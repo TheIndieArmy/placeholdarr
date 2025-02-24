@@ -1,0 +1,9 @@
+fastapi>=0.105.0
+uvicorn>=0.24.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+aiofiles==23.2.1
+pydantic>=2.5.2
+typing-extensions>=4.8.0
+plexapi>=4.15.7
+pydantic-settings>=2.1.0
