@@ -41,7 +41,7 @@ Leverage Radarr/Sonarr's import lists to their full potential:
      - A placeholder will be made when the request gets added to arrs
      - User sees the title as a placeholder in Plex and triggers the search when they play it
      - Saves you the storage space until the user is actually ready to watch
-   - *Maintainerr* for storage management - Can be setup so when a real file is deleted, a placeholder is created to keep it visible in Plex (Optional)
+   - *Maintainerr* for storage management - Can be set up so when a real file is deleted, a placeholder is created to keep it visible in Plex (Optional)
      - Be sure to turn on the "On File Delete" trigger in your arrs webhook settings
      - Replaces content not being watched with a placeholder
      - Keeps content visible to users in Plex to re-download when they are ready to watch
