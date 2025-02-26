@@ -63,78 +63,47 @@ def delete_dummy_files(media_type, title, year, media_id, target_base_folder, se
     try:
         # Extract just the series name when dealing with TV shows
         if media_type == 'tv' and ' - S' in title:
-            # Handle case where title includes episode information
             title = title.split(' - S')[0].strip()
         
-        # Always strip status markers from title for all operations
+        # Always strip status markers from title
         clean_title = sanitize_filename(strip_status_markers(title))
         year_str = f" ({year})" if year else ''
         
-        # Log with cleaned title
         logger.debug(f"Cleaning up placeholders for {clean_title}{year_str}", extra={'emoji_type': 'debug'})
         
         if media_type == 'movie':
-            # Try with and without edition tags for movies
-            possible_patterns = [
-                f"{clean_title}{year_str} {{tmdb-{media_id}}}*",
-                f"{clean_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}*",
-                f"{clean_title} {{tmdb-{media_id}}}*"
+            # For movies, use glob patterns to find potential dummy files directly
+            patterns = [
+                os.path.join(target_base_folder, f"{clean_title}{year_str} {{tmdb-{media_id}}}*", "*dummy*.mp4"),
+                os.path.join(target_base_folder, f"{clean_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}*", "*dummy*.mp4"),
+                os.path.join(target_base_folder, f"{clean_title} {{tmdb-{media_id}}}*", "*dummy*.mp4")
             ]
             
-            found_folders = []
-            for pattern in possible_patterns:
-                folders = glob.glob(os.path.join(target_base_folder, pattern))
-                if folders:
-                    found_folders.extend(folders)
-            
-            if not found_folders:
-                logger.warning(f"No matching folder found for movie {title} ({year})", 
-                             extra={'emoji_type': 'warning'})
-                return
-                
-            # Check each possible folder for dummy files
-            for folder in found_folders:
-                dummy_files = glob.glob(os.path.join(folder, "*dummy*.mp4"))
-                for dummy_file in dummy_files:
+            # Find and delete any matching dummy files
+            for pattern in patterns:
+                for dummy_file in glob.glob(pattern):
                     try:
                         os.remove(dummy_file)
-                        logger.info(f"Deleted movie placeholder: {dummy_file}", 
-                                  extra={'emoji_type': 'delete'})
+                        logger.info(f"Deleted movie placeholder: {dummy_file}", extra={'emoji_type': 'delete'})
                     except Exception as e:
-                        logger.error(f"Failed to delete {dummy_file}: {e}", 
-                                   extra={'emoji_type': 'error'})
+                        logger.error(f"Failed to delete {dummy_file}: {e}", extra={'emoji_type': 'error'})
         
         else:  # TV show
-            # Build folder pattern for TV series with properly cleaned title
-            folder_pattern = f"{clean_title}{year_str} {{tvdb-{media_id}}}"
-            folder_path = os.path.join(target_base_folder, folder_pattern)
+            # For TV episodes, construct pattern directly to the potential dummy file
+            pattern = os.path.join(
+                target_base_folder, 
+                f"{clean_title}{year_str} {{tvdb-{media_id}}}", 
+                f"Season {int(season_number):02d}", 
+                f"*s{int(season_number):02d}e{int(episode_number):02d}*dummy*.mp4"
+            )
             
-            if not os.path.exists(folder_path):
-                # Using clean title in the error message
-                logger.warning(f"Series folder not found: {folder_path}", 
-                             extra={'emoji_type': 'warning'})
-                return
-                
-            # Build season folder path
-            season_folder = os.path.join(folder_path, f"Season {season_number:02d}")
-            if not os.path.exists(season_folder):
-                logger.warning(f"Season folder not found: {season_folder}", 
-                             extra={'emoji_type': 'warning'})
-                return
-                
-            # Look for episode dummy files
-            pattern = f"*s{season_number:02d}e{episode_number:02d}*dummy*.mp4"
-            episode_dummies = glob.glob(os.path.join(season_folder, pattern))
-            
-            # Delete each matching dummy file
-            for dummy_file in episode_dummies:
+            # Find and delete any matching dummy files
+            for dummy_file in glob.glob(pattern):
                 try:
                     os.remove(dummy_file)
-                    logger.info(f"Deleted episode placeholder: {dummy_file}", 
-                              extra={'emoji_type': 'delete'})
+                    logger.info(f"Deleted episode placeholder: {dummy_file}", extra={'emoji_type': 'delete'})
                 except Exception as e:
-                    logger.error(f"Failed to delete {dummy_file}: {e}", 
-                               extra={'emoji_type': 'error'})
+                    logger.error(f"Failed to delete {dummy_file}: {e}", extra={'emoji_type': 'error'})
                     
     except Exception as e:
         logger.error(f"Error deleting placeholder files: {e}", extra={'emoji_type': 'error'})
