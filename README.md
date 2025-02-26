@@ -29,9 +29,9 @@ Leverage Radarr/Sonarr's import lists to their full potential:
 
 - **Storage Efficiency**: 
    - Add automated lists without the storage committment
-   - Reduce user requests taking up storage for things that won't be watched for weeks, months, or even never later
+   - Reduce user requests taking up storage for things that won't be watched for weeks later, months later, or even never
    - Combine with Maintainerr for automated retention without your Plex users losing sight of their desired content
-- **Full Library Visibility**: Users can see everything in arrs, not just downloaded content*
+- **Full Library Visibility**: Users can see everything in arrs, not just downloaded content
    - Don't want everything in arrs showing in Plex? Utilize tags in arrs to control what content gets placeholders made and shown in Plex
 - **Automation Ready**: Works with other tools in your stack:
    - *Radarr/Sonarr* for downloads and library management
