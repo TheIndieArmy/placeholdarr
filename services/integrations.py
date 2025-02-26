@@ -59,29 +59,85 @@ def place_dummy_file(media_type, title, year, media_id, target_base_folder, seas
     return target_path
 
 def delete_dummy_files(media_type, title, year, media_id, target_base_folder, season_number=None, episode_number=None):
-    clean_title = sanitize_filename(title)
-    year_str = f" ({year})" if year else ''
-    if media_type == 'movie':
-        folder_name = f"{clean_title}{year_str} {{tmdb-{media_id}}}"
-        target_dir = os.path.join(target_base_folder, folder_name.strip())
-        expected_file = os.path.join(target_dir, f"{clean_title}{year_str} (dummy).mp4")
-        if os.path.exists(expected_file):
-            os.remove(expected_file)
-            logger.info(f"Deleted dummy file: {expected_file}", extra={'emoji_type': 'delete'})
-        else:
-            logger.info(f"No dummy file exists for movie {title}", extra={'emoji_type': 'info'})
-    else:
-        folder_name = f"{clean_title}{year_str} {{tvdb-{media_id}}}"
-        target_dir = os.path.join(target_base_folder, folder_name.strip())
-        if season_number:
-            target_dir = os.path.join(target_dir, f"Season {int(season_number):02d}")
-        if episode_number is not None:
-            pattern = os.path.join(target_dir, f"*s{str(season_number).zfill(2)}e{str(episode_number).zfill(2)}*dummy*.mp4")
-            for file_path in glob.glob(pattern):
-                os.remove(file_path)
-                logger.info(f"Deleted dummy file: {file_path}", extra={'emoji_type': 'delete'})
-        else:
-            logger.info(f"No episode provided; not deleting dummies for {title}", extra={'emoji_type': 'info'})
+    """Delete placeholder files for media when real files are downloaded"""
+    try:
+        # Extract just the series name when dealing with TV shows
+        if media_type == 'tv' and ' - S' in title:
+            # Handle case where title includes episode information
+            title = title.split(' - S')[0].strip()
+        
+        # Always strip status markers from title for all operations
+        clean_title = sanitize_filename(strip_status_markers(title))
+        year_str = f" ({year})" if year else ''
+        
+        # Log with cleaned title
+        logger.debug(f"Cleaning up placeholders for {clean_title}{year_str}", extra={'emoji_type': 'debug'})
+        
+        if media_type == 'movie':
+            # Try with and without edition tags for movies
+            possible_patterns = [
+                f"{clean_title}{year_str} {{tmdb-{media_id}}}*",
+                f"{clean_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}*",
+                f"{clean_title} {{tmdb-{media_id}}}*"
+            ]
+            
+            found_folders = []
+            for pattern in possible_patterns:
+                folders = glob.glob(os.path.join(target_base_folder, pattern))
+                if folders:
+                    found_folders.extend(folders)
+            
+            if not found_folders:
+                logger.warning(f"No matching folder found for movie {title} ({year})", 
+                             extra={'emoji_type': 'warning'})
+                return
+                
+            # Check each possible folder for dummy files
+            for folder in found_folders:
+                dummy_files = glob.glob(os.path.join(folder, "*dummy*.mp4"))
+                for dummy_file in dummy_files:
+                    try:
+                        os.remove(dummy_file)
+                        logger.info(f"Deleted movie placeholder: {dummy_file}", 
+                                  extra={'emoji_type': 'delete'})
+                    except Exception as e:
+                        logger.error(f"Failed to delete {dummy_file}: {e}", 
+                                   extra={'emoji_type': 'error'})
+        
+        else:  # TV show
+            # Build folder pattern for TV series with properly cleaned title
+            folder_pattern = f"{clean_title}{year_str} {{tvdb-{media_id}}}"
+            folder_path = os.path.join(target_base_folder, folder_pattern)
+            
+            if not os.path.exists(folder_path):
+                # Using clean title in the error message
+                logger.warning(f"Series folder not found: {folder_path}", 
+                             extra={'emoji_type': 'warning'})
+                return
+                
+            # Build season folder path
+            season_folder = os.path.join(folder_path, f"Season {season_number:02d}")
+            if not os.path.exists(season_folder):
+                logger.warning(f"Season folder not found: {season_folder}", 
+                             extra={'emoji_type': 'warning'})
+                return
+                
+            # Look for episode dummy files
+            pattern = f"*s{season_number:02d}e{episode_number:02d}*dummy*.mp4"
+            episode_dummies = glob.glob(os.path.join(season_folder, pattern))
+            
+            # Delete each matching dummy file
+            for dummy_file in episode_dummies:
+                try:
+                    os.remove(dummy_file)
+                    logger.info(f"Deleted episode placeholder: {dummy_file}", 
+                              extra={'emoji_type': 'delete'})
+                except Exception as e:
+                    logger.error(f"Failed to delete {dummy_file}: {e}", 
+                               extra={'emoji_type': 'error'})
+                    
+    except Exception as e:
+        logger.error(f"Error deleting placeholder files: {e}", extra={'emoji_type': 'error'})
 
 # Title update and scheduling functions
 def schedule_episode_request_update(series_title, season_num, episode_num, media_id, delay=10, retries=5):
@@ -426,7 +482,16 @@ def check_media_has_file(media_id, base_title, rating_key, media_type='movie', a
                     new_title = f"{base} - Available"
                     item.editTitle(new_title)
                     item.reload()
-                    logger.info(f"Updated Plex title to Available for '{base_title}'", extra={'emoji_type': 'info'})
+                    
+                    # Make sure we use the actual title, not a placeholder
+                    display_title = strip_status_markers(base_title)
+                    if '{episode_title}' in base_title:
+                        display_title = f"Episode S{season_number:02d}E{episode_number:02d}"
+                    
+                    logger.info(f"Updated Plex title to Available for '{display_title}'", 
+                              extra={'emoji_type': 'info'})
+                    
+                    # Delete placeholder files when download is complete
                     delete_dummy_files(media_type, base_title, series.get('year'), media_id, 
                                     config['library_folder'], season_number, episode_number)
                     with TIMER_LOCK:
@@ -444,7 +509,14 @@ def check_media_has_file(media_id, base_title, rating_key, media_type='movie', a
                     avg_progress = progress / downloading_count if downloading_count > 0 else 0
                     new_title = f"{base} - Downloading {int(avg_progress)}%"
                     PROGRESS_FLAGS[rating_key] = True
-                    logger.info(f"Download progress for {base_title}: {int(avg_progress)}%", extra={'emoji_type': 'progress'})
+                    
+                    # Format proper title for logging
+                    display_title = strip_status_markers(base_title)
+                    if '{episode_title}' in base_title:
+                        display_title = f"Episode S{season_number:02d}E{episode_number:02d}"
+                        
+                    logger.info(f"Download progress for {display_title}: {int(avg_progress)}%", 
+                              extra={'emoji_type': 'progress'})
                     item.editTitle(new_title)
                     item.reload()
                 else:
@@ -461,7 +533,7 @@ def check_media_has_file(media_id, base_title, rating_key, media_type='movie', a
                         logger.debug(f"Still retrying search for {base_title}", extra={'emoji_type': 'debug'})
                     else:
                         new_title = f"{base} - Searching..."
-                        logger.debug(f"No queue item found for {base_title}; still searching.", 
+                        logger.debug(f"No queue item found for {base_title}, still searching.", 
                                    extra={'emoji_type': 'debug'})
                     item.editTitle(new_title)
                     item.reload()

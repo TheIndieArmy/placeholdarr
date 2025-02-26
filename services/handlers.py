@@ -16,6 +16,8 @@ from services.utils import (
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
     source = data.get("instanceName", "Tautulli")
+    
+    # Log incoming webhook but keep it brief
     logger.debug(f"{source} payload: {data}", extra={'emoji_type': 'debug'})
     
     # Get file path for quality detection
@@ -23,14 +25,17 @@ def handle_webhook(data: dict, source_port: int = None):
                  data.get('movie', {}).get('folderPath') or 
                  data.get('file', ''))
     
-    # Determine if this is a 4K request
     is_4k = is_4k_request(file_path, source_port)
     logger.debug(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
     
     event_type = (data.get('event') or data.get('eventType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
     
-    # Pass is_4k flag to all handlers
+    # Handle import events directly for cleanup
+    if event_type in ['download', 'moviefileimported', 'episodefileimported']:
+        return handle_import_event(data, is_4k)
+    
+    # Handle other events
     if event_type == 'seriesadd':
         return handle_seriesadd(data, is_4k)
     elif event_type == 'episodefiledelete':
@@ -39,14 +44,60 @@ def handle_webhook(data: dict, source_port: int = None):
         return handle_moviefiledelete(data)
     elif event_type == 'moviedelete':
         return handle_movie_delete(data)
-    elif event_type in ('movieadd', 'movieadded'):  # adjusted condition to catch both forms
+    elif event_type in ('movieadd', 'movieadded'):
         return handle_movieadd(data)
     elif event_type == 'seriesdelete':
         return handle_seriesdelete(data)
     elif event_type == 'playback.start':
         return handle_playback(data)
     else:
-        return handle_arrs_import(data)
+        # Fallback for unhandled events from other ARR providers
+        logger.info(f"Handling ARR import event: {data}", extra={'emoji_type': 'webhook'})
+        return JSONResponse({"status": "success", "message": "Import event processed"})
+
+def handle_import_event(data: dict, is_4k: bool = False):
+    """Handle media import events and delete placeholders"""
+    try:
+        if 'movie' in data:
+            # Movie import handling
+            movie = data['movie']
+            tmdb_id = movie.get('tmdbId')
+            title = movie.get('title', 'Unknown Movie')
+            year = movie.get('year')
+            
+            logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
+            delete_dummy_files('movie', title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
+            
+            # Refresh Plex library
+            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_MOVIE_SECTION_ID}/refresh")
+            requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+            
+        elif 'episodes' in data and 'series' in data:
+            # TV episode import handling
+            series = data['series']
+            episode = data['episodes'][0]  # Handle first episode in the list
+            
+            series_title = series.get('title', 'Unknown Series')
+            tvdb_id = series.get('tvdbId')
+            season_num = episode.get('seasonNumber')
+            episode_num = episode.get('episodeNumber')
+            episode_title = episode.get('title', 'Unknown Episode')
+            
+            # Format full episode identifier
+            full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
+            logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
+            
+            delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, 
+                              settings.TV_LIBRARY_FOLDER, season_number=season_num, episode_number=episode_num)
+            
+            # Refresh Plex library
+            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
+            requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+            
+    except Exception as e:
+        logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
+    
+    return JSONResponse({"status": "success", "message": "Import cleanup processed"})
 
 def handle_seriesadd(data: dict, is_4k: bool = False):
     # Extract series info and episodes, create dummies and schedule updates.
@@ -247,38 +298,65 @@ def handle_playback(data: dict):
                 logger.error("Episode ID not found in filename", extra={'emoji_type': 'error'})
                 return JSONResponse({"status": "error", "message": "Episode ID not found"}, status_code=400)
 
-            # Get episode details for monitoring
-            season_number = media.get("season_num")
-            episode_number = media.get("episode_num")
+            # Handle variable substitution issues from Tautulli
+            series_title = media.get("series_title", "")
+            episode_title = media.get("episode_title", "")
+            
+            # Check for placeholder values from Tautulli
+            if series_title.startswith('{') and series_title.endswith('}'): 
+                # Extract series title from the main title or path
+                path_match = re.search(r'/([^/]+) \(\d{4}\) \{tvdb-', file_path)
+                if path_match:
+                    series_title = path_match.group(1)
+                else:
+                    # Try extracting from the main title
+                    main_title_parts = title.split(' - ')
+                    if len(main_title_parts) > 0:
+                        series_title = main_title_parts[0]
+            
+            # Get episode details and convert to integers
+            try:
+                season_number = int(media.get("season_num", 0))
+                episode_number = int(media.get("episode_num", 0))
+            except (ValueError, TypeError):
+                logger.error("Invalid season or episode number format", extra={'emoji_type': 'error'})
+                return JSONResponse({"status": "error", "message": "Invalid season/episode format"}, status_code=400)
+                
             tvdb_id = media.get("ids", {}).get("tvdb")
-            if not (season_number and episode_number and tvdb_id):
-                logger.error("Missing season, episode, or TVDB ID", extra={'emoji_type': 'error'})
-                return JSONResponse({"status": "error", "message": "Missing required episode data"}, status_code=400)
+            
+            # Build full episode title for monitoring and logging
+            if episode_title.startswith('{') and episode_title.endswith('}'): 
+                # Extract from main title if possible
+                main_parts = title.split(' - ')
+                if len(main_parts) >= 3:  # Format: Series - SxxExx - Episode
+                    episode_title = main_parts[2].split(' [')[0]  # Remove status markers
+                else:
+                    episode_title = f"Episode {episode_number}"
+                    
+            # Format full episode identifier for logging and tracking
+            full_title = f"{series_title} - S{season_number:02d}E{episode_number:02d} - {episode_title}"
+            logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'processing'})
 
-            # Clean the title
-            base_title = extract_episode_title(media.get("episode_title", title))
-            logger.info(f"Processing episode playback for {base_title}", extra={'emoji_type': 'processing'})
-
-            # Get series ID from Sonarr (no search, just lookup)
+            # Continue with existing search code...
             series_id = search_in_sonarr(tvdb_id, rating_key, episode_mode=True, is_4k=is_4k)
             if not series_id:
                 return JSONResponse({"status": "error", "message": "Failed to get series ID"}, status_code=400)
 
             # Trigger appropriate search based on play mode
             if settings.TV_PLAY_MODE == "episode":
-                search_success = trigger_sonarr_search(series_id, episode_ids=episode_id, series_title=base_title, is_4k=is_4k)
+                search_success = trigger_sonarr_search(series_id, episode_ids=episode_id, series_title=full_title, is_4k=is_4k)
             elif settings.TV_PLAY_MODE == "season":
-                search_success = trigger_sonarr_search(series_id, season_number=season_number, series_title=base_title, is_4k=is_4k)
+                search_success = trigger_sonarr_search(series_id, season_number=season_number, series_title=full_title, is_4k=is_4k)
             else:  # series mode
-                search_success = trigger_sonarr_search(series_id, series_title=base_title, is_4k=is_4k)
+                search_success = trigger_sonarr_search(series_id, series_title=full_title, is_4k=is_4k)
 
             if not search_success:
                 return JSONResponse({"status": "error", "message": "Search failed"}, status_code=500)
             
-            # Start monitoring only if search was successful
+            # Start monitoring with improved title handling
             check_media_has_file(
                 media_id=tvdb_id,
-                base_title=base_title,
+                base_title=full_title,
                 rating_key=rating_key,
                 media_type=settings.TV_PLAY_MODE,
                 attempts=0,
@@ -296,10 +374,4 @@ def handle_playback(data: dict):
     except Exception as e:
         logger.error(f"Playback handling error: {e}", extra={'emoji_type': 'error'})
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-def handle_arrs_import(data: dict):
-    # Fallback for unhandled events from other ARR providers
-    logger.info(f"Handling ARR import event: {data}", extra={'emoji_type': 'webhook'})
-    return JSONResponse({"status": "success", "message": "Import event processed"})
-
-# ...end of handlers...
+import os, re, threading, time, shutil, requests

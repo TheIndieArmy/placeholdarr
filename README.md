@@ -1,6 +1,6 @@
 # Placeholdarr
 
-Placeholdarr is an AI-developed application built from the ground up, inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary). 
+Placeholdarr is an AI-developed application conducted by TheIndieArmy and built from the ground up, inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary). 
 
 ## Overview
 
@@ -21,19 +21,31 @@ Leverage Radarr/Sonarr's import lists to their full potential:
 2. Placeholdarr creates lightweight placeholder files in your Plex libraries
 3. Users see titles available in Plex, just as if they were downloaded
 4. When someone plays a placeholder:
-   - The real content is automatically requested
+   - The real content is automatically searched for in arrs
    - Plex title updates show download progress
    - Placeholder is replaced with actual media when ready
 
 ### Integration Benefits
 
-- **Storage Efficiency**: Only keep downloaded what's actively being watched
-- **Full Library Visibility**: Users see everything available, not just downloaded content
+- **Storage Efficiency**: 
+   - Add automated lists without the storage committment
+   - Reduce user requests taking up storage for things that won't be watched for weeks, months, or even never later
+   - Combine with Maintainerr for automated retention without your Plex users losing sight of their desired content
+- **Full Library Visibility**: Users can see everything in arrs, not just downloaded content*
+   - Don't want everything in arrs showing in Plex? Utilize tags in arrs to control what content gets placeholders made and shown in Plex
 - **Automation Ready**: Works with other tools in your stack:
-  - Overseerr/Jellyseerr for requests
-  - Maintainerr for storage management - When a real file is deleted, a placeholder is created to keep it visible in Plex
-  - Radarr/Sonarr for downloads
-  - Plex for streaming
+   - *Radarr/Sonarr* for downloads and library management
+   - *Plex* for streaming
+   - *Overseerr/Jellyseerr* for requests (Optional)
+     - Simply disable automatic search for requests
+     - A placeholder will be made when the request gets added to arrs
+     - User sees the title as a placeholder in Plex and triggers the search when they play it
+     - Saves you the storage space until the user is actually ready to watch
+   - *Maintainerr* for storage management - Can be setup so when a real file is deleted, a placeholder is created to keep it visible in Plex (Optional)
+     - Be sure to turn on the "On File Delete" trigger in your arrs webhook settings
+     - Replaces content not being watched with a placeholder
+     - Keeps content visible to users in Plex to re-download when they are ready to watch
+
 
 Perfect for:
 - Large libraries with limited storage
