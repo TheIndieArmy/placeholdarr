@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
     
+    # Lookahead settings
+    EPISODES_LOOKAHEAD: int = 3  # Number of episodes to look ahead for downloading when in episode mode
+    INCLUDE_SPECIALS: bool = False  # Whether to include special episodes (season 0) in lookahead
+    
+    @validator('EPISODES_LOOKAHEAD')
+    def validate_episodes_lookahead(cls, v):
+        if v < 0:
+            raise ValueError("EPISODES_LOOKAHEAD must be a non-negative integer")
+        return v
+    
     @validator('DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):
         path = Path(v)
