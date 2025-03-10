@@ -67,15 +67,15 @@ if __name__ == '__main__':
     import uvicorn
     
     # Get port from environment variable or exit if not set
-    port = os.getenv('APP_PORT')
+    port = os.getenv('PLACEHOLDARR_PORT')
     if not port:
-        logger.error("APP_PORT not set in environment variables. Please set it in your .env file.", extra={'emoji_type': 'error'})
+        logger.error("PLACEHOLDARR_PORT not set in environment variables. Please set it in your .env file.", extra={'emoji_type': 'error'})
         sys.exit(1)
     
     try:
         port = int(port)
     except ValueError:
-        logger.error(f"Invalid APP_PORT value: {port}. Must be a number.", extra={'emoji_type': 'error'})
+        logger.error(f"Invalid PLACEHOLDARR_PORT value: {port}. Must be a number.", extra={'emoji_type': 'error'})
         sys.exit(1)
     
     if not check_port(port):
