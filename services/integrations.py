@@ -14,49 +14,47 @@ TIMER_LOCK = threading.Lock()
 ACTIVE_SEARCH_TIMERS = {}
 LAST_RADARR_SEARCH = {}
 
-# Dummy File Management
-def place_dummy_file(media_type, title, year, media_id, target_base_folder, season_number=None, episode_range=None, episode_id=None):
-    clean_title = sanitize_filename(title)
-    year_str = f" ({year})" if year else ''
-    if media_type == 'movie':
-        folder_name = f"{clean_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}"
-        file_name = f"{clean_title}{year_str} (dummy).mp4"
-        target_dir = os.path.join(target_base_folder, folder_name.strip())
+def get_folder_path(media_type, base_path, title, year=None, media_id=None, season=None):
+    """Generate folder path according to the convention"""
+    if media_type == "movie":
+        # Movie folder: "{Movie Title} ({Year}) {tmdb-123456}{edition-Dummy}"
+        folder_name = f"{sanitize_filename(title)} ({year}) {{tmdb-{media_id}}}{{edition-Dummy}}"
+        return os.path.join(base_path, folder_name)
     else:
-        folder_name = f"{clean_title}{year_str} {{tvdb-{media_id}}}"
-        season_str = f"Season {int(season_number):02d}" if season_number else ""
-        target_dir = os.path.join(target_base_folder, folder_name.strip(), season_str)
-        if episode_range and episode_range[0] == episode_range[1]:
-            if episode_id:
-                file_name = f"{clean_title} - s{int(season_number):02d}e{int(episode_range[0]):02d} (dummy) [ID:{episode_id}].mp4"
-            else:
-                logger.warning(f"Episode ID not provided for {title} S{season_number:02d}E{episode_range[0]:02d}", extra={'emoji_type': 'warning'})
-                file_name = f"{clean_title} - s{int(season_number):02d}e{int(episode_range[0]):02d} (dummy) [ID:unknown].mp4"
-        else:
-            ep_range = f"e{episode_range[0]:02d}-e{episode_range[1]:02d}" if episode_range else "e01-e99"
-            file_name = f"{clean_title} - s{int(season_number):02d}{ep_range} (dummy).mp4"
-    os.makedirs(target_dir, exist_ok=True)
-    target_path = os.path.join(target_dir, file_name)
-    if os.path.exists(target_path):
-        os.remove(target_path)
+        # Series folder: "{Series Title} ({year}) {tvdb-123456} (dummy)"
+        folder_name = f"{sanitize_filename(title)} ({year}) {{tvdb-{media_id}}} (dummy)"
+        # Add season folder
+        season_folder = f"Season {season:02d}"
+        return os.path.join(base_path, folder_name, season_folder)
 
+def place_dummy_file(media_type, base_path, title, year=None, media_id=None, season=None, episode=None, episode_title=None):
+    """Create a dummy file in the appropriate location with the appropriate naming"""
     try:
-        if settings.PLACEHOLDER_STRATEGY == 'copy':
-            shutil.copy(settings.DUMMY_FILE_PATH, target_path)
-            logger.debug(f"Dummy file copied to: {target_path}", extra={'emoji_type': 'debug'})
-        else:  # 'hardlink' strategy (default)
-            try:
-                os.link(settings.DUMMY_FILE_PATH, target_path)
-                logger.debug(f"Dummy file hardlinked to: {target_path}", extra={'emoji_type': 'debug'})
-            except OSError:
-                logger.warning("Hardlink failed, falling back to copy", extra={'emoji_type': 'warning'})
-                shutil.copy(settings.DUMMY_FILE_PATH, target_path)
-                logger.debug(f"Dummy file copied to: {target_path} (fallback)", extra={'emoji_type': 'debug'})
+        # Generate folder path
+        folder_path = get_folder_path(media_type, base_path, title, year, media_id, season)
+        
+        # Create the folder if it doesn't exist
+        os.makedirs(folder_path, exist_ok=True)
+        
+        # Create the file name with your proposed format
+        if media_type == "movie":
+            file_name = f"{sanitize_filename(title)} ({year}).mp4"
+        else:
+            # Include episode title if available
+            episode_title_part = f" - {episode_title}" if episode_title else ""
+            file_name = f"{sanitize_filename(title)} - s{season:02d}e{episode:02d}{episode_title_part}.mp4"
+        
+        file_path = os.path.join(folder_path, file_name)
+        
+        # Create empty file
+        with open(file_path, "w") as f:
+            pass
+        
+        logger.info(f"Created dummy file for {title} {'' if media_type == 'movie' else f'S{season}E{episode}'} at {file_path}", extra={'emoji_type': 'file'})
+        return file_path
     except Exception as e:
-        logger.error(f"Failed to create dummy file: {e}", extra={'emoji_type': 'error'})
-        raise
-
-    return target_path
+        logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+        return None
 
 def delete_dummy_files(media_type, title, year, media_id, target_base_folder, season_number=None, episode_number=None):
     """Delete placeholder files for media when real files are downloaded"""

@@ -40,7 +40,7 @@ def check_port(port: int) -> bool:
     try:
         result = subprocess.run(['lsof', '-i', f':{port}'], capture_output=True, text=True)
         if result.stdout:
-            logger.error(f"Port {port} is already in use. Please update PLACEHOLDARR_PORT in your .env file.", extra={'emoji_type': 'error'})
+            logger.error(f"Port {port} is already in use. Please update APP_PORT in your .env file.", extra={'emoji_type': 'error'})
             return False
         return True
     except Exception as e:
