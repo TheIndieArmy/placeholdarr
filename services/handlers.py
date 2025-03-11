@@ -5,9 +5,10 @@ from core.logger import logger
 from services.plex_client import plex, build_plex_url
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
-    schedule_movie_request_update, check_media_has_file,
+    schedule_movie_request_update, check_media_has_file, check_has_file,
     search_in_radarr, search_in_sonarr, trigger_sonarr_search, monitor_episodes, 
-    mark_series_monitored, get_episodes_for_lookahead, check_tv_has_file
+    mark_series_monitored, get_episodes_for_lookahead, check_tv_has_file,
+    monitor_season
 )
 from services.utils import (
     strip_movie_status, sanitize_filename, extract_episode_title, 
@@ -289,142 +290,155 @@ def handle_playback(data: dict):
 
         if media.get("type") == "movie":
             tmdb_id = media.get("ids", {}).get("tmdb")
-            # If the payload contains a placeholder, attempt to extract the actual TMDB ID from file_info.path
-            if (tmdb_id == "{tmdb_id}"):
-                file_path = media.get("file_info", {}).get("path", "")
-                m = re.search(r"\{tmdb-(\d+)\}", file_path)
-                if m:
-                    tmdb_id = m.group(1)
-                    logger.info(f"Extracted numeric TMDB ID: {tmdb_id} from file path", extra={'emoji_type': 'info'})
-                else:
-                    logger.error("TMDB ID not found in file path", extra={'emoji_type': 'error'})
-                    return JSONResponse({"status": "error", "message": "Missing valid TMDB ID"}, status_code=400)
-            base_title = strip_movie_status(sanitize_filename(title))
-            logger.info(f"Processing movie playback for {base_title}", extra={'emoji_type': 'processing'})
-            success = search_in_radarr(tmdb_id, rating_key, is_4k=is_4k)
-            if not success:
-                return JSONResponse({"status": "error", "message": "Search failed"}, status_code=500)
+            imdb_id = media.get("ids", {}).get("imdb")
+            year = media.get("year", "")
             
-            check_media_has_file(
-                media_id=tmdb_id,
-                base_title=base_title,
-                rating_key=rating_key,
-                media_type='movie',
-                attempts=0,
-                start_time=time.time(),
-                is_4k=is_4k
-            )
-            return JSONResponse({"status": "success"})
+            logger.info(f"Processing movie playback for {title}", extra={'emoji_type': 'process'})
+            
+            radarr_id = search_in_radarr(title=title, tmdb_id=tmdb_id, imdb_id=imdb_id, 
+                                       year=year, rating_key=rating_key, is_4k=is_4k)
+            
+            if radarr_id:
+                # Movie exists in Radarr, check if it has a file
+                check_has_file('movie', radarr_id, title, rating_key, is_4k=is_4k)
+                return JSONResponse({"status": "success", "message": "Search triggered"})
+            else:
+                return JSONResponse({"status": "error", "message": "Failed to find/add movie"}, status_code=400)
             
         elif media.get("type") == "episode":
-            # Get episode details directly from the webhook payload
-            series_title = media.get("series_title", "")
-            episode_title = media.get("episode_title", "")
-            
-            # Handle variable substitution issues from Tautulli
-            if series_title.startswith('{') and series_title.endswith('}'): 
-                # Extract series title from the main title or path
-                path_match = re.search(r'/([^/]+) \(\d{4}\) \{tvdb-', file_path)
-                if path_match:
-                    series_title = path_match.group(1)
-                else:
-                    # Try extracting from the main title
-                    main_title_parts = title.split(' - ')
-                    if len(main_title_parts) > 0:
-                        series_title = main_title_parts[0]
-            
-            # Get episode details and convert to integers
-            try:
-                season_number = int(media.get("season_num", 0))
-                episode_number = int(media.get("episode_num", 0))
-            except (ValueError, TypeError):
-                logger.error("Invalid season or episode number format", extra={'emoji_type': 'error'})
-                return JSONResponse({"status": "error", "message": "Invalid season/episode format"}, status_code=400)
-                
+# Extract episode details from webhook
+            series_title = media.get("series_title", "Unknown Series")
+            episode_title = media.get("episode_title", "Unknown Episode")
+            season_number = int(media.get("season_num", 0))
+            episode_number = int(media.get("episode_num", 0))
+            year = media.get("year", "")
             tvdb_id = media.get("ids", {}).get("tvdb")
             
-            # Make sure we have valid TVDB ID
-            if not tvdb_id or tvdb_id == "{tvdb_id}":
-                # Try to extract from file path
-                path_match = re.search(r'\{tvdb-(\d+)\}', file_path)
-                if path_match:
-                    tvdb_id = path_match.group(1)
-                    logger.info(f"Extracted TVDB ID from path: {tvdb_id}", extra={'emoji_type': 'info'})
-                else:
-                    logger.error("Valid TVDB ID not found", extra={'emoji_type': 'error'})
-                    return JSONResponse({"status": "error", "message": "Missing valid TVDB ID"}, status_code=400)
+# Build display-friendly title
+            if series_title and series_title != "{series_title}":
+                full_title = f"{series_title} - S{season_number:02d}E{episode_number:02d}"
+            else:
+                full_title = f"{title}"
             
-            # Build full episode title for monitoring and logging
-            if episode_title.startswith('{') and episode_title.endswith('}'): 
-                # Extract from main title if possible
-                main_parts = title.split(' - ')
-                if len(main_parts) >= 3:  # Format: Series - SxxExx - Episode
-                    episode_title = main_parts[2].split(' [')[0]  # Remove status markers
-                else:
-                    episode_title = f"Episode {episode_number}"
-                    
-            # Format full episode identifier for logging and tracking
-            full_title = f"{series_title} - S{season_number:02d}E{episode_number:02d} - {episode_title}"
-            logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'processing'})
-
-            # Search in Sonarr using TVDB ID and season/episode numbers
-            series_id = search_in_sonarr(tvdb_id=tvdb_id, rating_key=rating_key, 
-                          season_number=season_number, episode_number=episode_number,
-                          episode_mode=True, is_4k=is_4k)
+            logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'process'})
+            
+            series_id = search_in_sonarr(tvdb_id=tvdb_id, rating_key=rating_key, is_4k=is_4k)
             if not series_id:
                 return JSONResponse({"status": "error", "message": "Failed to get series ID"}, status_code=400)
-
-            # Get episodes for lookahead (Chronicle-style)
-            lookahead = getattr(settings, 'EPISODES_LOOKAHEAD', 5)
-            episodes_to_monitor, reached_end = get_episodes_for_lookahead(
-                series_id, 
-                season_number, 
-                episode_number, 
-                lookahead=lookahead
-            )
+                
+            play_mode = settings.TV_PLAY_MODE.lower()
+            search_success = False
             
-            if not episodes_to_monitor:
-                logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
-                return JSONResponse({"status": "warning", "message": "No episodes available"})
-            
-            # Extract episode IDs for batch monitoring
-            episode_ids = [ep['id'] for ep in episodes_to_monitor]
-            
-            # Mark the selected episodes as monitored and trigger search
-            if episode_ids:
-                # First monitor all episodes in batch
+            if play_mode == "episode":
+                lookahead = getattr(settings, 'EPISODES_LOOKAHEAD', 5)
+                episodes_to_monitor, reached_end = get_episodes_for_lookahead(
+                    series_id, season_number, episode_number, lookahead
+                )
+                
+                if not episodes_to_monitor:
+                    logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
+                    return JSONResponse({"status": "warning", "message": "No episodes available"})
+                
+                episode_ids = [ep['id'] for ep in episodes_to_monitor]
                 monitor_episodes(series_id, episode_ids, monitor=True)
                 
-                # If we've reached the end, also mark entire series
                 if reached_end:
-                    mark_series_monitored(series_id)
-                
-                # Then trigger search for all of them
+                    mark_series_monitored(series_id, mark_seasons=False)
+                    
                 search_success = trigger_sonarr_search(
-                    series_id=series_id, 
-                    episode_ids=episode_ids, 
-                    series_title=full_title,
-                    is_4k=is_4k
+                    series_id, episode_ids=episode_ids, series_title=full_title, is_4k=is_4k
                 )
                 
                 if search_success:
-                    # Track each episode individually for status updates
                     for episode in episodes_to_monitor:
                         check_tv_has_file(
                             tvdb_id, 
                             series_title, 
                             rating_key, 
                             season_number=episode['seasonNumber'], 
-                            episode_number=episode['episodeNumber']
+                            episode_number=episode['episodeNumber'],
+                            is_4k=is_4k
                         )
-                    return JSONResponse({"status": "success", "message": f"Search triggered for {len(episode_ids)} episodes"})
-                else:
-                    return JSONResponse({"status": "error", "message": "Failed to trigger search"}, status_code=500)
+            
+            elif play_mode == "season":
+                url = f"{settings.SONARR_URL}/episode"
+                params = {'seriesId': series_id}
+                headers = {'X-Api-Key': settings.SONARR_API_KEY}
+                
+                try:
+                    response = requests.get(url, params=params, headers=headers)
+                    response.raise_for_status()
+                    all_episodes = response.json()
+                    
+                    season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == int(season_number)]
+                    season_episodes.sort(key=lambda x: x.get('episodeNumber', 0))
+                    
+                    is_last_episode_in_season = False
+                    next_season_exists = False
+                    next_season = int(season_number) + 1
+                    
+                    if season_episodes and season_episodes[-1].get('episodeNumber') == int(episode_number):
+                        is_last_episode_in_season = True
+                        next_season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == next_season]
+                        if next_season_episodes:
+                            next_season_exists = True
+                    
+                    monitor_season(series_id, season_number)
+                    
+                    if is_last_episode_in_season and next_season_exists:
+                        monitor_season(series_id, next_season)
+                        logger.info(f"Last episode of season {season_number} played, adding season {next_season}", 
+                                  extra={'emoji_type': 'info'})
+                        
+                        search_success = trigger_sonarr_search(
+                            series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
+                        )
+                        trigger_sonarr_search(
+                            series_id, season_number=next_season, series_title=full_title, is_4k=is_4k
+                        )
+                    else:
+                        search_success = trigger_sonarr_search(
+                            series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
+                        )
+                        
+                    if search_success:
+                        check_tv_has_file(tvdb_id, series_title, rating_key, 
+                                        season_number=season_number, 
+                                        episode_number=episode_number, 
+                                        is_4k=is_4k)
+                        
+                except Exception as e:
+                    logger.error(f"Error handling season mode: {str(e)}", extra={'emoji_type': 'error'})
+                    monitor_season(series_id, season_number)
+                    search_success = trigger_sonarr_search(
+                        series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
+                    )
+                    if search_success:
+                        check_tv_has_file(tvdb_id, series_title, rating_key, 
+                                       season_number=season_number, 
+                                       episode_number=episode_number, 
+                                       is_4k=is_4k)
+            
+            else:  # series mode
+                mark_series_monitored(series_id, mark_seasons=True, include_specials=getattr(settings, 'INCLUDE_SPECIALS', False))
+                
+                search_success = trigger_sonarr_search(
+                    series_id, series_title=full_title, is_4k=is_4k
+                )
+                
+                if search_success:
+                    check_tv_has_file(tvdb_id, series_title, rating_key, 
+                                   season_number=season_number, 
+                                   episode_number=episode_number, 
+                                   is_4k=is_4k)
+            
+            if search_success:
+                return JSONResponse({"status": "success", "message": "Search triggered"})
             else:
-                return JSONResponse({"status": "warning", "message": "No episodes to search for"})
-
+                return JSONResponse({"status": "error", "message": "Failed to trigger search"}, status_code=500)
+                
         else:
-            logger.warning(f"Unsupported media type {media.get('type')}", extra={'emoji_type': 'warning'})
+            logger.warning(f"Unsupported media type: {media.get('type')}", extra={'emoji_type': 'warning'})
             return JSONResponse({"status": "error", "message": "Unsupported media type"}, status_code=400)
 
     except Exception as e:

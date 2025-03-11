@@ -257,7 +257,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False):
 
 # Sonarr integration functions would follow a similar pattern.
 def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, episode_mode=False, is_4k=False):
-    """Search for a series in Sonarr and optionally trigger a search"""
+    """Search for a series in Sonarr but don't automatically mark as monitored"""
     try:
         config = get_arr_config('tv', is_4k)
         # First check if series exists
@@ -271,17 +271,6 @@ def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=Non
         if existing_response.status_code == 200 and existing_response.json():
             series = existing_response.json()[0]
             logger.info(f"Series already exists in Sonarr: {series['title']}", extra={'emoji_type': 'info'})
-            
-            # Always update monitored status
-            if not series.get("monitored", False):
-                series["monitored"] = True
-                update_response = requests.put(
-                    f"{config['url']}/series/{series['id']}", 
-                    json=series,
-                    headers={'X-Api-Key': config['api_key']}
-                )
-                update_response.raise_for_status()
-                logger.info(f"Series {series['title']} marked as monitored", extra={'emoji_type': 'monitored'})
             
             # In episode mode, just return the series ID, don't trigger search
             if episode_mode:
@@ -338,25 +327,50 @@ def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=Non
         logger.error(f"Sonarr operation failed: {e}", extra={'emoji_type': 'error'})
         return None
 
-def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, series_title=None, is_4k=False):
-    """Trigger episode search in Sonarr"""
+def trigger_sonarr_search(series_id, episode_ids=None, season_number=None, series_title=None, is_4k=False):
+    """Trigger a search in Sonarr with proper config handling"""
     try:
-        config = get_arr_config('tv', is_4k)
+        config = get_arr_config('sonarr', is_4k)
+        url = config.get('url')
+        api_key = config.get('api_key')
         
-        # Simplified command structure - this is key
-        command = {
-            'name': 'EpisodeSearch',
-            'episodeIds': [int(episode_ids)] if isinstance(episode_ids, str) else episode_ids
-        }
-
-        response = requests.post(
-            f"{config['url']}/command",
-            json=command,
-            headers={'X-Api-Key': config['api_key']}
-        )
-        response.raise_for_status()
-        logger.info(f"Triggered episode search for {series_title or f'series {series_id}'}", 
-                   extra={'emoji_type': 'search'})
+        if not url or not api_key:
+            logger.error("Sonarr configuration missing", extra={'emoji_type': 'error'})
+            return False
+            
+        headers = {'X-Api-Key': api_key}
+        
+        if episode_ids:
+            # Search for specific episodes (batch support)
+            data = {
+                'name': 'episodeSearch',
+                'episodeIds': episode_ids
+            }
+            r = requests.post(f"{url}/command", json=data, headers=headers)
+            r.raise_for_status()
+            logger.info(f"Triggered episode search for {series_title}", extra={'emoji_type': 'search'})
+            
+        elif season_number is not None:
+            # Search for a season
+            data = {
+                'name': 'seasonSearch',
+                'seriesId': series_id,
+                'seasonNumber': season_number
+            }
+            r = requests.post(f"{url}/command", json=data, headers=headers)
+            r.raise_for_status()
+            logger.info(f"Triggered season search for {series_title} Season {season_number}", extra={'emoji_type': 'search'})
+            
+        else:
+            # Search for entire series
+            data = {
+                'name': 'seriesSearch',
+                'seriesId': series_id
+            }
+            r = requests.post(f"{url}/command", json=data, headers=headers)
+            r.raise_for_status()
+            logger.info(f"Triggered series search for {series_title}", extra={'emoji_type': 'search'})
+        
         return True
     except Exception as e:
         logger.error(f"Sonarr search failed: {e}", extra={'emoji_type': 'error'})
@@ -380,16 +394,7 @@ def trigger_sonarr_episode_search(episode_id):
 
 def get_episodes_for_lookahead(series_id, current_season, current_episode, lookahead=5):
     """
-    Get episodes for lookahead processing
-    
-    Args:
-        series_id: Sonarr series ID
-        current_season: Season number being played
-        current_episode: Episode number being played
-        lookahead: Number of episodes to look ahead
-        
-    Returns:
-        tuple: (episodes_to_monitor, reached_end)
+    Get episodes for lookahead processing with proper range limiting and specials handling
     """
     logger.debug(f"Selecting episodes starting from S{current_season}E{current_episode} with lookahead {lookahead}", 
                 extra={'emoji_type': 'debug'})
@@ -407,36 +412,68 @@ def get_episodes_for_lookahead(series_id, current_season, current_episode, looka
         logger.error(f"Failed to fetch episodes: {str(e)}", extra={'emoji_type': 'error'})
         return [], False
     
-    # Filter for real episodes (not specials) and sort them
-    episodes = [
-        ep for ep in all_episodes 
-        if ep.get('seasonNumber', 0) > 0 and not ep.get('hasFile', False)
-    ]
+    # Determine if we include specials
+    include_specials = getattr(settings, 'INCLUDE_SPECIALS', False)
     
-    # Sort by season and episode
-    episodes.sort(key=lambda x: (x.get('seasonNumber', 0), x.get('episodeNumber', 0)))
+    # Filter episodes based on season number
+    if include_specials:
+        episodes = all_episodes
+    else:
+        episodes = [ep for ep in all_episodes if ep.get('seasonNumber', 0) > 0]
     
-    # Filter episodes that come after current episode
+    # Find the absolute last episode in the series
+    if episodes:
+        last_episode = max(episodes, key=lambda x: (x.get('seasonNumber', 0), x.get('episodeNumber', 0)))
+        last_season = last_episode.get('seasonNumber', 0)
+        last_episode_num = last_episode.get('episodeNumber', 0)
+    else:
+        last_season = 0
+        last_episode_num = 0
+    
+    # Get max episode number for each season for range calculation
+    max_episodes_by_season = {}
+    for ep in episodes:
+        season = ep.get('seasonNumber', 0)
+        episode = ep.get('episodeNumber', 0)
+        max_episodes_by_season[season] = max(episode, max_episodes_by_season.get(season, 0))
+    
+    # Calculate the end point of the lookahead range
+    range_end_season = current_season
+    range_end_episode = current_episode + lookahead
+    
+    # If we exceed episode count in this season, roll over to next season
+    while (range_end_season in max_episodes_by_season and 
+           range_end_episode > max_episodes_by_season[range_end_season]):
+        # Calculate how many episodes to carry over
+        overflow = range_end_episode - max_episodes_by_season[range_end_season]
+        # Move to next season
+        range_end_season += 1
+        # Start from episode 1, plus overflow
+        range_end_episode = overflow
+    
+    # Check if our range extends to or beyond the last episode
+    reached_end = (range_end_season > last_season or 
+                  (range_end_season == last_season and range_end_episode >= last_episode_num))
+    
+    # Filter episodes within range that don't have files
     filtered_episodes = []
-    reached_end = True
-    
     for ep in episodes:
         season = ep.get('seasonNumber', 0)
         episode = ep.get('episodeNumber', 0)
         
-        if (season > current_season) or (season == current_season and episode >= current_episode):
+        # Episode is within range if:
+        # 1. It's after current position (same season & later episode OR later season)
+        # 2. It's within the end range boundary
+        # 3. It doesn't have a file
+        if ((season > current_season or (season == current_season and episode >= current_episode)) and
+            (season < range_end_season or (season == range_end_season and episode <= range_end_episode)) and
+            not ep.get('hasFile', False)):
             filtered_episodes.append(ep)
     
-    # Take only the number defined by lookahead
-    episodes_to_monitor = filtered_episodes[:lookahead]
-    
-    # Check if we reached the end of known episodes
-    reached_end = len(filtered_episodes) <= lookahead
-    
     # Log the episodes we're going to monitor
-    if episodes_to_monitor:
-        start_ep = episodes_to_monitor[0]
-        end_ep = episodes_to_monitor[-1]
+    if filtered_episodes:
+        start_ep = filtered_episodes[0]
+        end_ep = filtered_episodes[-1]
         start_season = start_ep.get('seasonNumber')
         start_episode = start_ep.get('episodeNumber')
         end_season = end_ep.get('seasonNumber')
@@ -455,7 +492,7 @@ def get_episodes_for_lookahead(series_id, current_season, current_episode, looka
     else:
         logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
     
-    return episodes_to_monitor, reached_end
+    return filtered_episodes, reached_end
 
 def monitor_episodes(series_id, episode_ids, monitor=True):
     """Mark multiple episodes as monitored/unmonitored in batch"""
@@ -490,8 +527,8 @@ def monitor_episodes(series_id, episode_ids, monitor=True):
         logger.error(f"Failed to update episode monitored status: {str(e)}", extra={'emoji_type': 'error'})
         return False
 
-def mark_series_monitored(series_id):
-    """Mark entire series as monitored when we reach the end"""
+def mark_series_monitored(series_id, mark_seasons=False, include_specials=False):
+    """Mark series as monitored, with options to control season monitoring"""
     try:
         # Get series details
         url = f"{settings.SONARR_URL}/series/{series_id}"
@@ -501,22 +538,61 @@ def mark_series_monitored(series_id):
         response.raise_for_status()
         series = response.json()
         
-        if not series.get('monitored', False):
-            series['monitored'] = True
-            
-            # Mark all seasons as monitored
+        # Always mark series as monitored
+        series['monitored'] = True
+        
+        # Optionally mark seasons as monitored
+        if mark_seasons:
             for season in series.get('seasons', []):
-                season['monitored'] = True
-                
-            # Update the series
-            update_response = requests.put(url, json=series, headers=headers)
-            update_response.raise_for_status()
-            
-            logger.info(f"Marked entire series '{series.get('title')}' as monitored (end of episodes reached)", 
-                      extra={'emoji_type': 'monitored'})
+                season_number = season.get('seasonNumber', -1)
+                # Mark normal seasons, only mark specials if requested
+                if season_number > 0 or (season_number == 0 and include_specials):
+                    season['monitored'] = True
+        
+        # Update the series
+        update_response = requests.put(url, json=series, headers=headers)
+        update_response.raise_for_status()
+        
+        log_message = f"Marked series '{series.get('title')}' as monitored"
+        if mark_seasons:
+            log_message += " with all seasons"
+            if not include_specials:
+                log_message += " (except specials)"
+        logger.info(log_message, extra={'emoji_type': 'monitored'})
         return True
     except Exception as e:
         logger.error(f"Failed to mark series as monitored: {str(e)}", extra={'emoji_type': 'error'})
+        return False
+
+def monitor_season(series_id, season_number):
+    """Mark a specific season as monitored"""
+    try:
+        # Get series details
+        url = f"{settings.SONARR_URL}/series/{series_id}"
+        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        series = response.json()
+        
+        # Mark series as monitored
+        series['monitored'] = True
+        
+        # Mark the specific season as monitored
+        for season in series.get('seasons', []):
+            if season.get('seasonNumber') == int(season_number):
+                season['monitored'] = True
+                break
+        
+        # Update the series
+        update_response = requests.put(url, json=series, headers=headers)
+        update_response.raise_for_status()
+        
+        logger.info(f"Marked season {season_number} of '{series.get('title')}' as monitored", 
+                  extra={'emoji_type': 'monitored'})
+        return True
+    except Exception as e:
+        logger.error(f"Failed to mark season as monitored: {str(e)}", extra={'emoji_type': 'error'})
         return False
 
 # Monitoring functions:
@@ -688,11 +764,167 @@ def check_media_has_file(media_id, base_title, rating_key, media_type='movie', a
         with TIMER_LOCK:
             ACTIVE_SEARCH_TIMERS.pop(rating_key, None)
 
-def check_has_file(tmdb_id, base_title, rating_key, attempts=0, start_time=None):
-    return check_media_has_file(tmdb_id, base_title, rating_key, 'movie', attempts, start_time=start_time)
+def check_tv_has_file(tvdb_id, base_title, rating_key, attempts=0, season_number=None, episode_number=None, start_time=None, is_4k=False):
+    """Monitor episode download status and update Plex title accordingly"""
+    try:
+        config = get_arr_config('tv', is_4k)
+        if start_time is None:
+            start_time = time.time()
+        
+        # Handle timeout
+        if time.time() - start_time > settings.MAX_MONITOR_TIME:
+            try:
+                section = plex.library.sectionByID(config['section_id'])
+                item = section.fetchItem(int(rating_key))
+                base = strip_status_markers(item.title)
+                
+                new_title = f"{base} - {'Not Available' if PROGRESS_FLAGS.get(f'{rating_key}_retrying', False) else 'Not Found'}"
+                logger.error(f"{'Retry' if PROGRESS_FLAGS.get(f'{rating_key}_retrying', False) else 'Initial search'} timeout reached for episode S{season_number}E{episode_number}", 
+                           extra={'emoji_type': 'error'})
+                
+                item.editTitle(new_title)
+                item.reload()
+            except Exception as e:
+                logger.error(f"Failed to update Plex title on timeout: {e}", extra={'emoji_type': 'error'})
+            with TIMER_LOCK:
+                ACTIVE_SEARCH_TIMERS.pop(f"{rating_key}_{season_number}_{episode_number}", None)
+            return
 
-def check_tv_has_file(tvdb_id, base_title, rating_key, attempts=0, season_number=None, episode_number=None, start_time=None):
-    return check_media_has_file(tvdb_id, base_title, rating_key, 'episode', attempts, season_number, episode_number, start_time)
+        # Get series first
+        series_response = requests.get(f"{config['url']}/series", params={config['id_type']: tvdb_id}, 
+                                    headers={'X-Api-Key': config['api_key']})
+        series_response.raise_for_status()
+        series_list = series_response.json()
+        
+        if not series_list:
+            logger.error(f"Series with TVDB ID {tvdb_id} not found", extra={'emoji_type': 'error'})
+            with TIMER_LOCK:
+                ACTIVE_SEARCH_TIMERS.pop(f"{rating_key}_{season_number}_{episode_number}", None)
+            return
+            
+        series = series_list[0]
+        
+        # Get the specific episode
+        episodes_response = requests.get(f"{config['url']}/episode", params={'seriesId': series['id']}, 
+                                      headers={'X-Api-Key': config['api_key']})
+        episodes_response.raise_for_status()
+        episodes = episodes_response.json()
+        
+        # Find the target episode
+        target_episode = next((ep for ep in episodes 
+                            if int(ep.get('seasonNumber', 0)) == int(season_number)
+                            and int(ep.get('episodeNumber', 0)) == int(episode_number)), None)
+                            
+        if not target_episode:
+            logger.error(f"Episode S{season_number}E{episode_number} not found for series {series['title']}", 
+                       extra={'emoji_type': 'error'})
+            with TIMER_LOCK:
+                ACTIVE_SEARCH_TIMERS.pop(f"{rating_key}_{season_number}_{episode_number}", None)
+            return
+                            
+        # Check if episode has file
+        has_file = target_episode.get('hasFile', False)
+
+        # Check queue for download status
+        queue_response = requests.get(f"{config['url']}/queue", headers={'X-Api-Key': config['api_key']})
+        queue_response.raise_for_status()
+        queue_data = queue_response.json()
+        queue_items = queue_data.get('records', [])
+        
+        # Find this episode in queue
+        queue_item = next((qi for qi in queue_items 
+                        if qi.get('episodeId') == target_episode.get('id')), None)
+        
+        # Get Plex item for title updates
+        section = plex.library.sectionByID(config['section_id'])
+        item = section.fetchItem(int(rating_key))
+        base = strip_status_markers(item.title)
+        episode_key = f"{rating_key}_{season_number}_{episode_number}"
+
+        # Handle status updates
+        if has_file:
+            new_title = f"{base} - Available"
+            item.editTitle(new_title)
+            item.reload()
+            
+            logger.info(f"Updated Plex title to Available for '{series['title']}' S{season_number}E{episode_number}", 
+                      extra={'emoji_type': 'info'})
+            
+            # Delete placeholder file
+            delete_dummy_files('tv', series['title'], series.get('year'), tvdb_id, 
+                            config['library_folder'], season_number, episode_number)
+            
+            with TIMER_LOCK:
+                ACTIVE_SEARCH_TIMERS.pop(episode_key, None)
+            PROGRESS_FLAGS.pop(episode_key, None)
+            return
+            
+        elif queue_item:
+            # Kill search timer on first download detection
+            if not PROGRESS_FLAGS.get(episode_key, False):
+                with TIMER_LOCK:
+                    ACTIVE_SEARCH_TIMERS.pop(episode_key, None)
+                logger.info(f"Search completed successfully for {series['title']} S{season_number}E{episode_number}, monitoring download", 
+                          extra={'emoji_type': 'success'})
+
+            progress = (1 - (queue_item.get('sizeleft', 0) / queue_item.get('size', 1))) * 100
+            new_title = f"{base} - Downloading {int(progress)}%"
+            PROGRESS_FLAGS[episode_key] = True
+            
+            logger.info(f"Download progress for {series['title']} S{season_number}E{episode_number}: {int(progress)}%", 
+                      extra={'emoji_type': 'progress'})
+            item.editTitle(new_title)
+            item.reload()
+            
+        else:
+            # Handle searching/retrying states
+            if PROGRESS_FLAGS.get(episode_key, False):
+                start_time = time.time()
+                new_title = f"{base} - Retrying..."
+                PROGRESS_FLAGS[episode_key] = False
+                PROGRESS_FLAGS[f"{episode_key}_retrying"] = True
+                logger.info(f"Queue item disappeared for {series['title']} S{season_number}E{episode_number}. Starting new search.", 
+                          extra={'emoji_type': 'warning'})
+            elif PROGRESS_FLAGS.get(f"{episode_key}_retrying", False):
+                new_title = f"{base} - Retrying..."
+                logger.debug(f"Still retrying search for {series['title']} S{season_number}E{episode_number}", 
+                           extra={'emoji_type': 'debug'})
+            else:
+                new_title = f"{base} - Searching..."
+                logger.debug(f"No queue item found for {series['title']} S{season_number}E{episode_number}, still searching.", 
+                           extra={'emoji_type': 'debug'})
+            
+            item.editTitle(new_title)
+            item.reload()
+
+        # Continue polling
+        if attempts < settings.CHECK_MAX_ATTEMPTS:
+            timer = threading.Timer(
+                settings.CHECK_INTERVAL, 
+                check_tv_has_file, 
+                args=[tvdb_id, base_title, rating_key, attempts+1, season_number, episode_number, start_time, is_4k]
+            )
+            with TIMER_LOCK:
+                ACTIVE_SEARCH_TIMERS[episode_key] = timer
+            timer.start()
+        else:
+            logger.error(f"Maximum attempts reached for episode {series['title']} S{season_number}E{episode_number}", 
+                       extra={'emoji_type': 'error'})
+            try:
+                item = plex.fetchItem(rating_key)
+                base = strip_status_markers(item.title)
+                new_title = f"{base} - Not Found"
+                item.editTitle(new_title)
+                item.reload()
+            except Exception as e:
+                logger.error(f"Failed to update Plex title on max attempts: {e}", extra={'emoji_type': 'error'})
+            with TIMER_LOCK:
+                ACTIVE_SEARCH_TIMERS.pop(episode_key, None)
+
+    except Exception as e:
+        logger.error(f"Episode status check failed: {e}", extra={'emoji_type': 'error'})
+        with TIMER_LOCK:
+            ACTIVE_SEARCH_TIMERS.pop(f"{rating_key}_{season_number}_{episode_number}", None)
 
 # For brevity, any additional integration functions (including Sonarr functions) are implemented similarly.
 def update_plex_title(rating_key, base_title, status):
@@ -708,3 +940,7 @@ def update_plex_title(rating_key, base_title, status):
         logger.info(f"Updated Plex title to: {new_title}", extra={'emoji_type': 'update'})
     except Exception as e:
         logger.error(f"Failed to update Plex title for {rating_key}: {str(e)}", extra={'emoji_type': 'error'})
+
+def check_has_file(media_type, arr_id, title, rating_key, is_4k=False, attempts=0, start_time=None):
+    """Movie-specific wrapper for check_media_has_file"""
+    return check_media_has_file(media_type, arr_id, title, rating_key, is_4k=is_4k, attempts=attempts, start_time=start_time)
