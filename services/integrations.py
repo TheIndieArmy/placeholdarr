@@ -27,30 +27,46 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
         season_folder = f"Season {season:02d}"
         return os.path.join(base_path, folder_name, season_folder)
 
-def place_dummy_file(media_type, base_path, title, year=None, media_id=None, season=None, episode=None, episode_title=None):
+def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
+                    season_number=None, episode_range=None, episode_title=None):
     """Create a dummy file in the appropriate location with the appropriate naming"""
     try:
+        # Determine the base path if not provided
+        if not base_path:
+            if media_type == "movie":
+                base_path = settings.MOVIE_LIBRARY_FOLDER
+            else:  # TV
+                base_path = settings.TV_LIBRARY_FOLDER
+                
         # Generate folder path
-        folder_path = get_folder_path(media_type, base_path, title, year, media_id, season)
+        folder_path = get_folder_path(media_type, base_path, title, year, media_id, season_number)
         
         # Create the folder if it doesn't exist
         os.makedirs(folder_path, exist_ok=True)
         
-        # Create the file name with your proposed format
+        # Create the file name with your proposed format (NO episode ID)
         if media_type == "movie":
             file_name = f"{sanitize_filename(title)} ({year}).mp4"
         else:
             # Include episode title if available
             episode_title_part = f" - {episode_title}" if episode_title else ""
-            file_name = f"{sanitize_filename(title)} - s{season:02d}e{episode:02d}{episode_title_part}.mp4"
+            file_name = f"{sanitize_filename(title)} - s{season_number:02d}e{episode_range[0]:02d}{episode_title_part}.mp4"
         
         file_path = os.path.join(folder_path, file_name)
         
-        # Create empty file
-        with open(file_path, "w") as f:
-            pass
+        # Create file with content (from DUMMY_FILE_PATH) AND current timestamp
+        dummy_path = settings.DUMMY_FILE_PATH
+        if settings.PLACEHOLDER_STRATEGY.lower() == "hardlink":
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            os.link(dummy_path, file_path)
+            # Update access and modification times to now
+            os.utime(file_path, None)  # None means "use current time"
+        else:
+            shutil.copy2(dummy_path, file_path)
         
-        logger.info(f"Created dummy file for {title} {'' if media_type == 'movie' else f'S{season}E{episode}'} at {file_path}", extra={'emoji_type': 'file'})
+        logger.info(f"Created dummy file for {title} {'' if media_type == 'movie' else f'S{season_number}E{episode_range[0] if episode_range else 0}'} at {file_path}", extra={'emoji_type': 'file'})
+        
         return file_path
     except Exception as e:
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
@@ -240,7 +256,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False):
         return False
 
 # Sonarr integration functions would follow a similar pattern.
-def search_in_sonarr(tvdb_id, rating_key, episode_mode=False, is_4k=False):
+def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, episode_mode=False, is_4k=False):
     """Search for a series in Sonarr and optionally trigger a search"""
     try:
         config = get_arr_config('tv', is_4k)
@@ -360,6 +376,147 @@ def trigger_sonarr_episode_search(episode_id):
         return True
     except Exception as e:
         logger.error(f"Sonarr episode search failed: {e}", extra={'emoji_type': 'error'})
+        return False
+
+def get_episodes_for_lookahead(series_id, current_season, current_episode, lookahead=5):
+    """
+    Get episodes for lookahead processing
+    
+    Args:
+        series_id: Sonarr series ID
+        current_season: Season number being played
+        current_episode: Episode number being played
+        lookahead: Number of episodes to look ahead
+        
+    Returns:
+        tuple: (episodes_to_monitor, reached_end)
+    """
+    logger.debug(f"Selecting episodes starting from S{current_season}E{current_episode} with lookahead {lookahead}", 
+                extra={'emoji_type': 'debug'})
+    
+    # Get all episodes for the series from Sonarr
+    url = f"{settings.SONARR_URL}/episode"
+    params = {'seriesId': series_id}
+    headers = {'X-Api-Key': settings.SONARR_API_KEY}
+    
+    try:
+        response = requests.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        all_episodes = response.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch episodes: {str(e)}", extra={'emoji_type': 'error'})
+        return [], False
+    
+    # Filter for real episodes (not specials) and sort them
+    episodes = [
+        ep for ep in all_episodes 
+        if ep.get('seasonNumber', 0) > 0 and not ep.get('hasFile', False)
+    ]
+    
+    # Sort by season and episode
+    episodes.sort(key=lambda x: (x.get('seasonNumber', 0), x.get('episodeNumber', 0)))
+    
+    # Filter episodes that come after current episode
+    filtered_episodes = []
+    reached_end = True
+    
+    for ep in episodes:
+        season = ep.get('seasonNumber', 0)
+        episode = ep.get('episodeNumber', 0)
+        
+        if (season > current_season) or (season == current_season and episode >= current_episode):
+            filtered_episodes.append(ep)
+    
+    # Take only the number defined by lookahead
+    episodes_to_monitor = filtered_episodes[:lookahead]
+    
+    # Check if we reached the end of known episodes
+    reached_end = len(filtered_episodes) <= lookahead
+    
+    # Log the episodes we're going to monitor
+    if episodes_to_monitor:
+        start_ep = episodes_to_monitor[0]
+        end_ep = episodes_to_monitor[-1]
+        start_season = start_ep.get('seasonNumber')
+        start_episode = start_ep.get('episodeNumber')
+        end_season = end_ep.get('seasonNumber')
+        end_episode = end_ep.get('episodeNumber')
+        
+        if start_season == end_season:
+            logger.info(f"Episode Selection: Monitoring S{start_season}E{start_episode}-E{end_episode}", 
+                       extra={'emoji_type': 'info'})
+        else:
+            logger.info(f"Episode Selection: Monitoring episodes across seasons S{start_season}E{start_episode} to S{end_season}E{end_episode}", 
+                       extra={'emoji_type': 'info'})
+        
+        if reached_end:
+            logger.info("End of Episodes Detection: Reached end of known episodes, will mark entire series as monitored", 
+                       extra={'emoji_type': 'info'})
+    else:
+        logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
+    
+    return episodes_to_monitor, reached_end
+
+def monitor_episodes(series_id, episode_ids, monitor=True):
+    """Mark multiple episodes as monitored/unmonitored in batch"""
+    try:
+        # Get episode details first to preserve other properties
+        url = f"{settings.SONARR_URL}/episode"
+        params = {'seriesId': series_id}
+        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        
+        response = requests.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        episodes = response.json()
+        
+        # Filter to requested episodes and update monitored status
+        to_update = [
+            {**ep, 'monitored': monitor}
+            for ep in episodes if ep['id'] in episode_ids
+        ]
+        
+        # Update episodes in batch
+        if to_update:
+            for ep in to_update:
+                update_url = f"{settings.SONARR_URL}/episode/{ep['id']}"
+                update_response = requests.put(update_url, json=ep, headers=headers)
+                update_response.raise_for_status()
+                
+            logger.info(f"Marked {len(to_update)} episodes as {'monitored' if monitor else 'unmonitored'}", 
+                      extra={'emoji_type': 'monitored'})
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to update episode monitored status: {str(e)}", extra={'emoji_type': 'error'})
+        return False
+
+def mark_series_monitored(series_id):
+    """Mark entire series as monitored when we reach the end"""
+    try:
+        # Get series details
+        url = f"{settings.SONARR_URL}/series/{series_id}"
+        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        series = response.json()
+        
+        if not series.get('monitored', False):
+            series['monitored'] = True
+            
+            # Mark all seasons as monitored
+            for season in series.get('seasons', []):
+                season['monitored'] = True
+                
+            # Update the series
+            update_response = requests.put(url, json=series, headers=headers)
+            update_response.raise_for_status()
+            
+            logger.info(f"Marked entire series '{series.get('title')}' as monitored (end of episodes reached)", 
+                      extra={'emoji_type': 'monitored'})
+        return True
+    except Exception as e:
+        logger.error(f"Failed to mark series as monitored: {str(e)}", extra={'emoji_type': 'error'})
         return False
 
 # Monitoring functions:

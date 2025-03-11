@@ -6,12 +6,14 @@ from services.plex_client import plex, build_plex_url
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
     schedule_movie_request_update, check_media_has_file,
-    search_in_radarr, search_in_sonarr, trigger_sonarr_search
+    search_in_radarr, search_in_sonarr, trigger_sonarr_search, monitor_episodes, 
+    mark_series_monitored, get_episodes_for_lookahead, check_tv_has_file
 )
 from services.utils import (
     strip_movie_status, sanitize_filename, extract_episode_title, 
     is_4k_request, strip_status_markers
 )
+from urllib.parse import quote
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -47,7 +49,7 @@ def handle_webhook(data: dict, source_port: int = None):
     elif event_type in ('movieadd', 'movieadded'):
         return handle_movieadd(data)
     elif event_type == 'seriesdelete':
-        return handle_seriesdelete(data)
+        return handle_seriesdelete(data, is_4k)
     elif event_type == 'playback.start':
         return handle_playback(data)
     else:
@@ -121,22 +123,23 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
     for ep in episodes:
         season_num = ep.get('seasonNumber')
         episode_num = ep.get('episodeNumber')
+        episode_title = ep.get('title')
         if not (season_num and episode_num):
             continue
         dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
-                                       settings.TV_LIBRARY_FOLDER,
-                                       season_number=season_num,
-                                       episode_range=(episode_num, episode_num),
-                                       episode_id=ep.get("id"))
+                                    settings.TV_LIBRARY_FOLDER,
+                                    season_number=season_num,
+                                    episode_range=(episode_num, episode_num),
+                                    episode_title=episode_title)  # REMOVED episode_id
         logger.info(f"Created dummy file for {series_title} S{season_num}E{episode_num} at {dummy_path}",
                     extra={'emoji_type': 'dummy'})
         series_folder = "/".join(dummy_path.split(os.sep)[:-2])
         unique_folders.add(series_folder)
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
     for folder in unique_folders:
-        # Refresh Plex folder
-        r = requests.get(build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh"),
-                         headers={'X-Plex-Token': settings.PLEX_TOKEN})
+        # Refresh specific Plex folder instead of entire library
+        refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh?path={quote(folder)}")
+        r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
         r.raise_for_status()
     return JSONResponse({"status": "success", "message": "SeriesAdd processed"})
 
@@ -235,18 +238,45 @@ def handle_movieadd(data: dict):
         schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
 
-def handle_seriesdelete(data: dict):
+def handle_seriesdelete(data: dict, is_4k: bool = False):
+    """Delete placeholder files when a series is deleted from Sonarr"""
     if 'series' in data:
         series = data.get('series', {})
-        series_folder = os.path.join(settings.TV_LIBRARY_FOLDER,
-                                     f"{sanitize_filename(series.get('title',''))}{' ('+str(series.get('year'))+')' if series.get('year') else ''} {{tvdb-{series.get('tvdbId')}}}")
-        if os.path.exists(series_folder):
-            import shutil
-            shutil.rmtree(series_folder)
-            logger.info(f"Deleted series folder for {series.get('title')}", extra={'emoji_type': 'delete'})
-        refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
-        r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-        r.raise_for_status()
+        tvdb_id = series.get('tvdbId')
+        title = series.get('title', 'Unknown Series')
+        year = series.get('year')
+        
+        if tvdb_id:
+            # Construct folder path for placeholders
+            library_folder = settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER
+            series_folder = os.path.join(library_folder, f"{title} ({year}) {{tvdb-{tvdb_id}}} (dummy)")
+            
+            # Check if folder exists
+            if os.path.exists(series_folder):
+                try:
+                    # 1. First refresh Plex to recognize the deletion
+                    refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh?path={quote(os.path.dirname(series_folder))}")
+                    r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+                    r.raise_for_status()
+                    logger.info(f"Refreshed Plex for series folder: {series_folder}", extra={'emoji_type': 'refresh'})
+                    
+                    # 2. Then delete all files and subfolder recursively
+                    shutil.rmtree(series_folder)
+                    logger.info(f"Deleted placeholder folder: {series_folder}", extra={'emoji_type': 'delete'})
+                except Exception as e:
+                    logger.error(f"Error deleting folder {series_folder}: {str(e)}", extra={'emoji_type': 'error'})
+            else:
+                logger.warning(f"Series folder not found: {series_folder}", extra={'emoji_type': 'warning'})
+                # Still refresh Plex in case the folder was already deleted
+                refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh?path={quote(os.path.dirname(series_folder))}")
+                r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+                r.raise_for_status()
+        else:
+            # Fall back to full library refresh if no TVDB ID
+            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
+            r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+            r.raise_for_status()
+            
     return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
 
 def handle_playback(data: dict):
@@ -287,22 +317,11 @@ def handle_playback(data: dict):
             return JSONResponse({"status": "success"})
             
         elif media.get("type") == "episode":
-            # Extract episode_id from file path if available
-            file_path = media.get("file_info", {}).get("path", "")
-            episode_id = None
-            id_match = re.search(r"\[ID:(\d+)\]", file_path)
-            if id_match:
-                episode_id = id_match.group(1)
-                logger.info(f"Found episode ID: {episode_id} in filename", extra={'emoji_type': 'info'})
-            else:
-                logger.error("Episode ID not found in filename", extra={'emoji_type': 'error'})
-                return JSONResponse({"status": "error", "message": "Episode ID not found"}, status_code=400)
-
-            # Handle variable substitution issues from Tautulli
+            # Get episode details directly from the webhook payload
             series_title = media.get("series_title", "")
             episode_title = media.get("episode_title", "")
             
-            # Check for placeholder values from Tautulli
+            # Handle variable substitution issues from Tautulli
             if series_title.startswith('{') and series_title.endswith('}'): 
                 # Extract series title from the main title or path
                 path_match = re.search(r'/([^/]+) \(\d{4}\) \{tvdb-', file_path)
@@ -324,6 +343,17 @@ def handle_playback(data: dict):
                 
             tvdb_id = media.get("ids", {}).get("tvdb")
             
+            # Make sure we have valid TVDB ID
+            if not tvdb_id or tvdb_id == "{tvdb_id}":
+                # Try to extract from file path
+                path_match = re.search(r'\{tvdb-(\d+)\}', file_path)
+                if path_match:
+                    tvdb_id = path_match.group(1)
+                    logger.info(f"Extracted TVDB ID from path: {tvdb_id}", extra={'emoji_type': 'info'})
+                else:
+                    logger.error("Valid TVDB ID not found", extra={'emoji_type': 'error'})
+                    return JSONResponse({"status": "error", "message": "Missing valid TVDB ID"}, status_code=400)
+            
             # Build full episode title for monitoring and logging
             if episode_title.startswith('{') and episode_title.endswith('}'): 
                 # Extract from main title if possible
@@ -337,35 +367,61 @@ def handle_playback(data: dict):
             full_title = f"{series_title} - S{season_number:02d}E{episode_number:02d} - {episode_title}"
             logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'processing'})
 
-            # Continue with existing search code...
-            series_id = search_in_sonarr(tvdb_id, rating_key, episode_mode=True, is_4k=is_4k)
+            # Search in Sonarr using TVDB ID and season/episode numbers
+            series_id = search_in_sonarr(tvdb_id=tvdb_id, rating_key=rating_key, 
+                          season_number=season_number, episode_number=episode_number,
+                          episode_mode=True, is_4k=is_4k)
             if not series_id:
                 return JSONResponse({"status": "error", "message": "Failed to get series ID"}, status_code=400)
 
-            # Trigger appropriate search based on play mode
-            if settings.TV_PLAY_MODE == "episode":
-                search_success = trigger_sonarr_search(series_id, episode_ids=episode_id, series_title=full_title, is_4k=is_4k)
-            elif settings.TV_PLAY_MODE == "season":
-                search_success = trigger_sonarr_search(series_id, season_number=season_number, series_title=full_title, is_4k=is_4k)
-            else:  # series mode
-                search_success = trigger_sonarr_search(series_id, series_title=full_title, is_4k=is_4k)
-
-            if not search_success:
-                return JSONResponse({"status": "error", "message": "Search failed"}, status_code=500)
-            
-            # Start monitoring with improved title handling
-            check_media_has_file(
-                media_id=tvdb_id,
-                base_title=full_title,
-                rating_key=rating_key,
-                media_type=settings.TV_PLAY_MODE,
-                attempts=0,
-                season_number=season_number,
-                episode_number=episode_number,
-                start_time=time.time(),
-                is_4k=is_4k
+            # Get episodes for lookahead (Chronicle-style)
+            lookahead = getattr(settings, 'EPISODES_LOOKAHEAD', 5)
+            episodes_to_monitor, reached_end = get_episodes_for_lookahead(
+                series_id, 
+                season_number, 
+                episode_number, 
+                lookahead=lookahead
             )
-            return JSONResponse({"status": "success"})
+            
+            if not episodes_to_monitor:
+                logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
+                return JSONResponse({"status": "warning", "message": "No episodes available"})
+            
+            # Extract episode IDs for batch monitoring
+            episode_ids = [ep['id'] for ep in episodes_to_monitor]
+            
+            # Mark the selected episodes as monitored and trigger search
+            if episode_ids:
+                # First monitor all episodes in batch
+                monitor_episodes(series_id, episode_ids, monitor=True)
+                
+                # If we've reached the end, also mark entire series
+                if reached_end:
+                    mark_series_monitored(series_id)
+                
+                # Then trigger search for all of them
+                search_success = trigger_sonarr_search(
+                    series_id=series_id, 
+                    episode_ids=episode_ids, 
+                    series_title=full_title,
+                    is_4k=is_4k
+                )
+                
+                if search_success:
+                    # Track each episode individually for status updates
+                    for episode in episodes_to_monitor:
+                        check_tv_has_file(
+                            tvdb_id, 
+                            series_title, 
+                            rating_key, 
+                            season_number=episode['seasonNumber'], 
+                            episode_number=episode['episodeNumber']
+                        )
+                    return JSONResponse({"status": "success", "message": f"Search triggered for {len(episode_ids)} episodes"})
+                else:
+                    return JSONResponse({"status": "error", "message": "Failed to trigger search"}, status_code=500)
+            else:
+                return JSONResponse({"status": "warning", "message": "No episodes to search for"})
 
         else:
             logger.warning(f"Unsupported media type {media.get('type')}", extra={'emoji_type': 'warning'})
