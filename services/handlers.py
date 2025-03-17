@@ -193,6 +193,8 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     for ep in episodes:
         season_num = ep.get('seasonNumber')
         episode_num = ep.get('episodeNumber')
+        episode_title = ep.get('title')  # Make sure we extract episode title
+        
         if not (season_num and episode_num):
             # Try to extract season and episode from file field if missing
             file_field = data.get('file', '')
@@ -202,17 +204,22 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
             else:
                 logger.info("Cannot determine season/episode from data", extra={'emoji_type': 'warning'})
                 continue
+                
         dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
                                       settings.TV_LIBRARY_FOLDER,
                                       season_number=season_num,
                                       episode_range=(episode_num, episode_num),
-                                      episode_id=ep.get("id"))
+                                      episode_title=episode_title)  # Include episode title & REMOVE episode_id
+        
         logger.info(f"Re-created dummy file for {series_title} S{season_num}E{episode_num} at {dummy_path}",
                     extra={'emoji_type': 'dummy'})
+        
         refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
         r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
         r.raise_for_status()
+        
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
+    
     return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
 
 def handle_moviefiledelete(data: dict):
