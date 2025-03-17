@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Literal
 from dotenv import load_dotenv
@@ -45,9 +46,10 @@ class Settings(BaseSettings):
     TV_LIBRARY_4K_FOLDER: str = ""
 
     # Application
-    MAX_MONITOR_TIME: int = 120
-    CHECK_INTERVAL: int = 3
-    CHECK_MAX_ATTEMPTS: int = 1000
+    PLAYBACK_COOLDOWN: int = int(os.environ.get('PLAYBACK_COOLDOWN', '30').split('#')[0].strip())
+    MAX_MONITOR_TIME: int = int(os.getenv("MAX_MONITOR_TIME", "60").split('#')[0].strip())
+    CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "10").split('#')[0].strip())
+    AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10").split('#')[0].strip())
 
     # Dummy file management
     DUMMY_FILE_PATH: str
@@ -55,6 +57,20 @@ class Settings(BaseSettings):
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
+    TITLE_UPDATES: str = os.getenv("TITLE_UPDATES", "ALL")  # Options: OFF, REQUEST, ALL
+    AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
+
+    # Add a method to clean string values
+    @validator('*', pre=True)
+    def clean_string_values(cls, v):
+        """Clean string values by removing comments and extra whitespace"""
+        if isinstance(v, str):
+            # Split on # but only if it's not part of a URL
+            if '#' in v and not ('http://' in v or 'https://' in v):
+                v = v.split('#')[0].strip()
+            else:
+                v = v.strip()
+        return v
     
     @validator('DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):

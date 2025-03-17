@@ -1,4 +1,4 @@
-import os, glob, shutil, time, threading, requests, subprocess, platform
+import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch
 from core.config import settings
 from core.logger import logger
 from services.utils import (
@@ -28,99 +28,166 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
         return os.path.join(base_path, folder_name, season_folder)
 
 def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
-                    season_number=None, episode_range=None, episode_title=None):
+                    season_number=None, episode_range=None, episode_title=None, episode_id=None):
     """Create a dummy file in the appropriate location with the appropriate naming"""
     try:
         # Determine the base path if not provided
         if not base_path:
             if media_type == "movie":
                 base_path = settings.MOVIE_LIBRARY_FOLDER
-            else:  # TV
+            else:
                 base_path = settings.TV_LIBRARY_FOLDER
                 
-        # Generate folder path
-        folder_path = get_folder_path(media_type, base_path, title, year, media_id, season_number)
+        # Prepare folder path
+        folder_name = sanitize_filename(title)
+        if year:
+            folder_name += f" ({year})"
         
-        # Create the folder if it doesn't exist
-        os.makedirs(folder_path, exist_ok=True)
-        
-        # Create the file name with your proposed format (NO episode ID)
-        if media_type == "movie":
-            file_name = f"{sanitize_filename(title)} ({year}).mp4"
-        else:
-            # Include episode title if available
-            episode_title_part = f" - {episode_title}" if episode_title else ""
-            file_name = f"{sanitize_filename(title)} - s{season_number:02d}e{episode_range[0]:02d}{episode_title_part}.mp4"
-        
-        file_path = os.path.join(folder_path, file_name)
-        
-        # Create file with content (from DUMMY_FILE_PATH) AND current timestamp
-        dummy_path = settings.DUMMY_FILE_PATH
-        if settings.PLACEHOLDER_STRATEGY.lower() == "hardlink":
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            os.link(dummy_path, file_path)
-            # Update access and modification times to now
-            os.utime(file_path, None)  # None means "use current time"
-        else:
-            shutil.copy2(dummy_path, file_path)
-        
-        logger.info(f"Created dummy file for {title} {'' if media_type == 'movie' else f'S{season_number}E{episode_range[0] if episode_range else 0}'} at {file_path}", extra={'emoji_type': 'file'})
-        
-        return file_path
+        # Add appropriate ID tag and dummy marker
+        if media_type == 'tv':
+            folder_name += f" {{tvdb-{media_id}}} (dummy)"
+            
+            # TV show - create season folder structure
+            if season_number is not None:
+                # Create season folder
+                season_folder = f"Season {int(season_number):02d}"
+                episode_folder = os.path.join(base_path, folder_name, season_folder)
+                
+                # Create directories if they don't exist
+                os.makedirs(episode_folder, exist_ok=True)
+                
+                # If episode range is specified, create dummy files for each episode
+                if episode_range:
+                    start, end = episode_range
+                    for episode_num in range(start, end + 1):
+                        # Create file name with lowercase s##e## pattern
+                        file_name = f"{title} - s{int(season_number):02d}e{int(episode_num):02d}.mp4"
+                        if episode_title and episode_num == start:
+                            # Include episode title for first episode if available
+                            file_name = f"{title} - s{int(season_number):02d}e{int(episode_num):02d} - {episode_title}.mp4"
+                        
+                        file_path = os.path.join(episode_folder, sanitize_filename(file_name))
+                        
+                        # Create empty file if it doesn't exist
+                        if not os.path.exists(file_path):
+                            with open(file_path, 'w') as f:
+                                # Add minimal metadata
+                                f.write(f"Placeholder for {title} S{season_number}E{episode_num}")
+                            
+                            logger.info(f"Created dummy file for {title} S{season_number}E{episode_num} at {file_path}", 
+                                      extra={'emoji_type': 'file'})
+                        else:
+                            logger.info(f"Re-created dummy file for {title} S{season_number}E{episode_num} at {file_path}", 
+                                      extra={'emoji_type': 'file'})
+                        
+                        # Register this file with monitoring
+                        from services.queue_monitor import add_to_monitor
+                        if episode_id:
+                            add_to_monitor('episode', title, episode_id=episode_id, tvdb_id=media_id,
+                                      season_number=season_number, episode_number=episode_num)
+                            
+                        # Return the path of the first episode file
+                        if episode_num == start:
+                            first_episode_path = file_path
+                
+                return first_episode_path
+                
+        else:  # Movie
+            folder_name += f" {{tmdb-{media_id}}} (dummy)"
+            
+            # Create movie folder
+            movie_folder = os.path.join(base_path, folder_name)
+            os.makedirs(movie_folder, exist_ok=True)
+            
+            # Create dummy movie file with title (Year) format
+            file_name = f"{title} ({year}).mp4"
+            file_path = os.path.join(movie_folder, sanitize_filename(file_name))
+            
+            # Create empty file if it doesn't exist
+            if not os.path.exists(file_path):
+                with open(file_path, 'w') as f:
+                    f.write(f"Placeholder for {title} ({year})")
+                    
+                logger.info(f"Created dummy movie file for {title} ({year}) at {file_path}", 
+                          extra={'emoji_type': 'file'})
+            else:
+                logger.info(f"Re-created dummy movie file for {title} ({year}) at {file_path}", 
+                          extra={'emoji_type': 'file'})
+                
+            return file_path
+                
     except Exception as e:
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
         return None
 
-def delete_dummy_files(media_type, title, year, media_id, target_base_folder, season_number=None, episode_number=None):
-    """Delete placeholder files for media when real files are downloaded"""
+def cleanup_episode_placeholder(series_title, series_year=None, season_number=None, episode_number=None):
+    """Remove placeholder files for a specific episode or series"""
     try:
-        # Extract just the series name when dealing with TV shows
-        if media_type == 'tv' and ' - S' in title:
-            title = title.split(' - S')[0].strip()
+        # Construct the dummy folder name (same logic as in place_dummy_file)
+        folder_name = series_title
+        if series_year:
+            folder_name += f" ({series_year})"
+        folder_name += " {tvdb-*} (dummy)"
         
-        # Always strip status markers from title
-        clean_title = sanitize_filename(strip_status_markers(title))
-        year_str = f" ({year})" if year else ''
+        logger.debug(f"Cleaning up placeholders for {series_title} ({series_year})", extra={'emoji_type': 'debug'})
         
-        logger.debug(f"Cleaning up placeholders for {clean_title}{year_str}", extra={'emoji_type': 'debug'})
+        # Get the TV library path
+        tv_library_path = settings.TV_LIBRARY_FOLDER
         
-        if media_type == 'movie':
-            # For movies, use glob patterns to find potential dummy files directly
-            patterns = [
-                os.path.join(target_base_folder, f"{clean_title}{year_str} {{tmdb-{media_id}}}*", "*dummy*.mp4"),
-                os.path.join(target_base_folder, f"{clean_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}*", "*dummy*.mp4"),
-                os.path.join(target_base_folder, f"{clean_title} {{tmdb-{media_id}}}*", "*dummy*.mp4")
-            ]
+        # Search for matching dummy folders
+        matching_folders = []
+        for item in os.listdir(tv_library_path):
+            item_path = os.path.join(tv_library_path, item)
             
-            # Find and delete any matching dummy files
-            for pattern in patterns:
-                for dummy_file in glob.glob(pattern):
-                    try:
-                        os.remove(dummy_file)
-                        logger.info(f"Deleted movie placeholder: {dummy_file}", extra={'emoji_type': 'delete'})
-                    except Exception as e:
-                        logger.error(f"Failed to delete {dummy_file}: {e}", extra={'emoji_type': 'error'})
+            # Use glob pattern matching
+            if fnmatch.fnmatch(item, folder_name) and os.path.isdir(item_path):
+                matching_folders.append(item_path)
+                logger.debug(f"Found matching dummy folder: {item_path}", extra={'emoji_type': 'debug'})
         
-        else:  # TV show
-            # For TV episodes, construct pattern directly to the potential dummy file
-            pattern = os.path.join(
-                target_base_folder, 
-                f"{clean_title}{year_str} {{tvdb-{media_id}}}", 
-                f"Season {int(season_number):02d}", 
-                f"*s{int(season_number):02d}e{int(episode_number):02d}*dummy*.mp4"
-            )
+        if not matching_folders:
+            logger.debug(f"No matching dummy folders found for {folder_name}", extra={'emoji_type': 'debug'})
+            return False
+        
+        # If no specific episode is provided, clean up the entire series
+        if season_number is None or episode_number is None:
+            for folder_path in matching_folders:
+                shutil.rmtree(folder_path)
+                logger.info(f"Removed dummy folder: {folder_path}", extra={'emoji_type': 'cleanup'})
+            return True
+        
+        # Otherwise, clean up just the specific episode
+        season_folder = f"Season {season_number:02d}"
+        episode_pattern = f"*s{season_number:02d}e{episode_number:02d}*"
+        
+        logger.debug(f"Looking for episode files matching: {episode_pattern} in season folder: {season_folder}", 
+                   extra={'emoji_type': 'debug'})
+        
+        found_files = False
+        for folder_path in matching_folders:
+            season_path = os.path.join(folder_path, season_folder)
             
-            # Find and delete any matching dummy files
-            for dummy_file in glob.glob(pattern):
-                try:
-                    os.remove(dummy_file)
-                    logger.info(f"Deleted episode placeholder: {dummy_file}", extra={'emoji_type': 'delete'})
-                except Exception as e:
-                    logger.error(f"Failed to delete {dummy_file}: {e}", extra={'emoji_type': 'error'})
+            if os.path.exists(season_path):
+                logger.debug(f"Found season folder: {season_path}", extra={'emoji_type': 'debug'})
+                
+                for item in os.listdir(season_path):
+                    logger.debug(f"Checking file: {item} against pattern: {episode_pattern}", extra={'emoji_type': 'debug'})
                     
+                    if fnmatch.fnmatch(item.lower(), episode_pattern.lower()):
+                        file_path = os.path.join(season_path, item)
+                        os.remove(file_path)
+                        logger.info(f"Removed placeholder: {file_path}", extra={'emoji_type': 'cleanup'})
+                        found_files = True
+            else:
+                logger.debug(f"Season folder not found: {season_path}", extra={'emoji_type': 'debug'})
+        
+        if not found_files:
+            logger.debug(f"No matching episode files found for {episode_pattern}", extra={'emoji_type': 'debug'})
+            
+        return True
+        
     except Exception as e:
-        logger.error(f"Error deleting placeholder files: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Error cleaning up placeholder: {str(e)}", extra={'emoji_type': 'error'})
+        return False
 
 # Title update and scheduling functions
 def schedule_episode_request_update(series_title, season_num, episode_num, media_id, delay=10, retries=5):
@@ -189,7 +256,7 @@ def trigger_radarr_search(movie_id, movie_title=None):
         logger.error(f"Radarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-def search_in_radarr(tmdb_id, rating_key, is_4k=False):
+def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None, year=None):
     """Search for a movie in Radarr"""
     config = get_arr_config('movie', is_4k)
     # Validate tmdb_id is an integer
@@ -256,7 +323,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False):
         return False
 
 # Sonarr integration functions would follow a similar pattern.
-def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, episode_mode=False, is_4k=False):
+def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, is_4k=False):
     """Search for a series in Sonarr but don't automatically mark as monitored"""
     try:
         config = get_arr_config('tv', is_4k)
@@ -272,9 +339,7 @@ def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=Non
             series = existing_response.json()[0]
             logger.info(f"Series already exists in Sonarr: {series['title']}", extra={'emoji_type': 'info'})
             
-            # In episode mode, just return the series ID, don't trigger search
-            if episode_mode:
-                return series['id']
+            return series['id']
                 
             # Only trigger series-wide search if not in episode mode
             trigger_sonarr_search(series['id'], series_title=series['title'], is_4k=is_4k)
@@ -318,18 +383,16 @@ def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=Non
         added_series = add_response.json()
         logger.info(f"Added series: {series_data['title']}", extra={'emoji_type': 'success'})
         
-        if not episode_mode:
-            trigger_sonarr_search(added_series['id'], added_series['title'])
-        
         return added_series['id']
         
     except Exception as e:
         logger.error(f"Sonarr operation failed: {e}", extra={'emoji_type': 'error'})
         return None
 
-def trigger_sonarr_search(series_id, episode_ids=None, season_number=None, series_title=None, is_4k=False):
-    """Trigger a search in Sonarr with proper config handling"""
+def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, series_title="Unknown Series", is_4k=False):
+    """Trigger a search in Sonarr for episodes"""
     try:
+        # Get Sonarr configuration
         config = get_arr_config('sonarr', is_4k)
         url = config.get('url')
         api_key = config.get('api_key')
@@ -340,15 +403,14 @@ def trigger_sonarr_search(series_id, episode_ids=None, season_number=None, serie
             
         headers = {'X-Api-Key': api_key}
         
+        # Determine search type and prepare request
         if episode_ids:
             # Search for specific episodes (batch support)
             data = {
                 'name': 'episodeSearch',
                 'episodeIds': episode_ids
             }
-            r = requests.post(f"{url}/command", json=data, headers=headers)
-            r.raise_for_status()
-            logger.info(f"Triggered episode search for {series_title}", extra={'emoji_type': 'search'})
+            log_message = f"Triggered episode search for {series_title} ({len(episode_ids)} episodes)"
             
         elif season_number is not None:
             # Search for a season
@@ -357,9 +419,7 @@ def trigger_sonarr_search(series_id, episode_ids=None, season_number=None, serie
                 'seriesId': series_id,
                 'seasonNumber': season_number
             }
-            r = requests.post(f"{url}/command", json=data, headers=headers)
-            r.raise_for_status()
-            logger.info(f"Triggered season search for {series_title} Season {season_number}", extra={'emoji_type': 'search'})
+            log_message = f"Triggered season search for {series_title} S{season_number:02d}"
             
         else:
             # Search for entire series
@@ -367,11 +427,17 @@ def trigger_sonarr_search(series_id, episode_ids=None, season_number=None, serie
                 'name': 'seriesSearch',
                 'seriesId': series_id
             }
-            r = requests.post(f"{url}/command", json=data, headers=headers)
-            r.raise_for_status()
-            logger.info(f"Triggered series search for {series_title}", extra={'emoji_type': 'search'})
+            log_message = f"Triggered series search for {series_title}"
+            
+        # Send search command to Sonarr
+        r = requests.post(f"{url}/command", json=data, headers=headers)
+        r.raise_for_status()
+        
+        # Log single message for the search operation
+        logger.info(log_message, extra={'emoji_type': 'search'})
         
         return True
+        
     except Exception as e:
         logger.error(f"Sonarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
@@ -641,7 +707,7 @@ def check_media_has_file(media_id, base_title, rating_key, media_type='movie', a
                 episodes_response = requests.get(f"{config['url']}/episode", params={'seriesId': series['id']}, 
                                               headers={'X-Api-Key': config['api_key']})
                 episodes_response.raise_for_status()
-                episodes = episodes_response.json()
+                episodes = episodes.response.json()
 
                 # Filter episodes based on search type
                 if config['search_type'] == 'episode':
@@ -944,3 +1010,204 @@ def update_plex_title(rating_key, base_title, status):
 def check_has_file(media_type, arr_id, title, rating_key, is_4k=False, attempts=0, start_time=None):
     """Movie-specific wrapper for check_media_has_file"""
     return check_media_has_file(media_type, arr_id, title, rating_key, is_4k=is_4k, attempts=attempts, start_time=start_time)
+
+def get_sonarr_queue(is_4k=False):
+    """Get current queue items from Sonarr"""
+    try:
+        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
+        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
+        
+        url = f"{base_url}/queue"
+        params = {'pageSize': 50}
+        headers = {'X-Api-Key': api_key}
+        
+        response = requests.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        
+        data = response.json()
+        return data.get('records', [])
+    
+    except Exception as e:
+        logger.error(f"Error fetching Sonarr queue: {e}", extra={'emoji_type': 'error'})
+        return []
+
+def get_radarr_queue(is_4k=False):
+    """Get current queue items from Radarr"""
+    try:
+        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
+        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
+        
+        url = f"{base_url}/queue"
+        params = {'pageSize': 50}
+        headers = {'X-Api-Key': api_key}
+        
+        response = requests.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        
+        data = response.json()
+        return data.get('records', [])
+    
+    except Exception as e:
+        logger.error(f"Error fetching Radarr queue: {e}", extra={'emoji_type': 'error'})
+        return []
+
+def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, season_number=None, episode_number=None, is_4k=False, file_path=None):
+    """
+    Find a TV series in Sonarr using multiple fallback methods:
+    1. Path-based ID matching (most reliable)
+    2. TVDB ID matching
+    3. Title matching
+    Returns the series ID if found, None otherwise
+    """
+    try:
+        # Determine which Sonarr instance to use
+        sonarr_url = settings.SONARR_URL_4K if is_4k else settings.SONARR_URL
+        sonarr_api_key = settings.SONARR_API_KEY_4K if is_4k else settings.SONARR_API_KEY
+        headers = {"X-Api-Key": sonarr_api_key}
+        
+        # Get all series from Sonarr for efficient matching
+        series_url = f"{sonarr_url}/series"
+        series_response = requests.get(series_url, headers=headers)
+        
+        if series_response.status_code != 200:
+            logger.error(f"Failed to get series from Sonarr: {series_response.text}", extra={'emoji_type': 'error'})
+            return None
+            
+        all_series = series_response.json()
+        
+        # METHOD 1: Try to match by filepath ID (most reliable)
+        if file_path:
+            # Extract ID using regex pattern matching
+            imdb_match = re.search(r'{imdb-([^}]+)}', file_path)
+            tvdb_match = re.search(r'{tvdb-(\d+)}', file_path)
+            tmdb_match = re.search(r'{tmdb-(\d+)}', file_path)
+            
+            if imdb_match:
+                path_id = imdb_match.group(1)
+                for series in all_series:
+                    if series.get('imdbId') == path_id:
+                        logger.info(f"Found series in Sonarr by path IMDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                        return series['id']
+            
+            if tvdb_match:
+                path_id = tvdb_match.group(1)
+                for series in all_series:
+                    if str(series.get('tvdbId')) == str(path_id):
+                        logger.info(f"Found series in Sonarr by path TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                        return series['id']
+            
+            if tmdb_match:
+                path_id = tmdb_match.group(1)
+                for series in all_series:
+                    if str(series.get('tmdbId')) == str(path_id):
+                        logger.info(f"Found series in Sonarr by path TMDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                        return series['id']
+                        
+            # Also try to match by series folder name in path
+            path_parts = file_path.split('/')
+            for idx, part in enumerate(path_parts):
+                if idx > 0 and idx < len(path_parts) - 1 and 'Season' in path_parts[idx+1]:
+                    series_folder = part
+                    for series in all_series:
+                        if series_folder in series.get('path', ''):
+                            logger.info(f"Found series in Sonarr by folder path match: {series['title']}", extra={'emoji_type': 'info'})
+                            return series['id']
+        
+        # METHOD 2: Try TVDB ID matching (next most reliable)
+        if tvdb_id:
+            for series in all_series:
+                if str(series.get('tvdbId')) == str(tvdb_id):
+                    logger.info(f"Found series in Sonarr by TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                    return series['id']
+        
+        # METHOD 3: Try title matching (least reliable but good fallback)
+        if title:
+            # Try exact match first
+            for series in all_series:
+                if series.get('title', '').lower() == title.lower():
+                    logger.info(f"Found series in Sonarr by title: {series['title']}", extra={'emoji_type': 'info'})
+                    return series['id']
+        
+        # If we get here, series wasn't found
+        logger.warning(f"Series not found in Sonarr: {'TVDB:'+str(tvdb_id) if tvdb_id else title}", extra={'emoji_type': 'warning'})
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error finding series in Sonarr: {e}", extra={'emoji_type': 'error'})
+        return None
+
+def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None):
+    """Delete placeholder files once real files are downloaded"""
+    try:
+        # Build the folder pattern
+        folder_name = sanitize_filename(title)
+        if year:
+            folder_name += f" ({year})"
+        
+        # Add appropriate ID tag
+        if media_type == 'tv':
+            folder_name += f" {{tvdb-{tvdb_id}}} (dummy)"
+        else:  # movie
+            folder_name += f" {{tmdb-{tvdb_id}}} (dummy)"
+            
+        dummy_folder = os.path.join(library_path, folder_name)
+        logger.debug(f"Looking for dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
+        
+        # Check if the folder exists
+        if not os.path.exists(dummy_folder):
+            logger.debug(f"Dummy folder not found: {dummy_folder}", extra={'emoji_type': 'debug'})
+            return
+        
+        # TV show - delete specific episode file
+        if media_type == 'tv' and season_number is not None and episode_number is not None:
+            season_dir = os.path.join(dummy_folder, f"Season {int(season_number):02d}")
+            
+            # Check if season folder exists
+            if os.path.exists(season_dir):
+                # Log what we're looking for
+                logger.debug(f"Looking for episode files in {season_dir} matching pattern s{season_number:02d}e{episode_number:02d}", 
+                           extra={'emoji_type': 'debug'})
+                
+                # Look for files matching the episode pattern
+                files_found = False
+                for file in os.listdir(season_dir):
+                    logger.debug(f"Checking file: {file}", extra={'emoji_type': 'debug'})
+                    
+                    # Use more pattern variations to match all possible formats
+                    patterns = [
+                        f"s{int(season_number):02d}e{int(episode_number):02d}",  # "s01e01" format
+                        f"S{int(season_number):02d}E{int(episode_number):02d}",  # "S01E01" format
+                        f" - s{int(season_number):02d}e{int(episode_number):02d}",  # " - s01e01"
+                        f" - S{int(season_number):02d}E{int(episode_number):02d}"   # " - S01E01"
+                    ]
+                    
+                    # Check if any pattern matches
+                    if any(pattern in file for pattern in patterns):
+                        file_path = os.path.join(season_dir, file)
+                        logger.debug(f"Match found! Deleting: {file_path}", extra={'emoji_type': 'debug'})
+                        
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"Deleted placeholder file: {file_path}", extra={'emoji_type': 'delete'})
+                            files_found = True
+                        except Exception as e:
+                            logger.error(f"Failed to delete file {file_path}: {e}", extra={'emoji_type': 'error'})
+                
+                if not files_found:
+                    logger.debug(f"No matching episode files found in {season_dir}", extra={'emoji_type': 'debug'})
+            else:
+                logger.debug(f"Season directory not found: {season_dir}", extra={'emoji_type': 'debug'})
+        
+        # Movies or entire TV series - delete the whole folder
+        else:
+            # Only try to remove if it's not a TV show with season/episode specified
+            if media_type == 'movie' or (season_number is None and episode_number is None):
+                if os.path.exists(dummy_folder):
+                    shutil.rmtree(dummy_folder)
+                    logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+        
+        return True
+            
+    except Exception as e:
+        logger.error(f"Error deleting placeholder: {e}", extra={'emoji_type': 'error'})
+        return False
