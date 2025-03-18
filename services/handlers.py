@@ -2,7 +2,7 @@ import os, re, threading, time, shutil, requests
 from fastapi.responses import JSONResponse
 from core.config import settings
 from core.logger import logger
-from services.plex_client import plex, build_plex_url
+from services.plex_client import plex, build_plex_url, refresh_plex_item
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
     schedule_movie_request_update, check_media_has_file, check_has_file,
@@ -106,13 +106,15 @@ def handle_import_event(data: dict, is_4k: bool = False):
             tmdb_id = movie.get('tmdbId')
             title = movie.get('title', 'Unknown Movie')
             year = movie.get('year')
+            movie_path = data.get("movieFile", {}).get("path")
             
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
             delete_dummy_files('movie', title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
             
             # Refresh Plex library
-            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_MOVIE_SECTION_ID}/refresh")
-            requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+            dummy_folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER, 
+                           f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
+            refresh_plex_item(dummy_folder)
             
         elif 'episodes' in data and 'series' in data:
             # TV episode import handling
@@ -124,6 +126,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             season_num = episode.get('seasonNumber')
             episode_num = episode.get('episodeNumber')
             episode_title = episode.get('title', 'Unknown Episode')
+            episode_path = data.get("episodeFile", {}).get("path")
             
             # Format full episode identifier
             full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
@@ -133,8 +136,9 @@ def handle_import_event(data: dict, is_4k: bool = False):
                               settings.TV_LIBRARY_FOLDER, season_number=season_num, episode_number=episode_num)
             
             # Refresh Plex library
-            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
-            requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
+            series_folder = os.path.join(settings.TV_LIBRARY_FOLDER,
+                           f"{sanitize_filename(series_title)}{' ('+str(series.get('year'))+')' if series.get('year') else ''} {{tvdb-{tvdb_id}}}")
+            refresh_plex_item(series_folder)
             
     except Exception as e:
         logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
@@ -178,9 +182,7 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
     for folder in unique_folders:
         # Refresh specific Plex folder instead of entire library
-        refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh?path={quote(folder)}")
-        r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-        r.raise_for_status()
+        refresh_plex_item(folder)
     return JSONResponse({"status": "success", "message": "SeriesAdd processed"})
 
 def handle_episodefiledelete(data: dict, is_4k: bool = False):
@@ -190,6 +192,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     series_title = series.get('title', 'Unknown Series')
     series_year = series.get('year')
     tvdb_id = series.get('tvdbId')
+    episode_file_path = data.get("episodeFile", {}).get("path")
     for ep in episodes:
         season_num = ep.get('seasonNumber')
         episode_num = ep.get('episodeNumber')
@@ -214,9 +217,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
         logger.info(f"Re-created dummy file for {series_title} S{season_num}E{episode_num} at {dummy_path}",
                     extra={'emoji_type': 'dummy'})
         
-        refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
-        r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-        r.raise_for_status()
+        refresh_plex_item(os.path.dirname(dummy_path))
         
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
     
@@ -231,6 +232,8 @@ def handle_moviefiledelete(data: dict):
             return JSONResponse({"status": "error"}, status_code=400)
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
+        movie_file_path = data.get("movieFile", {}).get("path")
+        
         expected_dummy = os.path.join(settings.MOVIE_LIBRARY_FOLDER,
                                       f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}",
                                       f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} (dummy).mp4")
@@ -238,9 +241,7 @@ def handle_moviefiledelete(data: dict):
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
             logger.info(f"Created dummy file for movie '{title}' at {dummy_path}", extra={'emoji_type': 'dummy'})
             folder = os.path.dirname(dummy_path)
-            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_MOVIE_SECTION_ID}/refresh")
-            r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-            r.raise_for_status()
+            refresh_plex_item(folder) 
             schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
         else:
             logger.info(f"Dummy file already exists for movie '{title}'", extra={'emoji_type': 'info'})
@@ -249,6 +250,7 @@ def handle_moviefiledelete(data: dict):
 def handle_movie_delete(data: dict):
     if 'movie' in data:
         movie = data.get('movie', {})
+        movie_folder = data.get("movie", {}).get("folderPath")
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie delete", extra={'emoji_type': 'error'})
@@ -263,14 +265,13 @@ def handle_movie_delete(data: dict):
             logger.info(f"No dummy file exists for movie {movie.get('title')}", extra={'emoji_type': 'info'})
         folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER,
                               f"{sanitize_filename(movie.get('title', ''))}{' ('+str(movie.get('year'))+')' if movie.get('year') else ''} {{tmdb-{tmdb_id}}}")
-        refresh_url = build_plex_url(f"library/sections/{settings.PLEX_MOVIE_SECTION_ID}/refresh")
-        r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-        r.raise_for_status()
+        refresh_plex_item(os.path.dirname(movie_folder)) 
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
 def handle_movieadd(data: dict):
     if 'movie' in data:
         movie = data.get('movie', {})
+        movie_path = data.get("movie", {}).get("folderPath")
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie add", extra={'emoji_type': 'error'})
@@ -279,9 +280,7 @@ def handle_movieadd(data: dict):
         year = movie.get('year', '')
         dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
         logger.info(f"Created dummy file for movie '{title}' at {dummy_path}", extra={'emoji_type': 'dummy'})
-        refresh_url = build_plex_url(f"library/sections/{settings.PLEX_MOVIE_SECTION_ID}/refresh")
-        r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-        r.raise_for_status()
+        refresh_plex_item(os.path.dirname(dummy_path))
         schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
 
@@ -302,9 +301,7 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             if os.path.exists(series_folder):
                 try:
                     # 1. First refresh Plex to recognize the deletion
-                    refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh?path={quote(os.path.dirname(series_folder))}")
-                    r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-                    r.raise_for_status()
+                    refresh_plex_item(os.path.dirname(series_folder))
                     logger.info(f"Refreshed Plex for series folder: {series_folder}", extra={'emoji_type': 'refresh'})
                     
                     # 2. Then delete all files and subfolder recursively
@@ -315,9 +312,7 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             else:
                 logger.warning(f"Series folder not found: {series_folder}", extra={'emoji_type': 'warning'})
                 # Still refresh Plex in case the folder was already deleted
-                refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh?path={quote(os.path.dirname(series_folder))}")
-                r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-                r.raise_for_status()
+                refresh_plex_item(settings.TV_LIBRARY_FOLDER, media_type='tv')
         else:
             # Fall back to full library refresh if no TVDB ID
             refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
@@ -335,7 +330,39 @@ def handle_playback(data: dict):
         is_4k = is_4k_request(file_path)
         title = media.get("title", "Unknown Title")
         rating_key = media.get("ids", {}).get("plex")
+        media_type = media.get("type")  # Get the media type
 
+        # Debug log the file path 
+        logger.debug(f"Processing playback for file path: {file_path}", extra={'emoji_type': 'debug'})
+
+        # Check if file is in one of our placeholder library folders
+        is_placeholder = False
+        if file_path:
+            placeholder_folders = [
+                settings.MOVIE_LIBRARY_FOLDER,
+                settings.TV_LIBRARY_FOLDER
+            ]
+            
+            # Add 4K folders if configured
+            if hasattr(settings, 'MOVIE_LIBRARY_4K_FOLDER') and settings.MOVIE_LIBRARY_4K_FOLDER:
+                placeholder_folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
+            if hasattr(settings, 'TV_LIBRARY_4K_FOLDER') and settings.TV_LIBRARY_4K_FOLDER:
+                placeholder_folders.append(settings.TV_LIBRARY_4K_FOLDER)
+            
+            # Debug log the placeholder folders
+            logger.debug(f"Checking path against placeholder folders: {placeholder_folders}", extra={'emoji_type': 'debug'})
+                
+            # Check if file path starts with any placeholder folder path
+            is_placeholder = any(file_path.startswith(folder) for folder in placeholder_folders if folder)
+        
+        # Debug log the placeholder check result
+        logger.debug(f"Is placeholder check result: {is_placeholder}", extra={'emoji_type': 'debug'})
+        
+        # For MOVIES ONLY: Skip processing if it's a real file
+        if not is_placeholder and media_type == "movie":
+            logger.info(f"Ignoring playback of real movie file: {file_path}", extra={'emoji_type': 'info'})
+            return JSONResponse({"status": "ignored", "message": "Not a placeholder movie file"})
+        
         if media.get("type") == "movie":
             tmdb_id = media.get("ids", {}).get("tmdb")
             imdb_id = media.get("ids", {}).get("imdb")
@@ -525,14 +552,17 @@ def handle_download(data, is_4k=False):
             year = movie_data.get('year', '')
             tmdb_id = movie_data.get('tmdbId')
             
+            # Get the movie file path
+            movie_file_path = data.get("movieFile", {}).get("path")
+            
             logger.info(f"Processing movie import cleanup for: {title} ({year})", extra={'emoji_type': 'process'})
             
             # Delete placeholder file
             library_folder = settings.MOVIE_LIBRARY_4K_FOLDER if is_4k else settings.MOVIE_LIBRARY_FOLDER
             delete_dummy_files('movie', title, year, tmdb_id, library_folder)
             
-            # Refresh Plex library
-            refresh_plex_library('movie')
+            # Refresh Plex library using the movie's folder
+            refresh_plex_item(os.path.dirname(movie_file_path))
             
         elif 'episodes' in data:
             # Episode download
@@ -540,6 +570,9 @@ def handle_download(data, is_4k=False):
             series = data.get('series', {})
             series_title = series.get('title', 'Unknown Series')
             tvdb_id = series.get('tvdbId')
+            
+            # Get the series folder path
+            series_folder = series.get("path")
             
             for episode in episodes:
                 season_number = episode.get('seasonNumber')
@@ -582,8 +615,8 @@ def handle_download(data, is_4k=False):
                     episode_number=episode_number
                 )
                 
-            # Refresh Plex library
-            refresh_plex_library('tv')
+            # Refresh Plex library using the series folder
+            refresh_plex_item(series_folder)
             
         return JSONResponse({"status": "success", "message": "Download processed"})
         
@@ -591,20 +624,3 @@ def handle_download(data, is_4k=False):
         logger.error(f"Error handling download: {str(e)}", extra={'emoji_type': 'error'})
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
     
-def refresh_plex_library(media_type=None):
-    """Refresh Plex libraries"""
-    try:
-        if media_type == 'tv' or media_type is None:
-            # Refresh TV library
-            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
-            requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-            logger.debug("Refreshed Plex TV library", extra={'emoji_type': 'refresh'})
-            
-        if media_type == 'movie' or media_type is None:
-            # Refresh movie library
-            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_MOVIE_SECTION_ID}/refresh") 
-            requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-            logger.debug("Refreshed Plex movie library", extra={'emoji_type': 'refresh'})
-            
-    except Exception as e:
-        logger.error(f"Failed to refresh Plex library: {e}", extra={'emoji_type': 'error'})

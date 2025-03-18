@@ -10,7 +10,8 @@ from core.logger import logger
 from services.handlers import handle_webhook
 
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)
+
 
 def clear_port(port: int, max_attempts: int = 3) -> bool:
     """Clear a port if it's in use"""
@@ -40,7 +41,7 @@ def check_port(port: int) -> bool:
     try:
         result = subprocess.run(['lsof', '-i', f':{port}'], capture_output=True, text=True)
         if result.stdout:
-            logger.error(f"Port {port} is already in use. Please update APP_PORT in your .env file.", extra={'emoji_type': 'error'})
+            logger.error(f"Port {port} is already in use. Please update PLACEHOLDARR_PORT in your .env file.", extra={'emoji_type': 'error'})
             return False
         return True
     except Exception as e:
@@ -66,19 +67,18 @@ async def webhook(request: Request):
 if __name__ == '__main__':
     import uvicorn
     
-    # Get port from environment variable or exit if not set
-    port = os.getenv('PLACEHOLDARR_PORT')
-    if not port:
-        logger.error("PLACEHOLDARR_PORT not set in environment variables. Please set it in your .env file.", extra={'emoji_type': 'error'})
-        sys.exit(1)
+    # Set port back to 8001 (your existing webhook port)
+    port = int(os.getenv('PLACEHOLDARR_PORT'))
+    logger.info(f"Using port {port}", extra={'emoji_type': 'info'})
     
-    try:
-        port = int(port)
-    except ValueError:
-        logger.error(f"Invalid PLACEHOLDARR_PORT value: {port}. Must be a number.", extra={'emoji_type': 'error'})
-        sys.exit(1)
-    
+    # Check if port is in use, and try to clear it
     if not check_port(port):
-        sys.exit(1)
-        
+        logger.info(f"Attempting to clear port {port}", extra={'emoji_type': 'info'})
+        if clear_port(port):
+            logger.info(f"Successfully cleared port {port}", extra={'emoji_type': 'info'})
+        else:
+            logger.error(f"Failed to clear port {port}. Please choose a different port.", extra={'emoji_type': 'error'})
+            sys.exit(1)
+    
+    # Start the server
     uvicorn.run(app, host="0.0.0.0", port=port)

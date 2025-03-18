@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     TV_LIBRARY_4K_FOLDER: str = ""
 
     # Application
-    PLAYBACK_COOLDOWN: int = int(os.environ.get('PLAYBACK_COOLDOWN', '30').split('#')[0].strip())
+    PLAYBACK_COOLDOWN: int = int(os.environ.get("PLAYBACK_COOLDOWN", "30").split('#')[0].strip())
     MAX_MONITOR_TIME: int = int(os.getenv("MAX_MONITOR_TIME", "60").split('#')[0].strip())
     CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "10").split('#')[0].strip())
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10").split('#')[0].strip())
