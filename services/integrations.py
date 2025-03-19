@@ -289,7 +289,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
             else:
                 logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
             # Do not schedule further timer retries if TMDB ID is invalid
-            return True
+            return movie_data['id']
 
         lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
         lookup.raise_for_status()
