@@ -8,7 +8,7 @@ from services.integrations import (
     schedule_movie_request_update, check_media_has_file, check_has_file,
     search_in_radarr, search_in_sonarr, trigger_sonarr_search, monitor_episodes, 
     mark_series_monitored, get_episodes_for_lookahead, check_tv_has_file,
-    monitor_season
+    monitor_season, sanitize_filename
 )
 from services.queue_monitor import add_to_monitor
 from services.utils import (
@@ -293,9 +293,10 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
         year = series.get('year')
         
         if tvdb_id:
-            # Construct folder path for placeholders
+            # Construct folder path for placeholders using sanitized filename
             library_folder = settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER
-            series_folder = os.path.join(library_folder, f"{title} ({year}) {{tvdb-{tvdb_id}}} (dummy)")
+            sanitized_title = sanitize_filename(title)
+            series_folder = os.path.join(library_folder, f"{sanitized_title} ({year}) {{tvdb-{tvdb_id}}} (dummy)")
             
             # Check if folder exists
             if os.path.exists(series_folder):
@@ -310,16 +311,47 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
                 except Exception as e:
                     logger.error(f"Error deleting folder {series_folder}: {str(e)}", extra={'emoji_type': 'error'})
             else:
-                logger.warning(f"Series folder not found: {series_folder}", extra={'emoji_type': 'warning'})
+                # Try to see if any similar folders exist (for debugging purposes)
+                similar_folders = [f for f in os.listdir(library_folder) if str(tvdb_id) in f]
+                if similar_folders:
+                    logger.warning(f"Series folder not found: {series_folder}, but found similar folders: {similar_folders}", 
+                                  extra={'emoji_type': 'warning'})
+                else:
+                    logger.warning(f"Series folder not found: {series_folder}", extra={'emoji_type': 'warning'})
+                
                 # Still refresh Plex in case the folder was already deleted
-                refresh_plex_item(settings.TV_LIBRARY_FOLDER, media_type='tv')
+                refresh_plex_item(library_folder)
         else:
             # Fall back to full library refresh if no TVDB ID
-            refresh_url = build_plex_url(f"library/sections/{settings.PLEX_TV_SECTION_ID}/refresh")
-            r = requests.get(refresh_url, headers={'X-Plex-Token': settings.PLEX_TOKEN})
-            r.raise_for_status()
+            refresh_plex_item(settings.TV_LIBRARY_FOLDER)
             
     return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
+
+def handle_series_delete(payload):
+    """Handle 'seriesdelete' event from Sonarr"""
+    series_title = payload.get('series', {}).get('title')
+    tvdb_id = payload.get('series', {}).get('tvdbId')
+    year = payload.get('series', {}).get('year')
+    
+    # Sanitize the title for filesystem
+    sanitized_title = sanitize_filename(series_title)
+    
+    # Build the path the same way it was created
+    series_folder = f"{sanitized_title} ({year}) {{tvdb-{tvdb_id}}} (dummy)"
+    series_path = os.path.join(settings.PLEX_TV_FOLDER, series_folder)
+    
+    if os.path.exists(series_path):
+        try:
+            shutil.rmtree(series_path)
+            logger.info(f"Removed dummy files for {series_title}", extra={'emoji_type': 'delete'})
+        except Exception as e:
+            logger.error(f"Failed to remove dummy files for {series_title}: {str(e)}", extra={'emoji_type': 'error'})
+    else:
+        logger.warning(f"Series folder not found: {series_path}", extra={'emoji_type': 'warning'})
+    
+    # Refresh Plex library to reflect the changes
+    plex_folder = os.path.dirname(series_path)  # Get parent folder
+    refresh_plex_item(plex_folder)
 
 # In handle_playback, we need to keep the existing structure but integrate with queue monitoring
 
