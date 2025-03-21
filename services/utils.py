@@ -50,6 +50,32 @@ def get_series_folder(media_type, target_base_folder, title, year, media_id, sea
     folder = f"{clean_title}{year_str} {{tmdb-{media_id}}}" if media_type == 'movie' else f"{clean_title}{year_str} {{tvdb-{media_id}}}"
     return os.path.join(target_base_folder, folder)
 
+def get_folder_path(media_type, base_path, title, year=None, media_id=None, season=None):
+    """Generate folder path according to Placeholdarr's naming convention"""
+    # First sanitize the title
+    sanitized_title = sanitize_filename(title)
+    
+    # Remove any year pattern from the title to prevent duplication
+    year_pattern = r'\s*\(\d{4}\)'
+    sanitized_title = re.sub(year_pattern, '', sanitized_title).strip()
+    
+    # Add the year from metadata when available
+    year_str = f" ({year})" if year else ""
+    
+    if media_type == "movie":
+        # Movie folder: "{Movie Title} ({Year}) {tmdb-123456}{edition-Dummy}"
+        folder_name = f"{sanitized_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}"
+        return os.path.join(base_path, folder_name)
+    else:
+        # Series folder: "{Series Title} ({year}) {tvdb-123456} (dummy)"
+        folder_name = f"{sanitized_title}{year_str} {{tvdb-{media_id}}} (dummy)"
+        
+        # Add season folder if provided
+        if season is not None:
+            return os.path.join(base_path, folder_name, f"Season {season:02d}")
+        else:
+            return os.path.join(base_path, folder_name)
+
 def is_4k_request(file_path: str, source_port: int = None) -> bool:
     """
     Determine if this is a 4K request based on:

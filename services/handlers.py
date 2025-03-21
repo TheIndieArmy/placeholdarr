@@ -98,7 +98,7 @@ def handle_webhook(data: dict, source_port: int = None):
         return JSONResponse({"status": "success", "message": "Import event processed"})
 
 def handle_import_event(data: dict, is_4k: bool = False):
-    """Handle media import events and delete placeholders"""
+    """Handle media import events and clean up placeholders"""
     try:
         if 'movie' in data:
             # Movie import handling
@@ -109,6 +109,18 @@ def handle_import_event(data: dict, is_4k: bool = False):
             movie_path = data.get("movieFile", {}).get("path")
             
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
+            
+            # Update Plex title to "Available" (remove status markers)
+            from services.plex_client import update_plex_title_status
+            update_plex_title_status(
+                media_type='movie',
+                media_id=tmdb_id,
+                title=title,
+                status=None,  # None = remove status markers
+                year=year
+            )
+            
+            # Clean up placeholder files
             delete_dummy_files('movie', title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
             
             # Refresh Plex library
@@ -132,6 +144,18 @@ def handle_import_event(data: dict, is_4k: bool = False):
             full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
             logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
             
+            # Update Plex title to "Available" (remove status markers)
+            from services.plex_client import update_plex_title_status
+            update_plex_title_status(
+                media_type='tv',
+                media_id=tvdb_id,
+                title=series_title,
+                status=None,  # None = remove status markers
+                season=season_num,
+                episode=episode_num
+            )
+            
+            # Clean up placeholder files
             delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, 
                               settings.TV_LIBRARY_FOLDER, season_number=season_num, episode_number=episode_num)
             
@@ -175,14 +199,14 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                                     season_number=season_num,
                                     episode_range=(episode_num, episode_num),
                                     episode_title=episode_title)  # REMOVED episode_id
-        logger.info(f"Created dummy file for {series_title} S{season_num}E{episode_num} at {dummy_path}",
-                    extra={'emoji_type': 'dummy'})
         series_folder = "/".join(dummy_path.split(os.sep)[:-2])
         unique_folders.add(series_folder)
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
+
     for folder in unique_folders:
         # Refresh specific Plex folder instead of entire library
         refresh_plex_item(folder)
+    logger.info(f"Created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
     return JSONResponse({"status": "success", "message": "SeriesAdd processed"})
 
 def handle_episodefiledelete(data: dict, is_4k: bool = False):
@@ -214,13 +238,10 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                                       episode_range=(episode_num, episode_num),
                                       episode_title=episode_title)  # Include episode title & REMOVE episode_id
         
-        logger.info(f"Re-created dummy file for {series_title} S{season_num}E{episode_num} at {dummy_path}",
-                    extra={'emoji_type': 'dummy'})
-        
         refresh_plex_item(os.path.dirname(dummy_path))
         
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
-    
+    logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
     return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
 
 def handle_moviefiledelete(data: dict):
@@ -239,8 +260,8 @@ def handle_moviefiledelete(data: dict):
                                       f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} (dummy).mp4")
         if not os.path.exists(expected_dummy):
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-            logger.info(f"Created dummy file for movie '{title}' at {dummy_path}", extra={'emoji_type': 'dummy'})
             folder = os.path.dirname(dummy_path)
+            logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
             refresh_plex_item(folder) 
             schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
         else:
@@ -279,7 +300,7 @@ def handle_movieadd(data: dict):
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year', '')
         dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-        logger.info(f"Created dummy file for movie '{title}' at {dummy_path}", extra={'emoji_type': 'dummy'})
+        logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
         refresh_plex_item(os.path.dirname(dummy_path))
         schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
@@ -293,19 +314,31 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
         year = series.get('year')
         
         if tvdb_id:
-            # Construct folder path for placeholders using sanitized filename
+            # Construct folder path using get_folder_path for consistency
             library_folder = settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER
-            sanitized_title = sanitize_filename(title)
-            series_folder = os.path.join(library_folder, f"{sanitized_title} ({year}) {{tvdb-{tvdb_id}}} (dummy)")
+            from services.utils import get_folder_path
+            
+            # Get the series folder path without any season subfolder
+            series_folder = get_folder_path(
+                media_type='tv',
+                base_path=library_folder,
+                title=title,
+                year=year,
+                media_id=tvdb_id
+            )
+            
+            # Remove any season folder component if present
+            if "/Season" in series_folder:
+                series_folder = series_folder.split("/Season")[0]
             
             # Check if folder exists
             if os.path.exists(series_folder):
                 try:
-                    # 1. First refresh Plex to recognize the deletion
+                    # First refresh Plex to recognize the deletion
                     refresh_plex_item(os.path.dirname(series_folder))
                     logger.info(f"Refreshed Plex for series folder: {series_folder}", extra={'emoji_type': 'refresh'})
                     
-                    # 2. Then delete all files and subfolder recursively
+                    # Then delete all files and subfolder recursively
                     shutil.rmtree(series_folder)
                     logger.info(f"Deleted placeholder folder: {series_folder}", extra={'emoji_type': 'delete'})
                 except Exception as e:

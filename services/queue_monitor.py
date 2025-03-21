@@ -1189,103 +1189,64 @@ def _check_downloads_status():
         logger.error(f"Error in download status check: {str(e)}", extra={'emoji_type': 'error'})
 
 def handle_download_webhook(data):
-    """Handle download webhook to update monitored items"""
+    """Handle download completion events from *arr applications"""
     try:
-        items_removed = 0
-        
-        if 'episodes' in data and len(data['episodes']) > 0:
-            # Episode download
-            episode = data['episodes'][0]
-            series = data.get('series', {})
-            
-            episode_id = episode.get('id')
-            tvdb_id = series.get('tvdbId')
-            season_number = episode.get('seasonNumber')
-            episode_number = episode.get('episodeNumber')
-            series_title = series.get('title', '')
-            
-            logger.debug(f"Processing download webhook for {series_title} S{season_number:02d}E{episode_number:02d} (ID: {episode_id})", 
-                       extra={'emoji_type': 'debug'})
-            
-            # Generate keys to look for in the monitored media dictionary
-            keys_to_remove = []
-            
-            with REGISTRY_LOCK:
-                # First check: Look for exact episode ID match
-                for key, media in list(MONITORED_MEDIA.items()):
-                    if media.get('media_type') == 'episode':
-                        # Check by direct episode_id match
-                        if media.get('episode_id') == episode_id:
-                            keys_to_remove.append(key)
-                            logger.info(f"Found monitored item by episode ID: {key} - {series_title} S{season_number:02d}E{episode_number:02d}", 
-                                      extra={'emoji_type': 'cleanup'})
-                        
-                        # Also check by tvdb_id + season + episode
-                        elif (media.get('tvdb_id') == tvdb_id and 
-                              media.get('season_number') == season_number and 
-                              media.get('episode_number') == episode_number):
-                            keys_to_remove.append(key)
-                            logger.info(f"Found monitored item by series+season+episode: {key} - {series_title} S{season_number:02d}E{episode_number:02d}", 
-                                      extra={'emoji_type': 'cleanup'})
-                
-                # Now remove the found items from monitoring
-                for key in keys_to_remove:
-                    if key in MONITORED_MEDIA:
-                        logger.info(f"Download complete: Removing {key} from monitoring", 
-                                extra={'emoji_type': 'cleanup'})
-                        remove_from_monitor(key)
-                        items_removed += 1
-                
-                if not keys_to_remove:
-                    logger.debug(f"No matching monitored items found for {series_title} S{season_number:02d}E{episode_number:02d}", 
-                               extra={'emoji_type': 'debug'})
-        
-        elif 'movie' in data:
+        if 'movie' in data:
+            # Movie download completed
             movie = data.get('movie', {})
-            movie_id = movie.get('id')
-            movie_title = movie.get('title', 'Unknown Movie')
             tmdb_id = movie.get('tmdbId')
+            title = movie.get('title')
+            year = movie.get('year')
             
-            logger.debug(f"Processing download webhook for movie: {movie_title} (ID: {movie_id}, TMDB: {tmdb_id})", 
-                       extra={'emoji_type': 'debug'})
-            
-            keys_to_remove = []
-            
-            with REGISTRY_LOCK:
-                # First check: Look for exact movie ID match
-                for key, media in list(MONITORED_MEDIA.items()):
-                    if media.get('media_type') == 'movie':
-                        # Check by direct movie_id/radarr_id match (using both field names for compatibility)
-                        if (media.get('movie_id') == movie_id or 
-                            media.get('radarr_id') == movie_id):
-                            keys_to_remove.append(key)
-                            logger.info(f"Found monitored movie by ID: {key} - {movie_title}", 
-                                      extra={'emoji_type': 'cleanup'})
-                        
-                        # Also check by tmdb_id
-                        elif media.get('tmdb_id') == tmdb_id:
-                            keys_to_remove.append(key)
-                            logger.info(f"Found monitored movie by TMDB ID: {key} - {movie_title}", 
-                                      extra={'emoji_type': 'cleanup'})
+            if not tmdb_id:
+                logger.warning("Movie download webhook missing TMDB ID", extra={'emoji_type': 'warning'})
+                return
                 
-                # Now remove the found items from monitoring
-                for key in keys_to_remove:
-                    if key in MONITORED_MEDIA:
-                        logger.info(f"Download complete: Removing {key} from monitoring", 
-                                  extra={'emoji_type': 'cleanup'})
-                        remove_from_monitor(key)
-                        items_removed += 1
+            # Update status to Available
+            from services.plex_client import update_plex_title_status
+            update_plex_title_status(
+                media_type='movie',
+                media_id=tmdb_id,
+                title=title,
+                status=None,  # Remove status markers
+                year=year
+            )
+            
+            # Remove from monitoring if being tracked
+            remove_from_monitor('movie', tmdb_id)
+            
+        elif 'episodes' in data and 'series' in data:
+            # TV episode download completed
+            series = data.get('series', {})
+            tvdb_id = series.get('tvdbId')
+            title = series.get('title')
+            
+            if not tvdb_id:
+                logger.warning("Episode download webhook missing TVDB ID", extra={'emoji_type': 'warning'})
+                return
                 
-                if not keys_to_remove:
-                    logger.debug(f"No matching monitored items found for movie {movie_title}", 
-                               extra={'emoji_type': 'debug'})
-        
-        return items_removed > 0  # Return True if we removed at least one item
-        
+            # Update all episodes in the webhook
+            for episode in data.get('episodes', []):
+                season_num = episode.get('seasonNumber')
+                episode_num = episode.get('episodeNumber')
+                
+                if season_num is not None and episode_num is not None:
+                    # Update status to Available
+                    from services.plex_client import update_plex_title_status
+                    update_plex_title_status(
+                        media_type='tv',
+                        media_id=tvdb_id,
+                        title=title,
+                        status=None,  # Remove status markers
+                        season=season_num,
+                        episode=episode_num
+                    )
+                    
+                    # Remove this specific episode from monitoring
+                    remove_from_monitor('episode', tvdb_id, season=season_num, episode=episode_num)
+                
     except Exception as e:
-        logger.error(f"Error processing download webhook: {e}", 
-                   extra={'emoji_type': 'error'})
-        return False
+        logger.error(f"Error handling download webhook: {e}", extra={'emoji_type': 'error'})
 
 # Make sure the monitor thread starts when this module is imported
 logger.info("Starting queue monitoring", extra={'emoji_type': 'process'})

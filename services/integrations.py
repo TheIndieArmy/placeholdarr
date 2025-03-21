@@ -38,81 +38,79 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
             else:
                 base_path = settings.TV_LIBRARY_FOLDER
                 
-        # Prepare folder path
-        folder_name = sanitize_filename(title)
-        if year:
-            folder_name += f" ({year})"
+        # Use get_folder_path for consistent path generation with year handling
+        from services.utils import get_folder_path
         
-        # Add appropriate ID tag and dummy marker
-        if media_type == 'tv':
-            folder_name += f" {{tvdb-{media_id}}} (dummy)"
+        # Clean title for use in file names (remove year pattern if present)
+        clean_title = sanitize_filename(title)
+        year_pattern = r'\s*\(\d{4}\)'
+        clean_title = re.sub(year_pattern, '', clean_title).strip()
+        
+        # Add year back for file naming if it was provided
+        year_str = f" ({year})" if year else ""
+        
+        if media_type == 'tv' and season_number is not None:
+            # Get the path using our updated get_folder_path function
+            season_folder = get_folder_path(
+                media_type='tv',
+                base_path=base_path,
+                title=title,
+                year=year,
+                media_id=media_id,
+                season=season_number
+            )
             
-            # TV show - create season folder structure
-            if season_number is not None:
-                # Create season folder
-                season_folder = f"Season {int(season_number):02d}"
-                episode_folder = os.path.join(base_path, folder_name, season_folder)
-                
-                # Create directories if they don't exist
-                os.makedirs(episode_folder, exist_ok=True)
-                
-                # If episode range is specified, create dummy files for each episode
-                if episode_range:
-                    start, end = episode_range
-                    for episode_num in range(start, end + 1):
-                        # Create file name with lowercase s##e## pattern
-                        file_name = f"{title} - s{int(season_number):02d}e{int(episode_num):02d}.mp4"
-                        if episode_title and episode_num == start:
-                            # Include episode title for first episode if available
-                            file_name = f"{title} - s{int(season_number):02d}e{int(episode_num):02d} - {episode_title}.mp4"
-                        
-                        file_path = os.path.join(episode_folder, sanitize_filename(file_name))
-                        
-                        # Create empty file if it doesn't exist
-                        if not os.path.exists(file_path):
-                            with open(file_path, 'w') as f:
-                                # Add minimal metadata
-                                f.write(f"Placeholder for {title} S{season_number}E{episode_num}")
-                            
-                            logger.info(f"Created dummy file for {title} S{season_number}E{episode_num} at {file_path}", 
-                                      extra={'emoji_type': 'file'})
-                        else:
-                            logger.info(f"Re-created dummy file for {title} S{season_number}E{episode_num} at {file_path}", 
-                                      extra={'emoji_type': 'file'})
-                        
-                        # Register this file with monitoring
-                        from services.queue_monitor import add_to_monitor
-                        if episode_id:
-                            add_to_monitor('episode', title, episode_id=episode_id, tvdb_id=media_id,
-                                      season_number=season_number, episode_number=episode_num)
-                            
-                        # Return the path of the first episode file
-                        if episode_num == start:
-                            first_episode_path = file_path
-                
-                return first_episode_path
-                
+            # Create the season folder structure
+            os.makedirs(season_folder, exist_ok=True)
+            
+            # Create an episode file for each episode in the range
+            if episode_range:
+                start_ep, end_ep = episode_range
+                for ep_num in range(int(start_ep), int(end_ep) + 1):
+                    # Create the episode filename - use clean_title here
+                    ep_title = episode_title or f"Episode {ep_num}"
+                    file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
+                    file_path = os.path.join(season_folder, sanitize_filename(file_name))
+                    
+                    # Create the file if it doesn't exist
+                    if not os.path.exists(file_path):
+                        with open(file_path, 'w') as f:
+                            f.write('DUMMY')
+                        logger.debug(f"Created dummy file for {title} S{season_number}E{ep_num} at {file_path}", 
+                                  extra={'emoji_type': 'debug'})
+                    else:
+                        logger.debug(f"Dummy file already exists: {file_path}", extra={'emoji_type': 'debug'})
+                    
+                # Return the path to the first episode file
+                ep_title = episode_title or f"Episode {start_ep}"
+                file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
+                return os.path.join(season_folder, sanitize_filename(file_name))
+            
         else:  # Movie
-            folder_name += f" {{tmdb-{media_id}}} (dummy)"
+            # Get the folder path
+            movie_folder = get_folder_path(
+                media_type='movie',
+                base_path=base_path,
+                title=title,
+                year=year,
+                media_id=media_id
+            )
             
-            # Create movie folder
-            movie_folder = os.path.join(base_path, folder_name)
+            # Create the movie folder
             os.makedirs(movie_folder, exist_ok=True)
             
-            # Create dummy movie file with title (Year) format
-            file_name = f"{title} ({year}).mp4"
+            # Create the movie file - use clean_title with year_str
+            file_name = f"{clean_title}{year_str} (dummy).mp4"
             file_path = os.path.join(movie_folder, sanitize_filename(file_name))
             
-            # Create empty file if it doesn't exist
+            # Create the file if it doesn't exist
             if not os.path.exists(file_path):
                 with open(file_path, 'w') as f:
-                    f.write(f"Placeholder for {title} ({year})")
-                    
-                logger.info(f"Created dummy movie file for {title} ({year}) at {file_path}", 
-                          extra={'emoji_type': 'file'})
+                    f.write('DUMMY')
+                logger.debug(f"Created dummy file for movie {title} at {file_path}", 
+                          extra={'emoji_type': 'debug'})
             else:
-                logger.info(f"Re-created dummy movie file for {title} ({year}) at {file_path}", 
-                          extra={'emoji_type': 'file'})
+                logger.debug(f"Dummy file already exists: {file_path}", extra={'emoji_type': 'debug'})
                 
             return file_path
                 
@@ -120,127 +118,78 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
         return None
 
-def cleanup_episode_placeholder(series_title, series_year=None, season_number=None, episode_number=None):
-    """Remove placeholder files for a specific episode or series"""
-    try:
-        # Construct the dummy folder name (same logic as in place_dummy_file)
-        folder_name = series_title
-        if series_year:
-            folder_name += f" ({series_year})"
-        folder_name += " {tvdb-*} (dummy)"
-        
-        logger.debug(f"Cleaning up placeholders for {series_title} ({series_year})", extra={'emoji_type': 'debug'})
-        
-        # Get the TV library path
-        tv_library_path = settings.TV_LIBRARY_FOLDER
-        
-        # Search for matching dummy folders
-        matching_folders = []
-        for item in os.listdir(tv_library_path):
-            item_path = os.path.join(tv_library_path, item)
-            
-            # Use glob pattern matching
-            if fnmatch.fnmatch(item, folder_name) and os.path.isdir(item_path):
-                matching_folders.append(item_path)
-                logger.debug(f"Found matching dummy folder: {item_path}", extra={'emoji_type': 'debug'})
-        
-        if not matching_folders:
-            logger.debug(f"No matching dummy folders found for {folder_name}", extra={'emoji_type': 'debug'})
-            return False
-        
-        # If no specific episode is provided, clean up the entire series
-        if season_number is None or episode_number is None:
-            for folder_path in matching_folders:
-                shutil.rmtree(folder_path)
-                logger.info(f"Removed dummy folder: {folder_path}", extra={'emoji_type': 'cleanup'})
-            return True
-        
-        # Otherwise, clean up just the specific episode
-        season_folder = f"Season {season_number:02d}"
-        episode_pattern = f"*s{season_number:02d}e{episode_number:02d}*"
-        
-        logger.debug(f"Looking for episode files matching: {episode_pattern} in season folder: {season_folder}", 
-                   extra={'emoji_type': 'debug'})
-        
-        found_files = False
-        for folder_path in matching_folders:
-            season_path = os.path.join(folder_path, season_folder)
-            
-            if os.path.exists(season_path):
-                logger.debug(f"Found season folder: {season_path}", extra={'emoji_type': 'debug'})
-                
-                for item in os.listdir(season_path):
-                    logger.debug(f"Checking file: {item} against pattern: {episode_pattern}", extra={'emoji_type': 'debug'})
-                    
-                    if fnmatch.fnmatch(item.lower(), episode_pattern.lower()):
-                        file_path = os.path.join(season_path, item)
-                        os.remove(file_path)
-                        logger.info(f"Removed placeholder: {file_path}", extra={'emoji_type': 'cleanup'})
-                        found_files = True
-            else:
-                logger.debug(f"Season folder not found: {season_path}", extra={'emoji_type': 'debug'})
-        
-        if not found_files:
-            logger.debug(f"No matching episode files found for {episode_pattern}", extra={'emoji_type': 'debug'})
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error cleaning up placeholder: {str(e)}", extra={'emoji_type': 'error'})
-        return False
-
 # Title update and scheduling functions
 def schedule_episode_request_update(series_title, season_num, episode_num, media_id, delay=10, retries=5):
+    """Schedule an update to the episode title with [Request] tag"""
     def attempt_update(attempt=1):
         try:
-            tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
-            show = tv_section.get(series_title)
-            if not show:
-                logger.debug(f"Show '{series_title}' not found on attempt {attempt}.", extra={'emoji_type': 'debug'})
-                if attempt < retries:
-                    threading.Timer(3, attempt_update, args=[attempt+1]).start()
-                return
-
-            episodes = show.episodes()
-            target_ep = next((ep for ep in episodes if int(ep.index) == int(episode_num)), None)
-            if target_ep:
-                base = strip_status_markers(target_ep.title)
-                new_title = f"{base} - [Request]"
-                target_ep.editTitle(new_title)
-                target_ep.reload()
-                logger.info(f"Updated episode title for '{series_title}' S{season_num:02d}E{episode_num:02d} to: {new_title}",
-                            extra={'emoji_type': 'update'})
-                series_folder = get_series_folder("tv", settings.TV_LIBRARY_FOLDER, series_title, show.year, media_id)
-                # persist rating key as needed...
+            # Use our new ID-based title update function
+            from services.plex_client import update_plex_title_status
+            result = update_plex_title_status(
+                media_type='tv',
+                media_id=media_id,
+                title=series_title,
+                status='Request',
+                season=season_num,
+                episode=episode_num
+            )
+            
+            if result:
+                logger.debug(f"Successfully scheduled update for '{series_title}' S{season_num:02d}E{episode_num:02d}",
+                           extra={'emoji_type': 'debug'})
             else:
+                # If update fails but we have retries left, try again
                 if attempt < retries:
-                    logger.debug(f"Episode {episode_num} not found in '{series_title}' (attempt {attempt}). Retrying...", extra={'emoji_type': 'debug'})
-                    threading.Timer(3, attempt_update, args=[attempt+1]).start()
+                    threading.Timer(delay, attempt_update, args=[attempt+1]).start()
+                else:
+                    logger.error(f"Failed to update title for '{series_title}' S{season_num:02d}E{episode_num:02d} after {retries} attempts", 
+                               extra={'emoji_type': 'error'})
+                               
         except Exception as e:
-            logger.error(f"Failed to update '{series_title}' S{season_num:02d}E{episode_num:02d}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Error updating title for '{series_title}' S{season_num:02d}E{episode_num:02d}: {e}", 
+                       extra={'emoji_type': 'error'})
+            # Try again if we have retries left
+            if attempt < retries:
+                threading.Timer(delay, attempt_update, args=[attempt+1]).start()
 
+    # Start the first attempt after initial delay
     threading.Timer(delay, attempt_update).start()
 
-def schedule_movie_request_update(movie_title, media_id, delay=10, retries=5):
+def schedule_movie_request_update(movie_title, media_id, year=None, delay=10, retries=5):
+    """Schedule an update to the movie title with [Request] tag"""
     def attempt_update(attempt=1):
         try:
-            movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
-            item = movie_section.get(movie_title)
-            if item:
-                base = strip_status_markers(item.title)
-                new_title = f"{base} - [Request]"
-                item.editTitle(new_title)
-                item.reload()
-                logger.info(f"Updated movie title for '{movie_title}' to: {new_title}", extra={'emoji_type': 'update'})
-                series_folder = get_series_folder("movie", settings.MOVIE_LIBRARY_FOLDER, movie_title, item.year, media_id)
-                # persist rating key as needed...
+            # Use our new ID-based title update function
+            from services.plex_client import update_plex_title_status
+            result = update_plex_title_status(
+                media_type='movie',
+                media_id=media_id,
+                title=movie_title,
+                status='Request',
+                year=year
+            )
+            
+            if result:
+                logger.debug(f"Successfully scheduled update for movie '{movie_title}'",
+                           extra={'emoji_type': 'debug'})
             else:
+                # If update fails but we have retries left, try again
                 if attempt < retries:
-                    logger.debug(f"Movie '{movie_title}' not found (attempt {attempt}). Retrying...", extra={'emoji_type': 'debug'})
-                    threading.Timer(3, attempt_update, args=[attempt+1]).start()
+                    logger.debug(f"Retrying movie title update for '{movie_title}' (attempt {attempt}/{retries})", 
+                               extra={'emoji_type': 'debug'})
+                    threading.Timer(delay, attempt_update, args=[attempt+1]).start()
+                else:
+                    logger.error(f"Failed to update title for '{movie_title}' after {retries} attempts", 
+                               extra={'emoji_type': 'error'})
+                               
         except Exception as e:
-            logger.error(f"Failed to update movie '{movie_title}': {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Error updating title for '{movie_title}': {e}", 
+                       extra={'emoji_type': 'error'})
+            # Try again if we have retries left
+            if attempt < retries:
+                threading.Timer(delay, attempt_update, args=[attempt+1]).start()
 
+    # Start the first attempt after initial delay
     threading.Timer(delay, attempt_update).start()
 
 # Radarr integration functions
