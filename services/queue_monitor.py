@@ -1189,31 +1189,27 @@ def _check_downloads_status():
         logger.error(f"Error in download status check: {str(e)}", extra={'emoji_type': 'error'})
 
 def handle_download_webhook(data):
-    """Handle download completion events from *arr applications"""
+    """Handle download completion events from *arr applications
+    
+    This function only manages the monitoring state - title updates are
+    handled by handle_import_event() in handlers.py.
+    """
     try:
         if 'movie' in data:
             # Movie download completed
             movie = data.get('movie', {})
             tmdb_id = movie.get('tmdbId')
+            radarr_id = movie.get('id')  # Radarr internal ID
             title = movie.get('title')
-            year = movie.get('year')
             
             if not tmdb_id:
-                logger.warning("Movie download webhook missing TMDB ID", extra={'emoji_type': 'warning'})
+                logger.warning(f"Movie download webhook missing TMDB ID for '{title}'", extra={'emoji_type': 'warning'})
                 return
                 
-            # Update status to Available
-            from services.plex_client import update_plex_title_status
-            update_plex_title_status(
-                media_type='movie',
-                media_id=tmdb_id,
-                title=title,
-                status=None,  # Remove status markers
-                year=year
-            )
-            
-            # Remove from monitoring if being tracked
-            remove_from_monitor('movie', tmdb_id)
+            # Remove from monitoring
+            media_key = f"movie_{tmdb_id}"
+            remove_from_monitor(media_key)
+            logger.debug(f"Removed movie '{title}' (ID: {tmdb_id}) from monitoring", extra={'emoji_type': 'debug'})
             
         elif 'episodes' in data and 'series' in data:
             # TV episode download completed
@@ -1222,29 +1218,21 @@ def handle_download_webhook(data):
             title = series.get('title')
             
             if not tvdb_id:
-                logger.warning("Episode download webhook missing TVDB ID", extra={'emoji_type': 'warning'})
+                logger.warning(f"Episode download webhook missing TVDB ID for '{title}'", extra={'emoji_type': 'warning'})
                 return
                 
-            # Update all episodes in the webhook
+            # Handle each episode in the webhook
             for episode in data.get('episodes', []):
                 season_num = episode.get('seasonNumber')
                 episode_num = episode.get('episodeNumber')
                 
                 if season_num is not None and episode_num is not None:
-                    # Update status to Available
-                    from services.plex_client import update_plex_title_status
-                    update_plex_title_status(
-                        media_type='tv',
-                        media_id=tvdb_id,
-                        title=title,
-                        status=None,  # Remove status markers
-                        season=season_num,
-                        episode=episode_num
-                    )
-                    
                     # Remove this specific episode from monitoring
-                    remove_from_monitor('episode', tvdb_id, season=season_num, episode=episode_num)
-                
+                    media_key = f"episode_{tvdb_id}_{season_num}_{episode_num}"
+                    remove_from_monitor(media_key)
+                    logger.debug(f"Removed episode '{title}' S{season_num}E{episode_num} from monitoring", 
+                               extra={'emoji_type': 'debug'})
+                    
     except Exception as e:
         logger.error(f"Error handling download webhook: {e}", extra={'emoji_type': 'error'})
 
