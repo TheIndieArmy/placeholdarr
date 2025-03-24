@@ -6,6 +6,7 @@ venv/
 
 # Project specific
 placeholdarr_original/
+reference/
 
 # Python
 __pycache__/
