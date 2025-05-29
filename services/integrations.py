@@ -29,28 +29,25 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
 
 def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
                     season_number=None, episode_range=None, episode_title=None, episode_id=None):
-    """Create a dummy file in the appropriate location with the appropriate naming"""
+    """Create a hardlink to a real dummy video file in the appropriate location"""
     try:
         # Determine the base path if not provided
         if not base_path:
-            if media_type == "movie":
-                base_path = settings.MOVIE_LIBRARY_FOLDER
-            else:
-                base_path = settings.TV_LIBRARY_FOLDER
-                
-        # Use get_folder_path for consistent path generation with year handling
+            base_path = settings.MOVIE_LIBRARY_FOLDER if media_type == "movie" else settings.TV_LIBRARY_FOLDER
+
         from services.utils import get_folder_path
-        
-        # Clean title for use in file names (remove year pattern if present)
+
+        # Clean title
         clean_title = sanitize_filename(title)
-        year_pattern = r'\s*\(\d{4}\)'
-        clean_title = re.sub(year_pattern, '', clean_title).strip()
-        
-        # Add year back for file naming if it was provided
+        clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
         year_str = f" ({year})" if year else ""
-        
+
+        dummy_source = settings.DUMMY_FILE_PATH  # Valid dummy.mp4
+        if not os.path.exists(dummy_source):
+            logger.error(f"Dummy video file does not exist at {dummy_source}", extra={'emoji_type': 'error'})
+            return None
+
         if media_type == 'tv' and season_number is not None:
-            # Get the path using our updated get_folder_path function
             season_folder = get_folder_path(
                 media_type='tv',
                 base_path=base_path,
@@ -59,35 +56,27 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                 media_id=media_id,
                 season=season_number
             )
-            
-            # Create the season folder structure
             os.makedirs(season_folder, exist_ok=True)
-            
-            # Create an episode file for each episode in the range
+
             if episode_range:
                 start_ep, end_ep = episode_range
                 for ep_num in range(int(start_ep), int(end_ep) + 1):
-                    # Create the episode filename - use clean_title here
                     ep_title = episode_title or f"Episode {ep_num}"
                     file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
                     file_path = os.path.join(season_folder, sanitize_filename(file_name))
-                    
-                    # Create the file if it doesn't exist
-                    if not os.path.exists(file_path):
-                        with open(file_path, 'w') as f:
-                            f.write('DUMMY')
-                        logger.debug(f"Created dummy file for {title} S{season_number}E{ep_num} at {file_path}", 
-                                  extra={'emoji_type': 'debug'})
-                    else:
-                        logger.debug(f"Dummy file already exists: {file_path}", extra={'emoji_type': 'debug'})
-                    
-                # Return the path to the first episode file
+
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    os.link(dummy_source, file_path)
+
+                    logger.debug(f"Hardlinked dummy file for {title} S{season_number}E{ep_num} to {file_path}",
+                                 extra={'emoji_type': 'link'})
+
                 ep_title = episode_title or f"Episode {start_ep}"
                 file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
                 return os.path.join(season_folder, sanitize_filename(file_name))
-            
-        else:  # Movie
-            # Get the folder path
+
+        else:
             movie_folder = get_folder_path(
                 media_type='movie',
                 base_path=base_path,
@@ -95,25 +84,17 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                 year=year,
                 media_id=media_id
             )
-            
-            # Create the movie folder
             os.makedirs(movie_folder, exist_ok=True)
-            
-            # Create the movie file - use clean_title with year_str
             file_name = f"{clean_title}{year_str} (dummy).mp4"
             file_path = os.path.join(movie_folder, sanitize_filename(file_name))
-            
-            # Create the file if it doesn't exist
-            if not os.path.exists(file_path):
-                with open(file_path, 'w') as f:
-                    f.write('DUMMY')
-                logger.debug(f"Created dummy file for movie {title} at {file_path}", 
-                          extra={'emoji_type': 'debug'})
-            else:
-                logger.debug(f"Dummy file already exists: {file_path}", extra={'emoji_type': 'debug'})
-                
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            os.link(dummy_source, file_path)
+
+            logger.debug(f"Hardlinked dummy movie file for {title} to {file_path}", extra={'emoji_type': 'link'})
             return file_path
-                
+
     except Exception as e:
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
         return None

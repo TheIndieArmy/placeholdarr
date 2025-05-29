@@ -614,46 +614,121 @@ def handle_playback(data: dict):
                     search_success = trigger_sonarr_search(
                         series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
                     )
+                    
                     if search_success:
-                        check_tv_has_file(tvdb_id, series_title, rating_key, 
-                                       season_number=season_number, 
-                                       episode_number=episode_number, 
-                                       is_4k=is_4k)
+                        # Fallback to get episodes and add to batch monitoring
+                        try:
+                            url = f"{settings.SONARR_URL}/episode"
+                            params = {'seriesId': series_id}
+                            headers = {'X-Api-Key': settings.SONARR_API_KEY}
+                            response = requests.get(url, params=params, headers=headers)
+                            response.raise_for_status()
+                            
+                            # Get episodes for this season
+                            all_episodes = response.json()
+                            season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == int(season_number)]
+                            
+                            # Add episodes to monitoring
+                            for ep in season_episodes:
+                                if not ep.get('hasFile', False):
+                                    add_to_monitor({
+                                        'media_type': 'episode',
+                                        'tvdb_id': tvdb_id,
+                                        'series_title': series_title,
+                                        'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
+                                        'rating_key': rating_key,
+                                        'season_number': ep['seasonNumber'],
+                                        'episode_number': ep['episodeNumber'],
+                                        'episode_id': ep['id'],
+                                        'is_4k': is_4k,
+                                        'hasFile': ep.get('hasFile', False)
+                                    })
+                        except Exception as e2:
+                            logger.error(f"Error in fallback season monitoring: {e2}", extra={'emoji_type': 'error'})
             
             else:  # series mode
-                mark_series_monitored(series_id, mark_seasons=True, include_specials=getattr(settings, 'INCLUDE_SPECIALS', False))
+                # First check if all episodes already have files
+                url = f"{settings.SONARR_URL}/episode"
+                params = {'seriesId': series_id}
+                headers = {'X-Api-Key': settings.SONARR_API_KEY}
                 
-                search_success = trigger_sonarr_search(
-                    series_id, series_title=full_title, is_4k=is_4k
-                )
-                
-                if search_success:
-                    # Get all episodes for this series
-                    url = f"{settings.SONARR_URL}/episode"
-                    params = {'seriesId': series_id}
-                    headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                    try:
-                        response = requests.get(url, params=params, headers=headers)
-                        response.raise_for_status()
-                        all_episodes = response.json()
+                try:
+                    response = requests.get(url, params=params, headers=headers)
+                    response.raise_for_status()
+                    all_episodes = response.json()
+                    
+                    # For series mode, we might want to exclude specials or future episodes based on configuration
+                    include_specials = getattr(settings, 'INCLUDE_SPECIALS', False)
+                    episodes_to_check = all_episodes if include_specials else [ep for ep in all_episodes if ep.get('seasonNumber', 0) > 0]
+                    
+                    # Check if all episodes already have files
+                    missing_episodes = [ep for ep in episodes_to_check if not ep.get('hasFile', False)]
+                    
+                    if not missing_episodes:
+                        logger.info(f"All episodes of '{series_title}' already have files. Skipping search.", 
+                                  extra={'emoji_type': 'skip'})
+                        return JSONResponse({"status": "success", "message": "All files already available"})
                         
-                        # Add each episode to monitoring if it doesn't have a file
-                        for ep in all_episodes:
-                            if not ep.get('hasFile', False):
-                                add_to_monitor({
-                                    'media_type': 'episode',
-                                    'tvdb_id': tvdb_id,
-                                    'series_title': series_title,
-                                    'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
-                                    'rating_key': rating_key,
-                                    'season_number': ep['seasonNumber'],
-                                    'episode_number': ep['episodeNumber'],
-                                    'episode_id': ep['id'],
-                                    'is_4k': is_4k,
-                                    'hasFile': ep.get('hasFile', False)
-                                })
-                    except Exception as e:
-                        logger.error(f"Error adding series episodes to monitoring: {e}", extra={'emoji_type': 'error'})
+                    # Log the number of missing episodes
+                    logger.info(f"Found {len(missing_episodes)} episodes without files for '{series_title}'", 
+                              extra={'emoji_type': 'info'})
+                    
+                    # Now continue with normal flow - mark series as monitored
+                    mark_series_monitored(series_id, mark_seasons=True, include_specials=include_specials)
+                    
+                    # Trigger search only if we have missing episodes
+                    search_success = trigger_sonarr_search(
+                        series_id, series_title=full_title, is_4k=is_4k
+                    )
+                    
+                    if search_success:
+                        # Only monitor episodes that don't have files
+                        for ep in missing_episodes:
+                            add_to_monitor({
+                                'media_type': 'episode',
+                                'tvdb_id': tvdb_id,
+                                'series_title': series_title,
+                                'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
+                                'rating_key': rating_key,
+                                'season_number': ep['seasonNumber'],
+                                'episode_number': ep['episodeNumber'],
+                                'episode_id': ep['id'],
+                                'is_4k': is_4k,
+                                'hasFile': False
+                            })
+                except Exception as e:
+                    logger.error(f"Error checking series files: {e}", extra={'emoji_type': 'error'})
+                    # Fallback to original behavior on error
+                    mark_series_monitored(series_id, mark_seasons=True, include_specials=getattr(settings, 'INCLUDE_SPECIALS', False))
+                    
+                    search_success = trigger_sonarr_search(
+                        series_id, series_title=full_title, is_4k=is_4k
+                    )
+                    
+                    if search_success:
+                        # Fall back to getting all episodes
+                        try:
+                            response = requests.get(url, params=params, headers=headers)
+                            response.raise_for_status()
+                            all_episodes = response.json()
+                            
+                            # Add each episode to monitoring if it doesn't have a file
+                            for ep in all_episodes:
+                                if not ep.get('hasFile', False):
+                                    add_to_monitor({
+                                        'media_type': 'episode',
+                                        'tvdb_id': tvdb_id,
+                                        'series_title': series_title,
+                                        'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
+                                        'rating_key': rating_key,
+                                        'season_number': ep['seasonNumber'],
+                                        'episode_number': ep['episodeNumber'],
+                                        'episode_id': ep['id'],
+                                        'is_4k': is_4k,
+                                        'hasFile': False
+                                    })
+                        except Exception as e2:
+                            logger.error(f"Error in fallback episode monitoring: {e2}", extra={'emoji_type': 'error'})
             
             if search_success:
                 return JSONResponse({"status": "success", "message": "Search triggered"})
