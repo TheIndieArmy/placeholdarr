@@ -94,14 +94,14 @@ Optional settings:
     "media": {
         "type": "{media_type}",
         "title": "{title}",
-        "series_title": "{series_title}",
-        "episode_title": "{episode_title}",
+        "show_name": "{show_name}",
+        "episode_name": "{episode_name}",
         "season_num": "{season_num}",
         "episode_num": "{episode_num}",
         "year": "{year}",
         "ids": {
             "plex": "{rating_key}",
-            "tmdb": "{tmdb_id}",
+            "tmdb": "{themoviedb_id}",
             "tvdb": "{thetvdb_id}",
             "imdb": "{imdb_id}"
         },
