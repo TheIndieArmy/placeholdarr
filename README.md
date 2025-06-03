@@ -36,7 +36,7 @@ Leverage Radarr/Sonarr's import lists to their full potential:
 - **Automation Ready**: Works with other tools in your stack:
    - *Radarr/Sonarr* for downloads and library management
    - *Plex* for streaming
-   - *Overseerr/Jellyseerr* for requests (Optional)
+   - *Overseerr* for requests (Optional)
      - Simply disable automatic search for requests
      - A placeholder will be made when the request gets added to arrs
      - User sees the title as a placeholder in Plex and triggers the search when they play it
