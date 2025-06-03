@@ -22,7 +22,7 @@ Leverage Radarr/Sonarr's import lists to their full potential:
 3. Users see titles available in Plex, just as if they were downloaded
 4. When someone plays a placeholder:
    - The real content is automatically searched for in arrs
-   - Plex title updates show download progress
+   - Plex title updates show download progress (undergoing development)
    - Placeholder is replaced with actual media when ready
 
 ### Integration Benefits
