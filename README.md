@@ -67,6 +67,7 @@ Required settings in `.env`:
 Optional settings:
 - `PLACEHOLDER_STRATEGY`: How to create placeholders (`hardlink` or `copy`)
 - `TV_PLAY_MODE`: Download scope (`episode`, `season`, or `series`)
+- `TITLE_UPDATES` What level of title updates shown in Plex. "All" not currently recommended, as this feature is still in development (`OFF`, `REQUEST`, `ALL`)
 - 4K support settings (if needed)
 
 ### Tautulli Webhook Setup
@@ -146,7 +147,7 @@ Optional settings:
 - 4K Support: Configure separate 4K instances of Radarr/Sonarr
 - TV Play Modes: Choose between episode/season/series downloads
 - Hardlink/Copy: Choose how placeholder files are created
-- Progress Tracking: Monitor downloads in Plex titles
+- Progress Tracking: Monitor downloads in Plex titles (Development in-progress, recommend using the Off or Request setting in ENV for now.)
 - Auto Cleanup: Removes placeholders when downloads complete
 
 ## Troubleshooting
