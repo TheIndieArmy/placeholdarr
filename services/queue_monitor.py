@@ -1239,6 +1239,31 @@ def handle_download_webhook(data):
 # Make sure the monitor thread starts when this module is imported
 logger.info("Starting queue monitoring", extra={'emoji_type': 'process'})
 
+# Deprecation warnings for old-style monitoring functions
+def check_tv_has_file(*args, **kwargs):
+    logger.warning(
+        "[DEPRECATED] check_tv_has_file() is deprecated. Use add_to_monitor() instead.",
+        extra={'emoji_type': 'warning'}
+    )
+
+def check_media_has_file(*args, **kwargs):
+    logger.warning(
+        "[DEPRECATED] check_media_has_file() is deprecated. Use add_to_monitor() instead.",
+        extra={'emoji_type': 'warning'}
+    )
+
+def check_has_file(*args, **kwargs):
+    logger.warning(
+        "[DEPRECATED] check_has_file() is deprecated. Use add_to_monitor() instead.",
+        extra={'emoji_type': 'warning'}
+    )
+
+def update_plex_title(*args, **kwargs):
+    logger.warning(
+        "[DEPRECATED] update_plex_title() is deprecated. Title updates are now handled by the registry-based system.",
+        extra={'emoji_type': 'warning'}
+    )
+
 # Make sure this appears at the very bottom of the file
 logger.info("QUEUE MONITOR: Module loaded, initializing monitoring", extra={'emoji_type': 'process'})
 

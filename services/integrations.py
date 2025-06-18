@@ -594,6 +594,10 @@ def monitor_season(series_id, season_number):
 # Monitoring functions:
 def check_media_has_file(media_id, base_title, rating_key, media_type='movie', attempts=0, season_number=None, episode_number=None, start_time=None, is_4k=False):
     """Generic function to check if media has file and monitor downloads"""
+    logger.warning(
+        "[DEPRECATED] check_media_has_file() is deprecated. Use queue_monitor.add_to_monitor() instead.",
+        extra={'emoji_type': 'warning'}
+    )
     try:
         config = get_arr_config(media_type, is_4k)
         if start_time is None:
@@ -762,6 +766,10 @@ def check_media_has_file(media_id, base_title, rating_key, media_type='movie', a
 
 def check_tv_has_file(tvdb_id, base_title, rating_key, attempts=0, season_number=None, episode_number=None, start_time=None, is_4k=False):
     """Monitor episode download status and update Plex title accordingly"""
+    logger.warning(
+        "[DEPRECATED] check_tv_has_file() is deprecated. Use queue_monitor.add_to_monitor() instead.",
+        extra={'emoji_type': 'warning'}
+    )
     try:
         config = get_arr_config('tv', is_4k)
         if start_time is None:
@@ -925,6 +933,10 @@ def check_tv_has_file(tvdb_id, base_title, rating_key, attempts=0, season_number
 # For brevity, any additional integration functions (including Sonarr functions) are implemented similarly.
 def update_plex_title(rating_key, base_title, status):
     """Update a Plex item's title using PlexAPI directly rather than URL construction"""
+    logger.warning(
+        "[DEPRECATED] update_plex_title() is deprecated. Title updates are now handled by the registry-based system.",
+        extra={'emoji_type': 'warning'}
+    )
     try:
         # Get the item directly using PlexAPI
         item = plex.fetchItem(int(rating_key))
@@ -939,6 +951,10 @@ def update_plex_title(rating_key, base_title, status):
 
 def check_has_file(media_type, arr_id, title, rating_key, is_4k=False, attempts=0, start_time=None):
     """Movie-specific wrapper for check_media_has_file"""
+    logger.warning(
+        "[DEPRECATED] check_has_file() is deprecated. Use queue_monitor.add_to_monitor() instead.",
+        extra={'emoji_type': 'warning'}
+    )
     return check_media_has_file(media_type, arr_id, title, rating_key, is_4k=is_4k, attempts=attempts, start_time=start_time)
 
 def get_sonarr_queue(is_4k=False):
