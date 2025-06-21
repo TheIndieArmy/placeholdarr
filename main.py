@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, Request
 from core.logger import logger
 from services.handlers import handle_webhook
+from services.calendar_sync import start_calendar_sync  # <-- Add this import
 
 # Load environment variables
 load_dotenv(override=True)
@@ -66,7 +67,10 @@ async def webhook(request: Request):
 
 if __name__ == '__main__':
     import uvicorn
-    
+
+    # Start calendar sync on startup
+    start_calendar_sync()  # <-- Add this line
+
     # Set port back to 8001 (your existing webhook port)
     port = int(os.getenv('PLACEHOLDARR_PORT'))
     logger.info(f"Using port {port}", extra={'emoji_type': 'info'})
