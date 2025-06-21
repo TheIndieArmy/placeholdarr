@@ -188,26 +188,34 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             logger.warning("No series ID provided in seriesadd event.", extra={'emoji_type': 'warning'})
             episodes = []
     unique_folders = set()
-    for ep in episodes:
-        season_num = ep.get('seasonNumber')
-        episode_num = ep.get('episodeNumber')
-        episode_title = ep.get('title')
-        if not (season_num and episode_num):
-            continue
-        dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
-                                    settings.TV_LIBRARY_FOLDER,
-                                    season_number=season_num,
-                                    episode_range=(episode_num, episode_num),
-                                    episode_title=episode_title)  # REMOVED episode_id
-        series_folder = "/".join(dummy_path.split(os.sep)[:-2])
-        unique_folders.add(series_folder)
-        schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
+    def delayed_placeholders():
+        delay_seconds = 3  # Adjust as needed
+        logger.debug(f"Delaying {delay_seconds}s before checking hasFile for series '{series_title}'", extra={'emoji_type': 'debug'})
+        time.sleep(delay_seconds)
+        for ep in episodes:
+            season_num = ep.get('seasonNumber')
+            episode_num = ep.get('episodeNumber')
+            episode_title = ep.get('title')
+            if not (season_num and episode_num):
+                continue
+            from services.queue_monitor import check_episode_has_file
+            if check_episode_has_file(tvdb_id, season_num, episode_num, is_4k):
+                logger.info(f"Skipping placeholder for {series_title} S{season_num}E{episode_num} (real file exists)", extra={'emoji_type': 'skip'})
+                continue
+            dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
+                                        settings.TV_LIBRARY_FOLDER,
+                                        season_number=season_num,
+                                        episode_range=(episode_num, episode_num),
+                                        episode_title=episode_title)
+            series_folder = "/".join(dummy_path.split(os.sep)[:-2])
+            unique_folders.add(series_folder)
+            schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
+        for folder in unique_folders:
+            refresh_plex_item(folder)
+        logger.info(f"Created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
 
-    for folder in unique_folders:
-        # Refresh specific Plex folder instead of entire library
-        refresh_plex_item(folder)
-    logger.info(f"Created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
-    return JSONResponse({"status": "success", "message": "SeriesAdd processed"})
+    threading.Thread(target=delayed_placeholders, daemon=True).start()
+    return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
 
 def handle_episodefiledelete(data: dict, is_4k: bool = False):
     # Similar to seriesadd: recreate dummy for episode deletion.
@@ -302,10 +310,27 @@ def handle_movieadd(data: dict):
             return JSONResponse({"status": "error"}, status_code=400)
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year', '')
-        dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-        logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
-        refresh_plex_item(os.path.dirname(dummy_path))
-        schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+        from services.queue_monitor import check_movie_has_file
+        radarr_id = movie.get('id')
+
+        def delayed_placeholder():
+            delay_seconds = 3  # Adjust as needed
+            logger.debug(f"Delaying {delay_seconds}s before checking hasFile for movie '{title}'", extra={'emoji_type': 'debug'})
+            time.sleep(delay_seconds)
+            has_file = False
+            if radarr_id and check_movie_has_file(radarr_id):
+                has_file = True
+            if has_file:
+                logger.info(f"Skipping placeholder for movie '{title}' (real file exists)", extra={'emoji_type': 'skip'})
+                return
+            dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
+            logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
+            refresh_plex_item(os.path.dirname(dummy_path))
+            schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+
+        threading.Thread(target=delayed_placeholder, daemon=True).start()
+        return JSONResponse({"status": "success", "message": "MovieAdd scheduled"})
+
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
 
 def handle_seriesdelete(data: dict, is_4k: bool = False):
