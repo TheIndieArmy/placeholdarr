@@ -232,13 +232,13 @@ def update_plex_title_status(media_type, media_id, title, status=None, year=None
             try:
                 episode_obj = show.episode(season=season, episode=episode)
             except Exception as e:
-                logger.error(f"Error finding episode S{season}E{episode} for '{show.title}': {e}", 
-                           extra={'emoji_type': 'error'})
+                logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping title update. ({e})", 
+                               extra={'emoji_type': 'skip'})
                 return False
                 
             if not episode_obj:
-                logger.error(f"Episode S{season}E{episode} not found for '{show.title}'", 
-                           extra={'emoji_type': 'error'})
+                logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping title update.", 
+                               extra={'emoji_type': 'skip'})
                 return False
             
             # Update title

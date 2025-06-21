@@ -3,7 +3,7 @@ import time
 import requests
 from core.logger import logger
 from core.config import settings
-from services.integrations import get_sonarr_queue, get_radarr_queue, update_plex_title, strip_status_markers
+from services.integrations import get_sonarr_queue, get_radarr_queue, strip_status_markers
 from datetime import datetime, timezone, timedelta
 
 # Global registry to track monitored media
@@ -93,11 +93,30 @@ def add_to_monitor(media_data):
             # Log addition
             logger.info(f"Added {media_data['media_type']} to monitor: {media_data['title']}", 
                       extra={'emoji_type': 'monitor'})
-            
+
             # Update Plex with initial "Searching..." status (only for ALL mode)
             if settings.TITLE_UPDATES == "ALL":
-                from services.integrations import update_plex_title
-                update_plex_title(media_data['rating_key'], media_data['title'], "Searching...")
+                try:
+                    from services.plex_client import update_plex_title_status
+                    if media_data['media_type'] == 'movie':
+                        update_plex_title_status(
+                            media_type='movie',
+                            media_id=media_data.get('tmdb_id'),
+                            title=media_data.get('title'),
+                            status="Searching...",
+                            year=None  # Add year if available
+                        )
+                    else:  # episode
+                        update_plex_title_status(
+                            media_type='tv',
+                            media_id=media_data.get('tvdb_id'),
+                            title=media_data.get('series_title'),
+                            status="Searching...",
+                            season=media_data.get('season_number'),
+                            episode=media_data.get('episode_number')
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to update Plex title: {e}", extra={'emoji_type': 'error'})
         
         # Start the batch timer if it's not already running and we're in ALL mode
         if settings.TITLE_UPDATES == "ALL" and (BATCH_TIMER is None or not BATCH_TIMER.is_alive()):

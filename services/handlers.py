@@ -5,9 +5,9 @@ from core.logger import logger
 from services.plex_client import plex, build_plex_url, refresh_plex_item
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
-    schedule_movie_request_update, check_media_has_file, check_has_file,
+    schedule_movie_request_update, 
     search_in_radarr, search_in_sonarr, trigger_sonarr_search, monitor_episodes, 
-    mark_series_monitored, get_episodes_for_lookahead, check_tv_has_file,
+    mark_series_monitored, get_episodes_for_lookahead,
     monitor_season, sanitize_filename
 )
 from services.queue_monitor import add_to_monitor
@@ -271,22 +271,25 @@ def handle_moviefiledelete(data: dict):
 def handle_movie_delete(data: dict):
     if 'movie' in data:
         movie = data.get('movie', {})
-        movie_folder = data.get("movie", {}).get("folderPath")
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie delete", extra={'emoji_type': 'error'})
             return JSONResponse({"status": "error"}, status_code=400)
-        dummy_path = os.path.join(settings.MOVIE_LIBRARY_FOLDER,
-                                  f"{sanitize_filename(movie.get('title', ''))}{' ('+str(movie.get('year'))+')' if movie.get('year') else ''} {{tmdb-{tmdb_id}}}",
-                                  f"{sanitize_filename(movie.get('title', ''))}{' ('+str(movie.get('year'))+')' if movie.get('year') else ''} (dummy).mp4")
-        if os.path.exists(dummy_path):
-            os.remove(dummy_path)
-            logger.info(f"Deleted dummy file for movie {movie.get('title')}", extra={'emoji_type': 'delete'})
+        title = movie.get('title', 'Unknown Movie')
+        year = movie.get('year')
+        # Use the correct dummy folder naming with {edition-Dummy} suffix
+        dummy_folder = os.path.join(
+            settings.MOVIE_LIBRARY_FOLDER,
+            f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}{{edition-Dummy}}"
+        )
+        # Remove the dummy folder if it exists
+        if os.path.exists(dummy_folder):
+            shutil.rmtree(dummy_folder)
+            logger.info(f"Deleted dummy folder for movie {title}", extra={'emoji_type': 'delete'})
         else:
-            logger.info(f"No dummy file exists for movie {movie.get('title')}", extra={'emoji_type': 'info'})
-        folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER,
-                              f"{sanitize_filename(movie.get('title', ''))}{' ('+str(movie.get('year'))+')' if movie.get('year') else ''} {{tmdb-{tmdb_id}}}")
-        refresh_plex_item(os.path.dirname(movie_folder)) 
+            logger.info(f"No dummy folder exists for movie {title}", extra={'emoji_type': 'info'})
+        # Optionally refresh Plex at the dummy folder location
+        refresh_plex_item(dummy_folder)
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
 def handle_movieadd(data: dict):

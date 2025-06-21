@@ -10,8 +10,6 @@ from services.plex_client import plex
 # Global variables
 BASE_TITLES = {}
 PROGRESS_FLAGS = {}
-TIMER_LOCK = threading.Lock()
-ACTIVE_SEARCH_TIMERS = {}
 LAST_RADARR_SEARCH = {}
 
 def get_folder_path(media_type, base_path, title, year=None, media_id=None, season=None):
@@ -229,7 +227,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
             'qualityProfileId': 7,
             'tmdbId': int(movie_data['tmdbId']),
             'year': int(movie_data['year']),
-            'rootFolderPath': '/mnt/user/data/infinite/movies',
+            'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,  # Use .env value
             'monitored': True,
             'addOptions': {
                 'searchForMovie': True,
@@ -290,7 +288,7 @@ def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=Non
             'titleSlug': series_data['titleSlug'],
             'tvdbId': series_data['tvdbId'],
             'year': series_data['year'],
-            'rootFolderPath': '/mnt/user/data/infinite/tv',
+            'rootFolderPath': settings.TV_LIBRARY_FOLDER,  # Use .env value
             'monitored': True,
             'addOptions': {'searchForMissingEpisodes': True},
             'seasons': []
@@ -590,40 +588,6 @@ def monitor_season(series_id, season_number):
     except Exception as e:
         logger.error(f"Failed to mark season as monitored: {str(e)}", extra={'emoji_type': 'error'})
         return False
-
-# Monitoring functions:
-def check_media_has_file(media_id, base_title, rating_key, media_type='movie', attempts=0, season_number=None, episode_number=None, start_time=None, is_4k=False):
-    """Generic function to check if media has file and monitor downloads"""
-    logger.warning(
-        "[DEPRECATED] check_media_has_file() is deprecated. Use queue_monitor.add_to_monitor() instead.",
-        extra={'emoji_type': 'warning'}
-    )
-    return  # Disable legacy logic
-
-def check_tv_has_file(tvdb_id, base_title, rating_key, attempts=0, season_number=None, episode_number=None, start_time=None, is_4k=False):
-    """Monitor episode download status and update Plex title accordingly"""
-    logger.warning(
-        "[DEPRECATED] check_tv_has_file() is deprecated. Use queue_monitor.add_to_monitor() instead.",
-        extra={'emoji_type': 'warning'}
-    )
-    return  # Disable legacy logic
-
-# For brevity, any additional integration functions (including Sonarr functions) are implemented similarly.
-def update_plex_title(rating_key, base_title, status):
-    """Update a Plex item's title using PlexAPI directly rather than URL construction"""
-    logger.warning(
-        "[DEPRECATED] update_plex_title() is deprecated. Title updates are now handled by the registry-based system.",
-        extra={'emoji_type': 'warning'}
-    )
-    return  # Disable legacy logic
-
-def check_has_file(media_type, arr_id, title, rating_key, is_4k=False, attempts=0, start_time=None):
-    """Movie-specific wrapper for check_media_has_file"""
-    logger.warning(
-        "[DEPRECATED] check_has_file() is deprecated. Use queue_monitor.add_to_monitor() instead.",
-        extra={'emoji_type': 'warning'}
-    )
-    return  # Disable legacy logic
 
 def get_sonarr_queue(is_4k=False):
     """Get current queue items from Sonarr"""
