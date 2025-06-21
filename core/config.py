@@ -1,9 +1,9 @@
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
-from pydantic import validator
+from pydantic import validator, root_validator
 import urllib.parse
 
 # Get the project root directory (where main.py is)
@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     PLEX_TOKEN: str
     PLEX_MOVIE_SECTION_ID: int
     PLEX_TV_SECTION_ID: int
+    
+    # Jellyfin
+    JELLYFIN_URL: str
+    JELLYFIN_TOKEN: str
 
     # Services
     RADARR_URL: str
@@ -60,6 +64,8 @@ class Settings(BaseSettings):
     TITLE_UPDATES: str = os.getenv("TITLE_UPDATES", "ALL")  # Options: OFF, REQUEST, ALL
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
 
+    # Migration settings
+    MIGRATION: bool = False
     # Add a method to clean string values
     @validator('*', pre=True)
     def clean_string_values(cls, v):
@@ -79,11 +85,29 @@ class Settings(BaseSettings):
             raise ValueError(f"Path does not exist: {v}")
         return str(path.absolute())
     
-    @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL')
+    @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', pre=True)
     def validate_url(cls, v):
         if not v.startswith(('http://', 'https://')):
             raise ValueError(f"Invalid URL: {v}")
         return v.rstrip('/')
+
+    @root_validator(skip_on_failure=True)
+    def check_media_providers(cls, values):
+        plex_keys = [values.get('PLEX_URL'), values.get('PLEX_TOKEN')]
+        jellyfin_keys = [values.get('JELLYFIN_URL'), values.get('JELLYFIN_TOKEN')]
+        plex_configured = all(plex_keys)
+        jellyfin_configured = all(jellyfin_keys)
+        if not (plex_configured or jellyfin_configured):
+            raise ValueError("Configuration error: Either all PLEX_* variables or all JELLYFIN_* variables must be set.")
+        return values
+
+    @property
+    def plex_enabled(self) -> bool:
+        return bool(self.PLEX_URL and self.PLEX_TOKEN)
+
+    @property
+    def jellyfin_enabled(self) -> bool:
+        return bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
 
     @property
     def radarr_4k_port(self) -> int:

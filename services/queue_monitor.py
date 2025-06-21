@@ -93,30 +93,19 @@ def add_to_monitor(media_data):
             # Log addition
             logger.info(f"Added {media_data['media_type']} to monitor: {media_data['title']}", 
                       extra={'emoji_type': 'monitor'})
-
-            # Update Plex with initial "Searching..." status (only for ALL mode)
+            
+            # Update Plex/Jellyfin with initial "Searching..." status (only for ALL mode)
             if settings.TITLE_UPDATES == "ALL":
-                try:
-                    from services.plex_client import update_plex_title_status
-                    if media_data['media_type'] == 'movie':
-                        update_plex_title_status(
-                            media_type='movie',
-                            media_id=media_data.get('tmdb_id'),
-                            title=media_data.get('title'),
-                            status="Searching...",
-                            year=None  # Add year if available
-                        )
-                    else:  # episode
-                        update_plex_title_status(
-                            media_type='tv',
-                            media_id=media_data.get('tvdb_id'),
-                            title=media_data.get('series_title'),
-                            status="Searching...",
-                            season=media_data.get('season_number'),
-                            episode=media_data.get('episode_number')
-                        )
-                except Exception as e:
-                    logger.error(f"Failed to update Plex title: {e}", extra={'emoji_type': 'error'})
+                from services.integrations import update_title_status
+                update_title_status(
+                    media_type=media_data['media_type'],
+                    media_id=media_data['rating_key'],
+                    title=media_data['title'],
+                    status='Searching',
+                    season=media_data.get('season_number'),
+                    episode=media_data.get('episode_number'),
+                    year=media_data.get('year')
+                )
         
         # Start the batch timer if it's not already running and we're in ALL mode
         if settings.TITLE_UPDATES == "ALL" and (BATCH_TIMER is None or not BATCH_TIMER.is_alive()):
@@ -345,7 +334,7 @@ def process_movie_queue_item(media_key, movie, queue_item):
         logger.error(f"Error processing movie queue item: {e}", extra={'emoji_type': 'error'})
 
 def schedule_movie_available_cleanup(media_key, movie):
-    """Schedule removal of movie from monitoring after a delay to allow Plex scanning"""
+    """Schedule removal of movie from monitoring after a delay to allow Plex/Jellyfin scanning"""
     delay = getattr(settings, 'AVAILABLE_CLEANUP_DELAY', 10)  # Default 10 seconds
     
     def cleanup():
@@ -563,7 +552,7 @@ def process_episode_queue_item(media_key, episode, queue_item):
         logger.error(f"Error processing episode queue item: {e}", extra={'emoji_type': 'error'})
 
 def schedule_episode_available_cleanup(media_key, episode):
-    """Schedule removal of episode from monitoring after a delay to allow Plex scanning"""
+    """Schedule removal of episode from monitoring after a delay to allow Plex/Jellyfin scanning"""
     delay = getattr(settings, 'AVAILABLE_CLEANUP_DELAY', 10)  # Default 10 seconds
     
     def cleanup():

@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from core.config import settings
 from core.logger import logger
 from services.plex_client import plex, build_plex_url, refresh_plex_item
+from services.jellyfin_client import build_jellyfin_url, refresh_jellyfin_item, get_jellyfin_file_path
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
     schedule_movie_request_update, 
@@ -54,7 +55,10 @@ def should_process_playback(tvdb_id):
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
-    source = data.get("instanceName", "Tautulli")
+    if not data.get("instanceName") and not data.get("ServerName"):
+        source = "Tautulli"
+    else:
+        source = data.get("ServerName") if not data.get("instanceName") else data.get("instanceName")
     
     # Log incoming webhook but keep it brief
     logger.debug(f"{source} payload: {data}", extra={'emoji_type': 'debug'})
@@ -62,12 +66,13 @@ def handle_webhook(data: dict, source_port: int = None):
     # Get file path for quality detection
     file_path = (data.get('media', {}).get('file_info', {}).get('path') or 
                  data.get('movie', {}).get('folderPath') or 
-                 data.get('file', ''))
+                 data.get('file', '') or
+                 get_jellyfin_file_path(data.get("ItemId"), data.get("UserId")))
     
     is_4k = is_4k_request(file_path, source_port)
     logger.debug(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
     
-    event_type = (data.get('event') or data.get('eventType') or 'unknown').lower()
+    event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
     
     # Handle import events directly for cleanup
@@ -90,7 +95,7 @@ def handle_webhook(data: dict, source_port: int = None):
         return handle_movieadd(data)
     elif event_type == 'seriesdelete':
         return handle_seriesdelete(data, is_4k)
-    elif event_type == 'playback.start':
+    elif event_type in ['playback.start', 'playbackstart']:
         return handle_playback(data)
     else:
         # Fallback for unhandled events from other ARR providers
@@ -110,23 +115,28 @@ def handle_import_event(data: dict, is_4k: bool = False):
             
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
             
-            # Update Plex title to "Available" (remove status markers)
-            from services.plex_client import update_plex_title_status
-            update_plex_title_status(
+            # Update Plex/Jellyfin title to "Available" (remove status markers)
+            from services.integrations import update_title_status
+            update_title_status(
                 media_type='movie',
                 media_id=tmdb_id,
                 title=title,
-                status=None,  # None = remove status markers
+                status=None,     # None → strip markers
                 year=year
             )
             
             # Clean up placeholder files
             delete_dummy_files('movie', title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
             
-            # Refresh Plex library
             dummy_folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER, 
-                           f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
-            refresh_plex_item(dummy_folder)
+            f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
+
+            # Trigger a library refresh on whichever server is active
+            if settings.plex_enabled:
+                from services.plex_client import refresh_plex_item
+                refresh_plex_item(dummy_folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(dummy_folder)
             
         elif 'episodes' in data and 'series' in data:
             # TV episode import handling
@@ -144,9 +154,9 @@ def handle_import_event(data: dict, is_4k: bool = False):
             full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
             logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
             
-            # Update Plex title to "Available" (remove status markers)
-            from services.plex_client import update_plex_title_status
-            update_plex_title_status(
+            # Update Plex/Jellyfin title to "Available" (remove status markers)
+            from services.integrations import update_title_status
+            update_title_status(
                 media_type='tv',
                 media_id=tvdb_id,
                 title=series_title,
@@ -159,10 +169,18 @@ def handle_import_event(data: dict, is_4k: bool = False):
             delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, 
                               settings.TV_LIBRARY_FOLDER, season_number=season_num, episode_number=episode_num)
             
-            # Refresh Plex library
-            series_folder = os.path.join(settings.TV_LIBRARY_FOLDER,
-                           f"{sanitize_filename(series_title)}{' ('+str(series.get('year'))+')' if series.get('year') else ''} {{tvdb-{tvdb_id}}}")
-            refresh_plex_item(series_folder)
+            # Refresh library
+            if settings.plex_enabled:
+                from services.plex_client import refresh_plex_item
+                folder_path = os.path.join(
+                    settings.TV_LIBRARY_FOLDER,
+                    f"{sanitize_filename(series_title)}"
+                    f"{' ('+str(series.get('year'))+')' if series.get('year') else ''}"
+                    f" {{tvdb-{tvdb_id}}}"
+                )
+                refresh_plex_item(folder_path)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(folder_path)
             
     except Exception as e:
         logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
@@ -207,11 +225,15 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                                         season_number=season_num,
                                         episode_range=(episode_num, episode_num),
                                         episode_title=episode_title)
-            series_folder = "/".join(dummy_path.split(os.sep)[:-2])
+            series_folder = os.path.dirname(os.path.dirname(dummy_path))
             unique_folders.add(series_folder)
             schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
         for folder in unique_folders:
-            refresh_plex_item(folder)
+            if settings.plex_enabled:
+                refresh_plex_item(folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(folder)
+
         logger.info(f"Created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
 
     threading.Thread(target=delayed_placeholders, daemon=True).start()
@@ -245,8 +267,10 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                                       season_number=season_num,
                                       episode_range=(episode_num, episode_num),
                                       episode_title=episode_title)  # Include episode title & REMOVE episode_id
-        
-        refresh_plex_item(os.path.dirname(dummy_path))
+        if settings.plex_enabled:
+            refresh_plex_item(os.path.dirname(dummy_path))
+        if settings.jellyfin_enabled:
+            refresh_jellyfin_item(os.path.dirname(dummy_path), "Deleted")
         
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
     logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
@@ -270,7 +294,10 @@ def handle_moviefiledelete(data: dict):
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
             folder = os.path.dirname(dummy_path)
             logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
-            refresh_plex_item(folder) 
+            if settings.plex_enabled:
+                refresh_plex_item(folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(folder, "Deleted")
             schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
         else:
             logger.info(f"Dummy file already exists for movie '{title}'", extra={'emoji_type': 'info'})
@@ -296,8 +323,11 @@ def handle_movie_delete(data: dict):
             logger.info(f"Deleted dummy folder for movie {title}", extra={'emoji_type': 'delete'})
         else:
             logger.info(f"No dummy folder exists for movie {title}", extra={'emoji_type': 'info'})
-        # Optionally refresh Plex at the dummy folder location
-        refresh_plex_item(dummy_folder)
+        # Optionally refresh Plex/Jellyfin at the dummy folder location
+        if settings.plex_enabled:
+            refresh_plex_item(dummy_folder)
+        if settings.jellyfin_enabled:
+            refresh_jellyfin_item(dummy_folder, "Deleted")
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
 def handle_movieadd(data: dict):
@@ -325,7 +355,11 @@ def handle_movieadd(data: dict):
                 return
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
             logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
-            refresh_plex_item(os.path.dirname(dummy_path))
+            if settings.plex_enabled:
+                refresh_plex_item(os.path.dirname(dummy_path))
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(os.path.dirname(dummy_path))
+
             schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
 
         threading.Thread(target=delayed_placeholder, daemon=True).start()
@@ -362,9 +396,13 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             # Check if folder exists
             if os.path.exists(series_folder):
                 try:
-                    # First refresh Plex to recognize the deletion
-                    refresh_plex_item(os.path.dirname(series_folder))
-                    logger.info(f"Refreshed Plex for series folder: {series_folder}", extra={'emoji_type': 'refresh'})
+                    # First refresh Plex/Jellyfin to recognize the deletion
+                    if settings.plex_enabled:
+                        refresh_plex_item(os.path.dirname(series_folder))
+                    if settings.jellyfin_enabled:
+                        refresh_jellyfin_item(os.path.dirname(series_folder), "Deleted")
+
+                    logger.info(f"Refreshed Plex/Jellyfin for series folder: {series_folder}", extra={'emoji_type': 'refresh'})
                     
                     # Then delete all files and subfolder recursively
                     shutil.rmtree(series_folder)
@@ -380,11 +418,18 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
                 else:
                     logger.warning(f"Series folder not found: {series_folder}", extra={'emoji_type': 'warning'})
                 
-                # Still refresh Plex in case the folder was already deleted
-                refresh_plex_item(library_folder)
+                # Still refresh Plex/Jellyfin in case the folder was already deleted
+                if settings.plex_enabled:
+                    refresh_plex_item(library_folder)
+                if settings.jellyfin_enabled:
+                    refresh_jellyfin_item(library_folder, "Changed")
+
         else:
             # Fall back to full library refresh if no TVDB ID
-            refresh_plex_item(settings.TV_LIBRARY_FOLDER)
+            if settings.plex_enabled:
+                refresh_plex_item(settings.TV_LIBRARY_FOLDER)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(settings.TV_LIBRARY_FOLDER, "Changed")
             
     return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
 
@@ -410,44 +455,47 @@ def handle_series_delete(payload):
     else:
         logger.warning(f"Series folder not found: {series_path}", extra={'emoji_type': 'warning'})
     
-    # Refresh Plex library to reflect the changes
+    # Refresh Plex/Deleted library to reflect the changes
     plex_folder = os.path.dirname(series_path)  # Get parent folder
-    refresh_plex_item(plex_folder)
+    if settings.plex_enabled:
+        refresh_plex_item(plex_folder)
+    if settings.jellyfin_enabled:
+        refresh_jellyfin_item(plex_folder, "Deleted")
 
 # In handle_playback, we need to keep the existing structure but integrate with queue monitoring
 
 def handle_playback(data: dict):
     try:
-        media = data.get("media", {})
-        file_path = media.get("file_info", {}).get("path", "")
+        media = data.get("media", {}) or {}
+        notification = data.get("NotificationType")
+        # Determine file path source
+        if notification:
+            # Jellyfin payload
+            item_id = data.get("ItemId")
+            user_id = data.get("UserId")
+            file_path = get_jellyfin_file_path(item_id, user_id) or ""
+        else:
+            # Tautulli payload
+            file_path = media.get("file_info", {}).get("path", "")
         is_4k = is_4k_request(file_path)
-        title = media.get("title", "Unknown Title")
-        rating_key = media.get("ids", {}).get("plex")
-        media_type = media.get("type")  # Get the media type
+        title = media.get("title", data.get("Name", "Unknown Title"))
+        rating_key = media.get("ids", {}).get("plex") or data.get("ItemId")
+        media_type = media.get("type") or data.get("ItemType", "").lower()
 
         # Debug log the file path 
         logger.debug(f"Processing playback for file path: {file_path}", extra={'emoji_type': 'debug'})
 
         # Check if file is in one of our placeholder library folders
-        is_placeholder = False
-        if file_path:
-            placeholder_folders = [
-                settings.MOVIE_LIBRARY_FOLDER,
-                settings.TV_LIBRARY_FOLDER
-            ]
-            
-            # Add 4K folders if configured
-            if hasattr(settings, 'MOVIE_LIBRARY_4K_FOLDER') and settings.MOVIE_LIBRARY_4K_FOLDER:
-                placeholder_folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
-            if hasattr(settings, 'TV_LIBRARY_4K_FOLDER') and settings.TV_LIBRARY_4K_FOLDER:
-                placeholder_folders.append(settings.TV_LIBRARY_4K_FOLDER)
-            
-            # Debug log the placeholder folders
-            logger.debug(f"Checking path against placeholder folders: {placeholder_folders}", extra={'emoji_type': 'debug'})
-                
-            # Check if file path starts with any placeholder folder path
-            is_placeholder = any(file_path.startswith(folder) for folder in placeholder_folders if folder)
-        
+        # Build placeholder folders list
+        placeholder_folders = [settings.MOVIE_LIBRARY_FOLDER, settings.TV_LIBRARY_FOLDER]
+        if getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None):
+            placeholder_folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
+        if getattr(settings, 'TV_LIBRARY_4K_FOLDER', None):
+            placeholder_folders.append(settings.TV_LIBRARY_4K_FOLDER)
+
+        logger.debug(f"Checking path against placeholder folders: {placeholder_folders}", extra={'emoji_type': 'debug'})
+        is_placeholder = any(file_path.startswith(folder) for folder in placeholder_folders if folder)
+
         # Debug log the placeholder check result
         logger.debug(f"Is placeholder check result: {is_placeholder}", extra={'emoji_type': 'debug'})
         
@@ -456,10 +504,10 @@ def handle_playback(data: dict):
             logger.info(f"Ignoring playback of real movie file: {file_path}", extra={'emoji_type': 'info'})
             return JSONResponse({"status": "ignored", "message": "Not a placeholder movie file"})
         
-        if media.get("type") == "movie":
-            tmdb_id = media.get("ids", {}).get("tmdb")
-            imdb_id = media.get("ids", {}).get("imdb")
-            year = media.get("year", "")
+        if media_type == "movie":
+            tmdb_id = media.get("ids", {}).get("tmdb") or data.get("Provider_tmdb")
+            imdb_id = media.get("ids", {}).get("imdb") or data.get("Provider_imdb")
+            year = media.get("year") or data.get("Year", "")
             
             logger.info(f"Processing movie playback for {title}", extra={'emoji_type': 'process'})
             
@@ -478,35 +526,31 @@ def handle_playback(data: dict):
                     'hasFile': False
                 })
                 return JSONResponse({"status": "success", "message": "Search triggered"})
-            else:
-                return JSONResponse({"status": "error", "message": "Failed to find/add movie"}, status_code=400)
+            return JSONResponse({"status": "error", "message": "Failed to find/add movie"}, status_code=400)
             
-        elif media.get("type") == "episode":
+        elif media_type == "episode":
             # Extract episode details from webhook
-            series_title = media.get("show_name", "Unknown Series")
-            episode_title = media.get("episode_name", "Unknown Episode")
-            season_number = int(media.get("season_num", 0))
-            episode_number = int(media.get("episode_num", 0))
+            series_title   = media.get("show_name") or data.get("SeriesName", "Unknown Series")
+            episode_title  = media.get("episode_name") or data.get("Name", "Unknown Episode")
+            season_number  = int(media.get("season_num") or data.get("SeasonNumber", 0))
+            episode_number = int(media.get("episode_num") or data.get("EpisodeNumber", 0))
+            tvdb_id        = media.get("ids", {}).get("tvdb") or data.get("Provider_tvdb")
             year = media.get("year", "")
-            tvdb_id = media.get("ids", {}).get("tvdb")
             
-            # Skip if this series was recently processed
+            full_title = (
+                f"{series_title} - S{season_number:02d}E{episode_number:02d}"
+                if series_title and "{series_title}" not in series_title
+                else title
+            )
+
             if not should_process_playback(tvdb_id):
                 return JSONResponse({"status": "skipped", "message": "Playback suppressed (cooldown active)"})
-            
-            # Rest of episode handling continues unchanged
-            file_path = media.get("file_info", {}).get("path", "")
-            series_id = search_in_sonarr(tvdb_id=tvdb_id, title=series_title, rating_key=rating_key, 
-                            is_4k=is_4k, file_path=file_path)
-            
-            # Build display-friendly title
-            if series_title and series_title != "{series_title}":
-                full_title = f"{series_title} - S{season_number:02d}E{episode_number:02d}"
-            else:
-                full_title = f"{title}"
-            
+
             logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'process'})
-            
+            series_id = search_in_sonarr(
+                tvdb_id=tvdb_id, title=series_title, rating_key=rating_key,
+                is_4k=is_4k, file_path=file_path
+            )
             if not series_id:
                 return JSONResponse({"status": "error", "message": "Failed to get series ID"}, status_code=400)
                 

@@ -97,14 +97,37 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
         return None
 
+def update_title_status(media_type, media_id, title, status, **kwargs):
+    """Abstract update of media title status on Plex or Jellyfin"""
+    if settings.plex_enabled:
+        from services.plex_client import update_plex_title_status
+        return update_plex_title_status(
+            media_type=media_type,
+            media_id=media_id,
+            title=title,
+            status=status,
+            **kwargs
+        )
+    if settings.jellyfin_enabled:
+        from services.jellyfin_client import update_jellyfin_title_status
+        # Jellyfin expects itemId as media_id
+        return update_jellyfin_title_status(
+            media_type=media_type,
+            item_id=media_id,
+            title=title,
+            status=status,
+            **kwargs
+        )
+    logger.error("No media server configured for title update", extra={'emoji_type': 'error'})
+    return False
+
 # Title update and scheduling functions
 def schedule_episode_request_update(series_title, season_num, episode_num, media_id, delay=10, retries=5):
     """Schedule an update to the episode title with [Request] tag"""
     def attempt_update(attempt=1):
         try:
             # Use our new ID-based title update function
-            from services.plex_client import update_plex_title_status
-            result = update_plex_title_status(
+            result = update_title_status(
                 media_type='tv',
                 media_id=media_id,
                 title=series_title,
@@ -139,8 +162,7 @@ def schedule_movie_request_update(movie_title, media_id, year=None, delay=10, re
     def attempt_update(attempt=1):
         try:
             # Use our new ID-based title update function
-            from services.plex_client import update_plex_title_status
-            result = update_plex_title_status(
+            result = update_title_status(
                 media_type='movie',
                 media_id=media_id,
                 title=movie_title,
@@ -588,6 +610,21 @@ def monitor_season(series_id, season_number):
     except Exception as e:
         logger.error(f"Failed to mark season as monitored: {str(e)}", extra={'emoji_type': 'error'})
         return False
+
+# For brevity, any additional integration functions (including Sonarr functions) are implemented similarly.
+def update_plex_title(rating_key, base_title, status):
+    """Update a Plex item's title using PlexAPI directly rather than URL construction"""
+    try:
+        # Get the item directly using PlexAPI
+        item = plex.fetchItem(int(rating_key))
+        base_title = strip_status_markers(base_title)
+        new_title = f"{base_title} - {status}"
+        # Use PlexAPI's built-in title update
+        item.editTitle(new_title)
+        item.reload()
+        logger.info(f"Updated Plex title to: {new_title}", extra={'emoji_type': 'update'})
+    except Exception as e:
+        logger.error(f"Failed to update Plex title for {rating_key}: {str(e)}", extra={'emoji_type': 'error'})
 
 def get_sonarr_queue(is_4k=False):
     """Get current queue items from Sonarr"""
