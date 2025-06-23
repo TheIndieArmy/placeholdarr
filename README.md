@@ -85,6 +85,8 @@ Perfect for:
 - Set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to the same folders your *arr (Radarr/Sonarr) use as their root folders.
 - Both real files and placeholders will be created in the same folder.
 - Plex/Jellyfin will see both real and placeholder files in the same library.
+- **Recommended:** Create a `placeholders` subfolder inside your library folder (e.g., `/mnt/user/data/movies/placeholders`) and set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to this subfolder.  
+  This keeps placeholders organized and makes cleanup easier, while still allowing Plex/Jellyfin to scan them.
 
 #### 2. **Separate Folders for Placeholders and Real Files (Advanced)**
 - Set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to a dedicated "placeholder" folder (e.g., `/mnt/user/data/placeholder-movies`).
