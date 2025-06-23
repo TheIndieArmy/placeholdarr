@@ -22,7 +22,7 @@ Leverage Radarr/Sonarr's import lists to their full potential:
 3. Users see titles available in Plex, just as if they were downloaded
 4. When someone plays a placeholder:
    - The real content is automatically searched for in arrs
-   - Plex title updates show download progress (undergoing development)
+   - Plex summary updates show download/request status (see below)
    - Placeholder is replaced with actual media when ready
 
 ### Integration Benefits
@@ -46,12 +46,32 @@ Leverage Radarr/Sonarr's import lists to their full potential:
      - Replaces content not being watched with a placeholder
      - Keeps content visible to users in Plex to re-download when they are ready to watch
 
-
 Perfect for:
 - Large libraries with limited storage
 - Media servers with multiple users
 - Automated media management setups
 - Collections that exceed available storage
+
+---
+
+## Key Features
+
+- **Automatic Placeholder Creation:**  
+  Creates dummy video files for missing movies and TV episodes, so users can see and request unavailable content in Plex.
+- **Calendar-Based Status Sync:**  
+  Periodically syncs with Sonarr/Radarr calendars to create placeholders and update statuses for upcoming content (e.g., "Coming Soon", "Request").
+- **Batch Processing:**  
+  Efficiently batches placeholder creation and Plex refreshes to avoid missed updates and improve performance.
+- **Status in Summary:**  
+  Statuses (e.g., "Coming Soon", "Request", "Searching...") are now prepended to the summary/description field for both movies and TV episodes, ensuring visibility in all Plex clients (including mobile).
+- **Queue Monitoring:**  
+  Tracks download/search progress and updates status in Plex as content moves through the queue.
+- **Highly Configurable:**  
+  Supports lookahead windows, "Coming Soon" toggles, preferred movie date types, and more via `.env` settings.
+- **Robust Logging:**  
+  Emoji-enhanced logs for easy filtering and debugging.
+
+---
 
 ## Configuration
 
@@ -67,8 +87,22 @@ Required settings in `.env`:
 Optional settings:
 - `PLACEHOLDER_STRATEGY`: How to create placeholders (`hardlink` or `copy`)
 - `TV_PLAY_MODE`: Download scope (`episode`, `season`, or `series`)
-- `TITLE_UPDATES` What level of title updates shown in Plex. "All" not currently recommended, as this feature is still in development (`OFF`, `REQUEST`, `ALL`)
+- `TITLE_UPDATES`: What level of status updates are shown in Plex. "ALL" not currently recommended, as this feature is still in development (`OFF`, `REQUEST`, `ALL`)
 - 4K support settings (if needed)
+- `INCLUDE_SPECIALS`: Include specials in TV placeholder creation (`true`/`false`)
+- `EPISODES_LOOKAHEAD`: Number of episodes to look ahead and download (integer)
+- `MAX_MONITOR_TIME`: Maximum time to monitor for file in seconds (integer)
+- `CHECK_INTERVAL`: How often to check queue status in seconds (integer)
+- `AVAILABLE_CLEANUP_DELAY`: Delay before removing monitored item after it becomes available (integer)
+- **Calendar-based status update settings:**
+  - `CALENDAR_LOOKAHEAD_DAYS`: How many days into the future to allow placeholders/"Coming Soon" (integer)
+  - `CALENDAR_SYNC_INTERVAL_HOURS`: How often to sync calendar and update statuses (hours, integer)
+  - `ENABLE_COMING_SOON_PLACEHOLDERS`: Enable or disable "Coming Soon" placeholders (`true`/`false`)
+  - `PREFERRED_MOVIE_DATE_TYPE`: Which movie release date to use (`inCinemas`, `digitalRelease`, `physicalRelease`)
+  - `ENABLE_COMING_SOON_COUNTDOWN`: Show countdown in "Coming Soon" status (`true`/`false`)
+  - `CALENDAR_PLACEHOLDER_MODE`: Add placeholders as each episode enters lookahead window (`episode`) or add all known episodes of a season when any enters window (`season`)
+
+---
 
 ### Tautulli Webhook Setup
 
@@ -113,7 +147,10 @@ Optional settings:
 }
 ```
 
+---
+
 ### Radarr Webhook Setup
+
 - For more-tailored control of content, utilize tags to determine what titles get placeholders created for them. 
 
 1. In Radarr, go to Settings → Connect → Add Connection (Plus Icon)
@@ -128,6 +165,8 @@ Optional settings:
      - On Movie Delete
      - On Movie File Delete
 
+---
+
 ### Sonarr Webhook Setup
 
 1. In Sonarr, go to Settings → Connect → Add Connection (Plus Icon)
@@ -141,6 +180,8 @@ Optional settings:
      - On Series Add
      - On Series Delete
      - On Episode File Delete
+
+---
 
 ## Additional Features
 

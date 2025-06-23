@@ -198,93 +198,68 @@ def find_movie_by_id(tmdb_id, title=None, year=None):
         logger.error(f"Error finding movie by ID: {e}", extra={'emoji_type': 'error'})
         return None
 
+def _prepend_status_to_summary(summary, status):
+    """Prepend status to summary, replacing any previous status marker."""
+    import re
+    if not summary:
+        summary = ""
+    # Remove any existing status marker at the start
+    summary = re.sub(r"^\[.*?\]\s*", "", summary)
+    if status:
+        return f"[{status}] {summary}".strip()
+    else:
+        return summary.strip()
+
 def update_plex_title_status(media_type, media_id, title, status=None, year=None, season=None, episode=None):
     """
-    Update Plex title with status or remove status markers
-    Uses ID-based matching to find the item
-    
-    Args:
-        media_type: 'tv' or 'movie'
-        media_id: TVDB ID for TV, TMDB ID for movies
-        title: Title for fallback matching
-        status: Status to add (None = remove status markers)
-        year: Year for movies (optional)
-        season: Season number for TV (optional)
-        episode: Episode number for TV (optional)
-    
-    Returns:
-        Success boolean
+    Update Plex summary with status or remove status markers.
+    Uses ID-based matching to find the item.
     """
     try:
         if not plex:
             logger.error("Plex server not available", extra={'emoji_type': 'error'})
             return False
-            
+
         if media_type == 'tv' and season is not None and episode is not None:
-            # Find TV show by ID
             show = find_show_by_id(media_id, title)
             if not show:
-                logger.error(f"Could not find show with TVDB ID {media_id} for title update", 
-                           extra={'emoji_type': 'error'})
+                logger.error(f"Could not find show with TVDB ID {media_id} for summary update", extra={'emoji_type': 'error'})
                 return False
-            
-            # Get episode
             try:
                 episode_obj = show.episode(season=season, episode=episode)
             except Exception as e:
-                logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping title update. ({e})", 
-                               extra={'emoji_type': 'skip'})
+                logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping summary update. ({e})", extra={'emoji_type': 'skip'})
                 return False
-                
             if not episode_obj:
-                logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping title update.", 
-                               extra={'emoji_type': 'skip'})
+                logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping summary update.", extra={'emoji_type': 'skip'})
                 return False
-            
-            # Update title
-            from services.utils import strip_status_markers
-            current_title = episode_obj.title
-            base_title = strip_status_markers(current_title)
-            
-            if status:
-                new_title = f"{base_title} - [{status}]"
-            else:
-                new_title = base_title
-                
-            episode_obj.editTitle(new_title)
+
+            # Update summary
+            current_summary = getattr(episode_obj, 'summary', '') or ''
+            new_summary = _prepend_status_to_summary(current_summary, status)
+            episode_obj.editSummary(new_summary)
             episode_obj.reload()
-            logger.info(f"Updated episode title for '{show.title}' S{season}E{episode} to: {new_title}",
-                      extra={'emoji_type': 'update'})
+            logger.info(f"Updated episode summary for '{show.title}' S{season}E{episode} to: {new_summary}", extra={'emoji_type': 'update'})
             return True
-            
+
         elif media_type == 'movie':
-            # Find movie by ID
             movie = find_movie_by_id(media_id, title, year)
             if not movie:
-                logger.error(f"Could not find movie with TMDB ID {media_id} for title update", 
-                           extra={'emoji_type': 'error'})
+                logger.error(f"Could not find movie with TMDB ID {media_id} for summary update", extra={'emoji_type': 'error'})
                 return False
-            
-            # Update title
-            from services.utils import strip_status_markers
-            current_title = movie.title
-            base_title = strip_status_markers(current_title)
-            
-            if status:
-                new_title = f"{base_title} - [{status}]"
-            else:
-                new_title = base_title
-                
-            movie.editTitle(new_title)
+
+            # Update summary
+            current_summary = getattr(movie, 'summary', '') or ''
+            new_summary = _prepend_status_to_summary(current_summary, status)
+            movie.editSummary(new_summary)
             movie.reload()
-            logger.info(f"Updated movie title for '{movie.title}' to: {new_title}",
-                      extra={'emoji_type': 'update'})
+            logger.info(f"Updated movie summary for '{movie.title}' to: {new_summary}", extra={'emoji_type': 'update'})
             return True
-            
+
         return False
-        
+
     except Exception as e:
-        logger.error(f"Error updating title status: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Error updating summary status: {e}", extra={'emoji_type': 'error'})
         return False
 
 try:
