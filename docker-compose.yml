@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  placeholdarr:
+    build: .
+    container_name: placeholdarr
+    env_file:
+      - .env
+    volumes:
+      # Set these to your actual media and dummy file locations
+      - /path/to/movies:/movies
+      - /path/to/tv:/tv
+      - /path/to/dummy.mp4:/data/dummy.mp4
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
