@@ -763,7 +763,7 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
         if media_type == 'tv':
             folder_name += f" {{tvdb-{tvdb_id}}} (dummy)"
         else:  # movie
-            folder_name += f" {{tmdb-{tvdb_id}}} (dummy)"
+            folder_name += f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
             
         dummy_folder = os.path.join(library_path, folder_name)
         logger.debug(f"Looking for dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
