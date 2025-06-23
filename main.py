@@ -8,11 +8,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, Request
 from core.logger import logger
 from services.handlers import handle_webhook
+from services.migration import run_migration
 from services.calendar_sync import start_calendar_sync  # <-- Add this import
+
 
 # Load environment variables
 load_dotenv(override=True)
-
+# Trigger Migration
+run_migration()
 
 def clear_port(port: int, max_attempts: int = 3) -> bool:
     """Clear a port if it's in use"""
