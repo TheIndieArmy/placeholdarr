@@ -85,26 +85,41 @@ def refresh_jellyfin_library(library_id: str,
     return False
 
 
-def update_jellyfin_title_status(item_id: str, new_title: str) -> bool:
-    """
-    Update the display name of a Jellyfin item.
+def _prepend_status_to_summary(summary, status):
+    """Prepend status to summary, replacing any previous status marker."""
+    import re
+    if not summary:
+        summary = ""
+    # Remove any existing status marker at the start
+    summary = re.sub(r"^\[.*?\]\s*", "", summary)
+    if status:
+        return f"[{status}] {summary}".strip()
+    else:
+        return summary.strip()
 
-    Args:
-        item_id (str): GUID of the item to rename.
-        new_title (str): New name to set.
-
-    Returns:
-        bool: True if update succeeded (HTTP 200), False otherwise.
+def update_jellyfin_title_status(media_type=None, item_id=None, title=None, status=None, season=None, episode=None, year=None, **kwargs):
     """
-    url = build_jellyfin_url(f"Items/{item_id}")
-    payload = {"Name": new_title}
+    Update the display name and summary (Overview) of a Jellyfin item.
+    """
     try:
-        resp = session.post(url, json=payload)
+        url = build_jellyfin_url(f"Items/{item_id}")
+        # Fetch current item info for summary
+        resp = session.get(url)
         resp.raise_for_status()
-        logger.info(f"Updated item {item_id} title to '{new_title}'", extra={'emoji_type': 'update'})
+        item = resp.json()
+        current_summary = item.get('Overview', '') or ''
+        new_summary = _prepend_status_to_summary(current_summary, status)
+        # Always update title if provided
+        payload = {}
+        if title:
+            payload["Name"] = title
+        payload["Overview"] = new_summary
+        resp2 = session.post(url, json=payload)
+        resp2.raise_for_status()
+        logger.info(f"Updated item {item_id} title to '{title}' and summary to '{new_summary}'", extra={'emoji_type': 'update'})
         return True
     except Exception as ex:
-        logger.error(f"Title update failed: {ex}", extra={'emoji_type': 'error'})
+        logger.error(f"Title/summary update failed: {ex}", extra={'emoji_type': 'error'})
     return False
 
 # Legacy alias for backward compatibility
