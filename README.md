@@ -77,13 +77,33 @@ Perfect for:
 
 ## Configuration
 
+### Library Folder Strategies
+
+**You can use Placeholdarr in two ways:**
+
+#### 1. **Single Folder (Simple)**
+- Set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to the same folders your *arr (Radarr/Sonarr) use as their root folders.
+- Both real files and placeholders will be created in the same folder.
+- Plex/Jellyfin will see both real and placeholder files in the same library.
+
+#### 2. **Separate Folders for Placeholders and Real Files (Advanced)**
+- Set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to a dedicated "placeholder" folder (e.g., `/mnt/user/data/placeholder-movies`).
+- Configure your *arr to import/move real files to a different folder (e.g., `/mnt/user/data/movies`).
+- In Plex/Jellyfin, add both folders as separate libraries if you want users to browse placeholders and real files separately (e.g., "Requests" vs "Movies").
+- This is useful if you want to keep placeholders out of your main library or provide a dedicated "request" library for users.
+
+**Note:**  
+Placeholdarr does not need to know your *arr root folders—just set the library folders to wherever you want placeholders to appear.
+
+---
+
 ### Environment Variables
 
 Required settings in `.env`:
 - `PLEX_URL`, `PLEX_TOKEN`: Your Plex server details
 - `RADARR_URL`, `RADARR_API_KEY`: Radarr connection details
 - `SONARR_URL`, `SONARR_API_KEY`: Sonarr connection details
-- `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Plex library paths
+- `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin
 - `DUMMY_FILE_PATH`: Path to your dummy.mp4 file
 
 Optional settings:
