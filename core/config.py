@@ -77,6 +77,9 @@ class Settings(BaseSettings):
 
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
+    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").lower() == "true"
+    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").lower() == "true"
+
     # Add a method to clean string values
     @validator('*', pre=True)
     def clean_string_values(cls, v):
@@ -114,11 +117,11 @@ class Settings(BaseSettings):
 
     @property
     def plex_enabled(self) -> bool:
-        return bool(self.PLEX_URL and self.PLEX_TOKEN)
+        return self.ENABLE_PLEX and bool(self.PLEX_URL and self.PLEX_TOKEN)
 
     @property
     def jellyfin_enabled(self) -> bool:
-        return bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
+        return self.ENABLE_JELLYFIN and bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
 
     @property
     def radarr_4k_port(self) -> int:
