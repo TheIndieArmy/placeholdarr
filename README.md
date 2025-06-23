@@ -4,7 +4,7 @@ Placeholdarr is an AI-developed application conducted by TheIndieArmy and built 
 
 ## Overview
 
-Placeholdarr bridges the gap between media discovery and storage management. It allows you to maintain a comprehensive Plex library without the storage overhead of keeping everything downloaded at once.
+Placeholdarr bridges the gap between media discovery and storage management. It allows you to maintain a comprehensive **Plex or Jellyfin** library without the storage overhead of keeping everything downloaded at once.
 
 ### Automated Library Building
 
@@ -35,16 +35,16 @@ Leverage Radarr/Sonarr's import lists to their full potential:
    - Don't want everything in arrs showing in Plex? Utilize tags in arrs to control what content gets placeholders made and shown in Plex
 - **Automation Ready**: Works with other tools in your stack:
    - *Radarr/Sonarr* for downloads and library management
-   - *Plex* for streaming
+   - *Plex* and *Jellyfin* for streaming
    - *Overseerr* for requests (Optional)
      - Simply disable automatic search for requests
      - A placeholder will be made when the request gets added to arrs
-     - User sees the title as a placeholder in Plex and triggers the search when they play it
+     - User sees the title as a placeholder in Plex or Jellyfin and triggers the search when they play it
      - Saves you the storage space until the user is actually ready to watch
-   - *Maintainerr* for storage management - Can be set up so when a real file is deleted, a placeholder is created to keep it visible in Plex (Optional)
+   - *Maintainerr* for storage management - Can be set up so when a real file is deleted, a placeholder is created to keep it visible in Plex or Jellyfin (Optional)
      - Be sure to turn on the "On File Delete" trigger in your arrs webhook settings
      - Replaces content not being watched with a placeholder
-     - Keeps content visible to users in Plex to re-download when they are ready to watch
+     - Keeps content visible to users in Plex or Jellyfin to re-download when they are ready to watch
 
 Perfect for:
 - Large libraries with limited storage
@@ -56,16 +56,18 @@ Perfect for:
 
 ## Key Features
 
+- **Jellyfin Support:**  
+  Placeholdarr now works with Jellyfin as well as Plex. All placeholder, status, and automation features are available for both servers.
 - **Automatic Placeholder Creation:**  
-  Creates dummy video files for missing movies and TV episodes, so users can see and request unavailable content in Plex.
+  Creates dummy video files for missing movies and TV episodes, so users can see and request unavailable content in Plex or Jellyfin.
 - **Calendar-Based Status Sync:**  
   Periodically syncs with Sonarr/Radarr calendars to create placeholders and update statuses for upcoming content (e.g., "Coming Soon", "Request").
 - **Batch Processing:**  
-  Efficiently batches placeholder creation and Plex refreshes to avoid missed updates and improve performance.
-- **Status in Summary:**  
-  Statuses (e.g., "Coming Soon", "Request", "Searching...") are now prepended to the summary/description field for both movies and TV episodes, ensuring visibility in all Plex clients (including mobile).
+  Efficiently batches placeholder creation and library refreshes to avoid missed updates and improve performance.
+- **Status in Summary/Description:**  
+  Statuses (e.g., "Coming Soon", "Request", "Searching...") are now prepended to the summary/description field for both movies and TV episodes, ensuring visibility in all Plex and Jellyfin clients (including mobile).
 - **Queue Monitoring:**  
-  Tracks download/search progress and updates status in Plex as content moves through the queue.
+  Tracks download/search progress and updates status in Plex or Jellyfin as content moves through the queue.
 - **Highly Configurable:**  
   Supports lookahead windows, "Coming Soon" toggles, preferred movie date types, and more via `.env` settings.
 - **Robust Logging:**  
@@ -149,6 +151,41 @@ Optional settings:
 
 ---
 
+### Jellyfin Webhook Setup
+
+1. In Jellyfin, go to **Dashboard → Plugins → Catalog** and install the **Webhook** plugin if not already installed.
+2. Go to **Dashboard → Plugins → Webhook** and click **Add Webhook**.
+3. Set the **Webhook URL** to:
+   ```
+   http://your-server:8000/webhook
+   ```
+   Replace `your-server` with your actual server address.
+4. Under **Events**, enable **Playback Start**.
+5. Set **Content Type** to `application/json`.
+6. Use this as the **Payload Template**:
+   ```json
+   {
+     "event": "playback.start",
+     "ItemId": "{{ItemId}}",
+     "UserId": "{{UserId}}",
+     "Name": "{{Name}}",
+     "ItemType": "{{ItemType}}",
+     "SeriesName": "{{SeriesName}}",
+     "SeasonNumber": "{{SeasonNumber}}",
+     "EpisodeNumber": "{{EpisodeNumber}}",
+     "Provider_tmdb": "{{Provider_tmdb}}",
+     "Provider_tvdb": "{{Provider_tvdb}}",
+     "Provider_imdb": "{{Provider_imdb}}",
+     "Year": "{{Year}}",
+     "NotificationType": "{{NotificationType}}"
+   }
+   ```
+7. Save the webhook.
+
+**Note:** Placeholdarr will automatically detect and process both Tautulli (Plex) and Jellyfin webhooks using their respective payload formats. No extra configuration is needed—just set up the webhook as shown.
+
+---
+
 ### Radarr Webhook Setup
 
 - For more-tailored control of content, utilize tags to determine what titles get placeholders created for them. 
@@ -180,6 +217,16 @@ Optional settings:
      - On Series Add
      - On Series Delete
      - On Episode File Delete
+
+---
+
+## What's New
+
+- **Jellyfin support:** All placeholder, status, and automation features now work with Jellyfin.
+- **Unified status updates:** Statuses are now shown in the summary/description field for both Plex and Jellyfin, ensuring visibility in all clients.
+- **Automatic webhook detection:** Placeholdarr automatically distinguishes between Tautulli (Plex) and Jellyfin webhook payloads.
+- **Batch calendar sync:** Improved efficiency and reliability for placeholder creation and status updates.
+- **Improved configuration:** More `.env` options for calendar, queue, and placeholder management.
 
 ---
 
