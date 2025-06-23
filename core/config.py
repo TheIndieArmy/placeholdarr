@@ -19,7 +19,7 @@ if not dotenv_path.exists():
 load_dotenv(dotenv_path)
 
 class Settings(BaseSettings):
-    LOG_LEVEL: str = "DEBUG"
+    LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     
     # Plex
     PLEX_URL: str
@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     PREFERRED_MOVIE_DATE_TYPE: str = os.getenv("PREFERRED_MOVIE_DATE_TYPE", "inCinemas").split('#')[0].strip()
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
+
+    PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
     # Add a method to clean string values
     @validator('*', pre=True)
@@ -137,6 +139,10 @@ class Settings(BaseSettings):
     @property
     def plex_4k_tv_section_id(self) -> int:
         return self.PLEX_TV_4K_SECTION_ID if hasattr(self, 'PLEX_TV_4K_SECTION_ID') else self.PLEX_TV_SECTION_ID
+
+    @property
+    def host(self) -> str:
+        return self.PLACEHOLDARR_HOST
 
     class Config:
         env_file = str(dotenv_path)
