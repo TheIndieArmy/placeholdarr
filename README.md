@@ -128,6 +128,19 @@ Optional settings:
 
 ---
 
+### Disabling Plex or Jellyfin
+
+- **To disable Plex:**  
+  Leave `PLEX_URL`, `PLEX_TOKEN`, `PLEX_MOVIE_SECTION_ID`, and `PLEX_TV_SECTION_ID` blank in your `.env` file.
+
+- **To disable Jellyfin:**  
+  Leave `JELLYFIN_URL` and `JELLYFIN_TOKEN` blank in your `.env` file.
+
+**Note:**  
+You must have at least one of Plex or Jellyfin configured. Placeholdarr will automatically detect which server(s) to use based on which variables are set.
+
+---
+
 ### Tautulli Webhook Setup
 
 1. In Tautulli, go to Settings → Notification Agents
