@@ -255,6 +255,28 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 
 ---
 
+## Docker Usage Notes
+
+If you are running Placeholdarr in Docker, you **must provide a `dummy.mp4` file** on the host and mount it into the container.  
+You can use the sample `dummy.mp4` provided in this repository, or supply your own small/valid video file if you prefer.
+
+**Instructions:**
+1. **Download the sample dummy file:**  
+   - Download `dummy.mp4` from the Placeholdarr GitHub repository and save it to your host (e.g., `/path/to/dummy.mp4`).
+2. **Or use your own:**  
+   - You may use any small/valid video file as a placeholder.
+3. **Mount it into the container:**  
+   - In your `docker-compose.yml` or `docker run` command, mount it to `/data/dummy.mp4` inside the container:
+     ```yaml
+     volumes:
+       - /path/to/dummy.mp4:/data/dummy.mp4
+     ```
+4. **Set the path in your `.env`:**  
+   - `DUMMY_FILE_PATH=/data/dummy.mp4`
+
+
+---
+
 ## What's New
 
 - **Jellyfin support:** All placeholder, status, and automation features now work with Jellyfin.

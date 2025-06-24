@@ -22,14 +22,14 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     
     # Plex
-    PLEX_URL: str
-    PLEX_TOKEN: str
-    PLEX_MOVIE_SECTION_ID: int
-    PLEX_TV_SECTION_ID: int
+    PLEX_URL: Optional[str] = None
+    PLEX_TOKEN: Optional[str] = None
+    PLEX_MOVIE_SECTION_ID: Optional[int] = None
+    PLEX_TV_SECTION_ID: Optional[int] = None
     
     # Jellyfin
-    JELLYFIN_URL: str
-    JELLYFIN_TOKEN: str
+    JELLYFIN_URL: Optional[str] = None
+    JELLYFIN_TOKEN: Optional[str] = None
 
     # Services
     RADARR_URL: str
@@ -101,18 +101,26 @@ class Settings(BaseSettings):
     
     @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', pre=True)
     def validate_url(cls, v):
+        if v is None or v == "":
+            return v  # Allow missing/blank for optional URLs
         if not v.startswith(('http://', 'https://')):
             raise ValueError(f"Invalid URL: {v}")
         return v.rstrip('/')
 
     @root_validator(skip_on_failure=True)
     def check_media_providers(cls, values):
+        enable_plex = values.get('ENABLE_PLEX', True)
+        enable_jellyfin = values.get('ENABLE_JELLYFIN', True)
         plex_keys = [values.get('PLEX_URL'), values.get('PLEX_TOKEN')]
         jellyfin_keys = [values.get('JELLYFIN_URL'), values.get('JELLYFIN_TOKEN')]
         plex_configured = all(plex_keys)
         jellyfin_configured = all(jellyfin_keys)
-        if not (plex_configured or jellyfin_configured):
-            raise ValueError("Configuration error: Either all PLEX_* variables or all JELLYFIN_* variables must be set.")
+        if enable_plex and not plex_configured:
+            raise ValueError("ENABLE_PLEX is true but PLEX_URL or PLEX_TOKEN is missing.")
+        if enable_jellyfin and not jellyfin_configured:
+            raise ValueError("ENABLE_JELLYFIN is true but JELLYFIN_URL or JELLYFIN_TOKEN is missing.")
+        if not (enable_plex or enable_jellyfin):
+            raise ValueError("At least one of ENABLE_PLEX or ENABLE_JELLYFIN must be true.")
         return values
 
     @property

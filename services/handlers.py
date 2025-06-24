@@ -238,9 +238,12 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                                         season_number=season_num,
                                         episode_range=(episode_num, episode_num),
                                         episode_title=episode_title)
-            series_folder = os.path.dirname(os.path.dirname(dummy_path))
-            unique_folders.add(series_folder)
-            schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
+            if dummy_path:
+                series_folder = os.path.dirname(os.path.dirname(dummy_path))
+                unique_folders.add(series_folder)
+                schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
+            else:
+                logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
         for folder in unique_folders:
             if settings.plex_enabled:
                 refresh_plex_item(folder)
@@ -280,10 +283,13 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                                       season_number=season_num,
                                       episode_range=(episode_num, episode_num),
                                       episode_title=episode_title)  # Include episode title & REMOVE episode_id
-        if settings.plex_enabled:
-            refresh_plex_item(os.path.dirname(dummy_path))
-        if settings.jellyfin_enabled:
-            refresh_jellyfin_item(os.path.dirname(dummy_path), "Deleted")
+        if dummy_path:
+            if settings.plex_enabled:
+                refresh_plex_item(os.path.dirname(dummy_path))
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(os.path.dirname(dummy_path), "Deleted")
+        else:
+            logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
         # --- NEW: Always refresh parent folder ---
         if episode_file_path:
             parent_folder = os.path.dirname(episode_file_path)
@@ -311,13 +317,16 @@ def handle_moviefiledelete(data: dict):
                                       f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} (dummy).mp4")
         if not os.path.exists(expected_dummy):
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-            folder = os.path.dirname(dummy_path)
-            logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
-            if settings.plex_enabled:
-                refresh_plex_item(folder)
-            if settings.jellyfin_enabled:
-                refresh_jellyfin_item(folder, "Deleted")
-            schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+            if dummy_path:
+                folder = os.path.dirname(dummy_path)
+                logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
+                if settings.plex_enabled:
+                    refresh_plex_item(folder)
+                if settings.jellyfin_enabled:
+                    refresh_jellyfin_item(folder, "Deleted")
+                schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+            else:
+                logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
         else:
             logger.info(f"Dummy file already exists for movie '{title}'", extra={'emoji_type': 'info'})
 
@@ -382,13 +391,15 @@ def handle_movieadd(data: dict):
                 logger.info(f"Skipping placeholder for movie '{title}' (real file exists)", extra={'emoji_type': 'skip'})
                 return
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-            logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
-            if settings.plex_enabled:
-                refresh_plex_item(os.path.dirname(dummy_path))
-            if settings.jellyfin_enabled:
-                refresh_jellyfin_item(os.path.dirname(dummy_path))
-
-            schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+            if dummy_path:
+                logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
+                if settings.plex_enabled:
+                    refresh_plex_item(os.path.dirname(dummy_path))
+                if settings.jellyfin_enabled:
+                    refresh_jellyfin_item(os.path.dirname(dummy_path))
+                schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+            else:
+                logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
 
         threading.Thread(target=delayed_placeholder, daemon=True).start()
         return JSONResponse({"status": "success", "message": "MovieAdd scheduled"})

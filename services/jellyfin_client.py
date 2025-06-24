@@ -183,4 +183,5 @@ def test_jellyfin_connection() -> bool:
         return False
 
 # Run a quick test at import time (optional)
-test_jellyfin_connection()
+if getattr(settings, "jellyfin_enabled", False):
+    test_jellyfin_connection()
