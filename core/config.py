@@ -97,6 +97,10 @@ class Settings(BaseSettings):
         path = Path(v)
         if not path.exists():
             raise ValueError(f"Path does not exist: {v}")
+        # If it's a file, check it's not empty (for DUMMY_FILE_PATH)
+        if path.is_file() and path.name == os.path.basename(os.getenv("DUMMY_FILE_PATH", "")):
+            if path.stat().st_size == 0:
+                raise ValueError(f"Dummy file exists but is empty: {v}")
         return str(path.absolute())
     
     @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', pre=True)
