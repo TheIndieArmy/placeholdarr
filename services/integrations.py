@@ -98,28 +98,58 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         return None
 
 def update_title_status(media_type, media_id, title, status, **kwargs):
-    """Abstract update of media title status on Plex or Jellyfin"""
+    """Abstract update of media title status on Plex and/or Jellyfin"""
+    results = []
+
+    # Plex update
     if settings.plex_enabled:
         from services.plex_client import update_plex_title_status
-        return update_plex_title_status(
-            media_type=media_type,
-            media_id=media_id,
-            title=title,
-            status=status,
-            **kwargs
-        )
+        logger.debug(f"[Plex] Attempting update – type={media_type} id={media_id} status={status}", 
+                     extra={'emoji_type': 'debug'})
+        try:
+            success = update_plex_title_status(
+                media_type=media_type,
+                media_id=media_id,
+                title=title,
+                status=status,
+                **kwargs
+            )
+            logger.debug(f"[Plex] Update {'succeeded' if success else 'failed'} for id={media_id}", 
+                         extra={'emoji_type': 'debug'})
+            results.append(success)
+        except Exception as e:
+            logger.error(f"[Plex] Exception updating id={media_id}: {e}", extra={'emoji_type': 'error'})
+            results.append(False)
+
+    # Jellyfin update
     if settings.jellyfin_enabled:
         from services.jellyfin_client import update_jellyfin_title_status
-        # Jellyfin expects itemId as media_id
-        return update_jellyfin_title_status(
-            media_type=media_type,
-            item_id=media_id,
-            title=title,
-            status=status,
-            **kwargs
-        )
-    logger.error("No media server configured for title update", extra={'emoji_type': 'error'})
-    return False
+        logger.debug(f"[Jellyfin] Attempting update – type={media_type} id={media_id} status={status}", 
+                     extra={'emoji_type': 'debug'})
+        try:
+            success = update_jellyfin_title_status(
+                media_type=media_type,
+                media_id=media_id,
+                title=title,
+                status=status,
+                **kwargs
+            )
+            logger.debug(f"[Jellyfin] Update {'succeeded' if success else 'failed'} for id={media_id}", 
+                         extra={'emoji_type': 'debug'})
+            results.append(success)
+        except Exception as e:
+            logger.error(f"[Jellyfin] Exception updating id={media_id}: {e}", extra={'emoji_type': 'error'})
+            results.append(False)
+
+    # No server case
+    if not results:
+        logger.error("No media server configured for title update", extra={'emoji_type': 'error'})
+        return False
+
+    # Return True if at least one succeeded
+    overall = any(results)
+    logger.debug(f"update_title_status overall result: {overall}", extra={'emoji_type': 'debug'})
+    return overall
 
 # Title update and scheduling functions
 def schedule_episode_request_update(series_title, season_num, episode_num, media_id, delay=10, retries=5):

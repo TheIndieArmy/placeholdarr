@@ -4,13 +4,17 @@ from urllib.parse import quote
 import requests
 from core.config import settings
 from core.logger import logger
+from services.utils import strip_status_markers
+from urllib.parse import quote_plus
 
 # Initialize a shared session with default headers
 session = requests.Session()
 session.headers.update({
-    'X-MediaBrowser-Token': settings.JELLYFIN_TOKEN,
-    'Content-Type': 'application/json'
+    'X-Emby-Token': settings.JELLYFIN_TOKEN,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
 })
+
 
 def build_jellyfin_url(endpoint: str) -> str:
     """
@@ -85,27 +89,103 @@ def refresh_jellyfin_library(library_id: str,
     return False
 
 
-def update_jellyfin_title_status(item_id: str, new_title: str) -> bool:
+def update_jellyfin_title_status(
+    media_type: str,
+    media_id: int,
+    title: str,
+    status: str = None,
+    year: int = None,
+    season: int = None,
+    episode: int = None
+) -> bool:
     """
-    Update the display name of a Jellyfin item.
+    Update a Jellyfin item's display name by adding or removing a status marker.
+    Uses the /Users/{userId}/Items/{itemId} endpoint for both GET and POST.
 
     Args:
-        item_id (str): GUID of the item to rename.
-        new_title (str): New name to set.
+        media_type: 'tv' or 'movie'
+        media_id:   External ID (TVDb for TV, TMDb for movies)
+        title:      Fallback title search term
+        status:     e.g. 'Skipped', or None to remove any marker
+        year:       Movie year (optional)
+        season:     Season number for TV (required if media_type='tv')
+        episode:    Episode number for TV (required if media_type='tv')
 
     Returns:
-        bool: True if update succeeded (HTTP 200), False otherwise.
+        True if rename succeeded, False otherwise.
     """
-    url = build_jellyfin_url(f"Items/{item_id}")
-    payload = {"Name": new_title}
+    # Helper: get admin user ID
+    def _get_admin_user_id() -> Optional[str]:
+        try:
+            users = session.get(build_jellyfin_url("Users"), timeout=5).json()
+            for u in users:
+                if u.get('Policy', {}).get('IsAdministrator'):
+                    return u.get('Id')
+        except Exception as ex:
+            logger.error(f"Failed to fetch Jellyfin users for admin detection: {ex}", extra={'emoji_type': 'error'})
+        return None
+
+    user_id = _get_admin_user_id()
+    if not user_id:
+        logger.error("No admin user available for Jellyfin rename", extra={'emoji_type': 'error'})
+        return False
+
+    # Build the search query (title + year)
+    params = {
+        'searchTerm': title,
+        'includeItemTypes': 'Movie' if media_type=='movie' else 'Episode',
+        'recursive': 'true',
+        'fields': 'ProviderIds,Name,ProductionYear'
+    }
+    if media_type=='movie' and year:
+        params['searchTerm'] += f" {year}"
+
+    qs = "&".join(f"{k}={quote_plus(str(v))}" for k,v in params.items())
+    search_url = build_jellyfin_url(f"Users/{user_id}/Items?{qs}")
+
+    # 3) Perform search
     try:
-        resp = session.post(url, json=payload)
-        resp.raise_for_status()
-        logger.info(f"Updated item {item_id} title to '{new_title}'", extra={'emoji_type': 'update'})
+        items = session.get(search_url, timeout=5).json().get('Items', [])
+    except Exception as ex:
+        logger.error(f"Search request failed: {ex}", extra={'emoji_type': 'error'})
+        return False
+
+    # 4) Filter by TMDb provider ID (exact match on "Tmdb") and year
+    def matches(item: dict) -> bool:
+        pid = item.get('ProviderIds', {})
+        # match ID if provided
+        if media_type=='movie' and media_id is not None:
+            if int(pid.get('Tmdb', -1)) != media_id:
+                return False
+        # match year if provided
+        if media_type=='movie' and year is not None:
+            if int(item.get('ProductionYear', -1)) != year:
+                return False
+        return True
+
+    filtered = [i for i in items if matches(i)]
+    if not filtered:
+        logger.error(f"No matching item for '{title}' ({year}) TMDb={media_id}", extra={'emoji_type': 'error'})
+        return False
+
+    # 5) Pick the first result
+    item = filtered[0]
+    item_id = item['Id']
+    current_name = item.get('Name', title)
+    base = strip_status_markers(current_name)
+    new_name = f"{base} - [{status}]" if status else base
+
+    # 6) GET full DTO and POST it back
+    url = build_jellyfin_url(f"Items/{item_id}?userId={user_id}")
+    try:
+        dto = session.get(url, timeout=5).json()
+        dto['Name'] = new_name
+        session.post(url, json=dto, timeout=5).raise_for_status()
+        logger.info(f"Renamed item {current_name} → '{new_name}'", extra={'emoji_type': 'update'})
         return True
     except Exception as ex:
-        logger.error(f"Title update failed: {ex}", extra={'emoji_type': 'error'})
-    return False
+        logger.error(f"Failed to update DTO: {ex}", extra={'emoji_type': 'error'})
+        return False
 
 # Legacy alias for backward compatibility
 update_jellyfin_title = update_jellyfin_title_status
