@@ -5,6 +5,8 @@ from core.config import settings
 from core.logger import logger
 
 def build_plex_url(path: str) -> str:
+    if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL:
+        return ""
     """Build a complete Plex URL with proper path handling."""
     # Remove any leading/trailing slashes from both base and path
     base = settings.PLEX_URL.rstrip('/')
@@ -16,6 +18,8 @@ def build_plex_url(path: str) -> str:
     return url
 
 def refresh_plex_item(item_path, media_type=None):
+    if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL or not settings.PLEX_TOKEN:
+        return False
     """
     Refresh a specific Plex path
     
@@ -61,6 +65,8 @@ def refresh_plex_item(item_path, media_type=None):
         return False
 
 def find_show_by_id(tvdb_id, title=None):
+    if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL or not settings.PLEX_TOKEN:
+        return None
     """
     Find a TV show in Plex library using TVDB ID as primary identifier
     Falls back to title matching if ID matching fails
@@ -124,6 +130,8 @@ def find_show_by_id(tvdb_id, title=None):
         return None
 
 def find_movie_by_id(tmdb_id, title=None, year=None):
+    if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL or not settings.PLEX_TOKEN:
+        return None
     """
     Find a movie in Plex library using TMDB ID as primary identifier
     Falls back to title matching if ID matching fails
@@ -211,6 +219,8 @@ def _prepend_status_to_summary(summary, status):
         return summary.strip()
 
 def update_plex_title_status(media_type, media_id, title, status=None, year=None, season=None, episode=None):
+    if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL or not settings.PLEX_TOKEN:
+        return False
     """
     Update Plex summary with status or remove status markers.
     Uses ID-based matching to find the item.
