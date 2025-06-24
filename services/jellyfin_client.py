@@ -30,6 +30,8 @@ def build_jellyfin_url(endpoint: str) -> str:
 
 
 def refresh_jellyfin_item(path: str, update_type: str = 'Created') -> bool:
+    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
+        return False
     """
     Trigger a scan/update for a specific file or directory.
 
@@ -98,6 +100,8 @@ def _prepend_status_to_summary(summary, status):
         return summary.strip()
 
 def update_jellyfin_title_status(media_type=None, item_id=None, title=None, status=None, season=None, episode=None, year=None, **kwargs):
+    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
+        return False
     """
     Update the display name and summary (Overview) of a Jellyfin item.
     """
@@ -132,6 +136,8 @@ def update_jellyfin_title_status(media_type=None, item_id=None, title=None, stat
 update_jellyfin_title = update_jellyfin_title_status
 
 def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
+    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
+        return ''
     """
     Retrieve the absolute filesystem path for a given Jellyfin item ID.
 
