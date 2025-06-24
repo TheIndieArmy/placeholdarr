@@ -19,7 +19,7 @@ if not dotenv_path.exists():
 load_dotenv(dotenv_path)
 
 class Settings(BaseSettings):
-    LOG_LEVEL: str = "DEBUG"
+    LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     
     # Plex
     PLEX_URL: str
@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
 
+    PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
+
+    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").lower() == "true"
+    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").lower() == "true"
+
     # Add a method to clean string values
     @validator('*', pre=True)
     def clean_string_values(cls, v):
@@ -112,11 +117,11 @@ class Settings(BaseSettings):
 
     @property
     def plex_enabled(self) -> bool:
-        return bool(self.PLEX_URL and self.PLEX_TOKEN)
+        return self.ENABLE_PLEX and bool(self.PLEX_URL and self.PLEX_TOKEN)
 
     @property
     def jellyfin_enabled(self) -> bool:
-        return bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
+        return self.ENABLE_JELLYFIN and bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
 
     @property
     def radarr_4k_port(self) -> int:
@@ -137,6 +142,10 @@ class Settings(BaseSettings):
     @property
     def plex_4k_tv_section_id(self) -> int:
         return self.PLEX_TV_4K_SECTION_ID if hasattr(self, 'PLEX_TV_4K_SECTION_ID') else self.PLEX_TV_SECTION_ID
+
+    @property
+    def host(self) -> str:
+        return self.PLACEHOLDARR_HOST
 
     class Config:
         env_file = str(dotenv_path)

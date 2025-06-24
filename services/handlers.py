@@ -112,9 +112,9 @@ def handle_import_event(data: dict, is_4k: bool = False):
             title = movie.get('title', 'Unknown Movie')
             year = movie.get('year')
             movie_path = data.get("movieFile", {}).get("path")
-            
+
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
-            
+
             # Update Plex/Jellyfin title to "Available" (remove status markers)
             from services.integrations import update_title_status
             update_title_status(
@@ -124,36 +124,42 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 status=None,     # None → strip markers
                 year=year
             )
-            
+
             # Clean up placeholder files
             delete_dummy_files('movie', title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-            
+
             dummy_folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER, 
             f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
 
-            # Trigger a library refresh on whichever server is active
+            # --- NEW: Always refresh parent folder ---
+            if movie_path:
+                parent_folder = os.path.dirname(movie_path)
+                if settings.plex_enabled:
+                    refresh_plex_item(parent_folder)
+                if settings.jellyfin_enabled:
+                    refresh_jellyfin_item(parent_folder)
+
+            # Also refresh the dummy folder (legacy/placeholder logic)
             if settings.plex_enabled:
-                from services.plex_client import refresh_plex_item
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder)
-            
+
         elif 'episodes' in data and 'series' in data:
             # TV episode import handling
             series = data['series']
             episode = data['episodes'][0]  # Handle first episode in the list
-            
+
             series_title = series.get('title', 'Unknown Series')
             tvdb_id = series.get('tvdbId')
             season_num = episode.get('seasonNumber')
             episode_num = episode.get('episodeNumber')
             episode_title = episode.get('title', 'Unknown Episode')
             episode_path = data.get("episodeFile", {}).get("path")
-            
-            # Format full episode identifier
+
             full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
             logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
-            
+
             # Update Plex/Jellyfin title to "Available" (remove status markers)
             from services.integrations import update_title_status
             update_title_status(
@@ -164,27 +170,34 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 season=season_num,
                 episode=episode_num
             )
-            
+
             # Clean up placeholder files
             delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, 
                               settings.TV_LIBRARY_FOLDER, season_number=season_num, episode_number=episode_num)
-            
-            # Refresh library
+
+            # --- NEW: Always refresh parent folder ---
+            if episode_path:
+                parent_folder = os.path.dirname(episode_path)
+                if settings.plex_enabled:
+                    refresh_plex_item(parent_folder)
+                if settings.jellyfin_enabled:
+                    refresh_jellyfin_item(parent_folder)
+
+            # Also refresh the dummy folder (legacy/placeholder logic)
+            folder_path = os.path.join(
+                settings.TV_LIBRARY_FOLDER,
+                f"{sanitize_filename(series_title)}"
+                f"{' ('+str(series.get('year'))+')' if series.get('year') else ''}"
+                f" {{tvdb-{tvdb_id}}}"
+            )
             if settings.plex_enabled:
-                from services.plex_client import refresh_plex_item
-                folder_path = os.path.join(
-                    settings.TV_LIBRARY_FOLDER,
-                    f"{sanitize_filename(series_title)}"
-                    f"{' ('+str(series.get('year'))+')' if series.get('year') else ''}"
-                    f" {{tvdb-{tvdb_id}}}"
-                )
                 refresh_plex_item(folder_path)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(folder_path)
-            
+
     except Exception as e:
         logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
-    
+
     return JSONResponse({"status": "success", "message": "Import cleanup processed"})
 
 def handle_seriesadd(data: dict, is_4k: bool = False):
@@ -271,7 +284,13 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
             refresh_plex_item(os.path.dirname(dummy_path))
         if settings.jellyfin_enabled:
             refresh_jellyfin_item(os.path.dirname(dummy_path), "Deleted")
-        
+        # --- NEW: Always refresh parent folder ---
+        if episode_file_path:
+            parent_folder = os.path.dirname(episode_file_path)
+            if settings.plex_enabled:
+                refresh_plex_item(parent_folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(parent_folder)
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
     logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
     return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
@@ -286,7 +305,7 @@ def handle_moviefiledelete(data: dict):
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
         movie_file_path = data.get("movieFile", {}).get("path")
-        
+
         expected_dummy = os.path.join(settings.MOVIE_LIBRARY_FOLDER,
                                       f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}",
                                       f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} (dummy).mp4")
@@ -301,6 +320,15 @@ def handle_moviefiledelete(data: dict):
             schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
         else:
             logger.info(f"Dummy file already exists for movie '{title}'", extra={'emoji_type': 'info'})
+
+        # --- NEW: Always refresh parent folder ---
+        if movie_file_path:
+            parent_folder = os.path.dirname(movie_file_path)
+            if settings.plex_enabled:
+                refresh_plex_item(parent_folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(parent_folder)
+
     return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
 
 def handle_movie_delete(data: dict):
