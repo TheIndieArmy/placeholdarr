@@ -130,10 +130,18 @@ def update_title_status(media_type, media_id, title, status, **kwargs):
         )
     if settings.jellyfin_enabled:
         from services.jellyfin_client import update_jellyfin_title_status, find_jellyfin_item_id
-        # Always resolve the correct Jellyfin item ID (GUID) before updating
-        resolved_id = find_jellyfin_item_id(media_type, media_id, title, **kwargs)
+        # Retry logic for Jellyfin item lookup
+        max_attempts = 6
+        delay = 5  # seconds
+        resolved_id = None
+        for attempt in range(max_attempts):
+            resolved_id = find_jellyfin_item_id(media_type, media_id, title, **kwargs)
+            if resolved_id:
+                break
+            logger.info(f"Jellyfin item not found for {title} ({media_type}, {media_id}), retrying in {delay}s (attempt {attempt+1}/{max_attempts})", extra={'emoji_type': 'retry'})
+            time.sleep(delay)
         if not resolved_id:
-            logger.error(f"Could not resolve Jellyfin item ID for {title} ({media_type}, {media_id})", extra={'emoji_type': 'error'})
+            logger.error(f"Could not resolve Jellyfin item ID for {title} ({media_type}, {media_id}) after {max_attempts} attempts", extra={'emoji_type': 'error'})
             return False
         return update_jellyfin_title_status(
             media_type=media_type,

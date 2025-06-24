@@ -151,18 +151,27 @@ def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
             resp = session.get(users_url, timeout=5)
             resp.raise_for_status()
             users = resp.json()
-            # Find first admin user
+            user_id = None
+            # Prefer admin user, but fallback to first user if no admin found
             for u in users:
                 policy = u.get('Policy', {})
                 if policy.get('IsAdministrator'):
                     user_id = u.get('Id')
                     break
+            if not user_id and users:
+                logger.warning(f"No admin user found. Users returned: {users}", extra={'emoji_type': 'warning'})
+                user_id = users[0].get('Id')
+                logger.warning("No admin user found in Jellyfin Users list, using first user as fallback.", extra={'emoji_type': 'warning'})
             if not user_id:
-                logger.error("No admin user found in Jellyfin Users list", extra={'emoji_type': 'error'})
+                logger.error(f"No valid user found in Jellyfin Users list. Full users response: {users}", extra={'emoji_type': 'error'})
                 return ''
         except Exception as ex:
             logger.error(f"Failed to fetch Jellyfin users: {ex}", extra={'emoji_type': 'error'})
             return ''
+    # Validate user_id is a non-empty GUID
+    if not user_id or not isinstance(user_id, str) or len(user_id) < 8:
+        logger.error(f"Invalid or missing Jellyfin user_id: {user_id}", extra={'emoji_type': 'error'})
+        return ''
     # Fetch the disk path for the item under the user context
     try:
         url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}?fields=Path")
