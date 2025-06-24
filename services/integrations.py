@@ -128,11 +128,15 @@ def update_title_status(media_type, media_id, title, status, **kwargs):
             **kwargs
         )
     if settings.jellyfin_enabled:
-        from services.jellyfin_client import update_jellyfin_title_status
-        # Jellyfin expects itemId as media_id
+        from services.jellyfin_client import update_jellyfin_title_status, find_jellyfin_item_id
+        # Always resolve the correct Jellyfin item ID (GUID) before updating
+        resolved_id = find_jellyfin_item_id(media_type, media_id, title, **kwargs)
+        if not resolved_id:
+            logger.error(f"Could not resolve Jellyfin item ID for {title} ({media_type}, {media_id})", extra={'emoji_type': 'error'})
+            return False
         return update_jellyfin_title_status(
             media_type=media_type,
-            item_id=media_id,
+            item_id=resolved_id,
             title=title,
             status=status,
             **kwargs

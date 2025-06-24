@@ -22,7 +22,7 @@ def build_jellyfin_url(endpoint: str) -> str:
     Returns:
         str: Full URL to query.
     """
-    base = settings.JELLYFIN_URL.rstrip('/')
+    base = settings.JELLYFIN_URL.rstrip('/') if settings.JELLYFIN_URL else ""
     clean = endpoint.lstrip('/')
     url = f"{base}/{clean}"
     logger.debug(f"Built Jellyfin URL: {url}", extra={'emoji_type': 'debug'})
@@ -102,6 +102,12 @@ def update_jellyfin_title_status(media_type=None, item_id=None, title=None, stat
     Update the display name and summary (Overview) of a Jellyfin item.
     """
     try:
+# Ensure item_id is a valid Jellyfin GUID, not a TMDB/TVDB ID
+        # If item_id is numeric (e.g., TMDB/TVDB), this will fail with 400
+        if not item_id or not isinstance(item_id, str) or len(item_id) < 8:
+            logger.error(f"Invalid or missing Jellyfin item_id: {item_id}", extra={'emoji_type': 'error'})
+            return False
+
         url = build_jellyfin_url(f"Items/{item_id}")
         # Fetch current item info for summary
         resp = session.get(url)
@@ -166,6 +172,47 @@ def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
         logger.error(f"Failed to get file path for {item_id}: {ex}", extra={'emoji_type': 'error'})
 
     return ''
+
+
+def find_jellyfin_item_id(media_type, external_id, title, season=None, episode=None, year=None, **kwargs):
+    """
+    Find the Jellyfin item GUID by TMDB/TVDB ID or title (and optionally season/episode).
+    Returns the Jellyfin item ID (GUID) or None if not found.
+    """
+    try:
+        # Build filter params for /Items endpoint
+        params = {}
+        if media_type == "movie":
+            if external_id:
+                params["ExternalId"] = str(external_id)
+            if title:
+                params["SearchTerm"] = title
+            if year:
+                params["Years"] = year
+        elif media_type == "tv":
+            if external_id:
+                params["ExternalId"] = str(external_id)
+            if title:
+                params["SearchTerm"] = title
+            if year:
+                params["Years"] = year
+        url = build_jellyfin_url("Items")
+        resp = session.get(url, params=params)
+        resp.raise_for_status()
+        items = resp.json().get("Items", [])
+        if not items:
+            logger.error(f"No Jellyfin item found for {media_type} {external_id} ({title})", extra={'emoji_type': 'error'})
+            return None
+        # For episodes, further filter by season/episode if provided
+        if media_type == "tv" and season and episode:
+            for item in items:
+                if (item.get("SeasonNumber") == int(season) and item.get("IndexNumber") == int(episode)):
+                    return item.get("Id")
+        # Otherwise, return the first match
+        return items[0].get("Id")
+    except Exception as ex:
+        logger.error(f"Failed to find Jellyfin item ID: {ex}", extra={'emoji_type': 'error'})
+        return None
 
 
 def test_jellyfin_connection() -> bool:
