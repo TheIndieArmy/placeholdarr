@@ -98,14 +98,17 @@ def sync_calendar_episodes():
             # Only create placeholder if not already aired
             if air_date > now:
                 status = _build_coming_soon_status(air_date, now, enable_countdown)
+                dummy_file = getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or settings.DUMMY_FILE_PATH
             else:
                 status = "Request"
+                dummy_file = settings.DUMMY_FILE_PATH
             dummy_path = place_dummy_file(
                 "tv", series_title, series_year, tvdb_id,
                 settings.TV_LIBRARY_FOLDER,
                 season_number=season_num,
                 episode_range=(episode_num, episode_num),
-                episode_title=episode_title
+                episode_title=episode_title,
+                dummy_file_override=dummy_file
             )
             episodes_to_update.append({
                 "series_title": series_title,
@@ -146,10 +149,13 @@ def sync_calendar_episodes():
                 continue
             if air_date > now:
                 status = _build_coming_soon_status(air_date, now, enable_countdown)
+                dummy_file = getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or settings.DUMMY_FILE_PATH
             else:
                 status = "Request"
+                dummy_file = settings.DUMMY_FILE_PATH
             dummy_path = place_dummy_file(
-                "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER
+                "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER,
+                dummy_file_override=dummy_file
             )
             movies_to_update.append({
                 "title": title,

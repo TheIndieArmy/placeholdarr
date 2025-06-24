@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     # Dummy file management
     DUMMY_FILE_PATH: str
+    COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
 
     # Play mode settings
@@ -92,8 +93,10 @@ class Settings(BaseSettings):
                 v = v.strip()
         return v
     
-    @validator('DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
+    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):
+        if not v:
+            return v
         path = Path(v)
         if not path.exists():
             raise ValueError(f"Path does not exist: {v}")

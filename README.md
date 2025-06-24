@@ -133,6 +133,14 @@ Optional settings:
 
 ---
 
+### Placeholder Video Files
+
+- `DUMMY_FILE_PATH`: Path to your standard dummy video file (used for available/requestable placeholders).
+- `COMING_SOON_DUMMY_FILE_PATH`: (Optional) Path to a special dummy video file used for "Coming Soon" placeholders (future releases).  
+  If not set, the standard dummy file will be used for all placeholders.
+
+---
+
 ### Disabling Plex or Jellyfin
 
 - **To disable Plex:**  

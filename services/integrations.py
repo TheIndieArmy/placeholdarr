@@ -26,7 +26,8 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
         return os.path.join(base_path, folder_name, season_folder)
 
 def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
-                    season_number=None, episode_range=None, episode_title=None, episode_id=None):
+                    season_number=None, episode_range=None, episode_title=None, episode_id=None,
+                    dummy_file_override=None):
     """Create a dummy video file in the appropriate location using the configured strategy"""
     try:
         # Determine the base path if not provided
@@ -40,7 +41,7 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
         year_str = f" ({year})" if year else ""
 
-        dummy_source = settings.DUMMY_FILE_PATH  # Valid dummy.mp4
+        dummy_source = dummy_file_override or settings.DUMMY_FILE_PATH  # Valid dummy.mp4
         if not os.path.exists(dummy_source):
             logger.error(f"Dummy video file does not exist at {dummy_source}", extra={'emoji_type': 'error'})
             return None
