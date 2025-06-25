@@ -78,8 +78,8 @@ class Settings(BaseSettings):
 
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
-    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").lower() == "true"
-    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").lower() == "true"
+    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
 
     # Add a method to clean string values
     @validator('*', pre=True)
