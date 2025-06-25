@@ -248,6 +248,34 @@ def sync_calendar_episodes():
         except Exception as ex:
             logger.error(f"Exception during Jellyfin overview update for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {ex}", extra={'emoji_type': 'error'})
 
+    # --- Jellyfin movie overview updates ---
+    for movie in movies_to_update:
+        logger.debug(f"Attempting Jellyfin overview update: {movie['title']} ({movie['year']}) (TMDB {movie['tmdb_id']})", extra={'emoji_type': 'debug'})
+        try:
+            from services.jellyfin_client import find_jellyfin_item_id, update_jellyfin_title_status
+            jellyfin_id = find_jellyfin_item_id(
+                media_type='movie',
+                external_id=movie['tmdb_id'],
+                title=movie['title'],
+                year=movie['year']
+            )
+            logger.debug(f"Jellyfin item ID for update: {jellyfin_id}", extra={'emoji_type': 'debug'})
+            if jellyfin_id:
+                result = update_jellyfin_title_status(
+                    media_type='movie',
+                    item_id=jellyfin_id,
+                    title=movie['title'],
+                    status=movie['status'],
+                    year=movie['year']
+                )
+                if not result:
+                    logger.warning(f"[Jellyfin Update] Update returned False for {movie['title']} ({movie['year']}) (item_id={jellyfin_id})", extra={'emoji_type': 'warning'})
+                logger.info(f"Jellyfin overview update result for {movie['title']} ({movie['year']}): {result}", extra={'emoji_type': 'debug'})
+            else:
+                logger.warning(f"Could not find Jellyfin item for {movie['title']} ({movie['year']})", extra={'emoji_type': 'warning'})
+        except Exception as ex:
+            logger.error(f"Exception during Jellyfin overview update for {movie['title']} ({movie['year']}): {ex}", extra={'emoji_type': 'error'})
+
 # --- Helper Functions ---
 
 def _build_coming_soon_status(air_date, now, enable_countdown):

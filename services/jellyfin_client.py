@@ -142,6 +142,23 @@ def fetch_full_episode_object(item_id):
         logger.error(f"/Users/{{userId}}/Items/{{id}} failed: {user_resp.status_code} {user_resp.text}", extra={'emoji_type': 'error'})
         return None
 
+def fetch_full_movie_object(item_id):
+    """
+    Fetch the full movie object from Jellyfin using the only known working method: /Users/{userId}/Items/{id}.
+    """
+    user_id = get_first_jellyfin_user_id()
+    if not user_id:
+        logger.error(f"No valid Jellyfin user ID found for fetch.", extra={'emoji_type': 'error'})
+        return None
+    user_url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}")
+    user_resp = session.get(user_url)
+    if user_resp.status_code == 200:
+        logger.debug(f"Fetched movie object via /Users/{{userId}}/Items/{{id}}", extra={'emoji_type': 'debug'})
+        return user_resp.json()
+    else:
+        logger.error(f"/Users/{{userId}}/Items/{{id}} failed: {user_resp.status_code} {user_resp.text}", extra={'emoji_type': 'error'})
+        return None
+
 def update_jellyfin_title_status(media_type=None, item_id=None, title=None, status=None, season=None, episode=None, year=None, **kwargs):
     logger.info(f"[Jellyfin Update] Called with: media_type={media_type}, item_id={item_id}, title={title}, status={status}, season={season}, episode={episode}, year={year}, kwargs={kwargs}", extra={'emoji_type': 'debug'})
     if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
@@ -153,27 +170,28 @@ def update_jellyfin_title_status(media_type=None, item_id=None, title=None, stat
             return False
         if media_type == "tv":
             full_obj = fetch_full_episode_object(item_id)
-            if full_obj:
-                current_overview = full_obj.get('Overview', '') or ''
-                # Use the status as a prefix, replacing any previous status marker
-                new_overview = _prepend_status_to_summary(current_overview, status)
-                if title:
-                    full_obj["Name"] = title
-                full_obj["Overview"] = new_overview
-                url = build_jellyfin_url(f"Items/{item_id}")
-                logger.info(f"[Jellyfin Update] POSTing full episode object to {url}", extra={'emoji_type': 'debug'})
-                resp = session.post(url, json=full_obj)
-                if resp.status_code in (200, 204):
-                    logger.info(f"[Jellyfin Update] SUCCESS: Updated item {item_id} title to '{title}' and overview.", extra={'emoji_type': 'update'})
-                    return True
-                else:
-                    logger.error(f"[Jellyfin Update] FAIL: POST status {resp.status_code}: {resp.text}", extra={'emoji_type': 'error'})
-            else:
-                logger.error(f"[Jellyfin Update] Could not fetch full episode object for POST.", extra={'emoji_type': 'error'})
-            return False
+        elif media_type == "movie":
+            full_obj = fetch_full_movie_object(item_id)
         else:
-            logger.error(f"[Jellyfin Update] Only TV episode updates are supported in robust mode.", extra={'emoji_type': 'error'})
+            logger.error(f"[Jellyfin Update] Only TV episode and movie updates are supported in robust mode.", extra={'emoji_type': 'error'})
             return False
+        if full_obj:
+            current_overview = full_obj.get('Overview', '') or ''
+            new_overview = _prepend_status_to_summary(current_overview, status)
+            if title:
+                full_obj["Name"] = title
+            full_obj["Overview"] = new_overview
+            url = build_jellyfin_url(f"Items/{item_id}")
+            logger.info(f"[Jellyfin Update] POSTing full object to {url}", extra={'emoji_type': 'debug'})
+            resp = session.post(url, json=full_obj)
+            if resp.status_code in (200, 204):
+                logger.info(f"[Jellyfin Update] SUCCESS: Updated item {item_id} title to '{title}' and overview.", extra={'emoji_type': 'update'})
+                return True
+            else:
+                logger.error(f"[Jellyfin Update] FAIL: POST status {resp.status_code}: {resp.text}", extra={'emoji_type': 'error'})
+        else:
+            logger.error(f"[Jellyfin Update] Could not fetch full object for POST.", extra={'emoji_type': 'error'})
+        return False
     except Exception as ex:
         logger.error(f"[Jellyfin Update] EXCEPTION: Title/overview update failed: {ex}", extra={'emoji_type': 'error'})
     return False
@@ -229,7 +247,27 @@ def find_jellyfin_episode_id(series_tvdb_id, series_title, season_num, episode_n
 def find_jellyfin_item_id(media_type, external_id, title, season=None, episode=None, year=None, **kwargs):
     if media_type == "tv" and season and episode:
         return find_jellyfin_episode_id(external_id, title, season, episode)
-    logger.error(f"[Jellyfin Lookup] Only robust TV episode lookup is supported in this mode.", extra={'emoji_type': 'error'})
+    elif media_type == "movie":
+        url = build_jellyfin_url("Items")
+        params = {"IncludeItemTypes": "Movie", "Recursive": "true", "Fields": "ProviderIds,Name,ProductionYear"}
+        resp = session.get(url, params=params)
+        resp.raise_for_status()
+        items = resp.json().get("Items", [])
+        # Prefer TMDB/IMDB/TVDB ID match
+        if external_id:
+            for item in items:
+                prov = item.get("ProviderIds")
+                if prov and (str(prov.get("Tmdb")) == str(external_id) or str(prov.get("Imdb")) == str(external_id) or str(prov.get("Tvdb")) == str(external_id)):
+                    return item.get("Id")
+        # Fallback: match by title and year
+        if title:
+            for item in items:
+                if item.get("Name", "").strip().lower() == title.strip().lower():
+                    if not year or not item.get("ProductionYear") or int(item.get("ProductionYear")) == int(year):
+                        return item.get("Id")
+        logger.error(f"[Jellyfin Lookup] Could not find movie for {title} (TMDB/IMDB/TVDB: {external_id}, Year: {year})", extra={'emoji_type': 'error'})
+        return None
+    logger.error(f"[Jellyfin Lookup] Only robust TV episode and movie lookup is supported in this mode.", extra={'emoji_type': 'error'})
     return None
 
 def test_jellyfin_connection() -> bool:
