@@ -217,6 +217,37 @@ def sync_calendar_episodes():
     if updated_movies:
         logger.info(f"Batch updated movie titles: {', '.join(updated_movies)}", extra={'emoji_type': 'update'})
 
+    # --- Debugging: Jellyfin summary updates ---
+    logger.info(f"[Jellyfin Debug] settings.jellyfin_enabled={getattr(settings, 'jellyfin_enabled', None)}, ENABLE_JELLYFIN={getattr(settings, 'ENABLE_JELLYFIN', None)}, JELLYFIN_URL={getattr(settings, 'JELLYFIN_URL', None)}, JELLYFIN_TOKEN={'set' if getattr(settings, 'JELLYFIN_TOKEN', None) else 'unset'}", extra={'emoji_type': 'debug'})
+    for ep in episodes_to_update:
+        logger.debug(f"Attempting Jellyfin overview update: {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d} (TVDB {ep['tvdb_id']})", extra={'emoji_type': 'debug'})
+        try:
+            from services.jellyfin_client import find_jellyfin_item_id, update_jellyfin_title_status
+            jellyfin_id = find_jellyfin_item_id(
+                media_type='tv',
+                external_id=ep['tvdb_id'],
+                title=ep['series_title'],
+                season=ep['season_num'],
+                episode=ep['episode_num']
+            )
+            logger.debug(f"Jellyfin item ID for update: {jellyfin_id}", extra={'emoji_type': 'debug'})
+            if jellyfin_id:
+                result = update_jellyfin_title_status(
+                    media_type='tv',
+                    item_id=jellyfin_id,
+                    title=ep['series_title'],
+                    status=ep['status'],
+                    season=ep['season_num'],
+                    episode=ep['episode_num']
+                )
+                if not result:
+                    logger.warning(f"[Jellyfin Update] Update returned False for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d} (item_id={jellyfin_id})", extra={'emoji_type': 'warning'})
+                logger.info(f"Jellyfin overview update result for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {result}", extra={'emoji_type': 'debug'})
+            else:
+                logger.warning(f"Could not find Jellyfin item for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}", extra={'emoji_type': 'warning'})
+        except Exception as ex:
+            logger.error(f"Exception during Jellyfin overview update for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {ex}", extra={'emoji_type': 'error'})
+
 # --- Helper Functions ---
 
 def _build_coming_soon_status(air_date, now, enable_countdown):
