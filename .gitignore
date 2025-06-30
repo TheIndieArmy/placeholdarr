@@ -45,4 +45,4 @@ media_handler.log
 .DS_Store
 Thumbs.db
 
-docker-compose.yml
+docker-compose.override.yml

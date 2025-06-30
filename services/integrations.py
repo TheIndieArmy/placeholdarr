@@ -26,8 +26,9 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
         return os.path.join(base_path, folder_name, season_folder)
 
 def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
-                    season_number=None, episode_range=None, episode_title=None, episode_id=None):
-    """Create a hardlink to a real dummy video file in the appropriate location"""
+                    season_number=None, episode_range=None, episode_title=None, episode_id=None,
+                    dummy_file_override=None):
+    """Create a dummy video file in the appropriate location using the configured strategy"""
     try:
         # Determine the base path if not provided
         if not base_path:
@@ -40,10 +41,25 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
         year_str = f" ({year})" if year else ""
 
-        dummy_source = settings.DUMMY_FILE_PATH  # Valid dummy.mp4
+        dummy_source = dummy_file_override or settings.DUMMY_FILE_PATH  # Valid dummy.mp4
         if not os.path.exists(dummy_source):
             logger.error(f"Dummy video file does not exist at {dummy_source}", extra={'emoji_type': 'error'})
             return None
+
+        def create_placeholder_file(src, dst):
+            if settings.PLACEHOLDER_STRATEGY == "copy":
+                shutil.copy2(src, dst)
+                logger.debug(f"Copied dummy file to {dst}", extra={'emoji_type': 'copy'})
+            else:
+                try:
+                    os.link(src, dst)
+                    logger.debug(f"Hardlinked dummy file to {dst}", extra={'emoji_type': 'link'})
+                except OSError as e:
+                    if e.errno == 18:  # Invalid cross-device link
+                        shutil.copy2(src, dst)
+                        logger.warning(f"Hardlink failed (cross-device); copied dummy file instead: {dst}", extra={'emoji_type': 'warning'})
+                    else:
+                        raise
 
         if media_type == 'tv' and season_number is not None:
             season_folder = get_folder_path(
@@ -65,10 +81,11 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
 
                     if os.path.exists(file_path):
                         os.remove(file_path)
-                    os.link(dummy_source, file_path)
-
-                    logger.debug(f"Hardlinked dummy file for {title} S{season_number}E{ep_num} to {file_path}",
-                                 extra={'emoji_type': 'link'})
+                    try:
+                        create_placeholder_file(dummy_source, file_path)
+                    except Exception as e:
+                        logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+                        return None
 
                 ep_title = episode_title or f"Episode {start_ep}"
                 file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
@@ -88,9 +105,12 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
 
             if os.path.exists(file_path):
                 os.remove(file_path)
-            os.link(dummy_source, file_path)
+            try:
+                create_placeholder_file(dummy_source, file_path)
+            except Exception as e:
+                logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+                return None
 
-            logger.debug(f"Hardlinked dummy movie file for {title} to {file_path}", extra={'emoji_type': 'link'})
             return file_path
 
     except Exception as e:

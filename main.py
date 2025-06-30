@@ -9,6 +9,8 @@ from fastapi import FastAPI, Request
 from core.logger import logger
 from services.handlers import handle_webhook
 from services.migration import run_migration
+from services.calendar_sync import start_calendar_sync
+from core.config import settings
 
 # Load environment variables
 load_dotenv(override=True)
@@ -68,10 +70,14 @@ async def webhook(request: Request):
 
 if __name__ == '__main__':
     import uvicorn
-    
+
+    # Start calendar sync on startup
+    start_calendar_sync()
+
     # Set port back to 8001 (your existing webhook port)
     port = int(os.getenv('PLACEHOLDARR_PORT'))
-    logger.info(f"Using port {port}", extra={'emoji_type': 'info'})
+    host = getattr(settings, "host", "0.0.0.0")
+    logger.info(f"Using host {host} and port {port}", extra={'emoji_type': 'info'})
     
     # Check if port is in use, and try to clear it
     if not check_port(port):
@@ -83,4 +89,4 @@ if __name__ == '__main__':
             sys.exit(1)
     
     # Start the server
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower())

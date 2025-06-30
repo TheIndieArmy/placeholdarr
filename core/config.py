@@ -19,17 +19,17 @@ if not dotenv_path.exists():
 load_dotenv(dotenv_path)
 
 class Settings(BaseSettings):
-    LOG_LEVEL: str = "DEBUG"
+    LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     
     # Plex
-    PLEX_URL: str
-    PLEX_TOKEN: str
-    PLEX_MOVIE_SECTION_ID: int
-    PLEX_TV_SECTION_ID: int
+    PLEX_URL: Optional[str] = None
+    PLEX_TOKEN: Optional[str] = None
+    PLEX_MOVIE_SECTION_ID: Optional[int] = None
+    PLEX_TV_SECTION_ID: Optional[int] = None
     
     # Jellyfin
-    JELLYFIN_URL: str
-    JELLYFIN_TOKEN: str
+    JELLYFIN_URL: Optional[str] = None
+    JELLYFIN_TOKEN: Optional[str] = None
 
     # Services
     RADARR_URL: str
@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     # Dummy file management
     DUMMY_FILE_PATH: str
+    COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
 
     # Play mode settings
@@ -66,6 +67,20 @@ class Settings(BaseSettings):
 
     # Migration settings
     MIGRATION: bool = False
+      
+    # Calendar-based status update settings
+    CALENDAR_LOOKAHEAD_DAYS: int = int(os.getenv("CALENDAR_LOOKAHEAD_DAYS", "30").split('#')[0].strip())
+    CALENDAR_SYNC_INTERVAL_HOURS: int = int(os.getenv("CALENDAR_SYNC_INTERVAL_HOURS", "12").split('#')[0].strip())
+    ENABLE_COMING_SOON_PLACEHOLDERS: bool = os.getenv("ENABLE_COMING_SOON_PLACEHOLDERS", "true").split('#')[0].strip().lower() == "true"
+    PREFERRED_MOVIE_DATE_TYPE: str = os.getenv("PREFERRED_MOVIE_DATE_TYPE", "inCinemas").split('#')[0].strip()
+    ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
+    CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
+
+    PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
+
+    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").lower() == "true"
+    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").lower() == "true"
+
     # Add a method to clean string values
     @validator('*', pre=True)
     def clean_string_values(cls, v):
@@ -78,36 +93,50 @@ class Settings(BaseSettings):
                 v = v.strip()
         return v
     
-    @validator('DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
+    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):
+        if not v:
+            return v
         path = Path(v)
         if not path.exists():
             raise ValueError(f"Path does not exist: {v}")
+        # If it's a file, check it's not empty (for DUMMY_FILE_PATH)
+        if path.is_file() and path.name == os.path.basename(os.getenv("DUMMY_FILE_PATH", "")):
+            if path.stat().st_size == 0:
+                raise ValueError(f"Dummy file exists but is empty: {v}")
         return str(path.absolute())
     
     @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', pre=True)
     def validate_url(cls, v):
+        if v is None or v == "":
+            return v  # Allow missing/blank for optional URLs
         if not v.startswith(('http://', 'https://')):
             raise ValueError(f"Invalid URL: {v}")
         return v.rstrip('/')
 
     @root_validator(skip_on_failure=True)
     def check_media_providers(cls, values):
+        enable_plex = values.get('ENABLE_PLEX', True)
+        enable_jellyfin = values.get('ENABLE_JELLYFIN', True)
         plex_keys = [values.get('PLEX_URL'), values.get('PLEX_TOKEN')]
         jellyfin_keys = [values.get('JELLYFIN_URL'), values.get('JELLYFIN_TOKEN')]
         plex_configured = all(plex_keys)
         jellyfin_configured = all(jellyfin_keys)
-        if not (plex_configured or jellyfin_configured):
-            raise ValueError("Configuration error: Either all PLEX_* variables or all JELLYFIN_* variables must be set.")
+        if enable_plex and not plex_configured:
+            raise ValueError("ENABLE_PLEX is true but PLEX_URL or PLEX_TOKEN is missing.")
+        if enable_jellyfin and not jellyfin_configured:
+            raise ValueError("ENABLE_JELLYFIN is true but JELLYFIN_URL or JELLYFIN_TOKEN is missing.")
+        if not (enable_plex or enable_jellyfin):
+            raise ValueError("At least one of ENABLE_PLEX or ENABLE_JELLYFIN must be true.")
         return values
 
     @property
     def plex_enabled(self) -> bool:
-        return bool(self.PLEX_URL and self.PLEX_TOKEN)
+        return self.ENABLE_PLEX and bool(self.PLEX_URL and self.PLEX_TOKEN)
 
     @property
     def jellyfin_enabled(self) -> bool:
-        return bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
+        return self.ENABLE_JELLYFIN and bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
 
     @property
     def radarr_4k_port(self) -> int:
@@ -128,6 +157,10 @@ class Settings(BaseSettings):
     @property
     def plex_4k_tv_section_id(self) -> int:
         return self.PLEX_TV_4K_SECTION_ID if hasattr(self, 'PLEX_TV_4K_SECTION_ID') else self.PLEX_TV_SECTION_ID
+
+    @property
+    def host(self) -> str:
+        return self.PLACEHOLDARR_HOST
 
     class Config:
         env_file = str(dotenv_path)
