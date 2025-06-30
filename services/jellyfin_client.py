@@ -278,7 +278,7 @@ def update_jellyfin_title_status(
         # Series level
         clean_title = re.sub(r'\s*\(\d{4}\)$', '', title)
         series_url = build_jellyfin_url(
-            f"Users/{user_id}/Items?searchTerm={quote_plus(title)}&includeItemTypes=Series&recursive=true&fields=ProviderIds,Name,Overview"
+            f"Users/{user_id}/Items?searchTerm={quote_plus(clean_title)}&includeItemTypes=Series&recursive=true&fields=ProviderIds,Name,Overview"
         )
 
         def fetch_series():
