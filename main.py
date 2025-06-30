@@ -73,9 +73,14 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Webhook handling failed: {e}", extra={'emoji_type': 'error'})
         raise
 
-
 if __name__ == '__main__':
     import uvicorn
+
+    # Force import of media server clients to trigger connection tests and endpoint checks
+    if settings.plex_enabled:
+        from services.plex_client import plex
+    if settings.jellyfin_enabled:
+        from services.jellyfin_client import test_jellyfin_connection
 
     # Start calendar sync on startup
     start_calendar_sync()

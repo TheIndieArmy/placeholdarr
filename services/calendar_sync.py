@@ -5,8 +5,9 @@ from datetime import datetime, timedelta, timezone
 import requests
 from core.config import settings
 from core.logger import logger
-from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update
-from services.plex_client import refresh_plex_item, update_plex_title_status
+from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update, update_title_status
+from services.plex_client import refresh_plex_item
+from services.jellyfin_client import refresh_jellyfin_item
 from services.utils import sanitize_filename
 
 # --- Scheduler/Timer ---
@@ -167,21 +168,25 @@ def sync_calendar_episodes():
     except Exception as e:
         logger.error(f"Radarr calendar sync failed: {e}", extra={'emoji_type': 'error'})
 
-    # --- Batch Plex refresh ---
+    # --- Batch Plex/Jellyfin refresh ---
     try:
-        logger.info("Refreshing Plex TV and Movie library folders for batch placeholder update...", extra={'emoji_type': 'refresh'})
-        refresh_plex_item(settings.TV_LIBRARY_FOLDER)
-        refresh_plex_item(settings.MOVIE_LIBRARY_FOLDER)
-        logger.info("Waiting 30 seconds for Plex to scan new placeholders...", extra={'emoji_type': 'refresh'})
+        logger.info("Refreshing Plex/Jellyfin TV and Movie library folders for batch placeholder update...", extra={'emoji_type': 'refresh'})
+        if settings.plex_enabled:
+            refresh_plex_item(settings.TV_LIBRARY_FOLDER)
+            refresh_plex_item(settings.MOVIE_LIBRARY_FOLDER)
+        if settings.jellyfin_enabled:
+            refresh_jellyfin_item(settings.TV_LIBRARY_FOLDER)
+            refresh_jellyfin_item(settings.MOVIE_LIBRARY_FOLDER)
+        logger.info("Waiting 30 seconds for Plex/Jellyfin to scan new placeholders...", extra={'emoji_type': 'refresh'})
         time.sleep(30)
     except Exception as e:
-        logger.error(f"Error during batch Plex refresh: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Error during batch Plex/Jellyfin refresh: {e}", extra={'emoji_type': 'error'})
 
     # --- Batch update episode titles ---
     updated_eps = []
     for ep in episodes_to_update:
         try:
-            update_plex_title_status(
+            update_title_status(
                 media_type='tv',
                 media_id=ep["tvdb_id"],
                 title=ep["series_title"],
@@ -194,7 +199,7 @@ def sync_calendar_episodes():
             if ep["air_date"].date() == now.date():
                 schedule_episode_request_update(ep["series_title"], ep["season_num"], ep["episode_num"], ep["tvdb_id"], delay=3600, retries=3)
         except Exception as e:
-            logger.error(f"Failed to update Plex title for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Failed to update Plex/Jellyfin title for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {e}", extra={'emoji_type': 'error'})
     if updated_eps:
         logger.info(f"Batch updated episode titles: {', '.join(updated_eps)}", extra={'emoji_type': 'update'})
 
@@ -202,7 +207,7 @@ def sync_calendar_episodes():
     updated_movies = []
     for movie in movies_to_update:
         try:
-            update_plex_title_status(
+            update_title_status(
                 media_type='movie',
                 media_id=movie["tmdb_id"],
                 title=movie["title"],
@@ -213,9 +218,68 @@ def sync_calendar_episodes():
             if movie["air_date"].date() == now.date():
                 schedule_movie_request_update(movie["title"], movie["tmdb_id"], year=movie["year"], delay=3600, retries=3)
         except Exception as e:
-            logger.error(f"Failed to update Plex title for movie {movie['title']}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Failed to update Plex/Jellyfin title for movie {movie['title']}: {e}", extra={'emoji_type': 'error'})
     if updated_movies:
         logger.info(f"Batch updated movie titles: {', '.join(updated_movies)}", extra={'emoji_type': 'update'})
+
+    # --- Debugging: Jellyfin summary updates ---
+    logger.info(f"[Jellyfin Debug] settings.jellyfin_enabled={getattr(settings, 'jellyfin_enabled', None)}, ENABLE_JELLYFIN={getattr(settings, 'ENABLE_JELLYFIN', None)}, JELLYFIN_URL={getattr(settings, 'JELLYFIN_URL', None)}, JELLYFIN_TOKEN={'set' if getattr(settings, 'JELLYFIN_TOKEN', None) else 'unset'}", extra={'emoji_type': 'debug'})
+    for ep in episodes_to_update:
+        logger.debug(f"Attempting Jellyfin overview update: {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d} (TVDB {ep['tvdb_id']})", extra={'emoji_type': 'debug'})
+        try:
+            from services.jellyfin_client import find_jellyfin_item_id, update_jellyfin_title_status
+            jellyfin_id = find_jellyfin_item_id(
+                media_type='tv',
+                external_id=ep['tvdb_id'],
+                title=ep['series_title'],
+                season=ep['season_num'],
+                episode=ep['episode_num']
+            )
+            logger.debug(f"Jellyfin item ID for update: {jellyfin_id}", extra={'emoji_type': 'debug'})
+            if jellyfin_id:
+                result = update_jellyfin_title_status(
+                    media_type='tv',
+                    item_id=jellyfin_id,
+                    title=ep['series_title'],
+                    status=ep['status'],
+                    season=ep['season_num'],
+                    episode=ep['episode_num']
+                )
+                if not result:
+                    logger.warning(f"[Jellyfin Update] Update returned False for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d} (item_id={jellyfin_id})", extra={'emoji_type': 'warning'})
+                logger.info(f"Jellyfin overview update result for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {result}", extra={'emoji_type': 'debug'})
+            else:
+                logger.warning(f"Could not find Jellyfin item for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}", extra={'emoji_type': 'warning'})
+        except Exception as ex:
+            logger.error(f"Exception during Jellyfin overview update for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {ex}", extra={'emoji_type': 'error'})
+
+    # --- Jellyfin movie overview updates ---
+    for movie in movies_to_update:
+        logger.debug(f"Attempting Jellyfin overview update: {movie['title']} ({movie['year']}) (TMDB {movie['tmdb_id']})", extra={'emoji_type': 'debug'})
+        try:
+            from services.jellyfin_client import find_jellyfin_item_id, update_jellyfin_title_status
+            jellyfin_id = find_jellyfin_item_id(
+                media_type='movie',
+                external_id=movie['tmdb_id'],
+                title=movie['title'],
+                year=movie['year']
+            )
+            logger.debug(f"Jellyfin item ID for update: {jellyfin_id}", extra={'emoji_type': 'debug'})
+            if jellyfin_id:
+                result = update_jellyfin_title_status(
+                    media_type='movie',
+                    item_id=jellyfin_id,
+                    title=movie['title'],
+                    status=movie['status'],
+                    year=movie['year']
+                )
+                if not result:
+                    logger.warning(f"[Jellyfin Update] Update returned False for {movie['title']} ({movie['year']}) (item_id={jellyfin_id})", extra={'emoji_type': 'warning'})
+                logger.info(f"Jellyfin overview update result for {movie['title']} ({movie['year']}): {result}", extra={'emoji_type': 'debug'})
+            else:
+                logger.warning(f"Could not find Jellyfin item for {movie['title']} ({movie['year']})", extra={'emoji_type': 'warning'})
+        except Exception as ex:
+            logger.error(f"Exception during Jellyfin overview update for {movie['title']} ({movie['year']}): {ex}", extra={'emoji_type': 'error'})
 
 # --- Helper Functions ---
 

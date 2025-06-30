@@ -409,19 +409,58 @@ def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
     return ''
 
 def test_jellyfin_connection() -> bool:
-    """
-    Test connectivity to the Jellyfin server by fetching public system info.
-    """
+    """Test connectivity to the Jellyfin server by fetching public system info."""
     url = build_jellyfin_url('System/Info/Public')
     try:
         resp = session.get(url)
         resp.raise_for_status()
-        logger.info("Connected to Jellyfin server.", extra={'emoji_type': 'info'})
         return True
     except Exception as ex:
-        logger.error(f"Failed to connect to Jellyfin: {ex}", extra={'emoji_type': 'error'})
         return False
 
-# Run a quick test at import time (optional)
+def test_jellyfin_endpoints():
+    """Test key Jellyfin API endpoints needed for operation."""
+    try:
+        # /Users endpoint
+        url = build_jellyfin_url("Users")
+        resp = session.get(url, timeout=5)
+        resp.raise_for_status()
+        logger.info("Jellyfin /Users endpoint accessible", extra={'emoji_type': 'success'})
+        # /Items endpoint
+        url = build_jellyfin_url("Items")
+        resp = session.get(url, timeout=5)
+        resp.raise_for_status()
+        logger.info("Jellyfin /Items endpoint accessible", extra={'emoji_type': 'success'})
+    except Exception as ex:
+        logger.error(f"Jellyfin API endpoint test failed: {ex}", extra={'emoji_type': 'error'})
+
+# Run connection test at import time (same pattern as Plex)
 if getattr(settings, "jellyfin_enabled", False):
-    test_jellyfin_connection()
+    try:
+        if test_jellyfin_connection():
+            logger.info("Connected to Jellyfin server", extra={'emoji_type': 'success'})
+            test_jellyfin_endpoints()
+        else:
+            logger.error("Failed to connect to Jellyfin server", extra={'emoji_type': 'error'})
+    except Exception as ex:
+        logger.error(f"Failed to connect to Jellyfin server: {ex}", extra={'emoji_type': 'error'})
+
+def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
+    """
+    Return the file path for a Jellyfin item, optionally for a specific user.
+    """
+    try:
+        if user_id:
+            url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}")
+        else:
+            url = build_jellyfin_url(f"Items/{item_id}")
+        resp = session.get(url)
+        if resp.status_code == 200:
+            item = resp.json()
+            return item.get("Path", "")
+        else:
+            logger.warning(f"get_jellyfin_file_path: Failed to fetch item {item_id} (status {resp.status_code})", extra={'emoji_type': 'warning'})
+            return ""
+    except Exception as ex:
+        logger.error(f"get_jellyfin_file_path: Exception for item {item_id}: {ex}", extra={'emoji_type': 'error'})
+        return ""

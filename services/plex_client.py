@@ -272,9 +272,26 @@ def update_plex_title_status(media_type, media_id, title, status=None, year=None
         logger.error(f"Error updating summary status: {e}", extra={'emoji_type': 'error'})
         return False
 
-try:
-    plex = PlexServer(settings.PLEX_URL, settings.PLEX_TOKEN)
-    logger.info("Connected to Plex via PlexAPI.", extra={'emoji_type': 'info'})
-except Exception as e:
-    logger.error(f"Failed to connect to Plex: {e}", extra={'emoji_type': 'error'})
+def test_plex_endpoints():
+    """Test key Plex API endpoints needed for operation."""
+    try:
+        url = f"{settings.PLEX_URL}/library/sections"
+        headers = {'X-Plex-Token': settings.PLEX_TOKEN}
+        import requests
+        resp = requests.get(url, headers=headers, timeout=5)
+        resp.raise_for_status()
+        logger.info("Plex /library/sections endpoint accessible", extra={'emoji_type': 'success'})
+    except Exception as ex:
+        logger.error(f"Plex /library/sections endpoint failed: {ex}", extra={'emoji_type': 'error'})
+
+# Run connection test at import time (same pattern as Jellyfin)
+if getattr(settings, "plex_enabled", False):
+    try:
+        plex = PlexServer(settings.PLEX_URL, settings.PLEX_TOKEN)
+        logger.info("Connected to Plex server", extra={'emoji_type': 'success'})
+        test_plex_endpoints()
+    except Exception as e:
+        logger.error(f"Failed to connect to Plex server: {e}", extra={'emoji_type': 'error'})
+        plex = None
+else:
     plex = None
