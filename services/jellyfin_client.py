@@ -1,17 +1,22 @@
 import os
-from typing import Optional
+import re
+import time
+from typing import Optional, Dict, Any, Callable
 from urllib.parse import quote
 import requests
 from core.config import settings
 from core.logger import logger
-import re
+from services.utils import strip_status_markers
+from urllib.parse import quote_plus
 
 # Initialize a shared session with default headers
 session = requests.Session()
 session.headers.update({
-    'X-MediaBrowser-Token': settings.JELLYFIN_TOKEN,
-    'Content-Type': 'application/json'
+    'X-Emby-Token': settings.JELLYFIN_TOKEN,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
 })
+
 
 def build_jellyfin_url(endpoint: str) -> str:
     """
@@ -100,175 +105,308 @@ def _prepend_status_to_summary(summary, status):
     else:
         return summary.strip()
 
-def get_first_jellyfin_user_id():
-    url = build_jellyfin_url("Users")
+def retry_call(
+    func: Callable[[], Any],
+    on_error: Callable[[Exception], None],
+    retry_interval: int,
+    retry_timeout: int,
+    success_condition: Callable[[Any], bool]
+) -> Any:
+    start = time.time()
+    last_result = None
+    attempt = 0
+
+    while time.time() - start < retry_timeout:
+        attempt += 1
+        try:
+            result = func()
+        except Exception as ex:
+            on_error(ex)
+            result = None
+
+        last_result = result
+
+        # <-- DEBUG LOGGING ON EVERY ATTEMPT -->
+        logger.debug(f"🔁 retry_call attempt {attempt}, result={result!r}")
+
+        if success_condition(result):
+            logger.debug(f"✅ retry_call succeeded on attempt {attempt}")
+            return result
+
+        time.sleep(retry_interval)
+
+    logger.warning(f"⚠️ retry_call timed out after {attempt} attempts, last_result={last_result!r}")
+    return last_result
+
+def update_item_metadata(
+    item_id: str,
+    new_name: str,
+    new_overview: str,
+    user_id: str,
+    retry_interval: int,
+    retry_timeout: int,
+    verify_delay: int = 60
+) -> bool:
+    """
+    Fetch item DTO, update Name & Overview with retry, then verify post-update.
+    If verification fails after verify_delay, re-attempt update once.
+    """
+    dto_url = build_jellyfin_url(f"Items/{item_id}?userId={user_id}")
+
+    # Fetch current DTO
     try:
-        resp = session.get(url)
-        resp.raise_for_status()
-        users = resp.json()
-        user_id = None
-        # Prefer admin user, but fallback to first user if no admin found
-        for u in users:
-            policy = u.get('Policy', {})
-            if policy.get('IsAdministrator'):
-                user_id = u.get('Id')
-                break
-        if not user_id and users:
-            logger.warning(f"No admin user found. Users returned: {users}", extra={'emoji_type': 'warning'})
-            user_id = users[0].get('Id')
-            logger.warning("No admin user found in Jellyfin Users list, using first user as fallback.", extra={'emoji_type': 'warning'})
-        if not user_id:
-            logger.error(f"No valid user found in Jellyfin Users list. Full users response: {users}", extra={'emoji_type': 'error'})
-            return None
-        return user_id
+        dto = session.get(dto_url, timeout=5).json()
     except Exception as ex:
-        logger.error(f"Failed to fetch Jellyfin users: {ex}", extra={'emoji_type': 'error'})
-        return None
-
-def fetch_full_episode_object(item_id):
-    """
-    Fetch the full episode object from Jellyfin using the only known working method: /Users/{userId}/Items/{id}.
-    """
-    user_id = get_first_jellyfin_user_id()
-    if not user_id:
-        logger.error(f"No valid Jellyfin user ID found for fetch.", extra={'emoji_type': 'error'})
-        return None
-    user_url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}")
-    user_resp = session.get(user_url)
-    if user_resp.status_code == 200:
-        logger.debug(f"Fetched episode object via /Users/{{userId}}/Items/{{id}}", extra={'emoji_type': 'debug'})
-        return user_resp.json()
-    else:
-        logger.error(f"/Users/{{userId}}/Items/{{id}} failed: {user_resp.status_code} {user_resp.text}", extra={'emoji_type': 'error'})
-        return None
-
-def fetch_full_movie_object(item_id):
-    """
-    Fetch the full movie object from Jellyfin using the only known working method: /Users/{userId}/Items/{id}.
-    """
-    user_id = get_first_jellyfin_user_id()
-    if not user_id:
-        logger.error(f"No valid Jellyfin user ID found for fetch.", extra={'emoji_type': 'error'})
-        return None
-    user_url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}")
-    user_resp = session.get(user_url)
-    if user_resp.status_code == 200:
-        logger.debug(f"Fetched movie object via /Users/{{userId}}/Items/{{id}}", extra={'emoji_type': 'debug'})
-        return user_resp.json()
-    else:
-        logger.error(f"/Users/{{userId}}/Items/{{id}} failed: {user_resp.status_code} {user_resp.text}", extra={'emoji_type': 'error'})
-        return None
-
-def update_jellyfin_title_status(media_type=None, item_id=None, title=None, status=None, season=None, episode=None, year=None, **kwargs):
-    logger.info(f"[Jellyfin Update] Called with: media_type={media_type}, item_id={item_id}, title={title}, status={status}, season={season}, episode={episode}, year={year}, kwargs={kwargs}", extra={'emoji_type': 'debug'})
-    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
-        logger.warning(f"[Jellyfin Update] Skipping: Jellyfin not enabled or URL missing.", extra={'emoji_type': 'warning'})
+        logger.error(f"❌ Fetch for update failed for item {item_id}: {ex}", extra={"emoji_type": "error"})
         return False
+
+    original = dto.get("Name", "<unknown>")
+    dto["Name"] = new_name
+    dto["Overview"] = new_overview
+
+    # POST update with retry
+    def do_post():
+        session.post(dto_url, json=dto, timeout=5).raise_for_status()
+        return True
+
+    def post_error(ex: Exception):
+        logger.error(f"❌ POST update failed for item {item_id}: {ex}", extra={"emoji_type": "error"})
+
+    updated = retry_call(
+        func=do_post,
+        on_error=post_error,
+        retry_interval=retry_interval,
+        retry_timeout=retry_timeout,
+        success_condition=lambda res: res is True
+    )
+
+    if not updated:
+        return False
+
+    logger.info(f"🔄 Updated item {item_id} ('{original}' -> '{new_name}')", extra={"emoji_type": "update"})
+
+    # Verification: wait then fetch to confirm
+    time.sleep(verify_delay)
     try:
-        if not item_id or not isinstance(item_id, str) or len(item_id) < 8:
-            logger.error(f"[Jellyfin Update] Invalid or missing Jellyfin item_id: {item_id}", extra={'emoji_type': 'error'})
-            return False
-        if media_type == "tv":
-            full_obj = fetch_full_episode_object(item_id)
-        elif media_type == "movie":
-            full_obj = fetch_full_movie_object(item_id)
-        else:
-            logger.error(f"[Jellyfin Update] Only TV episode and movie updates are supported in robust mode.", extra={'emoji_type': 'error'})
-            return False
-        if full_obj:
-            current_overview = full_obj.get('Overview', '') or ''
-            new_overview = _prepend_status_to_summary(current_overview, status)
-            if title:
-                full_obj["Name"] = title
-            full_obj["Overview"] = new_overview
-            url = build_jellyfin_url(f"Items/{item_id}")
-            logger.info(f"[Jellyfin Update] POSTing full object to {url}", extra={'emoji_type': 'debug'})
-            resp = session.post(url, json=full_obj)
-            if resp.status_code in (200, 204):
-                logger.info(f"[Jellyfin Update] SUCCESS: Updated item {item_id} title to '{title}' and overview.", extra={'emoji_type': 'update'})
-                return True
-            else:
-                logger.error(f"[Jellyfin Update] FAIL: POST status {resp.status_code}: {resp.text}", extra={'emoji_type': 'error'})
-        else:
-            logger.error(f"[Jellyfin Update] Could not fetch full object for POST.", extra={'emoji_type': 'error'})
-        return False
+        verified = session.get(dto_url, timeout=5).json().get("Name") == new_name
     except Exception as ex:
-        logger.error(f"[Jellyfin Update] EXCEPTION: Title/overview update failed: {ex}", extra={'emoji_type': 'error'})
-    return False
+        logger.error(f"❌ Verification fetch failed for item {item_id}: {ex}", extra={"emoji_type": "error"})
+        verified = False
 
-def find_jellyfin_episode_id(series_tvdb_id, series_title, season_num, episode_num):
-    """
-    Robustly find a Jellyfin episode item ID by searching all series matching TVDB or title, and all their episodes.
-    """
-    url = build_jellyfin_url("Items")
-    params = {"IncludeItemTypes": "Series", "Recursive": "true", "Fields": "ProviderIds,Name"}
-    resp = session.get(url, params=params)
-    resp.raise_for_status()
-    items = resp.json().get("Items", [])
-    # Collect all matching series IDs
-    matching_series = []
-    if series_tvdb_id:
-        for item in items:
-            prov = item.get("ProviderIds")
-            if prov and str(prov.get("Tvdb")) == str(series_tvdb_id):
-                matching_series.append(item)
-    if not matching_series and series_title:
-        for item in items:
-            if item.get("Name", "").strip().lower() == series_title.strip().lower():
-                matching_series.append(item)
-    if not matching_series:
-        logger.error(f"[Jellyfin Lookup] Could not find series for {series_title} (TVDB: {series_tvdb_id})", extra={'emoji_type': 'error'})
-        return None
-    # For each matching series, search for the episode
-    for series in matching_series:
-        series_id = series.get("Id")
-        episode_params = {
-            "ParentId": series_id,
-            "IncludeItemTypes": "Episode",
-            "Recursive": "true",
-            "Fields": "ProviderIds,Name,SeasonNumber,IndexNumber,Path,Overview"
+    if not verified:
+        logger.warning(f"⚠️ Verification failed for item {item_id}, retrying update", extra={"emoji_type": "warn"})
+        # Attempt one more update
+        retry_call(
+            func=do_post,
+            on_error=post_error,
+            retry_interval=retry_interval,
+            retry_timeout=retry_timeout,
+            success_condition=lambda res: res is True
+        )
+        logger.info(f"🔄 Retried update for item {item_id} ('{original}' -> '{new_name}')", extra={"emoji_type": "update"})
+    return True
+
+def update_jellyfin_title_status(
+    media_type: str,
+    media_id: Optional[int],
+    title: str,
+    status: Optional[str] = None,
+    year: Optional[int] = None,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+    retry_interval: int = 15,
+    retry_timeout: int = 600
+) -> bool:
+    # 1) discover admin user
+    try:
+        users = session.get(build_jellyfin_url("Users"), timeout=5).json()
+        admin = next(u for u in users if u.get("Policy", {}).get("IsAdministrator"))
+        user_id = admin["Id"]
+    except Exception as ex:
+        logger.error(f"❌ Cannot find admin user: {ex}", extra={"emoji_type": "error"})
+        return False
+
+    def not_empty_list(res):
+        return bool(res and isinstance(res, list) and len(res) > 0)
+
+    if media_type == "movie":
+        params = {
+            "searchTerm": title,
+            "includeItemTypes": "Movie",
+            "recursive": "true",
+            "fields": "ProviderIds,Name,ProductionYear,Overview"
         }
-        resp = session.get(url, params=episode_params)
-        resp.raise_for_status()
-        episodes = resp.json().get("Items", [])
-        for ep in episodes:
-            if ep.get("SeasonNumber") == int(season_num) and ep.get("IndexNumber") == int(episode_num):
-                return ep.get("Id")
-        for ep in episodes:
-            path = ep.get("Path") or ep.get("Name") or ""
-            m = re.search(r"[sS](\d{2})[eE](\d{2})", path)
-            if m:
-                s, e = map(int, m.groups())
-                if s == int(season_num) and e == int(episode_num):
-                    return ep.get("Id")
-    logger.error(f"[Jellyfin Lookup] Could not find episode S{season_num}E{episode_num} for series {series_title}", extra={'emoji_type': 'error'})
-    return None
+        qs = "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items())
+        search_url = build_jellyfin_url(f"Users/{user_id}/Items?{qs}")
 
-def find_jellyfin_item_id(media_type, external_id, title, season=None, episode=None, year=None, **kwargs):
-    if media_type == "tv" and season and episode:
-        return find_jellyfin_episode_id(external_id, title, season, episode)
-    elif media_type == "movie":
-        url = build_jellyfin_url("Items")
-        params = {"IncludeItemTypes": "Movie", "Recursive": "true", "Fields": "ProviderIds,Name,ProductionYear"}
-        resp = session.get(url, params=params)
+        def fetch_movies():
+            return session.get(search_url, timeout=5).json().get("Items", [])
+
+        # def filter_movies(items):
+        #     return [it for it in items or [] if (not media_id or int(it.get("ProviderIds", {}).get("Tmdb", -1)) == media_id)
+        #             and (not year or int(it.get("ProductionYear", -1)) == year)]
+        def filter_movies(items):
+            return [
+                it for it in (items or [])
+                if (not media_id or (
+                        int(it.get("ProviderIds", {}).get("Tmdb", -1)) == media_id
+                        or str(it.get("Id", "")) == str(media_id)
+                    )
+                )
+                and (not year or int(it.get("ProductionYear", -1)) == year)
+            ]
+
+        items = retry_call(
+            func=fetch_movies,
+            on_error=lambda ex: logger.error(f"❌ Movie search error: {ex}", extra={"emoji_type": "error"}),
+            retry_interval=retry_interval,
+            retry_timeout=retry_timeout,
+            success_condition=lambda res: bool(filter_movies(res))
+        )
+        hits = filter_movies(items)
+        if not hits:
+            logger.error(f"❌ No movie match for '{title}' TMDb={media_id}", extra={"emoji_type": "error"})
+            return False
+
+        itm = hits[0]
+        orig_name = strip_status_markers(itm.get("Name", title))
+        new_name = f"{orig_name} - [{status}]" if status else orig_name
+        new_ovr = _prepend_status_to_summary(itm.get("Overview", ""), status)
+        return update_item_metadata(itm["Id"], new_name, new_ovr, user_id, retry_interval, retry_timeout)
+
+    elif media_type == "tv":
+        # Series level
+        clean_title = re.sub(r'\s*\(\d{4}\)$', '', title)
+        series_url = build_jellyfin_url(
+            f"Users/{user_id}/Items?searchTerm={quote_plus(clean_title)}&includeItemTypes=Series&recursive=true&fields=ProviderIds,Name,Overview"
+        )
+
+        def fetch_series():
+            return session.get(series_url, timeout=5).json().get("Items", [])
+
+        def pick_series(items):
+            return next((s for s in items or []
+                         if (not media_id or int(s.get("ProviderIds", {}).get("Tvdb", -1)) == media_id)), None)
+
+        series = retry_call(
+            func=fetch_series,
+            on_error=lambda ex: logger.error(f"❌ Series search error: {ex}", extra={"emoji_type": "error"}),
+            retry_interval=retry_interval,
+            retry_timeout=retry_timeout,
+            success_condition=lambda res: pick_series(res) is not None
+        )
+        series = pick_series(series)
+        if not series:
+            logger.error(f"❌ Series '{title}' TVDb={media_id} not found", extra={"emoji_type": "error"})
+            return False
+
+        sid = series["Id"]
+        orig_s = strip_status_markers(series.get("Name", title))
+        new_s = f"{orig_s} - [{status}]" if status else orig_s
+        o_s = _prepend_status_to_summary(series.get("Overview", ""), status)
+        if not update_item_metadata(sid, new_s, o_s, user_id, retry_interval, retry_timeout):
+            return False
+
+        # Season level
+        if season is not None:
+            seas_url = build_jellyfin_url(
+                f"Users/{user_id}/Items?ParentId={sid}&IncludeItemTypes=Season&Recursive=false&fields=Name,Overview,IndexNumber"
+            )
+            seasons = retry_call(
+                func=lambda: session.get(seas_url, timeout=5).json().get("Items", []),
+                on_error=lambda ex: logger.error(f"❌ Season list error: {ex}", extra={"emoji_type": "error"}),
+                retry_interval=retry_interval,
+                retry_timeout=retry_timeout,
+                success_condition=not_empty_list
+            ) or []
+            seas = next((ss for ss in seasons if ss.get("IndexNumber") == season), None)
+            if not seas:
+                logger.error(f"❌ Season {season} not found", extra={"emoji_type": "error"})
+                return False
+            if not update_item_metadata(
+                seas["Id"],
+                f"{strip_status_markers(seas.get('Name', f'Season {season}'))} - [{status}]" if status else strip_status_markers(seas.get('Name', f'Season {season}')),
+                _prepend_status_to_summary(seas.get("Overview", ""), status),
+                user_id, retry_interval, retry_timeout
+            ):
+                return False
+
+        # Episode level
+        if season is not None and episode is not None:
+            epi_url = build_jellyfin_url(
+                f"Users/{user_id}/Items?ParentId={seas['Id']}&IncludeItemTypes=Episode&Recursive=false&fields=Name,Overview,IndexNumber"
+            )
+            def fetch_eps():
+                return session.get(epi_url, timeout=5).json().get("Items", [])
+
+            def pick_ep(eps_list):
+                return next((e for e in eps_list if e.get("IndexNumber") == episode), None)
+
+            epm = retry_call(
+                func=fetch_eps,
+                on_error=lambda ex: logger.error(f"❌ Episode list error: {ex}", extra={"emoji_type": "error"}),
+                retry_interval=retry_interval,
+                retry_timeout=retry_timeout,
+                success_condition=lambda lst: pick_ep(lst) is not None
+            )
+            epm = pick_ep(epm or [])
+            if not epm:
+                logger.error(f"❌ Episode S{season:02d}E{episode:02d} not found after retry", extra={"emoji_type": "error"})
+                return False
+
+            orig_e = strip_status_markers(epm.get("Name", title))
+            new_e = f"{orig_e} - [{status}]" if status else orig_e
+            o_e = _prepend_status_to_summary(epm.get("Overview", ""), status)
+            return update_item_metadata(
+                epm["Id"], new_e, o_e, user_id, retry_interval, retry_timeout
+            )
+    return True
+# Legacy alias for backward compatibility
+update_jellyfin_title = update_jellyfin_title_status
+
+def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
+    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
+        return ''
+    """
+    Retrieve the absolute filesystem path for a given Jellyfin item ID.
+
+    You must supply the Jellyfin User ID to fetch disk paths. If not provided,
+    it auto-discovers via the Users endpoint.
+    """
+    # Discover user ID if not provided
+    if not user_id:
+        try:
+            users_url = build_jellyfin_url("Users")
+            resp = session.get(users_url, timeout=5)
+            resp.raise_for_status()
+            users = resp.json()
+            # Find first admin user
+            for u in users:
+                policy = u.get('Policy', {})
+                if policy.get('IsAdministrator'):
+                    user_id = u.get('Id')
+                    break
+            if not user_id:
+                logger.error("No admin user found in Jellyfin Users list", extra={'emoji_type': 'error'})
+                return ''
+        except Exception as ex:
+            logger.error(f"Failed to fetch Jellyfin users: {ex}", extra={'emoji_type': 'error'})
+            return ''
+    # Fetch the disk path for the item under the user context
+    try:
+        url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}?fields=Path")
+        resp = session.get(url, timeout=5)
         resp.raise_for_status()
-        items = resp.json().get("Items", [])
-        # Prefer TMDB/IMDB/TVDB ID match
-        if external_id:
-            for item in items:
-                prov = item.get("ProviderIds")
-                if prov and (str(prov.get("Tmdb")) == str(external_id) or str(prov.get("Imdb")) == str(external_id) or str(prov.get("Tvdb")) == str(external_id)):
-                    return item.get("Id")
-        # Fallback: match by title and year
-        if title:
-            for item in items:
-                if item.get("Name", "").strip().lower() == title.strip().lower():
-                    if not year or not item.get("ProductionYear") or int(item.get("ProductionYear")) == int(year):
-                        return item.get("Id")
-        logger.error(f"[Jellyfin Lookup] Could not find movie for {title} (TMDB/IMDB/TVDB: {external_id}, Year: {year})", extra={'emoji_type': 'error'})
-        return None
-    logger.error(f"[Jellyfin Lookup] Only robust TV episode and movie lookup is supported in this mode.", extra={'emoji_type': 'error'})
-    return None
+        data = resp.json()
+        path = data.get('Path', '')
+        if path:
+            logger.info(f"Retrieved path for item {item_id}: {path}", extra={'emoji_type': 'info'})
+            return path
+        logger.warning(f"Jellyfin item {item_id} did not include a Path field", extra={'emoji_type': 'warning'})
+    except Exception as ex:
+        logger.error(f"Failed to get file path for {item_id}: {ex}", extra={'emoji_type': 'error'})
+
+    return ''
 
 def test_jellyfin_connection() -> bool:
     """Test connectivity to the Jellyfin server by fetching public system info."""

@@ -5,7 +5,7 @@ import time
 from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from core.logger import logger
 from services.handlers import handle_webhook
 from services.migration import run_migration
@@ -13,9 +13,9 @@ from services.calendar_sync import start_calendar_sync
 from core.config import settings
 
 # Load environment variables
-load_dotenv(override=True)
-# Trigger Migration
-run_migration()
+def load_env_and_migrate():
+    load_dotenv(override=True)
+    run_migration()
 
 def clear_port(port: int, max_attempts: int = 3) -> bool:
     """Clear a port if it's in use"""
@@ -56,6 +56,8 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
+    # Load env and run migrations
+    load_env_and_migrate()
     logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
     logger.info("Calendar sync will begin in 10 seconds...", extra={'emoji_type': 'info'})
     import asyncio
@@ -65,13 +67,12 @@ async def startup_event():
     asyncio.create_task(delayed_calendar_sync())
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
-        data = await request.json()
-        # Extract source port from request
+        payload = await request.json()
         source_port = request.client.port
-        response = handle_webhook(data, source_port)
-        return response
+        background_tasks.add_task(handle_webhook, payload, source_port)
+        return {"status": "accepted"}
     except Exception as e:
         logger.error(f"Webhook handling failed: {e}", extra={'emoji_type': 'error'})
         raise
@@ -100,4 +101,4 @@ if __name__ == '__main__':
             sys.exit(1)
     
     # Start the server
-    uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower())
+    uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower(), workers=settings.WORKER_COUNT)

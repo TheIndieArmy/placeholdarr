@@ -20,7 +20,8 @@ load_dotenv(dotenv_path)
 
 class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
-    
+    WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
+
     # Plex
     PLEX_URL: Optional[str] = None
     PLEX_TOKEN: Optional[str] = None

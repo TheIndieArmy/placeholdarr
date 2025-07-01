@@ -143,7 +143,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             if settings.plex_enabled:
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(dummy_folder)
+                refresh_jellyfin_item(dummy_folder, "Deleted")
 
         elif 'episodes' in data and 'series' in data:
             # TV episode import handling
@@ -193,7 +193,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             if settings.plex_enabled:
                 refresh_plex_item(folder_path)
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(folder_path)
+                refresh_jellyfin_item(folder_path, "Deleted")
 
     except Exception as e:
         logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
@@ -287,7 +287,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
             if settings.plex_enabled:
                 refresh_plex_item(os.path.dirname(dummy_path))
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(os.path.dirname(dummy_path), "Deleted")
+                refresh_jellyfin_item(os.path.dirname(dummy_path), "Changed")
         else:
             logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
         # --- NEW: Always refresh parent folder ---
@@ -323,7 +323,7 @@ def handle_moviefiledelete(data: dict):
                 if settings.plex_enabled:
                     refresh_plex_item(folder)
                 if settings.jellyfin_enabled:
-                    refresh_jellyfin_item(folder, "Deleted")
+                    refresh_jellyfin_item(folder)
                 schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
             else:
                 logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
@@ -336,7 +336,7 @@ def handle_moviefiledelete(data: dict):
             if settings.plex_enabled:
                 refresh_plex_item(parent_folder)
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(parent_folder)
+                refresh_jellyfin_item(parent_folder, "Deleted")
 
     return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
 
@@ -433,7 +433,7 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
                 series_folder = series_folder.split("/Season")[0]
             
             # Check if folder exists
-            if os.path.exists(series_folder):
+            if os.path.exists(series_folder): ## use sonarr path instead
                 try:
                     # First refresh Plex/Jellyfin to recognize the deletion
                     if settings.plex_enabled:
@@ -494,7 +494,7 @@ def handle_series_delete(payload):
     else:
         logger.warning(f"Series folder not found: {series_path}", extra={'emoji_type': 'warning'})
     
-    # Refresh Plex/Deleted library to reflect the changes
+    # Refresh Plex/Jellyfin library to reflect the changes
     plex_folder = os.path.dirname(series_path)  # Get parent folder
     if settings.plex_enabled:
         refresh_plex_item(plex_folder)

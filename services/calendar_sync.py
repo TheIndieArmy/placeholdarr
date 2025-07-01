@@ -5,8 +5,9 @@ from datetime import datetime, timedelta, timezone
 import requests
 from core.config import settings
 from core.logger import logger
-from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update
-from services.plex_client import refresh_plex_item, update_plex_title_status
+from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update, update_title_status
+from services.plex_client import refresh_plex_item
+from services.jellyfin_client import refresh_jellyfin_item
 from services.utils import sanitize_filename
 
 # --- Scheduler/Timer ---
@@ -167,21 +168,25 @@ def sync_calendar_episodes():
     except Exception as e:
         logger.error(f"Radarr calendar sync failed: {e}", extra={'emoji_type': 'error'})
 
-    # --- Batch Plex refresh ---
+    # --- Batch Plex/Jellyfin refresh ---
     try:
-        logger.info("Refreshing Plex TV and Movie library folders for batch placeholder update...", extra={'emoji_type': 'refresh'})
-        refresh_plex_item(settings.TV_LIBRARY_FOLDER)
-        refresh_plex_item(settings.MOVIE_LIBRARY_FOLDER)
-        logger.info("Waiting 30 seconds for Plex to scan new placeholders...", extra={'emoji_type': 'refresh'})
+        logger.info("Refreshing Plex/Jellyfin TV and Movie library folders for batch placeholder update...", extra={'emoji_type': 'refresh'})
+        if settings.plex_enabled:
+            refresh_plex_item(settings.TV_LIBRARY_FOLDER)
+            refresh_plex_item(settings.MOVIE_LIBRARY_FOLDER)
+        if settings.jellyfin_enabled:
+            refresh_jellyfin_item(settings.TV_LIBRARY_FOLDER)
+            refresh_jellyfin_item(settings.MOVIE_LIBRARY_FOLDER)
+        logger.info("Waiting 30 seconds for Plex/Jellyfin to scan new placeholders...", extra={'emoji_type': 'refresh'})
         time.sleep(30)
     except Exception as e:
-        logger.error(f"Error during batch Plex refresh: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Error during batch Plex/Jellyfin refresh: {e}", extra={'emoji_type': 'error'})
 
     # --- Batch update episode titles ---
     updated_eps = []
     for ep in episodes_to_update:
         try:
-            update_plex_title_status(
+            update_title_status(
                 media_type='tv',
                 media_id=ep["tvdb_id"],
                 title=ep["series_title"],
@@ -194,7 +199,7 @@ def sync_calendar_episodes():
             if ep["air_date"].date() == now.date():
                 schedule_episode_request_update(ep["series_title"], ep["season_num"], ep["episode_num"], ep["tvdb_id"], delay=3600, retries=3)
         except Exception as e:
-            logger.error(f"Failed to update Plex title for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Failed to update Plex/Jellyfin title for {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}: {e}", extra={'emoji_type': 'error'})
     if updated_eps:
         logger.info(f"Batch updated episode titles: {', '.join(updated_eps)}", extra={'emoji_type': 'update'})
 
@@ -202,7 +207,7 @@ def sync_calendar_episodes():
     updated_movies = []
     for movie in movies_to_update:
         try:
-            update_plex_title_status(
+            update_title_status(
                 media_type='movie',
                 media_id=movie["tmdb_id"],
                 title=movie["title"],
@@ -213,7 +218,7 @@ def sync_calendar_episodes():
             if movie["air_date"].date() == now.date():
                 schedule_movie_request_update(movie["title"], movie["tmdb_id"], year=movie["year"], delay=3600, retries=3)
         except Exception as e:
-            logger.error(f"Failed to update Plex title for movie {movie['title']}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Failed to update Plex/Jellyfin title for movie {movie['title']}: {e}", extra={'emoji_type': 'error'})
     if updated_movies:
         logger.info(f"Batch updated movie titles: {', '.join(updated_movies)}", extra={'emoji_type': 'update'})
 
