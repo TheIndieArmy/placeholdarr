@@ -87,7 +87,7 @@ if __name__ == '__main__':
         from services.jellyfin_client import test_jellyfin_connection
 
     # Set port back to 8001 (your existing webhook port)
-    port = int(os.getenv('PLACEHOLDARR_PORT'))
+    port = int(os.getenv('PLACEHOLDARR_PORT', 8001))
     host = getattr(settings, "host", "0.0.0.0")
     logger.info(f"Using host {host} and port {port}", extra={'emoji_type': 'info'})
     
@@ -101,4 +101,4 @@ if __name__ == '__main__':
             sys.exit(1)
     
     # Start the server
-    uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower(), workers=settings.WORKER_COUNT)
+    uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower())
