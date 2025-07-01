@@ -55,12 +55,16 @@ def check_port(port: int) -> bool:
 app = FastAPI()
 
 @app.on_event("startup")
-async def on_startup():
+async def startup_event():
     # Load env and run migrations
     load_env_and_migrate()
-    # Start calendar synchronization in background
-    start_calendar_sync()
-    logger.info("Startup tasks completed", extra={'emoji_type': 'info'})
+    logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
+    logger.info("Calendar sync will begin in 10 seconds...", extra={'emoji_type': 'info'})
+    import asyncio
+    async def delayed_calendar_sync():
+        await asyncio.sleep(10)
+        start_calendar_sync()
+    asyncio.create_task(delayed_calendar_sync())
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
@@ -81,9 +85,6 @@ if __name__ == '__main__':
         from services.plex_client import plex
     if settings.jellyfin_enabled:
         from services.jellyfin_client import test_jellyfin_connection
-
-    # Start calendar sync on startup
-    start_calendar_sync()
 
     # Set port back to 8001 (your existing webhook port)
     port = int(os.getenv('PLACEHOLDARR_PORT'))
