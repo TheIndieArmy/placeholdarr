@@ -1,7 +1,7 @@
 version: "3.8"
 services:
   placeholdarr:
-    image: ghcr.io/theindiearmy/placeholdarr:latest
+    image: ghcr.io/theindiearmy/placeholdarr:queue_monitoring-latest
     env_file:
       - .env
     volumes:
