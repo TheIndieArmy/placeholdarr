@@ -1,4 +1,4 @@
-import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch
+import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
 from core.config import settings
 from core.logger import logger
 from services.utils import (
@@ -876,3 +876,81 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
     except Exception as e:
         logger.error(f"Error deleting placeholder: {e}", extra={'emoji_type': 'error'})
         return False
+
+def check_arr_webhook(arr_name, arr_url, api_key, webhook_url):
+    try:
+        headers = {'X-Api-Key': api_key}
+        response = requests.get(f"{arr_url}/notification", headers=headers, timeout=10)
+        response.raise_for_status()
+        notifications = response.json()
+        found = False
+        for n in notifications:
+            if n.get('implementation', '').lower() == 'webhook':
+                for field in n.get('fields', []):
+                    if field.get('name') == 'url' and webhook_url in str(field.get('value', '')):
+                        found = True
+                        break
+            if found:
+                break
+        if found:
+            logger.info(f"{arr_name} webhook for Placeholdarr is configured.", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning(f"{arr_name} webhook for Placeholdarr is NOT configured! Please add a webhook in {arr_name} Connect settings pointing to {webhook_url}.", extra={'emoji_type': 'warning'})
+            return False
+    except Exception as e:
+        logger.error(f"Failed to check {arr_name} webhook configuration: {e}", extra={'emoji_type': 'error'})
+        return False
+
+
+def check_all_arr_webhooks():
+    # Determine the webhook URL based on the first *arr URL (non-localhost), fallback to localhost
+    arr_urls = [
+        getattr(settings, 'RADARR_URL', None),
+        getattr(settings, 'RADARR_4K_URL', None),
+        getattr(settings, 'SONARR_URL', None),
+        getattr(settings, 'SONARR_4K_URL', None)
+    ]
+    arr_urls = [u for u in arr_urls if u and 'localhost' not in u and '127.0.0.1' not in u]
+    if arr_urls:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(arr_urls[0])
+        host = parsed.hostname
+        scheme = parsed.scheme
+        port = os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', 8001)
+        webhook_url = f"{scheme}://{host}:{port}/webhook"
+    else:
+        port = os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', 8001)
+        webhook_url = f"http://localhost:{port}/webhook"
+
+    arrs = []
+    # Radarr
+    if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
+        arrs.append(('Radarr', settings.RADARR_URL.rstrip('/'), settings.RADARR_API_KEY))
+    # Radarr 4K
+    if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None) and settings.RADARR_4K_URL.strip():
+        arrs.append(('Radarr 4K', settings.RADARR_4K_URL.rstrip('/'), settings.RADARR_4K_API_KEY))
+    # Sonarr
+    if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
+        arrs.append(('Sonarr', settings.SONARR_URL.rstrip('/'), settings.SONARR_API_KEY))
+    # Sonarr 4K
+    if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None) and settings.SONARR_4K_URL.strip():
+        arrs.append(('Sonarr 4K', settings.SONARR_4K_URL.rstrip('/'), settings.SONARR_4K_API_KEY))
+
+    if not arrs:
+        logger.error("No *arr services are configured.", extra={'emoji_type': 'error'})
+        return False
+
+    missing = []
+    status_msgs = []
+    for arr_name, arr_url, api_key in arrs:
+        configured = bool(arr_url and api_key)
+        webhook_ok = check_arr_webhook(arr_name, arr_url, api_key, webhook_url)
+        status_msgs.append(f"{arr_name} (configured: {'yes' if configured else 'no'}, webhook: {'yes' if webhook_ok else 'no'})")
+        if not webhook_ok:
+            missing.append(arr_name)
+    logger.info(f"Waiting for all configured *arrs to have webhooks set up. Detected: {', '.join(status_msgs)}.", extra={'emoji_type': 'info'})
+    if missing:
+        logger.warning(f"Webhooks still missing for: {', '.join(missing)}. Calendar sync will not start until all are ready.", extra={'emoji_type': 'warning'})
+        return False
+    return True

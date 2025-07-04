@@ -9,8 +9,9 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from core.logger import logger
 from services.handlers import handle_webhook
 from services.migration import run_migration
-from services.calendar_sync import start_calendar_sync
 from core.config import settings
+from services.calendar_sync import start_calendar_sync
+from contextlib import asynccontextmanager
 
 # Load environment variables
 def load_env_and_migrate():
@@ -54,17 +55,46 @@ def check_port(port: int) -> bool:
 
 app = FastAPI()
 
-@app.on_event("startup")
-async def startup_event():
+async def lifespan(app: FastAPI):
     # Load env and run migrations
     load_env_and_migrate()
     logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
-    logger.info("Calendar sync will begin in 10 seconds...", extra={'emoji_type': 'info'})
     import asyncio
-    async def delayed_calendar_sync():
-        await asyncio.sleep(10)
-        start_calendar_sync()
-    asyncio.create_task(delayed_calendar_sync())
+    from services.integrations import check_all_arr_webhooks
+
+    async def arr_webhook_check_loop():
+        max_attempts = 10  # 10 minutes at 60s interval
+        interval = 60
+        for attempt in range(max_attempts):
+            all_configured = check_all_arr_webhooks()
+            if all_configured:
+                logger.info("Calendar sync will begin in 10 seconds...", extra={'emoji_type': 'info'})
+                async def delayed_calendar_sync():
+                    await asyncio.sleep(10)
+                    start_calendar_sync()
+                asyncio.create_task(delayed_calendar_sync())
+                break
+            if attempt == 0:
+                # Only log a warning if NO *arrs are configured at all (not just missing webhooks)
+                from core.config import settings
+                arrs_configured = any([
+                    getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None),
+                    getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None),
+                    getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None),
+                    getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None)
+                ])
+                if not arrs_configured:
+                    logger.warning("No *arr services are configured. Please add at least one Radarr or Sonarr instance in your .env file.", extra={'emoji_type': 'warning'})
+            await asyncio.sleep(interval)
+        else:
+            logger.warning("Timed out waiting for *arr webhooks to be configured after 10 minutes. Placeholdarr will stop checking automatically, but you can restart the service to try again.", extra={'emoji_type': 'warning'})
+            logger.warning("Calendar sync will not start because no *arr webhooks are configured or reachable.", extra={'emoji_type': 'warning'})
+
+    asyncio.create_task(arr_webhook_check_loop())
+    yield
+    # (Optional) Add shutdown logic here if needed
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
