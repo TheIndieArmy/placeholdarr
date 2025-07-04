@@ -904,7 +904,14 @@ def check_arr_webhook(arr_name, arr_url, api_key, webhook_url):
 
 
 def check_all_arr_webhooks():
-    # Determine the webhook URL based on the first *arr URL (non-localhost), fallback to localhost
+    # Allow skipping the webhook check for advanced/test setups
+    if os.getenv('PLACEHOLDARR_SKIP_WEBHOOK_CHECK', '').lower() == 'true':
+        logger.warning("PLACEHOLDARR_SKIP_WEBHOOK_CHECK is set. Skipping all webhook checks! Calendar sync will start regardless of webhook status.", extra={'emoji_type': 'warning'})
+        return True
+
+    # Allow user to override the webhook URL
+    override_webhook_url = os.getenv('PLACEHOLDARR_WEBHOOK_URL')
+
     arr_urls = [
         getattr(settings, 'RADARR_URL', None),
         getattr(settings, 'RADARR_4K_URL', None),
@@ -912,7 +919,10 @@ def check_all_arr_webhooks():
         getattr(settings, 'SONARR_4K_URL', None)
     ]
     arr_urls = [u for u in arr_urls if u and 'localhost' not in u and '127.0.0.1' not in u]
-    if arr_urls:
+    if override_webhook_url:
+        webhook_url = override_webhook_url
+        logger.info(f"Using user-specified webhook URL for checks: {webhook_url}", extra={'emoji_type': 'info'})
+    elif arr_urls:
         import urllib.parse
         parsed = urllib.parse.urlparse(arr_urls[0])
         host = parsed.hostname
