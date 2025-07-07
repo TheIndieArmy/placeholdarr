@@ -1,13 +1,14 @@
 import os
 import re
 import time
-from typing import Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Tuple
 from urllib.parse import quote
 import requests
 from core.config import settings
 from core.logger import logger
 from services.utils import strip_status_markers
 from urllib.parse import quote_plus
+import inspect
 
 # Initialize a shared session with default headers
 session = requests.Session()
@@ -112,30 +113,66 @@ def retry_call(
     retry_timeout: int,
     success_condition: Callable[[Any], bool]
 ) -> Any:
+    """
+    Calls `func()` until `success_condition(result)` is True or until `retry_timeout` elapses.
+    - On HTTP connection/read errors, uses exponential backoff (interval doubles) and extends timeout by interval.
+    - On other failures (success_condition False without exception), waits fixed retry_interval.
+    """
     start = time.time()
+    interval = retry_interval
+    deadline = retry_timeout
     last_result = None
     attempt = 0
 
-    while time.time() - start < retry_timeout:
+    while time.time() - start < deadline:
         attempt += 1
+        is_net_error = False
         try:
             result = func()
         except Exception as ex:
             on_error(ex)
             result = None
+            # detect connection/read timeout
+            if isinstance(ex, (requests.exceptions.ConnectionError,
+                               requests.exceptions.ReadTimeout,
+                               requests.exceptions.Timeout)):
+                is_net_error = True
 
         last_result = result
-
-        # <-- DEBUG LOGGING ON EVERY ATTEMPT -->
         logger.debug(f"🔁 retry_call attempt {attempt}, result={result!r}")
 
+        # success?
         if success_condition(result):
             logger.debug(f"✅ retry_call succeeded on attempt {attempt}")
             return result
 
-        time.sleep(retry_interval)
+        if is_net_error:
+            # exponential backoff for network errors
+            logger.warning(
+                f"⚠️ network error on attempt {attempt}, waiting {interval}s"
+            )
+            time.sleep(interval)
+            deadline += interval  # extend window
+            interval *= 2
+        else:
+            # fixed interval for non-network failures
+            logger.warning(
+                f"⚠️ attempt {attempt} failed condition, waiting {retry_interval}s"
+            )
+            success_outcome = success_condition(result)
+            logger.debug(f"🔍 success_condition({result!r}) -> {success_outcome!r}")
+            try:
+                source = inspect.getsource(success_condition)
+            except Exception:
+                source = '<source unavailable>'
+            logger.debug(f"🖋 success_condition source:\n{source}")
 
-    logger.warning(f"⚠️ retry_call timed out after {attempt} attempts, last_result={last_result!r}")
+            time.sleep(retry_interval)
+
+    logger.warning(
+        f"⚠️ retry_call timed out after {attempt} attempts "
+        f"(total window={deadline}s), last_result={last_result!r}"
+    )
     return last_result
 
 def update_item_metadata(
@@ -214,7 +251,7 @@ def update_jellyfin_title_status(
     year: Optional[int] = None,
     season: Optional[int] = None,
     episode: Optional[int] = None,
-    retry_interval: int = 15,
+    retry_interval: int = 30,
     retry_timeout: int = 600
 ) -> bool:
     # 1) discover admin user
@@ -242,9 +279,6 @@ def update_jellyfin_title_status(
         def fetch_movies():
             return session.get(search_url, timeout=5).json().get("Items", [])
 
-        # def filter_movies(items):
-        #     return [it for it in items or [] if (not media_id or int(it.get("ProviderIds", {}).get("Tmdb", -1)) == media_id)
-        #             and (not year or int(it.get("ProductionYear", -1)) == year)]
         def filter_movies(items):
             return [
                 it for it in (items or [])
@@ -274,92 +308,143 @@ def update_jellyfin_title_status(
         new_ovr = _prepend_status_to_summary(itm.get("Overview", ""), status)
         return update_item_metadata(itm["Id"], new_name, new_ovr, user_id, retry_interval, retry_timeout)
 
-    elif media_type == "tv":
-        # Series level
-        clean_title = re.sub(r'\s*\(\d{4}\)$', '', title)
-        series_url = build_jellyfin_url(
-            f"Users/{user_id}/Items?searchTerm={quote_plus(clean_title)}&includeItemTypes=Series&recursive=true&fields=ProviderIds,Name,Overview"
-        )
+    if media_type == "tv":
+        start = time.time()
+        updated_any = False
 
-        def fetch_series():
-            return session.get(series_url, timeout=5).json().get("Items", [])
+        # Track what we've already updated
+        processed_series = set()               # series IDs
+        processed_seasons = set()              # season IDs
+        processed_episodes = set()             # (series_id, season_id, episode_number) tuples
 
-        def pick_series(items):
-            return next((s for s in items or []
-                         if (not media_id or int(s.get("ProviderIds", {}).get("Tvdb", -1)) == media_id)), None)
-
-        series = retry_call(
-            func=fetch_series,
-            on_error=lambda ex: logger.error(f"❌ Series search error: {ex}", extra={"emoji_type": "error"}),
-            retry_interval=retry_interval,
-            retry_timeout=retry_timeout,
-            success_condition=lambda res: pick_series(res) is not None
-        )
-        series = pick_series(series)
-        if not series:
-            logger.error(f"❌ Series '{title}' TVDb={media_id} not found", extra={"emoji_type": "error"})
-            return False
-
-        sid = series["Id"]
-        orig_s = strip_status_markers(series.get("Name", title))
-        new_s = f"{orig_s} - [{status}]" if status else orig_s
-        o_s = _prepend_status_to_summary(series.get("Overview", ""), status)
-        if not update_item_metadata(sid, new_s, o_s, user_id, retry_interval, retry_timeout):
-            return False
-
-        # Season level
-        if season is not None:
-            seas_url = build_jellyfin_url(
-                f"Users/{user_id}/Items?ParentId={sid}&IncludeItemTypes=Season&Recursive=false&fields=Name,Overview,IndexNumber"
+        while time.time() - start < retry_timeout:
+            # 1) discover matching series duplicates
+            clean_title = re.sub(r'\s*\(\d{4}\)$', '', title)
+            series_url = build_jellyfin_url(
+                f"Users/{user_id}/Items?searchTerm={quote_plus(clean_title)}"
+                "&includeItemTypes=Series&recursive=true&fields=ProviderIds,Name,Overview"
             )
-            seasons = retry_call(
-                func=lambda: session.get(seas_url, timeout=5).json().get("Items", []),
-                on_error=lambda ex: logger.error(f"❌ Season list error: {ex}", extra={"emoji_type": "error"}),
+
+            def fetch_series():
+                return session.get(series_url, timeout=5).json().get("Items", [])
+
+            def pick_series(items: List[dict]) -> List[dict]:
+                return [
+                    s for s in (items or [])
+                    if s.get("ProviderIds", {}).get("Tvdb")
+                    and (not media_id or int(s["ProviderIds"]["Tvdb"]) == media_id)
+                    and s["Id"] not in processed_series
+                ]
+
+            series_list = retry_call(
+                func=fetch_series,
+                on_error=lambda ex: logger.error(f"Series search error: {ex}"),
                 retry_interval=retry_interval,
-                retry_timeout=retry_timeout,
-                success_condition=not_empty_list
+                retry_timeout=retry_interval,
+                success_condition=lambda res: bool(pick_series(res))
             ) or []
-            seas = next((ss for ss in seasons if ss.get("IndexNumber") == season), None)
-            if not seas:
-                logger.error(f"❌ Season {season} not found", extra={"emoji_type": "error"})
-                return False
-            if not update_item_metadata(
-                seas["Id"],
-                f"{strip_status_markers(seas.get('Name', f'Season {season}'))} - [{status}]" if status else strip_status_markers(seas.get('Name', f'Season {season}')),
-                _prepend_status_to_summary(seas.get("Overview", ""), status),
-                user_id, retry_interval, retry_timeout
-            ):
-                return False
+            candidates = pick_series(series_list)
+            logger.debug(f"Discovered {len(candidates)} new series duplicates")
 
-        # Episode level
-        if season is not None and episode is not None:
-            epi_url = build_jellyfin_url(
-                f"Users/{user_id}/Items?ParentId={seas['Id']}&IncludeItemTypes=Episode&Recursive=false&fields=Name,Overview,IndexNumber"
-            )
-            def fetch_eps():
-                return session.get(epi_url, timeout=5).json().get("Items", [])
+            # 1a) update metadata for each new series
+            for s in candidates:
+                sid = s["Id"]
+                orig = strip_status_markers(s.get("Name", title))
+                new_name = f"{orig} - [{status}]" if status else orig
+                new_ovr = _prepend_status_to_summary(s.get("Overview", ""), status)
+                if update_item_metadata(sid, new_name, new_ovr, user_id, retry_interval, retry_timeout):
+                    updated_any = True
+                    processed_series.add(sid)
 
-            def pick_ep(eps_list):
-                return next((e for e in eps_list if e.get("IndexNumber") == episode), None)
+            # 2) discover seasons and build pending slots
+            pending = []
+            for s in candidates:
+                sid = s["Id"]
+                seas_url = build_jellyfin_url(
+                    f"Users/{user_id}/Items?ParentId={sid}"
+                    "&IncludeItemTypes=Season&Recursive=false&fields=Name,Overview,IndexNumber"
+                )
 
-            epm = retry_call(
-                func=fetch_eps,
-                on_error=lambda ex: logger.error(f"❌ Episode list error: {ex}", extra={"emoji_type": "error"}),
-                retry_interval=retry_interval,
-                retry_timeout=retry_timeout,
-                success_condition=lambda lst: pick_ep(lst) is not None
-            )
-            epm = pick_ep(epm or [])
-            if not epm:
-                logger.error(f"❌ Episode S{season:02d}E{episode:02d} not found after retry", extra={"emoji_type": "error"})
-                return False
+                def fetch_seasons():
+                    return session.get(seas_url, timeout=5).json().get("Items", [])
 
-            orig_e = strip_status_markers(epm.get("Name", title))
-            new_e = f"{orig_e} - [{status}]" if status else orig_e
-            o_e = _prepend_status_to_summary(epm.get("Overview", ""), status)
-            return update_item_metadata(
-                epm["Id"], new_e, o_e, user_id, retry_interval, retry_timeout
-            )
+                def pick_seasons(items: List[dict]) -> List[dict]:
+                    return [
+                        ss for ss in (items or [])
+                        if ss.get("IndexNumber") == season
+                        and ss["Id"] not in processed_seasons
+                    ]
+
+                seasons = retry_call(
+                    func=fetch_seasons,
+                    on_error=lambda ex: logger.error(f"Season list error for series {sid}: {ex}"),
+                    retry_interval=retry_interval,
+                    retry_timeout=retry_interval,
+                    success_condition=lambda res: bool(pick_seasons(res))
+                ) or []
+
+                matched_seasons = pick_seasons(seasons)
+                logger.debug(f"Series {sid} has {len(matched_seasons)} new matching seasons")
+                for ss in matched_seasons:
+                    seas_id = ss["Id"]
+                    # update season metadata once
+                    orig_s = strip_status_markers(ss.get("Name", f"Season {season}"))
+                    new_s = f"{orig_s} - [{status}]" if status else orig_s
+                    ovr_s = _prepend_status_to_summary(ss.get("Overview", ""), status)
+                    if update_item_metadata(seas_id, new_s, ovr_s, user_id, retry_interval, retry_timeout):
+                        updated_any = True
+                        processed_seasons.add(seas_id)
+
+                    # queue for episode update
+                    pending.append((sid, seas_id))
+
+            if not pending:
+                logger.debug(f"No new seasons found yet, retrying after {retry_interval}s")
+                time.sleep(retry_interval)
+                continue
+
+            # 3) for each pending, try to find and update episode
+            for sid, seas_id in list(pending):
+                epi_url = build_jellyfin_url(
+                    f"Users/{user_id}/Items?ParentId={seas_id}"
+                    "&IncludeItemTypes=Episode&Recursive=false&fields=Name,Overview,IndexNumber"
+                )
+                try:
+                    eps = session.get(epi_url, timeout=5).json().get("Items", [])
+                except Exception as ex:
+                    logger.error(f"Episode list error for season {seas_id}: {ex}")
+                    continue
+
+                ep_matches = [
+                    e for e in eps
+                    if e.get("IndexNumber") == episode
+                    and (sid, seas_id, episode) not in processed_episodes
+                ]
+                if not ep_matches:
+                    logger.debug(f"Series {sid}, season {seas_id} missing episode {episode}")
+                    continue
+
+                for epm in ep_matches:
+                    orig_e = strip_status_markers(epm.get("Name", title))
+                    new_e = f"{orig_e} - [{status}]" if status else orig_e
+                    ovr_e = _prepend_status_to_summary(epm.get("Overview", ""), status)
+                    if update_item_metadata(epm["Id"], new_e, ovr_e, user_id, retry_interval, retry_timeout):
+                        updated_any = True
+                        processed_episodes.add((sid, seas_id, episode))
+
+                # remove this slot whether updated or not to avoid infinite loop
+                pending.remove((sid, seas_id))
+                logger.debug(f"Removed season {seas_id} from queue, {len(pending)} slots left")
+
+            if not pending:
+                break
+
+            logger.debug(f"Sleeping {retry_interval}s before next pass")
+            time.sleep(retry_interval)
+
+        if pending:
+            logger.warning(f"⚠️ Timeout; pending slots: {pending}")
+        return updated_any
     return True
 # Legacy alias for backward compatibility
 update_jellyfin_title = update_jellyfin_title_status
