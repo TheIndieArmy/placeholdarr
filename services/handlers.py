@@ -538,8 +538,7 @@ def handle_playback(data: dict):
         # Debug log the placeholder check result
         logger.debug(f"Is placeholder check result: {is_placeholder}", extra={'emoji_type': 'debug'})
         
-        # For MOVIES ONLY: Skip processing if it's a real file
-        if not is_placeholder and media_type == "movie":
+        if not is_placeholder:
             logger.info(f"Ignoring playback of real movie file: {file_path}", extra={'emoji_type': 'info'})
             return JSONResponse({"status": "ignored", "message": "Not a placeholder movie file"})
         
