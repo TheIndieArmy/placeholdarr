@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 from pydantic import validator, root_validator
 import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Get the project root directory (where main.py is)
 ROOT_DIR = Path(__file__).parent.parent
@@ -12,11 +15,11 @@ ROOT_DIR = Path(__file__).parent.parent
 # Use project root for .env path
 dotenv_path = ROOT_DIR / ".env"
 
-if not dotenv_path.exists():
-    raise FileNotFoundError(f".env file does not exist at {dotenv_path}")
-
-# Preload the environment variables
-load_dotenv(dotenv_path)
+if dotenv_path.exists():
+    load_dotenv(dotenv_path)
+    logger.info(f"Loaded .env from {dotenv_path}")
+else:
+    logger.info(f"No .env file at {dotenv_path}, using process environment")
 
 class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
