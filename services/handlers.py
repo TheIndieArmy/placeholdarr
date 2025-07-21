@@ -126,7 +126,9 @@ def handle_import_event(data: dict, is_4k: bool = False):
             )
 
             # Clean up placeholder files
-            delete_dummy_files('movie', title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
+            folder_path = movie.get('folderPath')
+            arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+            delete_dummy_files('movie', title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder)
 
             dummy_folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER, 
             f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
@@ -172,8 +174,9 @@ def handle_import_event(data: dict, is_4k: bool = False):
             )
 
             # Clean up placeholder files
-            delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, 
-                              settings.TV_LIBRARY_FOLDER, season_number=season_num, episode_number=episode_num)
+            folder_path = series.get('folderPath')
+            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, None, season_number=season_num, episode_number=episode_num, folder_path=folder_path, arr_root_folder=arr_root_folder)
 
             # --- NEW: Always refresh parent folder ---
             if episode_path:
@@ -233,17 +236,25 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             if check_episode_has_file(tvdb_id, season_num, episode_num, is_4k):
                 logger.info(f"Skipping placeholder for {series_title} S{season_num}E{episode_num} (real file exists)", extra={'emoji_type': 'skip'})
                 continue
+            # Use folderPath from webhook if available
+            folder_path = data.get('series', {}).get('folderPath')
+            arr_root_folder = data.get('series', {}).get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
             dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
-                                        settings.TV_LIBRARY_FOLDER,
+                                        None,
                                         season_number=season_num,
                                         episode_range=(episode_num, episode_num),
-                                        episode_title=episode_title)
+                                        episode_title=episode_title,
+                                        folder_path=folder_path,
+                                        arr_root_folder=arr_root_folder)
             if dummy_path:
-                series_folder = os.path.dirname(os.path.dirname(dummy_path))
-                unique_folders.add(series_folder)
+                logger.info(f"Created placeholder file for {series_title} S{season_num}E{episode_num}", extra={'emoji_type': 'create'})
+                if settings.plex_enabled:
+                    refresh_plex_item(os.path.dirname(dummy_path))
+                if settings.jellyfin_enabled:
+                    refresh_jellyfin_item(os.path.dirname(dummy_path))
                 schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
             else:
-                logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
+                logger.error(f"Failed to create dummy file for {series_title} S{season_num}E{episode_num}; skipping refresh.", extra={'emoji_type': 'error'})
         for folder in unique_folders:
             if settings.plex_enabled:
                 refresh_plex_item(folder)
@@ -278,11 +289,15 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                 logger.info("Cannot determine season/episode from data", extra={'emoji_type': 'warning'})
                 continue
                 
+        folder_path = series.get('folderPath')
+        arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
         dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
-                                      settings.TV_LIBRARY_FOLDER,
+                                      None,
                                       season_number=season_num,
                                       episode_range=(episode_num, episode_num),
-                                      episode_title=episode_title)  # Include episode title & REMOVE episode_id
+                                      episode_title=episode_title,
+                                      folder_path=folder_path,
+                                      arr_root_folder=arr_root_folder)
         if dummy_path:
             if settings.plex_enabled:
                 refresh_plex_item(os.path.dirname(dummy_path))
@@ -310,35 +325,22 @@ def handle_moviefiledelete(data: dict):
             return JSONResponse({"status": "error"}, status_code=400)
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
-        movie_file_path = data.get("movieFile", {}).get("path")
-
-        expected_dummy = os.path.join(settings.MOVIE_LIBRARY_FOLDER,
-                                      f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}",
-                                      f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} (dummy).mp4")
-        if not os.path.exists(expected_dummy):
-            dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
-            if dummy_path:
-                folder = os.path.dirname(dummy_path)
-                logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
-                if settings.plex_enabled:
-                    refresh_plex_item(folder)
-                if settings.jellyfin_enabled:
-                    refresh_jellyfin_item(folder)
-                schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
-            else:
-                logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
-        else:
-            logger.info(f"Dummy file already exists for movie '{title}'", extra={'emoji_type': 'info'})
-
-        # --- NEW: Always refresh parent folder ---
-        if movie_file_path:
-            parent_folder = os.path.dirname(movie_file_path)
+        folder_path = movie.get('folderPath')
+        arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+        library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
+        # Use the unified dummy deletion logic
+        from services.integrations import delete_dummy_files
+        delete_dummy_files('movie', title, year, tmdb_id, library_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        # Optionally refresh Plex/Jellyfin at the dummy folder location
+        if folder_path and library_path:
+            import os
+            dummy_folder = os.path.join(library_path, os.path.basename(folder_path))
             if settings.plex_enabled:
-                refresh_plex_item(parent_folder)
+                refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(parent_folder, "Deleted")
-
-    return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
+                refresh_jellyfin_item(dummy_folder, "Deleted")
+        return JSONResponse({"status": "success", "message": "MovieDelete processed"})
+    return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
 def handle_movie_delete(data: dict):
     if 'movie' in data:
@@ -349,22 +351,21 @@ def handle_movie_delete(data: dict):
             return JSONResponse({"status": "error"}, status_code=400)
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
-        # Use the correct dummy folder naming with {edition-Dummy} suffix
-        dummy_folder = os.path.join(
-            settings.MOVIE_LIBRARY_FOLDER,
-            f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}{{edition-Dummy}}"
-        )
-        # Remove the dummy folder if it exists
-        if os.path.exists(dummy_folder):
-            shutil.rmtree(dummy_folder)
-            logger.info(f"Deleted dummy folder for movie {title}", extra={'emoji_type': 'delete'})
-        else:
-            logger.info(f"No dummy folder exists for movie {title}", extra={'emoji_type': 'info'})
+        folder_path = movie.get('folderPath')
+        arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+        library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
+        # Use the unified dummy deletion logic
+        from services.integrations import delete_dummy_files
+        delete_dummy_files('movie', title, year, tmdb_id, library_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
         # Optionally refresh Plex/Jellyfin at the dummy folder location
-        if settings.plex_enabled:
-            refresh_plex_item(dummy_folder)
-        if settings.jellyfin_enabled:
-            refresh_jellyfin_item(dummy_folder, "Deleted")
+        if folder_path and library_path:
+            import os
+            dummy_folder = os.path.join(library_path, os.path.basename(folder_path))
+            if settings.plex_enabled:
+                refresh_plex_item(dummy_folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(dummy_folder, "Deleted")
+        return JSONResponse({"status": "success", "message": "MovieDelete processed"})
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
 def handle_movieadd(data: dict):
@@ -390,14 +391,17 @@ def handle_movieadd(data: dict):
             if has_file:
                 logger.info(f"Skipping placeholder for movie '{title}' (real file exists)", extra={'emoji_type': 'skip'})
                 return
-            dummy_path = place_dummy_file("movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER)
+            # Use folderPath from webhook if available
+            folder_path = data.get('movie', {}).get('folderPath')
+            arr_root_folder = data.get('movie', {}).get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+            dummy_path = place_dummy_file("movie", title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder)
             if dummy_path:
                 logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
                 if settings.plex_enabled:
                     refresh_plex_item(os.path.dirname(dummy_path))
                 if settings.jellyfin_enabled:
                     refresh_jellyfin_item(os.path.dirname(dummy_path))
-                schedule_movie_request_update(title, tmdb_id, delay=10, retries=5)
+                schedule_movie_request_update
             else:
                 logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
 
@@ -407,99 +411,52 @@ def handle_movieadd(data: dict):
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
 
 def handle_seriesdelete(data: dict, is_4k: bool = False):
-    """Delete placeholder files when a series is deleted from Sonarr"""
+    """Delete placeholder files when a series is deleted from Sonarr using universal path logic"""
     if 'series' in data:
         series = data.get('series', {})
         tvdb_id = series.get('tvdbId')
         title = series.get('title', 'Unknown Series')
         year = series.get('year')
-        
-        if tvdb_id:
-            # Construct folder path using get_folder_path for consistency
-            library_folder = settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER
-            from services.utils import get_folder_path
-            
-            # Get the series folder path without any season subfolder
-            series_folder = get_folder_path(
-                media_type='tv',
-                base_path=library_folder,
-                title=title,
-                year=year,
-                media_id=tvdb_id
-            )
-            
-            # Remove any season folder component if present
-            if "/Season" in series_folder:
-                series_folder = series_folder.split("/Season")[0]
-            
-            # Check if folder exists
-            if os.path.exists(series_folder): ## use sonarr path instead
-                try:
-                    # First refresh Plex/Jellyfin to recognize the deletion
-                    if settings.plex_enabled:
-                        refresh_plex_item(os.path.dirname(series_folder))
-                    if settings.jellyfin_enabled:
-                        refresh_jellyfin_item(os.path.dirname(series_folder), "Deleted")
-
-                    logger.info(f"Refreshed Plex/Jellyfin for series folder: {series_folder}", extra={'emoji_type': 'refresh'})
-                    
-                    # Then delete all files and subfolder recursively
-                    shutil.rmtree(series_folder)
-                    logger.info(f"Deleted placeholder folder: {series_folder}", extra={'emoji_type': 'delete'})
-                except Exception as e:
-                    logger.error(f"Error deleting folder {series_folder}: {str(e)}", extra={'emoji_type': 'error'})
-            else:
-                # Try to see if any similar folders exist (for debugging purposes)
-                similar_folders = [f for f in os.listdir(library_folder) if str(tvdb_id) in f]
-                if similar_folders:
-                    logger.warning(f"Series folder not found: {series_folder}, but found similar folders: {similar_folders}", 
-                                  extra={'emoji_type': 'warning'})
-                else:
-                    logger.warning(f"Series folder not found: {series_folder}", extra={'emoji_type': 'warning'})
-                
-                # Still refresh Plex/Jellyfin in case the folder was already deleted
-                if settings.plex_enabled:
-                    refresh_plex_item(library_folder)
-                if settings.jellyfin_enabled:
-                    refresh_jellyfin_item(library_folder, "Changed")
-
-        else:
-            # Fall back to full library refresh if no TVDB ID
+        folder_path = series.get('folderPath')
+        arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+        library_folder = getattr(settings, 'TV_LIBRARY_FOLDER', None)
+        # Use the unified dummy deletion logic
+        from services.integrations import delete_dummy_files
+        delete_dummy_files('tv', title, year, tvdb_id, library_path=library_folder, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        # Optionally refresh Plex/Jellyfin at the dummy folder location
+        if folder_path and library_folder:
+            import os
+            dummy_folder = os.path.join(library_folder, os.path.basename(folder_path))
             if settings.plex_enabled:
-                refresh_plex_item(settings.TV_LIBRARY_FOLDER)
+                refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(settings.TV_LIBRARY_FOLDER, "Changed")
-            
+                refresh_jellyfin_item(dummy_folder, "Deleted")
+        return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
     return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
 
 def handle_series_delete(payload):
-    """Handle 'seriesdelete' event from Sonarr"""
-    series_title = payload.get('series', {}).get('title')
-    tvdb_id = payload.get('series', {}).get('tvdbId')
-    year = payload.get('series', {}).get('year')
-    
-    # Sanitize the title for filesystem
-    sanitized_title = sanitize_filename(series_title)
-    
-    # Build the path the same way it was created
-    series_folder = f"{sanitized_title} ({year}) {{tvdb-{tvdb_id}}} (dummy)"
-    series_path = os.path.join(settings.PLEX_TV_FOLDER, series_folder)
-    
-    if os.path.exists(series_path):
-        try:
-            shutil.rmtree(series_path)
-            logger.info(f"Removed dummy files for {series_title}", extra={'emoji_type': 'delete'})
-        except Exception as e:
-            logger.error(f"Failed to remove dummy files for {series_title}: {str(e)}", extra={'emoji_type': 'error'})
-    else:
-        logger.warning(f"Series folder not found: {series_path}", extra={'emoji_type': 'warning'})
-    
-    # Refresh Plex/Jellyfin library to reflect the changes
-    plex_folder = os.path.dirname(series_path)  # Get parent folder
-    if settings.plex_enabled:
-        refresh_plex_item(plex_folder)
-    if settings.jellyfin_enabled:
-        refresh_jellyfin_item(plex_folder, "Deleted")
+    """Handle 'seriesdelete' event from Sonarr using unified dummy deletion logic"""
+    if 'series' in payload:
+        series = payload.get('series', {})
+        tvdb_id = series.get('tvdbId')
+        title = series.get('title', 'Unknown Series')
+        year = series.get('year')
+        folder_path = series.get('folderPath')
+        arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+        library_folder = getattr(settings, 'TV_LIBRARY_FOLDER', None)
+        # Use the unified dummy deletion logic
+        from services.integrations import delete_dummy_files
+        delete_dummy_files('tv', title, year, tvdb_id, library_path=library_folder, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        # Optionally refresh Plex/Jellyfin at the dummy folder location
+        if folder_path and library_folder:
+            import os
+            dummy_folder = os.path.join(library_folder, os.path.basename(folder_path))
+            if settings.plex_enabled:
+                refresh_plex_item(dummy_folder)
+            if settings.jellyfin_enabled:
+                refresh_jellyfin_item(dummy_folder, "Deleted")
+        return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
+    return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
 
 # In handle_playback, we need to keep the existing structure but integrate with queue monitoring
 

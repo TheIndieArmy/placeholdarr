@@ -92,6 +92,9 @@ def sync_calendar_episodes():
             episode_title = ep.get('title')
             air_date_str = ep.get('airDateUtc') or ep.get('airDate')
             air_date = _parse_air_date(air_date_str)
+            # Use 'path' for API lookups (Sonarr v3+), fallback to 'folderPath' for legacy/compat
+            folder_path = series.get('path') or series.get('folderPath')
+            arr_root_folder = series.get('rootFolderPath')
             if not air_date:
                 continue
             if not enable_placeholders:
@@ -109,7 +112,9 @@ def sync_calendar_episodes():
                 season_number=season_num,
                 episode_range=(episode_num, episode_num),
                 episode_title=episode_title,
-                dummy_file_override=dummy_file
+                dummy_file_override=dummy_file,
+                folder_path=folder_path,
+                arr_root_folder=arr_root_folder
             )
             episodes_to_update.append({
                 "series_title": series_title,
@@ -144,6 +149,9 @@ def sync_calendar_episodes():
             tmdb_id = movie.get('tmdbId')
             date_str = movie.get(preferred_movie_date) or movie.get('inCinemas') or movie.get('digitalRelease') or movie.get('physicalRelease')
             air_date = _parse_air_date(date_str)
+            # Use 'path' for API lookups (Radarr), fallback to 'folderPath' for legacy/compat
+            folder_path = movie.get('path') or movie.get('folderPath')
+            arr_root_folder = movie.get('rootFolderPath')
             if not air_date:
                 continue
             if not enable_placeholders:
@@ -156,7 +164,9 @@ def sync_calendar_episodes():
                 dummy_file = settings.DUMMY_FILE_PATH
             dummy_path = place_dummy_file(
                 "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER,
-                dummy_file_override=dummy_file
+                dummy_file_override=dummy_file,
+                folder_path=folder_path,
+                arr_root_folder=arr_root_folder
             )
             movies_to_update.append({
                 "title": title,
