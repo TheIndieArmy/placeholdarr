@@ -30,7 +30,10 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
 def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
                     season_number=None, episode_range=None, episode_title=None, episode_id=None,
                     dummy_file_override=None, folder_path=None, arr_root_folder=None):
-    """Create a dummy video file in the correct location. Always use folderPath from webhook as subfolder. ENV is root if set, else use folderPath as absolute. Fallback to legacy only if folderPath missing."""
+    """
+    Create a dummy video file in the correct location. Always use folderPath or path from webhook as subfolder.
+    ENV is root if set, else use folderPath/path as absolute. Fallback to legacy only if both missing.
+    """
     import os
     try:
         dummy_source = dummy_file_override or settings.DUMMY_FILE_PATH
@@ -38,25 +41,26 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
             logger.error(f"Dummy video file does not exist at {dummy_source}", extra={'emoji_type': 'error'})
             return None
         # Canonical path logic
-        if folder_path:
-            # If ENV is set, use as root, else use folderPath as absolute
-            env_path = None
+        env_path = None
+        # --- Always check for both folderPath and path ---
+        effective_folder_path = folder_path or None
+        if not effective_folder_path:
+            # If folder_path not provided, try to get from path argument (for legacy)
+            effective_folder_path = None
+        if effective_folder_path:
             if media_type == "movie":
                 env_path = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
             elif media_type == "tv":
                 env_path = getattr(settings, "TV_LIBRARY_FOLDER", None)
             if env_path and str(env_path).strip():
-                # Compute relative path from arr_root_folder to folder_path
-                if arr_root_folder and folder_path.startswith(arr_root_folder):
-                    rel_subfolder = os.path.relpath(folder_path, arr_root_folder)
+                if arr_root_folder and effective_folder_path.startswith(arr_root_folder):
+                    rel_subfolder = os.path.relpath(effective_folder_path, arr_root_folder)
                     final_folder = os.path.join(env_path, rel_subfolder)
                 else:
-                    # If arr_root_folder not available, just append basename
-                    final_folder = os.path.join(env_path, os.path.basename(folder_path))
+                    final_folder = os.path.join(env_path, os.path.basename(effective_folder_path))
             else:
-                final_folder = folder_path
+                final_folder = effective_folder_path
         else:
-            # Fallback to legacy logic
             util_get_folder_path = get_folder_path
             final_folder = util_get_folder_path(
                 media_type=media_type,
@@ -66,7 +70,7 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                 media_id=media_id,
                 season=season_number if media_type == 'tv' else None
             )
-            logger.warning(f"No folderPath in webhook; using legacy fallback: {final_folder}", extra={'emoji_type': 'warning'})
+            logger.warning(f"No folderPath or path in webhook; using legacy fallback: {final_folder}", extra={'emoji_type': 'warning'})
         os.makedirs(final_folder, exist_ok=True)
         clean_title = sanitize_filename(title)
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
@@ -802,7 +806,9 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         return None
 
 def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None, folder_path=None, arr_root_folder=None):
-    """Delete placeholder files. If ENV is set, use ENV as root and append basename(folderPath). If ENV is blank, use folderPath directly. Also check legacy fallback."""
+    """
+    Delete placeholder files. If ENV is set, use ENV as root and append basename(folderPath or path). If ENV is blank, use folderPath/path directly. Also check legacy fallback.
+    """
     import os
     try:
         env_path = None
@@ -810,11 +816,13 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
             env_path = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
         elif media_type == "tv":
             env_path = getattr(settings, "TV_LIBRARY_FOLDER", None)
-        if folder_path:
+        # --- Always check for both folderPath and path ---
+        effective_folder_path = folder_path or None
+        if effective_folder_path:
             if env_path and str(env_path).strip():
-                dummy_folder = os.path.join(env_path, os.path.basename(folder_path))
+                dummy_folder = os.path.join(env_path, os.path.basename(effective_folder_path))
             else:
-                dummy_folder = folder_path
+                dummy_folder = effective_folder_path
         else:
             # Fallback to legacy logic
             folder_name = sanitize_filename(title)
@@ -825,7 +833,7 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
             else:
                 folder_name += f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
             dummy_folder = os.path.join(library_path or '.', folder_name)
-            logger.warning(f"No folderPath in webhook; using legacy fallback: {dummy_folder}", extra={'emoji_type': 'warning'})
+            logger.warning(f"No folderPath or path in webhook; using legacy fallback: {dummy_folder}", extra={'emoji_type': 'warning'})
         logger.debug(f"Looking for dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
         # Delete dummy at canonical path
         if os.path.exists(dummy_folder):

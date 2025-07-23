@@ -113,6 +113,10 @@ def handle_import_event(data: dict, is_4k: bool = False):
             year = movie.get('year')
             movie_path = data.get("movieFile", {}).get("path")
 
+            # --- Always check for both folderPath and path ---
+            folder_path = movie.get('folderPath') or movie.get('path')
+            arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
 
             # Update Plex/Jellyfin title to "Available" (remove status markers)
@@ -126,8 +130,6 @@ def handle_import_event(data: dict, is_4k: bool = False):
             )
 
             # Clean up placeholder files
-            folder_path = movie.get('folderPath')
-            arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
             delete_dummy_files('movie', title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder)
 
             dummy_folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER, 
@@ -159,6 +161,10 @@ def handle_import_event(data: dict, is_4k: bool = False):
             episode_title = episode.get('title', 'Unknown Episode')
             episode_path = data.get("episodeFile", {}).get("path")
 
+            # --- Always check for both folderPath and path ---
+            folder_path = series.get('folderPath') or series.get('path')
+            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            # Fix: define full_title before using it
             full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
             logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
 
@@ -174,8 +180,6 @@ def handle_import_event(data: dict, is_4k: bool = False):
             )
 
             # Clean up placeholder files
-            folder_path = series.get('folderPath')
-            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
             delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, None, season_number=season_num, episode_number=episode_num, folder_path=folder_path, arr_root_folder=arr_root_folder)
 
             # --- NEW: Always refresh parent folder ---
@@ -236,8 +240,8 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             if check_episode_has_file(tvdb_id, season_num, episode_num, is_4k):
                 logger.info(f"Skipping placeholder for {series_title} S{season_num}E{episode_num} (real file exists)", extra={'emoji_type': 'skip'})
                 continue
-            # Use folderPath from webhook if available
-            folder_path = data.get('series', {}).get('folderPath')
+            # Use folderPath or path from webhook if available
+            folder_path = data.get('series', {}).get('folderPath') or data.get('series', {}).get('path')
             arr_root_folder = data.get('series', {}).get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
             dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
                                         None,
@@ -289,6 +293,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                 logger.info("Cannot determine season/episode from data", extra={'emoji_type': 'warning'})
                 continue
                 
+        # Use folderPath from webhook if available
         folder_path = series.get('folderPath')
         arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
         dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
@@ -417,7 +422,8 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
         tvdb_id = series.get('tvdbId')
         title = series.get('title', 'Unknown Series')
         year = series.get('year')
-        folder_path = series.get('folderPath')
+        # --- Always check for both folderPath and path ---
+        folder_path = series.get('folderPath') or series.get('path')
         arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
         library_folder = getattr(settings, 'TV_LIBRARY_FOLDER', None)
         # Use the unified dummy deletion logic
