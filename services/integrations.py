@@ -93,6 +93,8 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                             except OSError:
                                 shutil.copy2(dummy_source, file_path)
                         logger.info(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
+                        # Set modified date to current time
+                        os.utime(file_path, None)
                     except Exception as e:
                         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
                         return None
@@ -113,6 +115,8 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                     except OSError:
                         shutil.copy2(dummy_source, file_path)
                 logger.info(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
+                # Set modified date to current time
+                os.utime(file_path, None)
             except Exception as e:
                 logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
                 return None

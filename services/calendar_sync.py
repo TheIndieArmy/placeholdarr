@@ -71,6 +71,8 @@ def sync_calendar_episodes():
         episodes = response.json()
         logger.info(f"Fetched {len(episodes)} upcoming episodes from Sonarr calendar", extra={'emoji_type': 'info'})
 
+        # Group episodes by series and season
+        series_seasons = {}
         for ep in episodes:
             # Fetch series info if needed
             if 'series' in ep and ep['series']:
@@ -99,32 +101,75 @@ def sync_calendar_episodes():
                 continue
             if not enable_placeholders:
                 continue
-            # Only create placeholder if not already aired
-            if air_date > now:
-                status = _build_coming_soon_status(air_date, now, enable_countdown)
-                dummy_file = getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or settings.DUMMY_FILE_PATH
-            else:
-                status = "Request"
-                dummy_file = settings.DUMMY_FILE_PATH
-            dummy_path = place_dummy_file(
-                "tv", series_title, series_year, tvdb_id,
-                settings.TV_LIBRARY_FOLDER,
-                season_number=season_num,
-                episode_range=(episode_num, episode_num),
-                episode_title=episode_title,
-                dummy_file_override=dummy_file,
-                folder_path=folder_path,
-                arr_root_folder=arr_root_folder
-            )
-            episodes_to_update.append({
-                "series_title": series_title,
-                "series_year": series_year,
-                "tvdb_id": tvdb_id,
-                "season_num": season_num,
-                "episode_num": episode_num,
-                "status": status,
-                "air_date": air_date
+            # Store episode info for later aggregation
+            key = (series_title, season_num)
+            if key not in series_seasons:
+                series_seasons[key] = []
+            logger.info(f"Aggregating episode: series={series_title}, season={season_num}, episode_num={episode_num}, title={episode_title}, air_date={air_date}", extra={'emoji_type': 'debug'})
+            series_seasons[key].append({
+                'episode_num': episode_num,
+                'air_date': air_date,
+                'title': episode_title,
+                'tvdb_id': tvdb_id,
+                'series_year': series_year,
+                'folder_path': folder_path,
+                'arr_root_folder': arr_root_folder
             })
+
+        # For each series/season, determine status for series/season and each episode
+        now = datetime.now(timezone.utc)
+        for (series_title, season_num), eps in series_seasons.items():
+            eps_sorted = sorted(eps, key=lambda e: e['air_date'])
+            latest_aired = None
+            next_upcoming = None
+            for ep in eps_sorted:
+                if ep['air_date'] <= now:
+                    latest_aired = ep
+                elif not next_upcoming:
+                    next_upcoming = ep
+            # Series/season status
+            if latest_aired and (now - latest_aired['air_date']).days <= 2:
+                status_msg = "Latest aired today" if (now - latest_aired['air_date']).days == 0 else "Latest aired yesterday"
+            elif next_upcoming:
+                days_left = (next_upcoming['air_date'].date() - now.date()).days
+                status_msg = f"Next episode in {days_left} days"
+            else:
+                status_msg = "No upcoming episodes"
+            # Update series/season title/description
+            update_title_status(
+                media_type='tv',
+                media_id=latest_aired['tvdb_id'] if latest_aired else eps_sorted[0]['tvdb_id'],
+                title=series_title,
+                status=status_msg,
+                season=season_num
+            )
+            # Update episodes
+            for ep in eps_sorted:
+                if ep['air_date'] > now:
+                    days_left = (ep['air_date'].date() - now.date()).days
+                    ep_status = f"Airing in {days_left} days"
+                    dummy_file = getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or settings.DUMMY_FILE_PATH
+                else:
+                    ep_status = "Request"
+                    dummy_file = settings.DUMMY_FILE_PATH
+                place_dummy_file(
+                    "tv", series_title, ep['series_year'], ep['tvdb_id'],
+                    settings.TV_LIBRARY_FOLDER,
+                    season_number=season_num,
+                    episode_range=(ep['episode_num'], ep['episode_num']),
+                    episode_title=ep['title'],
+                    dummy_file_override=dummy_file,
+                    folder_path=ep['folder_path'],
+                    arr_root_folder=ep['arr_root_folder']
+                )
+                update_title_status(
+                    media_type='tv',
+                    media_id=ep['tvdb_id'],
+                    title=series_title,
+                    status=ep_status,
+                    season=season_num,
+                    episode=ep['episode_num']
+                )
     except Exception as e:
         logger.error(f"Sonarr calendar sync failed: {e}", extra={'emoji_type': 'error'})
 
