@@ -5,6 +5,7 @@ from services.utils import (
     sanitize_filename, strip_status_markers, get_arr_config
 )
 from services.plex_client import plex
+import hashlib
 
 # Global variables
 BASE_TITLES = {}
@@ -132,7 +133,7 @@ def update_title_status(media_type, media_id, title, status, **kwargs):
     # Plex update
     if settings.plex_enabled:
         from services.plex_client import update_plex_title_status
-        logger.debug(f"[Plex] Attempting update – type={media_type} id={media_id} status={status}", 
+        logger.debug(f"[Plex] Attempting update – type={media_type} id={media_id} status={status} kwargs={kwargs}", 
                      extra={'emoji_type': 'debug'})
         try:
             success = update_plex_title_status(
@@ -142,17 +143,17 @@ def update_title_status(media_type, media_id, title, status, **kwargs):
                 status=status,
                 **kwargs
             )
-            logger.debug(f"[Plex] Update {'succeeded' if success else 'failed'} for id={media_id}", 
+            logger.debug(f"[Plex] Update {'succeeded' if success else 'failed'} for id={media_id} kwargs={kwargs}", 
                          extra={'emoji_type': 'debug'})
             results.append(success)
         except Exception as e:
-            logger.error(f"[Plex] Exception updating id={media_id}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"[Plex] Exception updating id={media_id} kwargs={kwargs}: {e}", extra={'emoji_type': 'error'})
             results.append(False)
 
     # Jellyfin update
     if settings.jellyfin_enabled:
         from services.jellyfin_client import update_jellyfin_title_status
-        logger.debug(f"[Jellyfin] Attempting update – type={media_type} id={media_id} status={status}", 
+        logger.debug(f"[Jellyfin] Attempting update – type={media_type} id={media_id} status={status} kwargs={kwargs}", 
                      extra={'emoji_type': 'debug'})
         try:
             success = update_jellyfin_title_status(
@@ -162,11 +163,11 @@ def update_title_status(media_type, media_id, title, status, **kwargs):
                 status=status,
                 **kwargs
             )
-            logger.debug(f"[Jellyfin] Update {'succeeded' if success else 'failed'} for id={media_id}", 
+            logger.debug(f"[Jellyfin] Update {'succeeded' if success else 'failed'} for id={media_id} kwargs={kwargs}", 
                          extra={'emoji_type': 'debug'})
             results.append(success)
         except Exception as e:
-            logger.error(f"[Jellyfin] Exception updating id={media_id}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"[Jellyfin] Exception updating id={media_id} kwargs={kwargs}: {e}", extra={'emoji_type': 'error'})
             results.append(False)
 
     # No server case
@@ -951,4 +952,33 @@ def check_all_arr_webhooks():
     if missing:
         logger.warning(f"Webhooks still missing for: {', '.join(missing)}. Calendar sync will not start until all are ready.", extra={'emoji_type': 'warning'})
         return False
+    return True
+
+def is_same_file(file1, file2):
+    import os
+    import hashlib
+    # Only log NO MATCH at DEBUG, comment out MATCH log for less noise
+    if not os.path.exists(file1) or not os.path.exists(file2):
+        logger.debug(f"is_same_file: NO MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
+        return False
+    size1 = os.path.getsize(file1)
+    size2 = os.path.getsize(file2)
+    if size1 != size2:
+        logger.debug(f"is_same_file: NO MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
+        return False
+    def file_hash(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    hash1 = file_hash(file1)
+    hash2 = file_hash(file2)
+    if hash1 != hash2:
+        logger.debug(f"is_same_file: NO MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
+        return False
+    # logger.debug(f"is_same_file: MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
     return True
