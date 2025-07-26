@@ -9,7 +9,7 @@ from services.integrations import (
     schedule_movie_request_update, 
     search_in_radarr, search_in_sonarr, trigger_sonarr_search, monitor_episodes, 
     mark_series_monitored, get_episodes_for_lookahead,
-    monitor_season, sanitize_filename
+    monitor_season
 )
 from services.queue_monitor import add_to_monitor
 from services.utils import (
@@ -112,10 +112,16 @@ def handle_import_event(data: dict, is_4k: bool = False):
             title = movie.get('title', 'Unknown Movie')
             year = movie.get('year')
             movie_path = data.get("movieFile", {}).get("path")
-
-            # --- Always check for both folderPath and path ---
-            folder_path = movie.get('folderPath') or movie.get('path')
-            arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+            library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
+            # Use ENV as root if set, otherwise fallback to folderPath/path
+            if library_path and str(library_path).strip():
+                base_path = library_path
+                folder_path = None
+                arr_root_folder = None
+            else:
+                base_path = None
+                folder_path = movie.get('folderPath') or movie.get('path')
+                arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
 
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
 
@@ -129,10 +135,24 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 year=year
             )
 
-            # Clean up placeholder files
-            delete_dummy_files('movie', title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder)
+            # Clean up placeholder files (delete only the dummy file, not the folder)
+            # Build the dummy file path using the same logic as place_dummy_file
+            dummy_folder = base_path or folder_path
+            file_name = f"{sanitize_filename(title)}"
+            if year:
+                file_name += f" ({year})"
+            file_name += f" (dummy).mp4"
+            dummy_file_path = os.path.join(dummy_folder, file_name)
+            if os.path.exists(dummy_file_path):
+                try:
+                    os.remove(dummy_file_path)
+                    logger.info(f"Deleted placeholder file: {dummy_file_path}", extra={'emoji_type': 'delete'})
+                except Exception as e:
+                    logger.error(f"Failed to delete dummy file {dummy_file_path}: {e}", extra={'emoji_type': 'error'})
+            else:
+                logger.debug(f"Dummy file not found for deletion: {dummy_file_path}", extra={'emoji_type': 'debug'})
 
-            dummy_folder = os.path.join(settings.MOVIE_LIBRARY_FOLDER, 
+            dummy_folder = os.path.join(library_path or '.', 
             f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
 
             # --- NEW: Always refresh parent folder ---
@@ -160,10 +180,15 @@ def handle_import_event(data: dict, is_4k: bool = False):
             episode_num = episode.get('episodeNumber')
             episode_title = episode.get('title', 'Unknown Episode')
             episode_path = data.get("episodeFile", {}).get("path")
-
-            # --- Always check for both folderPath and path ---
-            folder_path = series.get('folderPath') or series.get('path')
-            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            library_path = getattr(settings, 'TV_LIBRARY_FOLDER', None)
+            if library_path and str(library_path).strip():
+                base_path = library_path
+                folder_path = None
+                arr_root_folder = None
+            else:
+                base_path = None
+                folder_path = series.get('folderPath') or series.get('path')
+                arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
             # Fix: define full_title before using it
             full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
             logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
@@ -180,7 +205,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             )
 
             # Clean up placeholder files
-            delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, None, season_number=season_num, episode_number=episode_num, folder_path=folder_path, arr_root_folder=arr_root_folder)
+            delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, base_path, season_number=season_num, episode_number=episode_num, folder_path=folder_path, arr_root_folder=arr_root_folder)
 
             # --- NEW: Always refresh parent folder ---
             if episode_path:
@@ -208,12 +233,13 @@ def handle_import_event(data: dict, is_4k: bool = False):
     return JSONResponse({"status": "success", "message": "Import cleanup processed"})
 
 def handle_seriesadd(data: dict, is_4k: bool = False):
-    # Extract series info and episodes, create dummies and schedule updates.
+    # Extract series info and episodes, create dummies and schedule updates in batch.
     series = data.get('series', {})
     episodes = data.get('episodes', [])
     series_title = series.get('title', 'Unknown Series')
     series_year = series.get('year')
     tvdb_id = series.get('tvdbId')
+    library_path = getattr(settings, 'TV_LIBRARY_FOLDER', None)
     if not episodes:
         series_id = series.get('id')
         if series_id:
@@ -225,50 +251,74 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         else:
             logger.warning("No series ID provided in seriesadd event.", extra={'emoji_type': 'warning'})
             episodes = []
-    unique_folders = set()
-    def delayed_placeholders():
-        delay_seconds = 3  # Adjust as needed
-        logger.debug(f"Delaying {delay_seconds}s before checking hasFile for series '{series_title}'", extra={'emoji_type': 'debug'})
-        time.sleep(delay_seconds)
-        for ep in episodes:
-            season_num = ep.get('seasonNumber')
-            episode_num = ep.get('episodeNumber')
-            episode_title = ep.get('title')
-            if not (season_num and episode_num):
-                continue
-            from services.queue_monitor import check_episode_has_file
-            if check_episode_has_file(tvdb_id, season_num, episode_num, is_4k):
-                logger.info(f"Skipping placeholder for {series_title} S{season_num}E{episode_num} (real file exists)", extra={'emoji_type': 'skip'})
-                continue
-            # Use folderPath or path from webhook if available
-            folder_path = data.get('series', {}).get('folderPath') or data.get('series', {}).get('path')
-            arr_root_folder = data.get('series', {}).get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
-            dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
-                                        None,
-                                        season_number=season_num,
-                                        episode_range=(episode_num, episode_num),
-                                        episode_title=episode_title,
-                                        folder_path=folder_path,
-                                        arr_root_folder=arr_root_folder)
-            if dummy_path:
-                logger.info(f"Created placeholder file for {series_title} S{season_num}E{episode_num}", extra={'emoji_type': 'create'})
-                if settings.plex_enabled:
-                    refresh_plex_item(os.path.dirname(dummy_path))
-                if settings.jellyfin_enabled:
-                    refresh_jellyfin_item(os.path.dirname(dummy_path))
-                schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
-            else:
-                logger.error(f"Failed to create dummy file for {series_title} S{season_num}E{episode_num}; skipping refresh.", extra={'emoji_type': 'error'})
-        for folder in unique_folders:
-            if settings.plex_enabled:
-                refresh_plex_item(folder)
-            if settings.jellyfin_enabled:
-                refresh_jellyfin_item(folder)
-
-        logger.info(f"Created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
-
-    threading.Thread(target=delayed_placeholders, daemon=True).start()
-    return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
+    episode_updates = []
+    from services.utils import resolve_final_folder
+    from services.integrations import batch_poll_and_update_plex_status
+    from services.calendar_sync import _parse_air_date
+    series_folder = resolve_final_folder(
+        media_type="tv",
+        title=series_title,
+        year=series_year,
+        media_id=tvdb_id,
+        folder_path=series.get('folderPath') or series.get('path'),
+        arr_root_folder=series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None),
+        season_number=None,
+        season_folder_name=None
+    )
+    episode_list = []
+    for ep in episodes:
+        season_num = ep.get('seasonNumber')
+        episode_num = ep.get('episodeNumber')
+        episode_title = ep.get('title')
+        air_date_str = ep.get('airDateUtc') or ep.get('airDate')
+        air_date = _parse_air_date(air_date_str) if air_date_str else None
+        if not (season_num and episode_num):
+            continue
+        from services.queue_monitor import check_episode_has_file
+        if check_episode_has_file(tvdb_id, season_num, episode_num, is_4k):
+            logger.info(f"Skipping placeholder for {series_title} S{season_num}E{episode_num} (real file exists)", extra={'emoji_type': 'skip'})
+            continue
+        dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
+                                    library_path,
+                                    season_number=season_num,
+                                    episode_range=(episode_num, episode_num),
+                                    episode_title=episode_title,
+                                    folder_path=series.get('folderPath') or series.get('path'),
+                                    arr_root_folder=series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None))
+        if dummy_path:
+            episode_updates.append((series_title, season_num, episode_num, tvdb_id))
+            episode_list.append({
+                'season_num': season_num,
+                'episode_num': episode_num,
+                'episode_title': episode_title,
+                'air_date': air_date
+            })
+            logger.debug(f"Created placeholder file for {series_title} S{season_num}E{episode_num}", extra={'emoji_type': 'create'})
+        else:
+            logger.error(f"Failed to create dummy file for {series_title} S{season_num}E{episode_num}; skipping.", extra={'emoji_type': 'error'})
+    # Single refresh for the series folder
+    if series_folder:
+        if settings.plex_enabled:
+            refresh_plex_item(series_folder)
+        if settings.jellyfin_enabled:
+            refresh_jellyfin_item(series_folder)
+    # --- Batch status update for Plex using polling utility ---
+    if settings.plex_enabled and episode_list:
+        threading.Thread(target=batch_poll_and_update_plex_status, args=(tvdb_id, series_title, episode_list), daemon=True).start()
+    # --- Batch status update for Jellyfin ---
+    if settings.jellyfin_enabled and episode_list:
+        from services.jellyfin_client import update_jellyfin_title_status
+        for ep in episode_list:
+            update_jellyfin_title_status(
+                media_type='tv',
+                media_id=tvdb_id,
+                title=series_title,
+                status='Request',
+                season=ep['season_num'],
+                episode=ep['episode_num']
+            )
+    logger.info(f"Batch created {len(episode_updates)} placeholder files and refreshed series folder for '{series_title}'", extra={'emoji_type': 'create'})
+    return JSONResponse({"status": "success", "message": "SeriesAdd batch scheduled"})
 
 def handle_episodefiledelete(data: dict, is_4k: bool = False):
     # Similar to seriesadd: recreate dummy for episode deletion.
@@ -278,6 +328,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     series_year = series.get('year')
     tvdb_id = series.get('tvdbId')
     episode_file_path = data.get("episodeFile", {}).get("path")
+    library_path = getattr(settings, 'TV_LIBRARY_FOLDER', None)
     for ep in episodes:
         season_num = ep.get('seasonNumber')
         episode_num = ep.get('episodeNumber')
@@ -416,47 +467,27 @@ def handle_movieadd(data: dict):
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
 
 def handle_seriesdelete(data: dict, is_4k: bool = False):
-    """Delete placeholder files when a series is deleted from Sonarr using universal path logic"""
+    """Delete placeholder files when a series is deleted from Sonarr using universal path logic."""
     if 'series' in data:
         series = data.get('series', {})
         tvdb_id = series.get('tvdbId')
         title = series.get('title', 'Unknown Series')
         year = series.get('year')
-        # --- Always check for both folderPath and path ---
-        folder_path = series.get('folderPath') or series.get('path')
-        arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
         library_folder = getattr(settings, 'TV_LIBRARY_FOLDER', None)
-        # Use the unified dummy deletion logic
+        if library_folder and str(library_folder).strip():
+            base_path = library_folder
+            folder_path = None
+            arr_root_folder = None
+        else:
+            base_path = None
+            folder_path = series.get('folderPath') or series.get('path')
+            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
         from services.integrations import delete_dummy_files
-        delete_dummy_files('tv', title, year, tvdb_id, library_path=library_folder, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        delete_dummy_files('tv', title, year, tvdb_id, base_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
         # Optionally refresh Plex/Jellyfin at the dummy folder location
-        if folder_path and library_folder:
+        if base_path:
             import os
-            dummy_folder = os.path.join(library_folder, os.path.basename(folder_path))
-            if settings.plex_enabled:
-                refresh_plex_item(dummy_folder)
-            if settings.jellyfin_enabled:
-                refresh_jellyfin_item(dummy_folder, "Deleted")
-        return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
-    return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
-
-def handle_series_delete(payload):
-    """Handle 'seriesdelete' event from Sonarr using unified dummy deletion logic"""
-    if 'series' in payload:
-        series = payload.get('series', {})
-        tvdb_id = series.get('tvdbId')
-        title = series.get('title', 'Unknown Series')
-        year = series.get('year')
-        folder_path = series.get('folderPath')
-        arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
-        library_folder = getattr(settings, 'TV_LIBRARY_FOLDER', None)
-        # Use the unified dummy deletion logic
-        from services.integrations import delete_dummy_files
-        delete_dummy_files('tv', title, year, tvdb_id, library_path=library_folder, folder_path=folder_path, arr_root_folder=arr_root_folder)
-        # Optionally refresh Plex/Jellyfin at the dummy folder location
-        if folder_path and library_folder:
-            import os
-            dummy_folder = os.path.join(library_folder, os.path.basename(folder_path))
+            dummy_folder = os.path.join(base_path, f"{sanitize_filename(title)} ({year}) {{tvdb-{tvdb_id}}}")
             if settings.plex_enabled:
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:

@@ -1,4 +1,5 @@
 import re
+import os
 from core.config import settings
 
 def sanitize_filename(name: str) -> str:
@@ -86,3 +87,93 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
             "queue_id_field": "episodeId",
             "search_type": media_type  # This will be 'episode', 'season', or 'series'
         }
+
+def resolve_final_folder(media_type, title=None, year=None, media_id=None, season_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None, payload=None):
+    """
+    Centralized function to resolve the final folder path for dummy file operations.
+    Priority:
+    1. If ENV is set, use it as base and append *arrs folder name (from payload).
+    2. If ENV is blank, use *arrs root and folder name (from payload).
+    Always append season folder name for TV if available.
+    """
+    import os
+    # Extract folder name and season folder name from payload
+    arr_folder_name = None
+    arr_season_folder = None
+    arr_root = None
+    # --- PATCH: Always use basename of folder_path for movies if provided ---
+    if media_type == "movie" and folder_path:
+        arr_folder_name = os.path.basename(folder_path)
+        arr_root = os.path.dirname(folder_path)
+    elif payload:
+        # Get full folder path from payload
+        arr_full_path = payload.get('folderPath') or payload.get('path') or folder_path
+        if arr_full_path:
+            arr_folder_name = os.path.basename(arr_full_path)
+            arr_root = os.path.dirname(arr_full_path)
+        arr_season_folder = payload.get('seasonFolder') or payload.get('season_folder') or season_folder_name
+    # Determine base path
+    if media_type == "movie":
+        env_base = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
+    else:
+        env_base = getattr(settings, "TV_LIBRARY_FOLDER", None)
+    base_folder = None
+    if env_base and str(env_base).strip():
+        # ENV is set: use ENV as base, append *arrs folder name
+        if arr_folder_name:
+            base_folder = os.path.join(env_base, arr_folder_name)
+        else:
+            # Fallback: build from title/year/id
+            folder_name = sanitize_filename(title) if title else ("Unknown Movie" if media_type == "movie" else "Unknown Series")
+            if year:
+                folder_name += f" ({year})"
+            if media_id:
+                folder_name += f" {{tmdb-{media_id}}}" if media_type == "movie" else f" {{tvdb-{media_id}}}"
+            base_folder = os.path.join(env_base, folder_name)
+    elif arr_root and arr_folder_name:
+        # ENV is blank: use *arrs root and folder name
+        base_folder = os.path.join(arr_root, arr_folder_name)
+    else:
+        # Fallback: build from title/year/id
+        folder_name = sanitize_filename(title) if title else ("Unknown Movie" if media_type == "movie" else "Unknown Series")
+        if year:
+            folder_name += f" ({year})"
+        if media_id:
+            folder_name += f" {{tmdb-{media_id}}}" if media_type == "movie" else f" {{tvdb-{media_id}}}"
+        base_folder = folder_path or os.path.join(env_base or "", folder_name)
+    # Season folder resolution (for TV)
+    if media_type != "movie":
+        season_folder = arr_season_folder
+        if not season_folder and relative_path:
+            parts = os.path.normpath(relative_path).split(os.sep)
+            for part in parts:
+                if part.lower().startswith("season"):
+                    season_folder = part
+                    break
+        elif not season_folder and season_number is not None:
+            season_folder = f"Season {season_number:02d}"
+        if season_folder:
+            return os.path.join(base_folder, season_folder)
+    return base_folder
+
+def is_same_file(file1, file2):
+    import os
+    import hashlib
+    if not os.path.exists(file1) or not os.path.exists(file2):
+        return False
+    size1 = os.path.getsize(file1)
+    size2 = os.path.getsize(file2)
+    if size1 != size2:
+        return False
+    def file_hash(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    hash1 = file_hash(file1)
+    hash2 = file_hash(file2)
+    return hash1 == hash2

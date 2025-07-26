@@ -2,7 +2,7 @@ import os, glob, shutil, time, threading, requests, subprocess, platform, re, fn
 from core.config import settings
 from core.logger import logger
 from services.utils import (
-    sanitize_filename, strip_status_markers, get_arr_config
+    resolve_final_folder, sanitize_filename, strip_status_markers, get_arr_config
 )
 from services.plex_client import plex
 import hashlib
@@ -30,10 +30,9 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
 
 def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
                     season_number=None, episode_range=None, episode_title=None, episode_id=None,
-                    dummy_file_override=None, folder_path=None, arr_root_folder=None):
+                    dummy_file_override=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None):
     """
-    Create a dummy video file in the correct location. Always use folderPath or path from webhook as subfolder.
-    ENV is root if set, else use folderPath/path as absolute. Fallback to legacy only if both missing.
+    Create a dummy video file in the correct location. Uses resolve_final_folder for path resolution.
     """
     import os
     try:
@@ -41,67 +40,38 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         if not os.path.exists(dummy_source):
             logger.error(f"Dummy video file does not exist at {dummy_source}", extra={'emoji_type': 'error'})
             return None
-        # Canonical path logic
-        env_path = None
-        # --- Always check for both folderPath and path ---
-        effective_folder_path = folder_path or None
-        if not effective_folder_path:
-            # If folder_path not provided, try to get from path argument (for legacy)
-            effective_folder_path = None
-        if effective_folder_path:
-            if media_type == "movie":
-                env_path = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
-            elif media_type == "tv":
-                env_path = getattr(settings, "TV_LIBRARY_FOLDER", None)
-            if env_path and str(env_path).strip():
-                if arr_root_folder and effective_folder_path.startswith(arr_root_folder):
-                    rel_subfolder = os.path.relpath(effective_folder_path, arr_root_folder)
-                    final_folder = os.path.join(env_path, rel_subfolder)
-                else:
-                    final_folder = os.path.join(env_path, os.path.basename(effective_folder_path))
-            else:
-                final_folder = effective_folder_path
-        else:
-            util_get_folder_path = get_folder_path
-            final_folder = util_get_folder_path(
-                media_type=media_type,
-                base_path=base_path or env_path or '.',
-                title=title,
-                year=year,
-                media_id=media_id,
-                season=season_number if media_type == 'tv' else None
-            )
-            logger.warning(f"No folderPath or path in webhook; using legacy fallback: {final_folder}", extra={'emoji_type': 'warning'})
+        final_folder = resolve_final_folder(media_type, title, year, media_id, season_number, folder_path, arr_root_folder, season_folder_name, relative_path)
+        if not final_folder:
+            logger.error("No valid folder path for dummy file creation.", extra={'emoji_type': 'error'})
+            return None
         os.makedirs(final_folder, exist_ok=True)
         clean_title = sanitize_filename(title)
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
         year_str = f" ({year})" if year else ""
-        if media_type == 'tv' and season_number is not None:
-            if episode_range:
-                start_ep, end_ep = episode_range
-                for ep_num in range(int(start_ep), int(end_ep) + 1):
-                    ep_title = episode_title or f"Episode {ep_num}"
-                    file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
-                    file_path = os.path.join(final_folder, sanitize_filename(file_name))
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    try:
-                        if settings.PLACEHOLDER_STRATEGY == "copy":
+        if media_type == 'tv' and season_number is not None and episode_range:
+            start_ep, end_ep = episode_range
+            for ep_num in range(int(start_ep), int(end_ep) + 1):
+                ep_title = episode_title or f"Episode {ep_num}"
+                file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
+                file_path = os.path.join(final_folder, sanitize_filename(file_name))
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                try:
+                    if settings.PLACEHOLDER_STRATEGY == "copy":
+                        shutil.copy2(dummy_source, file_path)
+                    else:
+                        try:
+                            os.link(dummy_source, file_path)
+                        except OSError:
                             shutil.copy2(dummy_source, file_path)
-                        else:
-                            try:
-                                os.link(dummy_source, file_path)
-                            except OSError:
-                                shutil.copy2(dummy_source, file_path)
-                        logger.info(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
-                        # Set modified date to current time
-                        os.utime(file_path, None)
-                    except Exception as e:
-                        logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
-                        return None
-                ep_title = episode_title or f"Episode {start_ep}"
-                file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
-                return os.path.join(final_folder, sanitize_filename(file_name))
+                    logger.debug(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
+                    os.utime(file_path, None)
+                except Exception as e:
+                    logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+                    return None
+            ep_title = episode_title or f"Episode {start_ep}"
+            file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
+            return os.path.join(final_folder, sanitize_filename(file_name))
         else:
             file_name = f"{clean_title}{year_str} (dummy).mp4"
             file_path = os.path.join(final_folder, sanitize_filename(file_name))
@@ -115,8 +85,7 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                         os.link(dummy_source, file_path)
                     except OSError:
                         shutil.copy2(dummy_source, file_path)
-                logger.info(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
-                # Set modified date to current time
+                logger.debug(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
                 os.utime(file_path, None)
             except Exception as e:
                 logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
@@ -739,6 +708,10 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         sonarr_api_key = settings.SONARR_API_KEY_4K if is_4k else settings.SONARR_API_KEY
         headers = {"X-Api-Key": sonarr_api_key}
         
+        # --- Always resolve folder path for placeholder creation/deletion ---
+        folder_path = file_path or None
+        arr_root_folder = getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+
         # Get all series from Sonarr for efficient matching
         series_url = f"{sonarr_url}/series"
         series_response = requests.get(series_url, headers=headers)
@@ -810,57 +783,47 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         logger.error(f"Error finding series in Sonarr: {e}", extra={'emoji_type': 'error'})
         return None
 
-def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None, folder_path=None, arr_root_folder=None):
+def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None):
     """
-    Delete placeholder files. If ENV is set, use ENV as root and append basename(folderPath or path). If ENV is blank, use folderPath/path directly. Also check legacy fallback.
+    Delete placeholder files. Uses resolve_final_folder for path resolution.
     """
     import os
     try:
-        env_path = None
-        if media_type == "movie":
-            env_path = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
-        elif media_type == "tv":
-            env_path = getattr(settings, "TV_LIBRARY_FOLDER", None)
-        # --- Always check for both folderPath and path ---
-        effective_folder_path = folder_path or None
-        if effective_folder_path:
-            if env_path and str(env_path).strip():
-                dummy_folder = os.path.join(env_path, os.path.basename(effective_folder_path))
+        final_folder = resolve_final_folder(media_type, title, year, tvdb_id, season_number, folder_path, arr_root_folder, season_folder_name, relative_path)
+        if not final_folder:
+            logger.error("No valid folder path for dummy file deletion.", extra={'emoji_type': 'error'})
+            return False
+        # For TV episodes, delete only the specific episode file in the correct season folder
+        if media_type == 'tv' and season_number is not None and episode_number is not None:
+            patterns = [
+                f"s{season_number:02d}e{episode_number:02d}",
+                f"S{season_number:02d}E{episode_number:02d}",
+                f" - s{season_number:02d}e{episode_number:02d}",
+                f" - S{season_number:02d}E{episode_number:02d}"
+            ]
+            files_found = False
+            if os.path.exists(final_folder):
+                for file in os.listdir(final_folder):
+                    if any(pattern in file for pattern in patterns):
+                        file_path = os.path.join(final_folder, file)
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"Deleted placeholder file: {file_path}", extra={'emoji_type': 'delete'})
+                            files_found = True
+                        except Exception as e:
+                            logger.error(f"Failed to delete file {file_path}: {e}", extra={'emoji_type': 'error'})
+                if not os.listdir(final_folder):
+                    os.rmdir(final_folder)
+                    logger.info(f"Deleted empty season folder: {final_folder}", extra={'emoji_type': 'delete'})
+                if not files_found:
+                    logger.debug(f"No matching episode files found in {final_folder}", extra={'emoji_type': 'debug'})
             else:
-                dummy_folder = effective_folder_path
+                logger.debug(f"Season directory not found: {final_folder}", extra={'emoji_type': 'debug'})
         else:
-            # Fallback to legacy logic
-            folder_name = sanitize_filename(title)
-            if year:
-                folder_name += f" ({year})"
-            if media_type == 'tv':
-                folder_name += f" {{tvdb-{tvdb_id}}} (dummy)"
-            else:
-                folder_name += f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
-            dummy_folder = os.path.join(library_path or '.', folder_name)
-            logger.warning(f"No folderPath or path in webhook; using legacy fallback: {dummy_folder}", extra={'emoji_type': 'warning'})
-        logger.debug(f"Looking for dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
-        # Delete dummy at canonical path
-        if os.path.exists(dummy_folder):
-            shutil.rmtree(dummy_folder)
-            logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
-        else:
-            logger.info(f"Dummy folder not found at canonical path: {dummy_folder}", extra={'emoji_type': 'info'})
-        # Also check legacy fallback if not already checked
-        if folder_path:
-            folder_name = sanitize_filename(title)
-            if year:
-                folder_name += f" ({year})"
-            if media_type == 'tv':
-                folder_name += f" {{tvdb-{tvdb_id}}} (dummy)"
-            else:
-                folder_name += f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
-            legacy_folder = os.path.join(library_path or '.', folder_name)
-            if legacy_folder != dummy_folder and os.path.exists(legacy_folder):
-                shutil.rmtree(legacy_folder)
-                logger.info(f"Deleted legacy placeholder folder: {legacy_folder}", extra={'emoji_type': 'delete'})
-        # TV episode file deletion logic unchanged
-        # ...existing code for TV episode file deletion...
+            # Movies or entire TV series - delete the whole folder
+            if os.path.exists(final_folder):
+                shutil.rmtree(final_folder)
+                logger.info(f"Deleted placeholder folder: {final_folder}", extra={'emoji_type': 'delete'})
         return True
     except Exception as e:
         logger.error(f"Error deleting placeholder: {e}", extra={'emoji_type': 'error'})
@@ -954,31 +917,135 @@ def check_all_arr_webhooks():
         return False
     return True
 
-def is_same_file(file1, file2):
-    import os
-    import hashlib
-    # Only log NO MATCH at DEBUG, comment out MATCH log for less noise
-    if not os.path.exists(file1) or not os.path.exists(file2):
-        logger.debug(f"is_same_file: NO MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
-        return False
-    size1 = os.path.getsize(file1)
-    size2 = os.path.getsize(file2)
-    if size1 != size2:
-        logger.debug(f"is_same_file: NO MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
-        return False
-    def file_hash(path):
-        h = hashlib.sha256()
-        with open(path, 'rb') as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                h.update(chunk)
-        return h.hexdigest()
-    hash1 = file_hash(file1)
-    hash2 = file_hash(file2)
-    if hash1 != hash2:
-        logger.debug(f"is_same_file: NO MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
-        return False
-    # logger.debug(f"is_same_file: MATCH | {file1} vs {file2}", extra={'emoji_type': 'debug'})
+def batch_poll_and_update_plex_status(tvdb_id, title, episodes, max_attempts=10, initial_delay=0, throttle=0.2):
+    """
+    Batch poll Plex for summary readiness and update episode summaries with correct status/countdown.
+    Args:
+        tvdb_id: TVDB ID of the show
+        title: Title of the show
+        episodes: List of dicts with keys: season_num, episode_num, air_date (datetime), episode_title
+        max_attempts: Max polling attempts
+        initial_delay: Delay before first poll (0 for instant)
+        throttle: Throttle between updates
+    """
+    import time
+    from datetime import datetime, timedelta
+    from services.plex_client import batch_update_plex_episode_status, find_show_by_id
+    from services.calendar_sync import _parse_air_date
+    
+    def _local_date(dt):
+        return dt.astimezone().date() if dt and hasattr(dt, 'tzinfo') and dt.tzinfo else dt.date() if dt else None
+    def _get_unaired_status(air_date):
+        now = datetime.now()
+        today = now.date()
+        tomorrow = today + timedelta(days=1)
+        if not air_date:
+            return None
+        local_air_date = _local_date(air_date)
+        if local_air_date == today:
+            return "Airing today"
+        elif local_air_date == tomorrow:
+            return "Airing in 1 day"
+        elif local_air_date > today:
+            days_left = (local_air_date - today).days
+            return f"Airing in {days_left} days"
+        return None
+    ep_lookup = {(int(ep['season_num']), int(ep['episode_num'])): ep for ep in episodes}
+    done = set()
+    attempt = 0
+    prev_done_count = 0
+    # Polling ramp-up: 1s, 5s, 10s, 20s, then 20s for all subsequent polls
+    poll_schedule = [1, 5, 10, 20]
+    delay = initial_delay
+    while attempt < max_attempts:
+        show = find_show_by_id(tvdb_id, title)
+        if not show:
+            logger.error(f"[BatchPoll] Could not find show with TVDB ID {tvdb_id}", extra={'emoji_type': 'error'})
+            return False
+        all_eps = list(show.episodes())
+        plex_ep_map = {}
+        for ep in all_eps:
+            try:
+                s = getattr(ep, 'seasonNumber', None) or getattr(ep, 'season', None)
+                e = getattr(ep, 'episodeNumber', None) or getattr(ep, 'index', None)
+                if s is not None and e is not None:
+                    plex_ep_map[(int(s), int(e))] = ep
+            except Exception as ex:
+                logger.warning(f"[BatchPoll] Error mapping episode: {ex}", extra={'emoji_type': 'skip'})
+        status_map = {}
+        for key, ep_data in ep_lookup.items():
+            if key in done:
+                continue
+            season, episode = key
+            air_date = ep_data.get('air_date')
+            # Ensure both air_date and now are comparable (naive or aware)
+            if air_date and hasattr(air_date, 'tzinfo') and air_date.tzinfo:
+                now = datetime.now(air_date.tzinfo)
+            else:
+                now = datetime.now()
+            aired = air_date and air_date <= now
+            plex_ep = plex_ep_map.get(key)
+            if not plex_ep:
+                continue  # Not yet in Plex
+            current_summary = getattr(plex_ep, 'summary', '') or ''
+            if aired:
+                if current_summary.strip() != '':
+                    status_map[key] = "Request"
+                    done.add(key)
+            else:
+                status_map[key] = _get_unaired_status(air_date)
+                done.add(key)
+        batch_start = time.time()
+        if status_map:
+            batch_update_plex_episode_status(tvdb_id, title, status_map, throttle=throttle)
+        batch_duration = time.time() - batch_start
+        if len(done) == prev_done_count and attempt > 0:
+            logger.info(f"[BatchPoll] No new episodes ready since last poll. Finishing early and updating all remaining as blank.", extra={'emoji_type': 'info'})
+            remaining_status_map = {}
+            for key, ep_data in ep_lookup.items():
+                if key not in done:
+                    air_date = ep_data.get('air_date')
+                    if air_date and hasattr(air_date, 'tzinfo') and air_date.tzinfo:
+                        now = datetime.now(air_date.tzinfo)
+                    else:
+                        now = datetime.now()
+                    aired = air_date and air_date <= now
+                    if aired:
+                        remaining_status_map[key] = "Request"
+                    else:
+                        remaining_status_map[key] = _get_unaired_status(air_date)
+            if remaining_status_map:
+                batch_update_plex_episode_status(tvdb_id, title, remaining_status_map, throttle=throttle)
+            logger.info(f"[BatchPoll] Early finish: updated all remaining episodes for '{title}'", extra={'emoji_type': 'success'})
+            return True
+        prev_done_count = len(done)
+        if len(done) == len(ep_lookup):
+            logger.info(f"[BatchPoll] All {len(done)} episodes updated for '{title}'", extra={'emoji_type': 'success'})
+            return True
+        attempt += 1
+        # Ramp-up poll interval: 1, 5, 10, 20, then 20s for all subsequent polls
+        if attempt < len(poll_schedule):
+            wait_time = max(0, poll_schedule[attempt] - batch_duration)
+        else:
+            wait_time = max(0, 20 - batch_duration)
+        logger.info(f"[BatchPoll] {len(done)}/{len(ep_lookup)} episodes updated for '{title}'. Polling again in {wait_time:.2f}s...", extra={'emoji_type': 'debug'})
+        if wait_time > 0:
+            time.sleep(wait_time)
+    logger.warning(f"[BatchPoll] Polling ended. Forcing update of all remaining episodes for '{title}'", extra={'emoji_type': 'warning'})
+    remaining_status_map = {}
+    for key, ep_data in ep_lookup.items():
+        if key not in done:
+            air_date = ep_data.get('air_date')
+            if air_date and hasattr(air_date, 'tzinfo') and air_date.tzinfo:
+                now = datetime.now(air_date.tzinfo)
+            else:
+                now = datetime.now()
+            aired = air_date and air_date <= now
+            if aired:
+                remaining_status_map[key] = "Request"
+            else:
+                remaining_status_map[key] = _get_unaired_status(air_date)
+    if remaining_status_map:
+        batch_update_plex_episode_status(tvdb_id, title, remaining_status_map, throttle=throttle)
+    logger.info(f"[BatchPoll] Final forced update: updated all remaining episodes for '{title}'", extra={'emoji_type': 'success'})
     return True

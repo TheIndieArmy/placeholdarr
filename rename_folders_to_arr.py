@@ -112,7 +112,21 @@ def get_expected_folder_names(url, api_key, media_type):
     resp = requests.get(full_url, headers=headers)
     resp.raise_for_status()
     items = resp.json()
-    return set(Path(item['path']).name for item in items if 'path' in item)
+    expected_names = set()
+    if media_type == 'tv':
+        # Add all season folders for each series
+        for item in items:
+            series_folder = Path(item['path']).name
+            seasons = item.get('seasons', [])
+            for season in seasons:
+                season_folder = season.get('folder') or season.get('seasonFolder') or season.get('seasonName')
+                if season_folder:
+                    expected_names.add(os.path.join(series_folder, season_folder))
+            # Also add the series folder itself
+            expected_names.add(series_folder)
+    else:
+        expected_names = set(Path(item['path']).name for item in items if 'path' in item)
+    return expected_names
 
 def scan_and_rename_by_name(library_root, expected_names, media_type):
     global DRY_RUN
@@ -123,10 +137,36 @@ def scan_and_rename_by_name(library_root, expected_names, media_type):
         folder_path = os.path.join(library_root, folder)
         if not os.path.isdir(folder_path):
             continue
+        # Check for season folders inside series folders
+        if media_type == 'tv':
+            for subfolder in os.listdir(folder_path):
+                subfolder_path = os.path.join(folder_path, subfolder)
+                if not os.path.isdir(subfolder_path):
+                    continue
+                full_season_path = os.path.join(folder, subfolder)
+                if full_season_path in expected_names:
+                    print(f"[OK] {full_season_path} matches TV season folder name.")
+                else:
+                    match = None
+                    for expected in expected_names:
+                        if full_season_path.lower() == expected.lower():
+                            match = expected
+                            break
+                    if match:
+                        target_path = os.path.join(library_root, match)
+                        if os.path.exists(target_path):
+                            print(f"[SKIPPED] Target season folder already exists: {target_path}. Will delete old folder.")
+                            rename_candidates.append((full_season_path, match, subfolder_path, target_path, True))
+                        else:
+                            print(f"[RENAME] {full_season_path} -> {match}")
+                            rename_candidates.append((full_season_path, match, subfolder_path, target_path, False))
+                    else:
+                        print(f"[WARN] No TV season match for {full_season_path}")
+                        unmatched_folders.append((full_season_path, subfolder_path))
+        # Check series/movie folder itself
         if folder in expected_names:
             print(f"[OK] {folder} matches {media_type} folder name.")
         else:
-            # Try to find a best match (case-insensitive, or partial match)
             match = None
             for expected in expected_names:
                 if folder.lower() == expected.lower():
@@ -138,7 +178,7 @@ def scan_and_rename_by_name(library_root, expected_names, media_type):
                         match = expected
                         break
             if match:
-                target_path = os.path.join(os.path.dirname(folder_path), match)
+                target_path = os.path.join(library_root, match)
                 if os.path.exists(target_path):
                     print(f"[SKIPPED] Target folder already exists: {target_path}. Will delete old folder.")
                     rename_candidates.append((folder, match, folder_path, target_path, True))
