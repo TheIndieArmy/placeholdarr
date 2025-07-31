@@ -1,4 +1,3 @@
-import os  # <-- Add this import
 import threading
 import time
 from datetime import datetime, timedelta, timezone

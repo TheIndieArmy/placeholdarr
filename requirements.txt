@@ -7,3 +7,6 @@ pydantic>=2.5.2
 typing-extensions>=4.8.0
 plexapi>=4.15.7
 pydantic-settings>=2.1.0
+sqlalchemy
+psycopg2-binary
+apscheduler

@@ -1,11 +1,17 @@
 import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
+from typing import Type
 from core.config import settings
 from core.logger import logger
+from services.postgres.models import Episode, Movie, Season, Series, SubFlow
 from services.utils import (
     sanitize_filename, strip_status_markers, get_series_folder,
     get_arr_config
 )
 from services.plex_client import plex
+from services.utils import get_movie_by_id
+from sqlalchemy.orm import Session
+from services.postgres.models import Series
+
 
 # Global variables
 BASE_TITLES = {}
@@ -116,134 +122,7 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
     except Exception as e:
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
         return None
-
-def update_title_status(media_type, media_id, title, status, **kwargs):
-    """Abstract update of media title status on Plex and/or Jellyfin"""
-    results = []
-
-    # Plex update
-    if settings.plex_enabled:
-        from services.plex_client import update_plex_title_status
-        logger.debug(f"[Plex] Attempting update – type={media_type} id={media_id} status={status}", 
-                     extra={'emoji_type': 'debug'})
-        try:
-            success = update_plex_title_status(
-                media_type=media_type,
-                media_id=media_id,
-                title=title,
-                status=status,
-                **kwargs
-            )
-            logger.debug(f"[Plex] Update {'succeeded' if success else 'failed'} for id={media_id}", 
-                         extra={'emoji_type': 'debug'})
-            results.append(success)
-        except Exception as e:
-            logger.error(f"[Plex] Exception updating id={media_id}: {e}", extra={'emoji_type': 'error'})
-            results.append(False)
-
-    # Jellyfin update
-    if settings.jellyfin_enabled:
-        from services.jellyfin_client import update_jellyfin_title_status
-        logger.debug(f"[Jellyfin] Attempting update – type={media_type} id={media_id} status={status}", 
-                     extra={'emoji_type': 'debug'})
-        try:
-            success = update_jellyfin_title_status(
-                media_type=media_type,
-                media_id=media_id,
-                title=title,
-                status=status,
-                **kwargs
-            )
-            logger.debug(f"[Jellyfin] Update {'succeeded' if success else 'failed'} for id={media_id}", 
-                         extra={'emoji_type': 'debug'})
-            results.append(success)
-        except Exception as e:
-            logger.error(f"[Jellyfin] Exception updating id={media_id}: {e}", extra={'emoji_type': 'error'})
-            results.append(False)
-
-    # No server case
-    if not results:
-        logger.error("No media server configured for title update", extra={'emoji_type': 'error'})
-        return False
-
-    # Return True if at least one succeeded
-    overall = any(results)
-    logger.debug(f"update_title_status overall result: {overall}", extra={'emoji_type': 'debug'})
-    return overall
-
-# Title update and scheduling functions
-def schedule_episode_request_update(series_title, season_num, episode_num, media_id, delay=10, retries=5):
-    """Schedule an update to the episode title with [Request] tag"""
-    def attempt_update(attempt=1):
-        try:
-            # Use our new ID-based title update function
-            result = update_title_status(
-                media_type='tv',
-                media_id=media_id,
-                title=series_title,
-                status='Request',
-                season=season_num,
-                episode=episode_num
-            )
-            
-            if result:
-                logger.debug(f"Successfully scheduled update for '{series_title}' S{season_num:02d}E{episode_num:02d}",
-                           extra={'emoji_type': 'debug'})
-            else:
-                # If update fails but we have retries left, try again
-                if attempt < retries:
-                    threading.Timer(delay, attempt_update, args=[attempt+1]).start()
-                else:
-                    logger.error(f"Failed to update title for '{series_title}' S{season_num:02d}E{episode_num:02d} after {retries} attempts", 
-                               extra={'emoji_type': 'error'})
-                               
-        except Exception as e:
-            logger.error(f"Error updating title for '{series_title}' S{season_num:02d}E{episode_num:02d}: {e}", 
-                       extra={'emoji_type': 'error'})
-            # Try again if we have retries left
-            if attempt < retries:
-                threading.Timer(delay, attempt_update, args=[attempt+1]).start()
-
-    # Start the first attempt after initial delay
-    threading.Timer(delay, attempt_update).start()
-
-def schedule_movie_request_update(movie_title, media_id, year=None, delay=10, retries=5):
-    """Schedule an update to the movie title with [Request] tag"""
-    def attempt_update(attempt=1):
-        try:
-            # Use our new ID-based title update function
-            result = update_title_status(
-                media_type='movie',
-                media_id=media_id,
-                title=movie_title,
-                status='Request',
-                year=year
-            )
-            
-            if result:
-                logger.debug(f"Successfully scheduled update for movie '{movie_title}'",
-                           extra={'emoji_type': 'debug'})
-            else:
-                # If update fails but we have retries left, try again
-                if attempt < retries:
-                    logger.debug(f"Retrying movie title update for '{movie_title}' (attempt {attempt}/{retries})", 
-                               extra={'emoji_type': 'debug'})
-                    threading.Timer(delay, attempt_update, args=[attempt+1]).start()
-                else:
-                    logger.error(f"Failed to update title for '{movie_title}' after {retries} attempts", 
-                               extra={'emoji_type': 'error'})
-                               
-        except Exception as e:
-            logger.error(f"Error updating title for '{movie_title}': {e}", 
-                       extra={'emoji_type': 'error'})
-            # Try again if we have retries left
-            if attempt < retries:
-                threading.Timer(delay, attempt_update, args=[attempt+1]).start()
-
-    # Start the first attempt after initial delay
-    threading.Timer(delay, attempt_update).start()
-
-# Radarr integration functions
+                        
 def trigger_radarr_search(movie_id, movie_title=None):
     try:
         response = requests.post(f"{settings.RADARR_URL}/command", json={'name': 'MoviesSearch', 'movieIds': [movie_id]}, headers={'X-Api-Key': settings.RADARR_API_KEY})
@@ -256,25 +135,17 @@ def trigger_radarr_search(movie_id, movie_title=None):
         logger.error(f"Radarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None, year=None):
+def search_in_radarr(session: Session, episode_id: int, model: Type, is_4k: bool = False):
     """Search for a movie in Radarr"""
-    config = get_arr_config('movie', is_4k)
-    # Validate tmdb_id is an integer
-    try:
-        tmdb_id_int = int(tmdb_id)
-    except (ValueError, TypeError):
-        logger.error(f"Invalid TMDB ID received: {tmdb_id}", extra={'emoji_type': 'error'})
-        return False
-    try:
-        movies_response = requests.get(f"{config['url']}/movie", headers={'X-Api-Key': config['api_key']})
-        movies_response.raise_for_status()
-        movies = movies_response.json()
-        if not isinstance(movies, list):
-            logger.error(f"Expected list from Radarr /movie endpoint but got {type(movies)}", extra={'emoji_type': 'error'})
-            return False
-        
-        existing = [m for m in movies if int(m.get("tmdbId", 0)) == tmdb_id_int]
-        if existing:
+    # MOVIE CASE
+    if model is Movie:
+        m = dbsession.query(Movie).get(ent_id)
+        config = get_arr_config('movie', is_4k)
+        tmdb_id_int = int(m.tmdb_id)
+        movie_response = requests.get(f"{config['url']}/movie/{m.radarrid}", headers={'X-Api-Key': config['api_key']})
+        movie_response.raise_for_status()
+        movie = movie_response.json()
+        if movies:
             movie_data = existing[0]
             logger.info(f"Movie already exists in Radarr: {movie_data['title']}", extra={'emoji_type': 'info'})
             if not movie_data.get("monitored", False):
@@ -283,44 +154,44 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
                 put_response.raise_for_status()
                 logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'monitored'})
             now = time.time()
-            if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
-                LAST_RADARR_SEARCH[rating_key] = now
+            if not m.last_search or (now - m.last_search >= 30):
+                m.last_search = now
+                m.commit()
                 trigger_radarr_search(movie_data['id'], movie_data['title'])
             else:
                 logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-            # Do not schedule further timer retries if TMDB ID is invalid
-            return movie_data['id']
-
-        lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
-        lookup.raise_for_status()
-        movie_data = lookup.json()[0]
-        payload = {
-            'title': movie_data['title'],
-            'qualityProfileId': 7,
-            'tmdbId': int(movie_data['tmdbId']),
-            'year': int(movie_data['year']),
-            'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,  # Use .env value
-            'monitored': True,
-            'addOptions': {
-                'searchForMovie': True,
-                'addMethod': 'manual',
-                'monitor': 'movieOnly'
-            }
-        }
-        response = requests.post(f"{config['url']}/movie", json=payload, headers={'X-Api-Key': config['api_key']})
-        response.raise_for_status()
-        logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
-        now = time.time()
-        if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
-            LAST_RADARR_SEARCH[rating_key] = now
-            trigger_radarr_search(response.json()['id'], movie_data['title'])
+            return True
         else:
-            logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-        return True
-
-    except Exception as e:
-        logger.error(f"Radarr operation failed: {e}", extra={'emoji_type': 'error'})
-        return False
+            logger.error(f"Movie not found in radarr (adding manually): {m.title}", extra={'emoji_type': 'error'})
+            lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
+            lookup.raise_for_status()
+            movie_data = lookup.json()[0]
+            payload = {
+                'title': movie_data['title'],
+                'qualityProfileId': 7,
+                'tmdbId': int(movie_data['tmdbId']),
+                'year': int(movie_data['year']),
+                'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,  # Use .env value
+                'monitored': True,
+                'addOptions': {
+                    'searchForMovie': True,
+                    'addMethod': 'manual',
+                    'monitor': 'movieOnly'
+                }
+            }
+            response = requests.post(f"{config['url']}/movie", json=payload, headers={'X-Api-Key': config['api_key']})
+            response.raise_for_status()
+            logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
+            now = time.time()
+            if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
+                LAST_RADARR_SEARCH[rating_key] = now
+                trigger_radarr_search(response.json()['id'], movie_data['title'])
+            else:
+                logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
+            return True
+    else:
+        logger.error(f"Unable to search for type not movie", extra={'emoji_type': 'error'})
+    return False
 
 # Sonarr integration functions would follow a similar pattern.
 def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, is_4k=False):
@@ -801,6 +672,124 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         logger.error(f"Error finding series in Sonarr: {e}", extra={'emoji_type': 'error'})
         return None
 
+def delete_dummy_file(
+    dbsession: Session,
+    ent_id: int,
+    model: Type,
+    action: str
+):
+    """Delete dummy file for a specific media item"""
+    try:
+        if model is Movie:
+            # For movies, delete the dummy file
+            movie = dbsession.query(Movie).get(ent_id)
+            if not movie:
+                logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
+            dummy_file_path = movie.dummypath
+            if dummy_file_path and os.path.exists(dummy_file_path):
+                os.remove(dummy_file_path)
+                logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
+                movie.is_deleted = True
+                movie.jellyfin_dummy_id = None
+                movie.dummypath = None
+                dbsession.commit()
+                logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
+                
+                return True
+            else:
+                logger.debug(f"Dummy file path is None or file not found: {dummy_file_path}", extra={'emoji_type': 'debug'})
+                return False
+            
+
+        
+        elif model is Episode:
+            # For episodes, delete the dummy file
+            episode = dbsession.query(Episode).get(ent_id)
+            if not episode:
+                logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
+            
+            dummy_file_path = episode.dummypath
+            
+            if dummy_file_path and os.path.exists(dummy_file_path):
+                os.remove(dummy_file_path)
+                logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
+                episode.is_deleted = True
+                episode.jellyfin_dummy_id = None
+                episode.dummypath = None
+                dbsession.commit()
+                logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
+                parent_dir = os.path.dirname(dummy_file_path)
+                if os.path.exists(parent_dir) and not os.listdir(parent_dir):
+                    os.rmdir(parent_dir)
+                    logger.info(f"Removed empty parent directory: {parent_dir}", extra={'emoji_type': 'delete'})
+                    season = episode.season
+                    if season:
+                        season.is_deleted = True
+                        season.jellyfin_dummy_id = None
+                        season.dummypath = None
+                        dbsession.commit()
+                        logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
+                    parent_dir = os.path.dirname(parent_dir)
+                    if os.path.exists(parent_dir) and not os.listdir(parent_dir):   
+                        os.rmdir(parent_dir)
+                        logger.debug(f"Parent directory marked as deleted: {parent_dir}", extra={'emoji_type': 'debug'})
+                        series = season.series
+                        if series:
+                            series.is_deleted = True
+                            series.jellyfin_dummy_id = None
+                            series.dummypath = None
+                            dbsession.commit()
+                            logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
+                return True
+            else:
+                logger.debug(f"Dummy file path is None or file not found: {dummy_file_path}", extra={'emoji_type': 'debug'})
+                return False
+        
+        else:
+            logger.error(f'Unsupported model type for delete_dummy_file: {model}', extra={'emoji_type': 'error'})
+            return False
+    except Exception as e:
+        logger.error(f"Error deleting dummy file for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
+
+def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, action: str):
+    """Update the status of a placeholder file"""
+    try:
+        status = None
+        if 'add' in action:
+            status = "Request"
+        elif 'delete' in action or 'import' in action:
+            status = None
+        if model is Movie:
+            movie = dbSession.query(Movie).get(ent_id)
+            if not movie:
+                logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
+            
+            movie.placeholder_status = status
+            dbSession.commit()
+            logger.info(f"Updated movie placeholder status to '{status}' for ID {ent_id}", extra={'emoji_type': 'update'})
+            return True
+        
+        elif model is Episode:
+            episode = dbSession.query(Episode).get(ent_id)
+            if not episode:
+                logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
+            
+            episode.placeholder_status = status
+            dbSession.commit()
+            logger.info(f"Updated episode placeholder status to '{status}' for ID {ent_id}", extra={'emoji_type': 'update'})
+            return True
+        
+        else:
+            logger.error(f'Unsupported model type for update_placeholder_status: {model}', extra={'emoji_type': 'error'})
+            return False
+    except Exception as e:
+        logger.error(f"Error updating placeholder status for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
+        return False
+
 def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None):
     """Delete placeholder files once real files are downloaded"""
     try:
@@ -964,3 +953,250 @@ def check_all_arr_webhooks():
         logger.warning(f"Webhooks still missing for: {', '.join(missing)}. Calendar sync will not start until all are ready.", extra={'emoji_type': 'warning'})
         return False
     return True
+
+def save_jellyfin_id(session, model, ent_id, jf_id):
+    obj = session.query(model).get(ent_id)
+    field = {
+      Series: 'jellyfin_series_id',
+      Season: 'jellyfin_season_id',
+      Episode: 'jellyfin_episode_id'
+    }[model]
+    if getattr(obj, field) != jf_id:
+        setattr(obj, field, jf_id)
+        session.add(obj)
+        session.commit()
+    return jf_id
+
+def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str) -> bool:
+    """
+    Delay briefly then process placeholder actions for the specified media.
+    For TV shows, creates placeholders for all episodes in the series.
+    For movies, creates a single placeholder file.
+    """
+    delay_seconds = 3
+    is_4k = False  # Default to standard definition
+    
+    # Handle different media types
+    if model is Movie:
+        # Movie case
+        movie = session.query(Movie).get(ent_id)
+        if not movie:
+            logger.error(f"Movie with id {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+        
+        # Check if the movie has is_4k attribute
+        if hasattr(movie, 'is_4k') and movie.is_4k:
+            is_4k = True
+        
+        # Delay before processing
+        logger.debug(
+            f"Delaying {delay_seconds}s before processing placeholder for movie '{movie.title}'",
+            extra={'emoji_type': 'debug'}
+        )
+        time.sleep(delay_seconds)
+        
+        # Check if movie already has a real file
+        from services.queue_monitor import check_movie_has_file
+        tmdb_id = getattr(movie, 'tmdbid', None) or getattr(movie, 'tmdb_id', None)
+        if tmdb_id and check_movie_has_file(tmdb_id, is_4k=is_4k):
+            logger.info(f"Skipping placeholder for {movie.title} (real file exists)", extra={'emoji_type': 'skip'})
+            return True
+        
+        # Select appropriate library folder based on 4K status
+        movie_library = settings.MOVIE_LIBRARY_FOLDER_4K if is_4k else settings.MOVIE_LIBRARY_FOLDER
+        
+        # Create placeholder file
+        dummy_path = place_dummy_file(
+            "movie", 
+            movie.title, 
+            movie.year, 
+            tmdb_id,
+            movie_library
+        )
+        
+        if dummy_path:
+            movie.dummypath = dummy_path
+            session.add(movie)
+            session.commit()
+            logger.info(f"Created placeholder file for '{movie.title}'", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.error(f"Failed to create placeholder file for movie '{movie.title}'", extra={'emoji_type': 'error'})
+            return False
+    
+    elif model is Episode:
+        
+        sf_eps = session.query(SubFlow).filter(
+            SubFlow.steps == "delayed_placeholders",
+            SubFlow.episode_id != None,
+            SubFlow.episode_id.in_([ent_id])
+        ).all()
+        
+        # Get the episode from the database
+        ep = session.query(Episode).get(ent_id)
+        if not ep:
+            logger.error(f"Episode with id {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+        
+        # Check if the episode has is_4k attribute
+        if hasattr(ep, 'is_4k') and ep.is_4k:
+            is_4k = True
+            
+        seas = session.query(Season).get(ep.season_id)
+        if not seas:
+            logger.error(f"Season for episode {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+        
+        series = session.query(Series).get(seas.series_id)
+        if not series:
+            logger.error(f"Series for episode {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+
+        # Delay before processing
+        logger.debug(
+            f"Delaying {delay_seconds}s before processing placeholders for series '{series.title}'",
+            extra={'emoji_type': 'debug'}
+        )
+        time.sleep(delay_seconds)
+
+        # Select appropriate library folder based on 4K status
+        tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
+        
+        placeholder_count = 0
+        for episode in sf_eps:
+            ep = session.query(Episode).get(episode.episode_id)
+            if not ep.dummypath and not ep.filepath:
+                logger.debug(f"Processing Episode {ep.episode_number} - {ep.title}", extra={'emoji_type': 'debug'})
+                season_num = seas.season_number
+                episode_num = ep.episode_number
+                episode_title = ep.title
+                ep_tvdb_id = getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None)
+                
+                if not (season_num and episode_num):
+                    logger.error(f"Missing season or episode number for {ep.title}", extra={'emoji_type': 'error'})
+
+                # Check if episode already has a real file
+                from services.queue_monitor import check_episode_has_file
+                if ep_tvdb_id and check_episode_has_file(ep_tvdb_id, season_num, episode_num, is_4k):
+                    logger.info(f"Skipping placeholder for {series.title} S{season_num}E{episode_num} (real file exists)", 
+                                extra={'emoji_type': 'skip'})
+                
+                # Create placeholder file
+                dummy_path = place_dummy_file(
+                    "tv", 
+                    series.title, 
+                    series.year, 
+                    ep_tvdb_id,
+                    tv_library,
+                    season_number=season_num,
+                    episode_range=(episode_num, episode_num),
+                    episode_title=episode_title
+                )
+                
+                if dummy_path:
+                    ep.dummypath = dummy_path
+                    session.add(ep)
+                    placeholder_count += 1
+            episode.status = "DONE"
+            session.add(episode)
+            session.commit()
+            
+        if placeholder_count > 0:
+            session.commit()
+            logger.info(f"Created {placeholder_count} placeholder files for '{series.title}'", 
+                      extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.info(f"No placeholders needed for '{series.title}'", extra={'emoji_type': 'info'})
+            return True
+    
+    else:
+        logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
+        return False
+
+def mark_movie_monitored(movie_id, is_4k=False):
+    """Mark a movie as monitored in Radarr"""
+    try:
+        config = get_arr_config('movie', is_4k)
+        # Get current movie data
+        response = requests.get(
+            f"{config['url']}/movie/{movie_id}", 
+            headers={'X-Api-Key': config['api_key']}
+        )
+        response.raise_for_status()
+        movie_data = response.json()
+        
+        # Update monitored status if needed
+        if not movie_data.get("monitored", False):
+            movie_data["monitored"] = True
+            update_response = requests.put(
+                f"{config['url']}/movie/{movie_id}", 
+                json=movie_data, 
+                headers={'X-Api-Key': config['api_key']}
+            )
+            update_response.raise_for_status()
+            logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'info'})
+            return True
+        else:
+            logger.debug(f"Movie {movie_data['title']} already monitored", extra={'emoji_type': 'debug'})
+            return True
+    except Exception as e:
+        logger.error(f"Failed to mark movie as monitored: {e}", extra={'emoji_type': 'error'})
+        return False
+
+def api_monitor_episodes(series_id, episode_ids, is_4k=False):
+    """
+    Mark episodes as monitored in Sonarr.
+    series_id: Database series ID.
+    episode_ids: list of Sonarr episode IDs
+    is_4k: use 4K Sonarr instance if True
+    Also marks all other episodes in the series as unmonitored if they are still monitored.
+    """
+    try:
+        config = get_arr_config('tv', is_4k)
+        headers = {'X-Api-Key': config['api_key']}
+
+        # Ensure the series is monitored
+        series_url = f"{config['url']}/series/{series_id}"
+        series_response = requests.get(series_url, headers=headers)
+        series_response.raise_for_status()
+        series_data = series_response.json()
+        if not series_data.get("monitored", False):
+            series_data["monitored"] = True
+            update_series = requests.put(series_url, json=series_data, headers=headers)
+            update_series.raise_for_status()
+            logger.info(f"Series '{series_data['title']}' marked as monitored", extra={'emoji_type': 'info'})
+
+        # Get all episodes for the series
+        episodes_url = f"{config['url']}/episode"
+        params = {"seriesId": series_id}
+        episode_response = requests.get(episodes_url, params=params, headers=headers)
+        episode_response.raise_for_status()
+        episodes = episode_response.json()
+
+        updated = 0
+        unmonitored = 0
+        for ep in episodes:
+            if ep['id'] in episode_ids:
+                if not ep.get('monitored', False):
+                    ep['monitored'] = True
+                    update_ep_url = f"{config['url']}/episode/{ep['id']}"
+                    update_ep = requests.put(update_ep_url, json=ep, headers=headers)
+                    update_ep.raise_for_status()
+                    updated += 1
+            else:
+                if ep.get('monitored', False):
+                    ep['monitored'] = False
+                    update_ep_url = f"{config['url']}/episode/{ep['id']}"
+                    update_ep = requests.put(update_ep_url, json=ep, headers=headers)
+                    update_ep.raise_for_status()
+                    unmonitored += 1
+
+        if updated > 0:
+            logger.info(f"Marked {updated} episodes as monitored", extra={'emoji_type': 'info'})
+        if unmonitored > 0:
+            logger.info(f"Marked {unmonitored} episodes as unmonitored", extra={'emoji_type': 'info'})
+        return True
+    except Exception as e:
+        logger.error(f"Failed to monitor episodes: {e}", extra={'emoji_type': 'error'})
+        return False
