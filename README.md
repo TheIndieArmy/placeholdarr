@@ -160,17 +160,7 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
    - Webhook URL: `http://your-server:8000/webhook`
    - Trigger: Playback Start
    - Payload Format: JSON
-   
-4. Add this condition to only trigger on dummy files:
-```
-{
-    "operator": "contains",
-    "condition": "filename",
-    "value": "dummy"
-}
-```
-
-5. Use this JSON payload:
+4. Put in this JSON payload under the Playback JSON in the Data tab:
 ```json
 {
     "event": "playback.start",
