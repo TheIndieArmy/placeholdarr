@@ -152,7 +152,7 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 
 ---
 
-### Tautulli Webhook Setup
+### Tautulli (Plex) Webhook Setup
 
 1. In Tautulli, go to Settings → Notification Agents
 2. Add a new Webhook notification agent
