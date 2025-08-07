@@ -105,6 +105,7 @@ def handle_webhook(data: dict, source_port: int = None):
 def handle_import_event(data: dict, is_4k: bool = False):
     """Handle media import events and clean up placeholders"""
     try:
+        from services.utils import resolve_final_folder
         if 'movie' in data:
             # Movie import handling
             movie = data['movie']
@@ -112,19 +113,23 @@ def handle_import_event(data: dict, is_4k: bool = False):
             title = movie.get('title', 'Unknown Movie')
             year = movie.get('year')
             movie_path = data.get("movieFile", {}).get("path")
-            library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
-            # Use ENV as root if set, otherwise fallback to folderPath/path
-            if library_path and str(library_path).strip():
-                base_path = library_path
-                folder_path = None
-                arr_root_folder = None
-            else:
-                base_path = None
-                folder_path = movie.get('folderPath') or movie.get('path')
-                arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
-
+            folder_path = movie.get('folderPath') or movie.get('path')
+            arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+            # Use resolve_final_folder to match dummy creation
+            dummy_folder = resolve_final_folder(
+                media_type="movie",
+                title=title,
+                year=year,
+                media_id=tmdb_id,
+                folder_path=folder_path,
+                arr_root_folder=arr_root_folder
+            )
+            file_name = f"{sanitize_filename(title)}"
+            if year:
+                file_name += f" ({year})"
+            file_name += f" (dummy).mp4"
+            dummy_file_path = os.path.join(dummy_folder, file_name)
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
-
             # Update Plex/Jellyfin title to "Available" (remove status markers)
             from services.integrations import update_title_status
             update_title_status(
@@ -134,15 +139,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 status=None,     # None → strip markers
                 year=year
             )
-
             # Clean up placeholder files (delete only the dummy file, not the folder)
-            # Build the dummy file path using the same logic as place_dummy_file
-            dummy_folder = base_path or folder_path
-            file_name = f"{sanitize_filename(title)}"
-            if year:
-                file_name += f" ({year})"
-            file_name += f" (dummy).mp4"
-            dummy_file_path = os.path.join(dummy_folder, file_name)
             if os.path.exists(dummy_file_path):
                 try:
                     os.remove(dummy_file_path)
@@ -151,10 +148,6 @@ def handle_import_event(data: dict, is_4k: bool = False):
                     logger.error(f"Failed to delete dummy file {dummy_file_path}: {e}", extra={'emoji_type': 'error'})
             else:
                 logger.debug(f"Dummy file not found for deletion: {dummy_file_path}", extra={'emoji_type': 'debug'})
-
-            dummy_folder = os.path.join(library_path or '.', 
-            f"{sanitize_filename(title)}{' ('+str(year)+')' if year else ''} {{tmdb-{tmdb_id}}}")
-
             # --- NEW: Always refresh parent folder ---
             if movie_path:
                 parent_folder = os.path.dirname(movie_path)
@@ -162,37 +155,40 @@ def handle_import_event(data: dict, is_4k: bool = False):
                     refresh_plex_item(parent_folder)
                 if settings.jellyfin_enabled:
                     refresh_jellyfin_item(parent_folder)
-
-            # Also refresh the dummy folder (legacy/placeholder logic)
+            # Also refresh the dummy folder
             if settings.plex_enabled:
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder, "Deleted")
-
         elif 'episodes' in data and 'series' in data:
             # TV episode import handling
             series = data['series']
             episode = data['episodes'][0]  # Handle first episode in the list
-
             series_title = series.get('title', 'Unknown Series')
+            series_year = series.get('year')
             tvdb_id = series.get('tvdbId')
             season_num = episode.get('seasonNumber')
             episode_num = episode.get('episodeNumber')
             episode_title = episode.get('title', 'Unknown Episode')
             episode_path = data.get("episodeFile", {}).get("path")
-            library_path = getattr(settings, 'TV_LIBRARY_FOLDER', None)
-            if library_path and str(library_path).strip():
-                base_path = library_path
-                folder_path = None
-                arr_root_folder = None
-            else:
-                base_path = None
-                folder_path = series.get('folderPath') or series.get('path')
-                arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
-            # Fix: define full_title before using it
-            full_title = f"{series_title} - S{season_num:02d}E{episode_num:02d} - {episode_title}"
-            logger.info(f"Processing episode import cleanup for: {full_title}", extra={'emoji_type': 'cleanup'})
-
+            folder_path = series.get('folderPath') or series.get('path')
+            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            # Use resolve_final_folder to match dummy creation
+            dummy_folder = resolve_final_folder(
+                media_type="tv",
+                title=series_title,
+                year=series_year,
+                media_id=tvdb_id,
+                season_number=season_num,
+                folder_path=folder_path,
+                arr_root_folder=arr_root_folder
+            )
+            file_name = f"{sanitize_filename(series_title)}"
+            if series_year:
+                file_name += f" ({series_year})"
+            file_name += f" - s{season_num:02d}e{episode_num:02d} - {episode_title}.mp4"
+            dummy_file_path = os.path.join(dummy_folder, sanitize_filename(file_name))
+            logger.info(f"Processing episode import cleanup for: {series_title} S{season_num}E{episode_num}", extra={'emoji_type': 'cleanup'})
             # Update Plex/Jellyfin title to "Available" (remove status markers)
             from services.integrations import update_title_status
             update_title_status(
@@ -203,10 +199,15 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 season=season_num,
                 episode=episode_num
             )
-
             # Clean up placeholder files
-            delete_dummy_files('tv', series_title, series.get('year'), tvdb_id, base_path, season_number=season_num, episode_number=episode_num, folder_path=folder_path, arr_root_folder=arr_root_folder)
-
+            if os.path.exists(dummy_file_path):
+                try:
+                    os.remove(dummy_file_path)
+                    logger.info(f"Deleted placeholder file: {dummy_file_path}", extra={'emoji_type': 'delete'})
+                except Exception as e:
+                    logger.error(f"Failed to delete dummy file {dummy_file_path}: {e}", extra={'emoji_type': 'error'})
+            else:
+                logger.debug(f"Dummy file not found for deletion: {dummy_file_path}", extra={'emoji_type': 'debug'})
             # --- NEW: Always refresh parent folder ---
             if episode_path:
                 parent_folder = os.path.dirname(episode_path)
@@ -214,19 +215,11 @@ def handle_import_event(data: dict, is_4k: bool = False):
                     refresh_plex_item(parent_folder)
                 if settings.jellyfin_enabled:
                     refresh_jellyfin_item(parent_folder)
-
-            # Also refresh the dummy folder (legacy/placeholder logic)
-            folder_path = os.path.join(
-                settings.TV_LIBRARY_FOLDER,
-                f"{sanitize_filename(series_title)}"
-                f"{' ('+str(series.get('year'))+')' if series.get('year') else ''}"
-                f" {{tvdb-{tvdb_id}}}"
-            )
+            # Also refresh the dummy folder
             if settings.plex_enabled:
-                refresh_plex_item(folder_path)
+                refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(folder_path, "Deleted")
-
+                refresh_jellyfin_item(dummy_folder, "Deleted")
     except Exception as e:
         logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
 
