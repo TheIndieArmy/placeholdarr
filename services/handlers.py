@@ -384,19 +384,19 @@ def handle_moviefiledelete(data: dict):
         folder_path = movie.get('folderPath')
         arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
         library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
-        # Use the unified dummy deletion logic
-        from services.integrations import delete_dummy_files
-        delete_dummy_files('movie', title, year, tmdb_id, library_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
-        # Optionally refresh Plex/Jellyfin at the dummy folder location
-        if folder_path and library_path:
-            import os
-            dummy_folder = os.path.join(library_path, os.path.basename(folder_path))
+        # Create a placeholder dummy file for the deleted movie
+        from services.integrations import place_dummy_file
+        dummy_path = place_dummy_file('movie', title, year, tmdb_id, base_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        if dummy_path:
             if settings.plex_enabled:
-                refresh_plex_item(dummy_folder)
+                refresh_plex_item(os.path.dirname(dummy_path))
             if settings.jellyfin_enabled:
-                refresh_jellyfin_item(dummy_folder, "Deleted")
-        return JSONResponse({"status": "success", "message": "MovieDelete processed"})
-    return JSONResponse({"status": "success", "message": "MovieDelete processed"})
+                refresh_jellyfin_item(os.path.dirname(dummy_path), "Changed")
+            logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
+        else:
+            logger.error(f"Failed to create dummy file for movie '{title}'; skipping.", extra={'emoji_type': 'error'})
+        return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
+    return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
 
 def handle_movie_delete(data: dict):
     if 'movie' in data:
