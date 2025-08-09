@@ -5,18 +5,20 @@ services:
     env_file:
       - .env
     volumes:
-      # Update these paths to match your actual placeholder library locations and dummy files
-      # Mount your movie placeholder folder (MOVIE_LIBRARY_FOLDER)
-      - /path/to/your/movie-library:/movies
-      # Mount your TV placeholder folder (TV_LIBRARY_FOLDER)
-      - /path/to/your/tv-library:/tv
-      # Uncomment the following lines if using 4K placeholder libraries:
-      # - /path/to/your/movie-library-4k:/movies-4k  # MOVIE_LIBRARY_4K_FOLDER
-      # - /path/to/your/tv-library-4k:/tv-4k        # TV_LIBRARY_4K_FOLDER
-      # Mount your standard dummy file
-      - ./dummy.mp4:/app/dummy.mp4
-      # Mount your "coming soon" dummy file (optional)
-      - ./coming_soon_dummy.mp4:/app/coming_soon_dummy.mp4
+  # Update these paths to match your actual placeholder library locations and dummy files
+  # Mount your movie placeholder folder (MOVIE_LIBRARY_FOLDER)
+  # IMPORTANT: For Plex/Tautulli compatibility, mount the host path to the SAME absolute path inside the container.
+  # Example: - /mnt/plex/Movies/placeholders:/mnt/plex/Movies/placeholders
+  - /path/to/your/movie-library:/path/to/your/movie-library
+  # Mount your TV placeholder folder (TV_LIBRARY_FOLDER)
+  - /path/to/your/tv-library:/path/to/your/tv-library
+  # Uncomment the following lines if using 4K placeholder libraries:
+  # - /path/to/your/movie-library-4k:/path/to/your/movie-library-4k  # MOVIE_LIBRARY_4K_FOLDER
+  # - /path/to/your/tv-library-4k:/path/to/your/tv-library-4k        # TV_LIBRARY_4K_FOLDER
+  # Mount your standard dummy file
+  - /path/to/your/dummy.mp4:/path/to/your/dummy.mp4
+  # Mount your "coming soon" dummy file (optional)
+  - /path/to/your/coming_soon_dummy.mp4:/path/to/your/coming_soon_dummy.mp4
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -24,5 +26,10 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
-# Note: Update the /path/to/your/movie-library and /path/to/your/tv-library to match your MOVIE_LIBRARY_FOLDER and TV_LIBRARY_FOLDER settings in .env.
-# Dummy file paths should match DUMMY_FILE_PATH and COMING_SOON_DUMMY_FILE_PATH in .env.
+# IMPORTANT:
+# For Plex/Tautulli compatibility, the left and right side of each volume mount must be the SAME absolute host path.
+# Your .env file paths must match this host path, and the container must see the same path as the host.
+# Example:
+#   - /mnt/plex/Movies/placeholders:/mnt/plex/Movies/placeholders
+#   - /mnt/plex/TV/placeholders:/mnt/plex/TV/placeholders
+# This ensures Placeholdarr can match the path sent by Tautulli.
