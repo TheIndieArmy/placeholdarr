@@ -1209,15 +1209,15 @@ def handle_download_webhook(data):
             tmdb_id = movie.get('tmdbId')
             radarr_id = movie.get('id')  # Radarr internal ID
             title = movie.get('title')
-            
-            if not tmdb_id:
-                logger.warning(f"Movie download webhook missing TMDB ID for '{title}'", extra={'emoji_type': 'warning'})
+
+            if not radarr_id:
+                logger.warning(f"Movie download webhook missing Radarr ID for '{title}'", extra={'emoji_type': 'warning'})
                 return
-                
-            # Remove from monitoring
-            media_key = f"movie_{tmdb_id}"
+
+            # Remove from monitoring using Radarr ID (to match add_to_monitor)
+            media_key = f"movie_{radarr_id}"
             remove_from_monitor(media_key)
-            logger.debug(f"Removed movie '{title}' (ID: {tmdb_id}) from monitoring", extra={'emoji_type': 'debug'})
+            logger.debug(f"Removed movie '{title}' (Radarr ID: {radarr_id}) from monitoring", extra={'emoji_type': 'debug'})
             
         elif 'episodes' in data and 'series' in data:
             # TV episode download completed

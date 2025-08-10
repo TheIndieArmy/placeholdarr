@@ -511,8 +511,7 @@ def handle_playback(data: dict):
         # Debug log the file path 
         logger.debug(f"Processing playback for file path: {file_path}", extra={'emoji_type': 'debug'})
 
-        # Check if file is in one of our placeholder library folders
-        # Build placeholder folders list
+        # Check if file is in one of our placeholder library folders (for logging/analytics only)
         placeholder_folders = [settings.MOVIE_LIBRARY_FOLDER, settings.TV_LIBRARY_FOLDER]
         if getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None):
             placeholder_folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
@@ -524,10 +523,6 @@ def handle_playback(data: dict):
 
         # Debug log the placeholder check result
         logger.debug(f"Is placeholder check result: {is_placeholder}", extra={'emoji_type': 'debug'})
-        
-        if not is_placeholder:
-            logger.info(f"Ignoring playback of real movie file: {file_path}", extra={'emoji_type': 'info'})
-            return JSONResponse({"status": "ignored", "message": "Not a placeholder movie file"})
         
         if media_type == "movie":
             tmdb_id = media.get("ids", {}).get("tmdb") or data.get("Provider_tmdb")
