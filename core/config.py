@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 from pydantic import validator, root_validator
 import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Get the project root directory (where main.py is)
 ROOT_DIR = Path(__file__).parent.parent
@@ -12,15 +15,17 @@ ROOT_DIR = Path(__file__).parent.parent
 # Use project root for .env path
 dotenv_path = ROOT_DIR / ".env"
 
-if not dotenv_path.exists():
-    raise FileNotFoundError(f".env file does not exist at {dotenv_path}")
-
-# Preload the environment variables
-load_dotenv(dotenv_path)
+if dotenv_path.exists():
+    load_dotenv(dotenv_path)
+    logger.info(f"Loaded .env from {dotenv_path}")
+else:
+    logger.info(f"No .env file at {dotenv_path}, using process environment")
 
 class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
-    
+    WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
+    SCHEDULED_TIME_FAILED: Optional[str] = None  # Add this line to avoid AttributeError
+
     # Plex
     PLEX_URL: Optional[str] = None
     PLEX_TOKEN: Optional[str] = None
@@ -57,6 +62,7 @@ class Settings(BaseSettings):
 
     # Dummy file management
     DUMMY_FILE_PATH: str
+    COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
 
     # Play mode settings
@@ -75,10 +81,17 @@ class Settings(BaseSettings):
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
 
+    # Postgres
+    DB_HOST: str
+    DB_PORT: int
+    DB_USER: str
+    DB_PASS: str
+    DB_NAME: str
+
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
-    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").lower() == "true"
-    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").lower() == "true"
+    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
 
     # Add a method to clean string values
     @validator('*', pre=True)
@@ -92,8 +105,10 @@ class Settings(BaseSettings):
                 v = v.strip()
         return v
     
-    @validator('DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
+    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):
+        if not v:
+            return v
         path = Path(v)
         if not path.exists():
             raise ValueError(f"Path does not exist: {v}")

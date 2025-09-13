@@ -1,7 +1,9 @@
-import os  # <-- required for get_series_folder
+import os
 import re
 from pathlib import Path
 from core.config import settings
+from services.postgres.db import get_session
+from services.postgres.movie_repo import MovieRepository
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', name).strip()
@@ -120,3 +122,9 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
             "queue_id_field": "episodeId",
             "search_type": media_type  # This will be 'episode', 'season', or 'series'
         }
+
+def get_movie_by_id(movie_id, session=None):
+    session = session if session else get_session()
+    movie_repo = MovieRepository(session)
+    movie_repo.get_by_id(movie_id)
+    return movie_repo

@@ -1,676 +1,287 @@
+from datetime import datetime, timezone
+import logging
 import threading
-import time
 import requests
-from core.logger import logger
+from services.jellyfin_client import update_jellyfin_title_status
+from services.plex_client import update_plex_title_status
+from sqlalchemy.orm import Session
 from core.config import settings
-from services.integrations import get_sonarr_queue, get_radarr_queue, strip_status_markers
-from datetime import datetime, timezone, timedelta
 
-# Global registry to track monitored media
-MONITORED_MEDIA = {}
+from services.postgres.db import get_session
+from services.postgres.models import Episode, Movie, SubFlow
+from services.integrations import get_radarr_queue, get_sonarr_queue
+from services.postgres.models import Series
+import concurrent.futures
 
-# Single timer for batch processing
-BATCH_TIMER = None
+logger = logging.getLogger("queue_monitor")
+logger.setLevel(logging.INFO)
 
-# Lock for thread safety when modifying the registry
-REGISTRY_LOCK = threading.RLock()
+POLL_INTERVAL = 10      # seconds
+IDLE_TIMEOUT  = 120     # seconds without any pending playback jobs
 
-# Global cache for API responses to reduce API calls
-API_CACHE = {
-    'sonarr_queue': {'standard': {'data': None, 'timestamp': 0}, '4k': {'data': None, 'timestamp': 0}},
-    'radarr_queue': {'standard': {'data': None, 'timestamp': 0}, '4k': {'data': None, 'timestamp': 0}},
-    'series_id_map': {'standard': {}, '4k': {}},  # Maps TVDB ID to Sonarr series ID
-    'episode_map': {'standard': {}, '4k': {}},
-    'movie_map': {'standard': {}, '4k': {}}
-}
-
-# Cache expiry time in seconds
-CACHE_EXPIRY = 10  # 10 seconds
-
-# Make sure this function is properly defined
-def add_to_monitor(media_data):
-    """Add a media item to monitoring"""
-    global BATCH_TIMER, MONITORED_MEDIA
-    
-    # Skip if title updates are disabled
-    if settings.TITLE_UPDATES == "OFF":
-        logger.debug(f"Title updates disabled, not monitoring: {media_data.get('title')}", extra={'emoji_type': 'debug'})
-        return
-    
-    # Skip if already has file
-    if media_data.get('hasFile', False):
-        logger.debug(f"Skipping monitoring for item that already has file: {media_data.get('title')}", 
-                   extra={'emoji_type': 'debug'})
-        return
-    
-    # Create unique key based on media type
-    if media_data['media_type'] == 'movie':
-        media_key = f"movie_{media_data['radarr_id']}"
-    else:  # episode
-        media_key = f"episode_{media_data['tvdb_id']}_{media_data['season_number']}_{media_data['episode_number']}"
-    
-    # Log the episode_id for episodes to help debug
-    if media_data['media_type'] == 'episode':
-        episode_id = media_data.get('episode_id')
-        if not episode_id:
-            logger.error(f"Missing episode_id for {media_data.get('title')} - Queue tracking will fail!", 
-                      extra={'emoji_type': 'error'})
-    
-    with REGISTRY_LOCK:
-        # Add to registry if not already present
-        if media_key not in MONITORED_MEDIA:
-            # Common fields
-            entry = {
-                'media_type': media_data['media_type'],
-                'title': media_data['title'],
-                'rating_key': media_data['rating_key'],
-                'is_4k': media_data.get('is_4k', False),
-                'status': 'searching',
-                'start_time': time.time(),
-                'last_update_time': time.time(),
-                'last_status': '',
-                'attempts': 0,
-                'retrying': False
-            }
-            
-            # Media-specific fields
-            if media_data['media_type'] == 'movie':
-                entry.update({
-                    'tmdb_id': media_data.get('tmdb_id'),
-                    'radarr_id': media_data.get('radarr_id')
-                })
-            else:  # episode
-                entry.update({
-                    'tvdb_id': media_data.get('tvdb_id', None),
-                    'season_number': media_data['season_number'],
-                    'episode_number': media_data['episode_number'],
-                    'series_title': media_data.get('series_title', 'Unknown Series'),
-                    'episode_id': media_data.get('episode_id')  # Make sure episode_id is stored
-                })
-            
-            MONITORED_MEDIA[media_key] = entry
-            
-            # Log addition
-            logger.info(f"Added {media_data['media_type']} to monitor: {media_data['title']}", 
-                      extra={'emoji_type': 'monitor'})
-            
-            # Update Plex/Jellyfin with initial "Searching..." status (only for ALL mode)
-            if settings.TITLE_UPDATES == "ALL":
-                from services.integrations import update_title_status
-                update_title_status(
-                    media_type=media_data['media_type'],
-                    media_id=media_data['rating_key'],
-                    title=media_data['title'],
-                    status='Searching',
-                    season=media_data.get('season_number'),
-                    episode=media_data.get('episode_number'),
-                    year=media_data.get('year')
-                )
-        
-        # Start the batch timer if it's not already running and we're in ALL mode
-        if settings.TITLE_UPDATES == "ALL" and (BATCH_TIMER is None or not BATCH_TIMER.is_alive()):
-            start_batch_monitoring()
-
-def remove_from_monitor(media_key):
-    """Remove an item from the monitoring registry"""
-    with REGISTRY_LOCK:
-        if media_key in MONITORED_MEDIA:
-            item = MONITORED_MEDIA[media_key]
-            
-            if item['media_type'] == 'movie':
-                logger.debug(f"Removed movie from monitor: {item['title']}",
-                           extra={'emoji_type': 'debug'})
-            else:
-                logger.debug(f"Removed episode from monitor: S{item['season_number']}E{item['episode_number']}",
-                           extra={'emoji_type': 'debug'})
-            
-            del MONITORED_MEDIA[media_key]
-        
-        # If registry is empty, stop the timer
-        if not MONITORED_MEDIA and BATCH_TIMER is not None:
-            stop_batch_monitoring()
-
-def start_batch_monitoring():
-    """Start a timer to periodically check the status of all monitored media"""
-    global BATCH_TIMER
-    
-    # Log the current title update setting to help with debugging
-    logger.info(f"Queue monitor initializing. Title updates setting: '{settings.TITLE_UPDATES}'", extra={'emoji_type': 'process'})
-    
-    # If title updates are disabled, don't start monitoring
-    if settings.TITLE_UPDATES == "OFF":
-        logger.info("Title updates disabled, not starting monitoring", extra={'emoji_type': 'info'})
-        return
-        
-    # Only do full monitoring for ALL mode
-    if settings.TITLE_UPDATES == "ALL":
-        check_interval = getattr(settings, 'CHECK_INTERVAL', 10)  # Default to 10 seconds
-        
-        # Create a timer that will run batch_check_media after the interval
-        BATCH_TIMER = threading.Timer(check_interval, batch_check_media)
-        BATCH_TIMER.daemon = True
-        BATCH_TIMER.start()
-        logger.info(f"Started batch monitoring timer (interval: {check_interval}s)", extra={'emoji_type': 'process'})
-    else:
-        logger.info(f"Full monitoring not enabled, using mode: {settings.TITLE_UPDATES}", extra={'emoji_type': 'info'})
-
-def stop_batch_monitoring():
-    """Stop the batch monitoring timer"""
-    global BATCH_TIMER
-    
-    if BATCH_TIMER is not None:
-        BATCH_TIMER.cancel()
-        BATCH_TIMER = None
-        logger.debug("Stopped batch media monitoring", extra={'emoji_type': 'debug'})
-
-def update_media_status(media_key, status, progress=None):
-    """Update the status for a specific media item (LOGGING ONLY FOR STAGE 1)"""
-    with REGISTRY_LOCK:
-        if media_key not in MONITORED_MEDIA:
-            return
-        
-        media = MONITORED_MEDIA[media_key]
-        current_status = media.get('last_status', '')
-        
-        # Only update if status has changed
-        if current_status != status:
-            # Get detailed info for logging
-            if media['media_type'] == 'movie':
-                title_str = f"{media['title']}"
-            else:  # episode
-                title_str = f"{media.get('series_title', 'Unknown')} S{media.get('season_number', 0):02d}E{media.get('episode_number', 0):02d}"
-            
-            # Log status change
-            logger.info(f"Status change for {title_str}: {current_status} → {status}", extra={'emoji_type': 'status'})
-            
-            # Update status in registry
-            media['last_status'] = status
-            media['last_update_time'] = time.time()
-            
-            # DISABLED FOR STAGE 1: Title updates will be implemented in Stage 2
-            # if settings.TITLE_UPDATES == "ALL":
-            #     try:
-            #         from services.integrations import update_plex_title
-            #         update_plex_title(media['rating_key'], media['title'], status)
-            #     except Exception as e:
-            #         logger.error(f"Failed to update Plex title: {e}", extra={'emoji_type': 'error'})
-            
-            # Special handling for "Available" status
-            if status == "Available":
-                # Schedule removal from monitoring after a delay
-                remove_timer = threading.Timer(
-                    settings.AVAILABLE_CLEANUP_DELAY, 
-                    remove_from_monitor, 
-                    args=[media_key]
-                )
-                remove_timer.daemon = True
-                remove_timer.start()
-        
-        # Always log progress updates if provided, even if status hasn't changed
-        if progress is not None:
-            if media['media_type'] == 'movie':
-                title_str = f"{media['title']}"
-            else:  # episode
-                title_str = f"{media.get('series_title', 'Unknown')} S{media.get('season_number', 0):02d}E{media.get('episode_number', 0):02d}"
-                
-            logger.info(f"Download progress for {title_str}: {progress}%", extra={'emoji_type': 'progress'})
-            media['progress'] = progress
-
-def batch_check_media():
+class ProgressMonitor:
     """
-    Main batch processing function that checks all monitored media.
-    This function will reschedule itself until all media is processed.
+    Event-driven monitoring of download progress that only runs when needed.
     """
-    try:
-        # Only run if we have items to check
-        if MONITORED_MEDIA:
-            # Skip the "batch check triggered" message - it will be part of the consolidated message
-            
-            # Run the download status check function
-            _check_downloads_status()
-        
-            # Reschedule if there are still media to monitor
-            if MONITORED_MEDIA:
-                check_interval = getattr(settings, 'CHECK_INTERVAL', 10)
-                global BATCH_TIMER
-                BATCH_TIMER = threading.Timer(check_interval, batch_check_media)
-                BATCH_TIMER.daemon = True
-                BATCH_TIMER.start()
-                # No next check message needed
-            
-    except Exception as e:
-        logger.error(f"Error in batch check: {str(e)}", extra={'emoji_type': 'error'})
-        # Rescheduling code remains the same...
+    def __init__(self):
+        self.is_monitoring = False
+        # Thread locks to prevent concurrent updates to each service
+        self._jellyfin_lock = threading.Lock()
+        self._plex_lock = threading.Lock()
+        self._monitor_thread = None
+        self._stop_event = threading.Event()
+        logger.info("ProgressMonitor initialized (not monitoring yet)")
 
-def process_movie_batch(movies, is_4k):
-    """
-    Process a batch of movies with a single queue request
-    
-    Args:
-        movies: List of movie data dictionaries
-        is_4k: Whether these are 4K movies
-    """
-    # Skip if empty
-    if not movies:
-        return
+    def start_monitoring(self):
+        """Start monitoring when there's actually something to monitor"""
+        if not self.is_monitoring:
+            self._stop_event.clear()
+            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._monitor_thread.start()
+            self.is_monitoring = True
+            logger.info("Started queue monitoring", extra={'emoji_type': 'start'})
         
-    # Get Radarr queue once for all movies
-    try:
-        queue = get_radarr_queue(is_4k)
-        
-        # Process each movie independently
-        for movie in movies:
-            media_key = f"movie_{movie['rating_key']}"
-            
-            # Find movie in queue
-            queue_item = find_movie_in_queue(queue, movie)
-            
-            if queue_item:
-                # Movie is in download queue
-                process_movie_queue_item(media_key, movie, queue_item)
-            else:
-                # Not in queue, check if it has a file
-                has_file = check_movie_has_file(movie['radarr_id'], is_4k)
-                
-                if (has_file):
-                    # Movie has been imported, mark as available
-                    update_media_status(media_key, "Available")
-                    
-                    # Wait briefly for Plex to scan the new file
-                    schedule_movie_available_cleanup(media_key, movie)
-                elif movie.get('retrying', False):
-                    # Still retrying, update status
-                    update_media_status(media_key, "Retrying...")
-                else:
-                    # Still searching for initial release
-                    update_media_status(media_key, "Searching...")
-                    
-                # Check Radarr history to see if we've had any activity
-                check_movie_history(media_key, movie, is_4k)
-    
-    except Exception as e:
-        logger.error(f"Error processing movie batch: {e}", extra={'emoji_type': 'error'})
+    def stop_monitoring(self):
+        """Stop monitoring when queue is empty"""
+        if self.is_monitoring:
+            self._stop_event.set()
+            if self._monitor_thread and self._monitor_thread.is_alive():
+                self._monitor_thread.join(timeout=5)
+            self.is_monitoring = False
+            logger.info("Stopped queue monitoring", extra={'emoji_type': 'stop'})
 
-def process_movie_queue_item(media_key, movie, queue_item):
-    """Process a movie queue item and update status"""
-    try:
-        status = queue_item.get('status', '').lower()
-        title = movie.get('title', 'Unknown Movie')
+    def _monitor_loop(self):
+        """Main monitoring loop running in background thread"""
+        idle_count = 0
+        max_idle_cycles = IDLE_TIMEOUT // POLL_INTERVAL
         
-        # Debug logging for status
-        logger.debug(f"Queue status for movie {title}: {status}", extra={'emoji_type': 'debug'})
-        
-        # Status based on queue item state
-        if status == 'completed':
-            update_media_status(media_key, "Processing...")
-        
-        elif status == 'downloading':
-            # Get progress info
+        while not self._stop_event.is_set():
             try:
-                size_remaining = float(queue_item.get('sizeleft', 0))
-                size_total = float(queue_item.get('size', 0))
+                has_items = self.poll()
                 
-                if size_total > 0:
-                    percent = int(100 - ((size_remaining / size_total) * 100))
-                    logger.info(f"Download progress for {title}: {percent}%", 
-                              extra={'emoji_type': 'download'})
-                    update_media_status(media_key, f"Downloading {percent}%")
+                if has_items:
+                    idle_count = 0
                 else:
-                    update_media_status(media_key, "Downloading...")
-            except (ValueError, TypeError, ZeroDivisionError) as e:
-                logger.error(f"Error calculating download percentage: {e}", extra={'emoji_type': 'error'})
-                update_media_status(media_key, "Downloading...")
-        
-        elif status in ['delay', 'queued', 'paused']:
-            update_media_status(media_key, "Queued")
-        
-        elif status == 'warning':
-            update_media_status(media_key, "Warning")
-        
-        elif status == 'error':
-            update_media_status(media_key, "Error")
-    
-    except Exception as e:
-        logger.error(f"Error processing movie queue item: {e}", extra={'emoji_type': 'error'})
-
-def schedule_movie_available_cleanup(media_key, movie):
-    """Schedule removal of movie from monitoring after a delay to allow Plex/Jellyfin scanning"""
-    delay = getattr(settings, 'AVAILABLE_CLEANUP_DELAY', 10)  # Default 10 seconds
-    
-    def cleanup():
-        with REGISTRY_LOCK:
-            if media_key in MONITORED_MEDIA:
-                logger.info(f"Movie available: {movie['title']}", extra={'emoji_type': 'success'})
-                remove_from_monitor(media_key)
-    
-    timer = threading.Timer(delay, cleanup)
-    timer.daemon = True
-    timer.start()
-
-def check_movie_history(media_key, movie, is_4k=False):
-    """
-    Check Radarr history to determine if a movie download was completed but not yet imported,
-    or if it failed and should be marked as retrying
-    """
-    try:
-        # Only check history if we're not already retrying
-        with REGISTRY_LOCK:
-            if media_key in MONITORED_MEDIA and MONITORED_MEDIA[media_key].get('retrying', False):
-                return
-        
-        # Get movie history from Radarr
-        history = get_radarr_history(movie['radarr_id'], is_4k)
-        
-        if not history:
-            return
-            
-        # Sort by date descending to get most recent events
-        history.sort(key=lambda x: x.get('date', ''), reverse=True)
-        
-        # Check most recent event
-        latest_event = history[0] if history else None
-        
-        if not latest_event:
-            return
-            
-        event_type = latest_event.get('eventType', '').lower()
-        
-        # If most recent event is grabbed but not followed by downloadFailed or downloadFolderImported
-        if event_type == 'grabbed':
-            # Download started but not completed yet - we should see it in queue soon
-            # Calculate how long ago the grab happened
-            try:
-                event_date = datetime.fromisoformat(latest_event.get('date', '').replace('Z', '+00:00'))
-                now = datetime.now().astimezone()
-                minutes_since_grab = (now - event_date).total_seconds() / 60
+                    idle_count += 1
+                    if idle_count >= max_idle_cycles:
+                        logger.info("No items found for extended period, stopping monitoring")
+                        break
                 
-                # If it was grabbed more than 5 minutes ago but not in queue, likely failed silently
-                if minutes_since_grab > 5:
-                    update_media_status(media_key, "Retrying...")
-                    logger.info(f"Movie download may have failed silently, retrying: {movie['title']}", 
-                              extra={'emoji_type': 'retry'})
             except Exception as e:
-                logger.error(f"Error calculating grab time: {e}", extra={'emoji_type': 'error'})
-        
-        elif event_type == 'downloadfolderimported':
-            # Movie was recently imported, should show up with hasFile=true soon
-            update_media_status(media_key, "Processing...")
-            logger.debug(f"Movie recently imported, waiting for file: {movie['title']}", extra={'emoji_type': 'debug'})
+                logger.error(f"Monitor loop error: {e}", extra={'emoji_type': 'error'})
             
-        elif event_type == 'downloadfailed':
-            # Download failed, mark as retrying
-            with REGISTRY_LOCK:
-                if media_key in MONITORED_MEDIA:
-                    MONITORED_MEDIA[media_key]['retrying'] = True
-            
-            update_media_status(media_key, "Retrying...")
-            logger.info(f"Movie download failed, retrying: {movie['title']}", extra={'emoji_type': 'retry'})
-    
-    except Exception as e:
-        logger.error(f"Error checking movie history: {e}", extra={'emoji_type': 'error'})
-
-def process_episode_batch(episodes, is_4k):
-    """Process a batch of episodes"""
-    try:
-        # Get queue once for all episodes
-        queue = get_sonarr_queue(is_4k)
-        logger.debug(f"Fetched Sonarr queue ({len(queue)} items)", extra={'emoji_type': 'debug'})
+            # Wait for next poll or stop signal
+            self._stop_event.wait(POLL_INTERVAL)
         
-        # Process each episode
-        for episode in episodes:
-            if 'tvdb_id' not in episode or 'season_number' not in episode or 'episode_number' not in episode:
-                logger.error(f"Missing required fields in episode data: {episode}", extra={'emoji_type': 'error'})
-                continue
+        self.is_monitoring = False
+        
+    def poll(self):
+        """Check for subflows and return whether any items were found"""
+        session = get_session()
+        try:
+            now = datetime.now(timezone.utc)
+            in_queue = session.query(SubFlow).filter_by(status='IN_QUEUE', action='playback').all()
+            
+            # If no items in queue, return False
+            if not in_queue:
+                return False
                 
-            media_key = f"episode_{episode['tvdb_id']}_{episode['season_number']}_{episode['episode_number']}"
+            # Determine which queues we actually need based on subflows
+            needed_queues = set()
             
-            # Find episode in queue
-            episode_in_queue = None
-            for item in queue:
-                # Check if this queue item is for our episode
-                if ('episodeId' in item and 'episode' in item and 
-                    item['episode'].get('seasonNumber') == episode['season_number'] and 
-                    item['episode'].get('episodeNumber') == episode['episode_number']):
-                    episode_in_queue = item
+            for sf in in_queue:
+                if sf.movie_id:
+                    rec = session.query(Movie).get(sf.movie_id)
+                    queue_key = 'radarr_4k' if rec.is_4k else 'radarr_standard'
+                    needed_queues.add(queue_key)
+                elif sf.episode_id:
+                    rec = session.query(Episode).get(sf.episode_id)
+                    # Get is_4k from series through relationships
+                    is_4k = rec.season.series.is_4k if rec.season and rec.season.series else False
+                    queue_key = 'sonarr_4k' if is_4k else 'sonarr_standard'
+                    needed_queues.add(queue_key)
+            
+            # Only fetch the queues we actually need
+            queues = {}
+            for queue_key in needed_queues:
+                if queue_key == 'radarr_standard':
+                    queues[queue_key] = get_radarr_queue(is_4k=False)
+                elif queue_key == 'radarr_4k':
+                    queues[queue_key] = get_radarr_queue(is_4k=True)
+                elif queue_key == 'sonarr_standard':
+                    queues[queue_key] = get_sonarr_queue(is_4k=False)
+                elif queue_key == 'sonarr_4k':
+                    queues[queue_key] = get_sonarr_queue(is_4k=True)
+            
+            logger.debug(f"Processing {len(in_queue)} subflows with {len(queues)} queues: {list(queues.keys())}", 
+                        extra={'emoji_type': 'process'})
+            
+            # Process all subflows with the cached queues
+            # Process subflows sequentially to prevent rate limiting on media servers
+            for sf in in_queue:
+                if self._stop_event.is_set():
                     break
-            
-            if episode_in_queue:
-                # Episode is in queue, update status
-                logger.debug(f"Found episode in queue: {episode.get('series_title', 'Unknown')} S{episode.get('season_number', 0):02d}E{episode.get('episode_number', 0):02d}", 
-                          extra={'emoji_type': 'debug'})
-                process_episode_queue_item(media_key, episode, episode_in_queue)
-            else:
-                # Not in queue, keep searching status
-                # Only log status change if it changed
-                with REGISTRY_LOCK:
-                    if media_key in MONITORED_MEDIA:
-                        current_status = MONITORED_MEDIA[media_key].get('last_status', '')
-                        if current_status != 'Searching...':
-                            logger.debug(f"No queue item found for {episode.get('series_title', 'Unknown')} S{episode.get('season_number', 0):02d}E{episode.get('episode_number', 0):02d}, still searching.", 
-                                      extra={'emoji_type': 'debug'})
-                            update_media_status(media_key, "Searching...")
-    
-    except Exception as e:
-        logger.error(f"Error processing episode batch: {e}", extra={'emoji_type': 'error'})
-
-def find_episode_in_queue(queue, episode):
-    """
-    Find an episode in the Sonarr queue
-    
-    Args:
-        queue: List of queue items
-        episode: Episode data dictionary
-    
-    Returns:
-        Queue item for the episode, or None if not found
-    """
-    tvdb_id = episode.get('tvdb_id')
-    season_number = episode.get('season_number')
-    episode_number = episode.get('episode_number')
-    
-    # Get or fetch series ID
-    series_id = get_sonarr_series_id_by_tvdb(tvdb_id, episode.get('is_4k', False))
-    
-    for item in queue:
-        if 'episode' not in item:
-            continue
-        
-        ep_info = item['episode']
-        
-        # Check if this queue item matches our episode
-        if (ep_info.get('seriesId') == series_id and
-            ep_info.get('seasonNumber') == season_number and
-            ep_info.get('episodeNumber') == episode_number):
-            return item
-    
-    return None
-
-def find_movie_in_queue(queue, movie):
-    """
-    Find a movie in the Radarr queue
-    
-    Args:
-        queue: List of queue items
-        movie: Movie data dictionary
-    
-    Returns:
-        Queue item for the movie, or None if not found
-    """
-    radarr_id = movie.get('radarr_id')
-    
-    for item in queue:
-        if 'movieId' in item and item['movieId'] == radarr_id:
-            return item
-    
-    return None
-
-def process_episode_queue_item(media_key, episode, queue_item):
-    """Process an episode queue item and update status"""
-    try:
-        status = queue_item.get('status', '').lower()
-        title = f"{episode.get('series_title', 'Unknown')} S{episode.get('season_number', 0):02d}E{episode.get('episode_number', 0):02d}"
-        
-        # Debug logging for queue item
-        logger.debug(f"Processing queue item: {queue_item}", extra={'emoji_type': 'debug'})
-        
-        # Status based on queue item state
-        if status == 'completed':
-            update_media_status(media_key, "Processing...")
-            
-        elif status == 'downloading':
-            # Get progress info
-            size_left = queue_item.get('sizeleft', 0)
-            size_total = queue_item.get('size', 0)
-            logger.debug(f"Download sizes - Left: {size_left}, Total: {size_total}", extra={'emoji_type': 'debug'})
-            
-            try:
-                size_remaining = float(size_left)
-                size_total = float(size_total)
+                self.process_subflow(sf, session, now, queues)
                 
-                if size_total > 0:
-                    percent = int(100 - ((size_remaining / size_total) * 100))
-                    logger.info(f"Download progress for {title}: {percent}%", extra={'emoji_type': 'download'})
-                    update_media_status(media_key, f"Downloading {percent}%")
-                else:
-                    update_media_status(media_key, "Downloading...")
-            except (ValueError, TypeError, ZeroDivisionError) as e:
-                logger.error(f"Error calculating download percentage: {e}", extra={'emoji_type': 'error'})
-                update_media_status(media_key, "Downloading...")
-        
-        elif status in ['delay', 'queued', 'paused']:
-            update_media_status(media_key, "Queued")
-        
-        elif status == 'warning':
-            update_media_status(media_key, "Warning")
-        
-        elif status == 'error':
-            update_media_status(media_key, "Error")
-        else:
-            logger.debug(f"Unknown status '{status}' for {title}", extra={'emoji_type': 'debug'})
-    
-    except Exception as e:
-        logger.error(f"Error processing episode queue item: {e}", extra={'emoji_type': 'error'})
-
-def schedule_episode_available_cleanup(media_key, episode):
-    """Schedule removal of episode from monitoring after a delay to allow Plex/Jellyfin scanning"""
-    delay = getattr(settings, 'AVAILABLE_CLEANUP_DELAY', 10)  # Default 10 seconds
-    
-    def cleanup():
-        with REGISTRY_LOCK:
-            if media_key in MONITORED_MEDIA:
-                logger.info(f"Episode available: {episode['series_title']} S{episode['season_number']:02d}E{episode['episode_number']:02d}", 
-                          extra={'emoji_type': 'success'})
-                remove_from_monitor(media_key)
-    
-    timer = threading.Timer(delay, cleanup)
-    timer.daemon = True
-    timer.start()
-
-def check_episode_history(media_key, episode, is_4k=False):
-    """
-    Check Sonarr history to determine if an episode download was completed but not yet imported,
-    or if it failed and should be marked as retrying
-    """
-    try:
-        # Only check history if we're not already retrying
-        with REGISTRY_LOCK:
-            if media_key in MONITORED_MEDIA and MONITORED_MEDIA[media_key].get('retrying', False):
-                return
-        
-        # Get episode history from Sonarr
-        history = get_sonarr_episode_history(
-            episode['tvdb_id'], 
-            episode['season_number'], 
-            episode['episode_number'],
-            is_4k
-        )
-        
-        if not history:
-            return
+            session.commit()
+            return True
             
-        # Sort by date descending to get most recent events
-        history.sort(key=lambda x: x.get('date', ''), reverse=True)
-        
-        # Check most recent event
-        latest_event = history[0] if history else None
-        
-        if not latest_event:
-            return
-            
-        event_type = latest_event.get('eventType', '').lower()
-        
-        # If most recent event is grabbed but not followed by downloadFailed or downloadFolderImported
-        if event_type == 'grabbed':
-            # Download started but not completed yet - we should see it in queue soon
-            # Calculate how long ago the grab happened
+        except Exception as e:
+            session.rollback()
+            logger.error(f"ProgressMonitor error: {e}", extra={'emoji_type': 'error'})
+            return False
+        finally:
+            session.close()
+
+    def _update_jellyfin_locked(self, **kwargs):
+        """Thread-safe Jellyfin update with lock"""
+        with self._jellyfin_lock:
             try:
-                event_date = datetime.fromisoformat(latest_event.get('date', '').replace('Z', '+00:00'))
-                now = datetime.now().astimezone()
-                minutes_since_grab = (now - event_date).total_seconds() / 60
-                
-                # If it was grabbed more than 5 minutes ago but not in queue, likely failed silently
-                if minutes_since_grab > 5:
-                    with REGISTRY_LOCK:
-                        if media_key in MONITORED_MEDIA:
-                            MONITORED_MEDIA[media_key]['retrying'] = True
-                            MONITORED_MEDIA[media_key]['start_time'] = time.time()  # Reset timeout
-                    
-                    update_media_status(media_key, "Retrying...")
-                    logger.info(f"Episode download failed, retrying: {episode['series_title']} S{episode['season_number']:02d}E{episode['episode_number']:02d}",
-                              extra={'emoji_type': 'retry'})
+                update_jellyfin_title_status(**kwargs)
             except Exception as e:
-                logger.error(f"Error calculating grab time: {e}", extra={'emoji_type': 'error'})
-        
-        elif event_type == 'downloadfolderimported':
-            # Episode was recently imported, should show up with hasFile=true soon
-            update_media_status(media_key, "Processing...")
-            logger.debug(f"Episode recently imported, waiting for file: {episode['series_title']} S{episode['season_number']:02d}E{episode['episode_number']:02d}", 
-                       extra={'emoji_type': 'debug'})
-            
-        elif event_type == 'downloadfailed':
-            # Download failed, mark as retrying
-            with REGISTRY_LOCK:
-                if media_key in MONITORED_MEDIA:
-                    MONITORED_MEDIA[media_key]['retrying'] = True
-                    MONITORED_MEDIA[media_key]['start_time'] = time.time()  # Reset timeout
-            
-            update_media_status(media_key, "Retrying...")
-            logger.info(f"Episode download failed, retrying: {episode['series_title']} S{episode['season_number']:02d}E{episode['episode_number']:02d}", 
-                      extra={'emoji_type': 'retry'})
-    
-    except Exception as e:
-        logger.error(f"Error checking episode history: {e}", extra={'emoji_type': 'error'})
+                logger.error(f"Error updating Jellyfin: {str(e)}", extra={'emoji_type': 'error'})
 
-# Additional functions for API interaction
+    def _update_plex_locked(self, **kwargs):
+        """Thread-safe Plex update with lock"""
+        with self._plex_lock:
+            try:
+                update_plex_title_status(**kwargs)
+            except Exception as e:
+                logger.error(f"Error updating Plex: {str(e)}", extra={'emoji_type': 'error'})
 
-def get_radarr_history(movie_id, is_4k=False):
-    """
-    Get history for a specific movie from Radarr
-    
-    Args:
-        movie_id: Radarr movie ID
-        is_4k: Whether to use 4K Radarr
+    def process_subflow(self, sf: SubFlow, session: Session, now: datetime, queues: dict):
+        """Process a subflow using pre-fetched queues"""
+        # Mark as in progress
+        sf.status = 'IN_PROGRESS'
+        session.add(sf)
+        session.commit()
         
-    Returns:
-        List of history records
-    """
-    try:
-        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-        
-        params = {'movieId': movie_id, 'pageSize': 10}
-        url = f"{base_url}/history"
-        headers = {'X-Api-Key': api_key}
-        
-        response = requests.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        
-        data = response.json()
-        return data.get('records', [])
-    
-    except Exception as e:
-        logger.error(f"Error getting Radarr history: {e}", extra={'emoji_type': 'error'})
-        return []
+        try:
+            # Determine which queue to check and what key to use
+            if sf.movie_id:
+                rec = session.query(Movie).get(sf.movie_id)
+                arr_id = rec.radarrid
+                queue_key = 'radarr_4k' if rec.is_4k else 'radarr_standard'
+                item_key = 'movieId'
+            else:
+                rec = session.query(Episode).get(sf.episode_id)
+                arr_id = rec.sonarrid
+                # Get is_4k from series through relationships
+                is_4k = rec.season.series.is_4k if rec.season and rec.season.series else False
+                queue_key = 'sonarr_4k' if is_4k else 'sonarr_standard'
+                item_key = 'episodeId'
+                
+            # Get the appropriate pre-fetched queue
+            queue = queues.get(queue_key, [])
+            
+            # Find ALL matches in the pre-fetched queue
+            matches = [it for it in queue if it.get(item_key) == arr_id]
+            
+            if matches:
+                # Use the most advanced match for status updates
+                matches.sort(key=lambda x: (
+                    100 - (x.get('sizeleft', 0) or 0) / (x.get('size', 1) or 1) * 100 
+                    if x.get('size', 0) else 0
+                ), reverse=True)
+                
+                match = matches[0]
+                
+                # Calculate status and progress
+                status = match.get('status', '').lower()
+                size = match.get('size', 0) or 0
+                left = match.get('sizeleft', 0) or 0
+                progress = int(100 - (left/size*100)) if size > 0 else 0
+                
+                # Update DB record
+                rec_field_status = 'radarr_status' if sf.movie_id else 'sonarr_status'
+                rec_field_prog = 'radarr_progress' if sf.movie_id else 'sonarr_progress'
+                setattr(rec, rec_field_status, status)
+                setattr(rec, rec_field_prog, progress)
+                session.add(rec)
+                
+                # Prepare update parameters
+                update_params = {}
+                if sf.movie_id:
+                    update_params = {
+                        'media_type': 'movie',
+                        'media_id': rec.tmdbid,
+                        'title': rec.title,
+                        'status': f"Downloading ({progress}%)",
+                        'year': rec.year
+                    }
+                else:
+                    # For episodes, get series info through relationships
+                    series = rec.season.series if rec.season else None
+                    if series:
+                        update_params = {
+                            'media_type': 'tv',
+                            'media_id': series.tvdbid,
+                            'title': series.title,
+                            'status': f"Downloading ({progress}%)",
+                            'season': rec.season_number,
+                            'episode': rec.episode_number
+                        }
+                
+                # Send updates to both services concurrently but with locks
+                if update_params:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                        futures = []
+                        
+                        # Submit Jellyfin update if enabled
+                        if hasattr(settings, 'jellyfin_enabled') and settings.jellyfin_enabled:
+                            futures.append(executor.submit(self._update_jellyfin_locked, **update_params))
+                        
+                        # Submit Plex update if enabled
+                        if hasattr(settings, 'plex_enabled') and settings.plex_enabled:
+                            futures.append(executor.submit(self._update_plex_locked, **update_params))
+                        
+                        # Wait for both to complete
+                        concurrent.futures.wait(futures)
+                
+                # Update SubFlow status based on download status
+                if status in ('completed', 'imported'):
+                    sf.status = 'DONE'
+                    session.add(sf)
+                    logger.info(f"SubFlow {sf.id} DONE", extra={'emoji_type': 'success'})
+                else:
+                    # Still in progress, keep IN_QUEUE status
+                    sf.status = 'IN_QUEUE'
+                    session.add(sf)
+            else:
+                # Not in queue - check timeout
+                elapsed = (now - sf.started_at).total_seconds()
+                timeout = getattr(settings, 'QUEUE_TIMEOUT_SECONDS', 200)
+                
+                if elapsed > timeout:
+                    sf.status = 'FAILED'
+                    session.add(sf)
+                    logger.info(f"SubFlow {sf.id} FAILED (timeout after {timeout}s)", extra={'emoji_type': 'timeout'})
+                else:
+                    # Not timed out yet, put back in queue
+                    sf.status = 'IN_QUEUE'
+                    session.add(sf)
+            
+            # Commit all changes
+            session.commit()
+            
+        except Exception as e:
+            # Log error and rollback
+            logger.error(f"Error processing subflow {sf.id}: {str(e)}", extra={'emoji_type': 'error'})
+            session.rollback()
+            
+            # Put back in queue to retry later
+            sf.status = 'IN_QUEUE'
+            session.add(sf)
+            session.commit()
+
+# Create the global instance
+progress_monitor = ProgressMonitor()
+
+# Function to call from handlers and flows
+def trigger_monitoring():
+    """Call this when you add items to the SubFlow queue"""
+    progress_monitor.start_monitoring()
+
 
 def check_movie_has_file(radarr_id, is_4k=False):
     """
@@ -700,48 +311,6 @@ def check_movie_has_file(radarr_id, is_4k=False):
         logger.error(f"Error checking if movie has file: {e}", extra={'emoji_type': 'error'})
         return False
 
-def get_sonarr_episode_history(tvdb_id, season_number, episode_number, is_4k=False):
-    """
-    Get history for a specific episode from Sonarr
-    
-    Args:
-        tvdb_id: TVDB ID
-        season_number: Season number
-        episode_number: Episode number
-        is_4k: Whether to use 4K Sonarr
-        
-    Returns:
-        List of history records
-    """
-    try:
-        # First get series ID and episode ID
-        series_id = get_sonarr_series_id_by_tvdb(tvdb_id, is_4k)
-        
-        if not series_id:
-            return []
-            
-        episode_id = get_sonarr_episode_id(series_id, season_number, episode_number, is_4k)
-        
-        if not episode_id:
-            return []
-            
-        # Get history for this episode
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        params = {'episodeId': episode_id, 'pageSize': 10}
-        url = f"{base_url}/history"
-        headers = {'X-Api-Key': api_key}
-        
-        response = requests.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        
-        data = response.json()
-        return data.get('records', [])
-    
-    except Exception as e:
-        logger.error(f"Error getting Sonarr episode history: {e}", extra={'emoji_type': 'error'})
-        return []
 
 def check_episode_has_file(tvdb_id, season_number, episode_number, is_4k=False):
     """
@@ -756,10 +325,21 @@ def check_episode_has_file(tvdb_id, season_number, episode_number, is_4k=False):
     Returns:
         True if the episode has a file, False otherwise
     """
-    try:
-        # First get the series ID
-        series_id = get_sonarr_series_id_by_tvdb(tvdb_id, is_4k)
-        
+    try:        # Get series ID from the database instead of API call
+        # Prefer getting series ID from the database instead of API call
+        session_db = get_session()
+        try:
+            series = session_db.query(Series).filter_by(tvdbid=tvdb_id, is_4k=is_4k).first()
+            series_id = series.sonarrid if series else None
+        finally:
+            session_db.close()
+        session_db = get_session()
+        try:
+            # Find the series by tvdb_id and is_4k flag
+            series = session_db.query(Series).filter_by(tvdbid=tvdb_id, is_4k=is_4k).first()
+            series_id = series.sonarrid if series else None
+        finally:
+            session_db.close()        
         if not series_id:
             return False
         
@@ -787,466 +367,56 @@ def check_episode_has_file(tvdb_id, season_number, episode_number, is_4k=False):
         logger.error(f"Error checking if episode has file: {e}", extra={'emoji_type': 'error'})
         return False
 
-def get_sonarr_series_id_by_tvdb(tvdb_id, is_4k=False):
-    """
-    Get Sonarr series ID from TVDB ID with caching
-    
-    Args:
-        tvdb_id: TVDB ID
-        is_4k: Whether to use 4K Sonarr
-    
-    Returns:
-        Sonarr series ID, or None if not found
-    """
-    cache_key = '4k' if is_4k else 'standard'
-    
-    # Try to get from cache first
-    if str(tvdb_id) in API_CACHE['series_id_map'][cache_key]:
-        return API_CACHE['series_id_map'][cache_key][str(tvdb_id)]
-    
-    # Not in cache, need to fetch
-    try:
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        url = f"{base_url}/series"
-        headers = {'X-Api-Key': api_key}
-        
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        
-        series_list = response.json()
-        
-        # Find the series with matching TVDB ID
-        for series in series_list:
-            if str(series.get('tvdbId')) == str(tvdb_id):
-                series_id = series.get('id')
-                # Cache the result
-                API_CACHE['series_id_map'][cache_key][str(tvdb_id)] = series_id
-                return series_id
-        
-        return None
-    
-    except Exception as e:
-        logger.error(f"Error finding series ID for TVDB ID {tvdb_id}: {e}", extra={'emoji_type': 'error'})
-        return None
-
-def get_sonarr_episode_id(series_id, season_number, episode_number, is_4k=False):
-    """
-    Get Sonarr episode ID from series ID and season/episode numbers
-    
-    Args:
-        series_id: Sonarr series ID
-        season_number: Season number
-        episode_number: Episode number
-        is_4k: Whether to use 4K Sonarr
-        
-    Returns:
-        Episode ID or None if not found
-    """
-    try:
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        params = {'seriesId': series_id}
-        url = f"{base_url}/episode"
-        headers = {'X-Api-Key': api_key}
-        
-        response = requests.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        
-        episodes = response.json()
-        
-        for ep in episodes:
-            if ep.get('seasonNumber') == season_number and ep.get('episodeNumber') == episode_number:
-                return ep.get('id')
-        
-        return None
-    
-    except Exception as e:
-        logger.error(f"Error getting Sonarr episode ID: {e}", extra={'emoji_type': 'error'})
-        return None
-
-def _check_downloads_status():
-    """Check status of monitored downloads and update progress"""
-    try:
-        with REGISTRY_LOCK:
-            monitored_count = len(MONITORED_MEDIA)
-            if not monitored_count:
-                return
-        
-        # Track total items found in all queues
-        total_queue_items = 0
-        
-        # Create sets to track what's in each queue 
-        items_in_queue = {
-            'episode': set(),  # For episodes 
-            'movie': set()     # For movies
-        }
-        
-        # Check Sonarr standard queue
-        sonarr_queue = {}
-        if settings.SONARR_URL and settings.SONARR_API_KEY:
-            try:
-                sonarr_url = f"{settings.SONARR_URL}/queue"
-                headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                response = requests.get(sonarr_url, headers=headers)
-                if response.status_code == 200:
-                    queue_data = response.json()
-                    records = queue_data.get('records', [])
-                    total_queue_items += len(records)
-                    
-                    # Process queue items into a lookup dictionary
-                    for item in records:
-                        episode_id = item.get('episodeId')
-                        if episode_id:
-                            # Calculate progress percentage
-                            if item.get('size', 0) > 0:
-                                progress = round(100 - (item.get('sizeleft', 0) / item.get('size', 1) * 100), 1)
-                            else:
-                                progress = 0
-                                
-                            status = item.get('status', 'Unknown').capitalize()
-                            
-                            sonarr_queue[str(episode_id)] = {
-                                'status': status,
-                                'progress': progress,
-                                'is_4k': False
-                            }
-            except Exception as e:
-                logger.error(f"Failed to check standard Sonarr queue: {e}", extra={'emoji_type': 'error'})
-        
-        # Check Sonarr 4K queue if configured
-        sonarr_4k_queue = {}
-        if settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY:
-            try:
-                sonarr_url = f"{settings.SONARR_4K_URL}/queue"
-                headers = {'X-Api-Key': settings.SONARR_4K_API_KEY}
-                response = requests.get(sonarr_url, headers=headers)
-                if response.status_code == 200:
-                    queue_data = response.json()
-                    records = queue_data.get('records', [])
-                    total_queue_items += len(records)
-                    
-                    logger.debug(f"Sonarr 4K queue: {len(records)} items", extra={'emoji_type': 'debug'})
-                    
-                    # Process queue items into a lookup dictionary
-                    for item in records:
-                        episode_id = item.get('episodeId')
-                        if episode_id:
-                            # Calculate progress percentage
-                            if item.get('size', 0) > 0:
-                                progress = round(100 - (item.get('sizeleft', 0) / item.get('size', 1) * 100), 1)
-                            else:
-                                progress = 0
-                                
-                            status = item.get('status', 'Unknown').capitalize()
-                            
-                            sonarr_4k_queue[str(episode_id)] = {
-                                'status': status,
-                                'progress': progress,
-                                'is_4k': True
-                            }
-            except Exception as e:
-                logger.error(f"Failed to check 4K Sonarr queue: {e}", extra={'emoji_type': 'error'})
-                
-        # Update status of monitored episode items
-        with REGISTRY_LOCK:
-            for key, media in list(MONITORED_MEDIA.items()):
-                try:
-                    if media['media_type'] == 'episode':
-                        episode_id = media.get('episode_id')
-                        if not episode_id:
-                            continue
-                        
-                        is_4k = media.get('is_4k', False)
-                        title_str = f"{media.get('series_title', 'Unknown')} S{media.get('season_number', 0):02d}E{media.get('episode_number', 0):02d}"
-                        
-                        # Choose the right queue based on 4K flag
-                        queue_to_check = sonarr_4k_queue if is_4k else sonarr_queue
-                        queue_name = "Sonarr 4K" if is_4k else "Sonarr"
-                        
-                        # If episode is in queue, update status and progress
-                        if str(episode_id) in queue_to_check:
-                            queue_info = queue_to_check[str(episode_id)]
-                            current_status = media.get('last_status', '')
-                            current_progress = media.get('progress', 0)
-
-                            # Disable timeout for items in queue
-                            media['start_time'] = None
-                            
-                            # Track what changed
-                            status_changed = current_status != queue_info['status']
-                            progress_changed = abs(current_progress - queue_info['progress']) >= 0.5
-                            
-                            # Always log status changes
-                            if status_changed:
-                                logger.info(f"Status change for {title_str} ({queue_name}): {current_status} → {queue_info['status']}", 
-                                          extra={'emoji_type': 'status'})
-                                media['last_status'] = queue_info['status']
-                            
-                            # Log progress updates when they change
-                            if progress_changed:
-                                logger.info(f"Download progress for {title_str} ({queue_name}): {queue_info['progress']}%", 
-                                          extra={'emoji_type': 'progress'})
-                                media['progress'] = queue_info['progress']
-                except Exception as e:
-                    logger.error(f"Error updating episode item {key}: {e}", extra={'emoji_type': 'error'})
-            
-        # Check Radarr standard queue
-        radarr_queue = {}
-        if settings.RADARR_URL and settings.RADARR_API_KEY:
-            try:
-                radarr_url = f"{settings.RADARR_URL}/queue"
-                headers = {'X-Api-Key': settings.RADARR_API_KEY}
-                response = requests.get(radarr_url, headers=headers)
-                if response.status_code == 200:
-                    queue_data = response.json()
-                    records = queue_data.get('records', [])
-                    total_queue_items += len(records)
-                    
-                    # Process queue items into a lookup dictionary
-                    for item in records:
-                        movie_id = item.get('movieId')
-                        if movie_id:
-                            # Calculate progress percentage
-                            if item.get('size', 0) > 0:
-                                progress = round(100 - (item.get('sizeleft', 0) / item.get('size', 1) * 100), 1)
-                            else:
-                                progress = 0
-                                
-                            status = item.get('status', 'Unknown').capitalize()
-                            
-                            radarr_queue[str(movie_id)] = {
-                                'status': status,
-                                'progress': progress,
-                                'is_4k': False
-                            }
-                    
-                    # Add debug logging for movie queue detection
-                    standard_monitored_movie_ids = [media.get('radarr_id') for key, media in list(MONITORED_MEDIA.items()) 
-                                        if media['media_type'] == 'movie' and not media.get('is_4k', False)]
-                    standard_queue_movie_ids = [item.get('movieId') for item in records]
-                    logger.debug(f"Radarr standard queue movie IDs: {standard_queue_movie_ids}", extra={'emoji_type': 'debug'})
-                    logger.debug(f"Monitored standard movie IDs: {standard_monitored_movie_ids}", extra={'emoji_type': 'debug'})
-            except Exception as e:
-                logger.error(f"Failed to check standard Radarr queue: {e}", extra={'emoji_type': 'error'})
-        
-        # Check Radarr 4K queue if configured
-        radarr_4k_queue = {}
-        if settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY:
-            try:
-                radarr_url = f"{settings.RADARR_4K_URL}/queue"
-                headers = {'X-Api-Key': settings.RADARR_4K_API_KEY}
-                response = requests.get(radarr_url, headers=headers)
-                if response.status_code == 200:
-                    queue_data = response.json()
-                    records = queue_data.get('records', [])
-                    total_queue_items += len(records)
-                    
-                    logger.debug(f"Radarr 4K queue: {len(records)} items", extra={'emoji_type': 'debug'})
-                    
-                    # Process queue items into a lookup dictionary
-                    for item in records:
-                        movie_id = item.get('movieId')
-                        if movie_id:
-                            # Calculate progress percentage
-                            if item.get('size', 0) > 0:
-                                progress = round(100 - (item.get('sizeleft', 0) / item.get('size', 1) * 100), 1)
-                            else:
-                                progress = 0
-                                
-                            status = item.get('status', 'Unknown').capitalize()
-                            
-                            radarr_4k_queue[str(movie_id)] = {
-                                'status': status,
-                                'progress': progress,
-                                'is_4k': True
-                            }
-                    
-                    # Add debug logging for 4K movie queue detection
-                    _4k_monitored_movie_ids = [media.get('radarr_id') for key, media in list(MONITORED_MEDIA.items()) 
-                                        if media['media_type'] == 'movie' and media.get('is_4k', False)]
-                    _4k_queue_movie_ids = [item.get('movieId') for item in records]
-                    logger.debug(f"Radarr 4K queue movie IDs: {_4k_queue_movie_ids}", extra={'emoji_type': 'debug'})
-                    logger.debug(f"Monitored 4K movie IDs: {_4k_monitored_movie_ids}", extra={'emoji_type': 'debug'})
-            except Exception as e:
-                logger.error(f"Failed to check 4K Radarr queue: {e}", extra={'emoji_type': 'error'})
-                
-        # Update status of monitored movie items
-        with REGISTRY_LOCK:
-            for key, media in list(MONITORED_MEDIA.items()):
-                try:
-                    if media['media_type'] == 'movie':
-                        movie_id = media.get('radarr_id')
-                        if not movie_id:
-                            continue
-                        
-                        is_4k = media.get('is_4k', False)
-                        title_str = media.get('title', 'Unknown Movie')
-                        
-                        # Choose the right queue based on 4K flag
-                        queue_to_check = radarr_4k_queue if is_4k else radarr_queue
-                        queue_name = "Radarr 4K" if is_4k else "Radarr"
-                        
-                        # If movie is in queue, update status and progress
-                        if str(movie_id) in queue_to_check:
-                            queue_info = queue_to_check[str(movie_id)]
-                            current_status = media.get('last_status', '')
-                            current_progress = media.get('progress', 0)
-
-                            # Debug the start_time before change
-                            old_start_time = media.get('start_time')
-                            logger.debug(f"Movie {title_str} in queue - start_time before: {old_start_time}", extra={'emoji_type': 'debug'})
-
-                            # Disable timeout for items in queue
-                            media['start_time'] = None
-
-                            # Debug after change
-                            logger.debug(f"Movie {title_str} in queue - start_time after: {media.get('start_time')}", extra={'emoji_type': 'debug'})
-                            
-                            # Track what changed
-                            status_changed = current_status != queue_info['status']
-                            progress_changed = abs(current_progress - queue_info['progress']) >= 0.5
-                            
-                            # Always log status changes
-                            if status_changed:
-                                logger.info(f"Status change for {title_str} ({queue_name}): {current_status} → {queue_info['status']}", 
-                                          extra={'emoji_type': 'status'})
-                                media['last_status'] = queue_info['status']
-                            
-                            # Log progress updates when they change
-                            if progress_changed:
-                                logger.info(f"Download progress for {title_str} ({queue_name}): {queue_info['progress']}%", 
-                                          extra={'emoji_type': 'progress'})
-                                media['progress'] = queue_info['progress']
-                except Exception as e:
-                    logger.error(f"Error updating movie item {key}: {e}", extra={'emoji_type': 'error'})
-        
-        # Update consolidated log message after checking all queues
-        logger.info(f"Queue check complete: {monitored_count} monitored item(s), found {total_queue_items} item(s) across all services", 
-                  extra={'emoji_type': 'process'})
-                
-        # After all queue processing, add code to reset timeouts for items that left the queue
-        with REGISTRY_LOCK:
-            for key, media in list(MONITORED_MEDIA.items()):
-                media_type = media.get('media_type')
-                
-                # Get the appropriate ID based on media type
-                if media_type == 'movie':
-                    item_id = str(media.get('radarr_id', ''))
-                    # If movie is in queue, mark it
-                    if str(item_id) in radarr_queue or str(item_id) in radarr_4k_queue:
-                        items_in_queue['movie'].add(item_id)
-                else:  # episode
-                    item_id = str(media.get('episode_id', ''))
-                    # If episode is in queue, mark it
-                    if str(item_id) in sonarr_queue or str(item_id) in sonarr_4k_queue:
-                        items_in_queue['episode'].add(item_id)
-                        
-            # Now check all items and reset timeout for those not in queue but with start_time=None
-            for key, media in list(MONITORED_MEDIA.items()):
-                media_type = media.get('media_type')
-                
-                if media_type == 'movie':
-                    item_id = str(media.get('radarr_id', ''))
-                elif media_type == 'episode':
-                    item_id = str(media.get('episode_id', ''))
-                else:
-                    continue
-                    
-                # If it's not in queue but has start_time=None, it left the queue without failing
-                if item_id and item_id not in items_in_queue.get(media_type, set()) and media.get('start_time') is None:
-                    # Item left queue - reset timeout timer
-                    media['start_time'] = time.time()
-                    logger.info(f"Item left queue, starting timeout: {media.get('title')}", 
-                            extra={'emoji_type': 'warning'})
-
-            # Add timeout check for all monitored items - AT THE SAME LEVEL AS PREVIOUS LOOPS
-            timeout_seconds = getattr(settings, 'MAX_MONITOR_TIME', 120)
-            logger.debug(f"Checking timeouts with MAX_MONITOR_TIME={timeout_seconds} seconds", extra={'emoji_type': 'debug'})
-            
-            now = time.time()
-            timed_out_keys = []
-            
-            for key2, media2 in list(MONITORED_MEDIA.items()):  # Using different variable names to avoid confusion
-                # Debug logging for every item
-                start_time = media2.get('start_time')
-                title = media2.get('title', 'Unknown')
-                logger.debug(f"Timeout check for {title}: start_time={start_time}", extra={'emoji_type': 'debug'})
-                
-                # Skip timeout check for items with start_time = None
-                if start_time is None:
-                    logger.debug(f"Skipping timeout check for {title} - start_time is None", extra={'emoji_type': 'debug'})
-                    continue
-                
-                # Check if the item has timed out
-                elapsed = now - start_time
-                logger.debug(f"Elapsed time for {title}: {elapsed:.1f}/{timeout_seconds} seconds", extra={'emoji_type': 'debug'})
-                
-                if elapsed > timeout_seconds:
-                    timed_out_keys.append(key2)
-                    logger.info(f"Monitoring timed out after {timeout_seconds} seconds for {title}", 
-                            extra={'emoji_type': 'timeout'})
-            
-            # Remove timed out items
-            for key2 in timed_out_keys:
-                remove_from_monitor(key2)
-
-    except Exception as e:
-        logger.error(f"Error in download status check: {str(e)}", extra={'emoji_type': 'error'})
-
 def handle_download_webhook(data):
-    """Handle download completion events from *arr applications
-    
-    This function only manages the monitoring state - title updates are
-    handled by handle_import_event() in handlers.py.
-    """
+    """Handle download completion events from *arr applications by marking the matching SubFlow DONE."""
+    session = get_session()
     try:
         if 'movie' in data:
-            # Movie download completed
-            movie = data.get('movie', {})
-            tmdb_id = movie.get('tmdbId')
-            radarr_id = movie.get('id')  # Radarr internal ID
-            title = movie.get('title')
-            
-            if not tmdb_id:
-                logger.warning(f"Movie download webhook missing TMDB ID for '{title}'", extra={'emoji_type': 'warning'})
+            movie = data['movie']
+            radarr_id = movie.get('id')
+            if radarr_id is None:
                 return
-                
-            # Remove from monitoring
-            media_key = f"movie_{tmdb_id}"
-            remove_from_monitor(media_key)
-            logger.debug(f"Removed movie '{title}' (ID: {tmdb_id}) from monitoring", extra={'emoji_type': 'debug'})
-            
+
+            # find the in-queue subflow for this radarr download
+            sf = (
+                session.query(SubFlow)
+                .filter_by(branch='playback', status='IN_QUEUE')
+                .filter(SubFlow.movie_id.isnot(None))
+                .filter(SubFlow.movie.has(radarrid=radarr_id))
+                .first()
+            )
+            if sf:
+                sf.status = 'DONE'
+                session.add(sf)
+                session.commit()
+
         elif 'episodes' in data and 'series' in data:
-            # TV episode download completed
-            series = data.get('series', {})
-            tvdb_id = series.get('tvdbId')
-            title = series.get('title')
-            
-            if not tvdb_id:
-                logger.warning(f"Episode download webhook missing TVDB ID for '{title}'", extra={'emoji_type': 'warning'})
-                return
-                
-            # Handle each episode in the webhook
-            for episode in data.get('episodes', []):
-                season_num = episode.get('seasonNumber')
-                episode_num = episode.get('episodeNumber')
-                
-                if season_num is not None and episode_num is not None:
-                    # Remove this specific episode from monitoring
-                    media_key = f"episode_{tvdb_id}_{season_num}_{episode_num}"
-                    remove_from_monitor(media_key)
-                    logger.debug(f"Removed episode '{title}' S{season_num}E{episode_num} from monitoring", 
-                               extra={'emoji_type': 'debug'})
-                    
+            series = data['series']
+            episodes = data['episodes']
+            for ep in episodes:
+                season = ep.get('seasonNumber')
+                number = ep.get('episodeNumber')
+                sonarr_id = ep.get('id')
+                if sonarr_id is None:
+                    continue
+
+                sf = (
+                    session.query(SubFlow)
+                    .filter_by(branch='playback', status='IN_QUEUE')
+                    .filter(SubFlow.episode_id.isnot(None))
+                    .filter(SubFlow.episode.has(sonarrid=sonarr_id))
+                    .first()
+                )
+                if sf:
+                    sf.status = 'DONE'
+                    session.add(sf)
+            session.commit()
+
     except Exception as e:
+        session.rollback()
         logger.error(f"Error handling download webhook: {e}", extra={'emoji_type': 'error'})
-
-# Make sure the monitor thread starts when this module is imported
-logger.info("Starting queue monitoring", extra={'emoji_type': 'process'})
-
+    finally:
+        session.close()
 # Deprecation warnings for old-style monitoring functions
 def check_tv_has_file(*args, **kwargs):
     logger.warning(
@@ -1271,13 +441,3 @@ def update_plex_title(*args, **kwargs):
         "[DEPRECATED] update_plex_title() is deprecated. Title updates are now handled by the registry-based system.",
         extra={'emoji_type': 'warning'}
     )
-
-# Make sure this appears at the very bottom of the file
-logger.info("QUEUE MONITOR: Module loaded, initializing monitoring", extra={'emoji_type': 'process'})
-
-# Start the monitoring process - use a single initialization
-try:
-    start_batch_monitoring()
-    logger.info("Queue monitoring initialized successfully", extra={'emoji_type': 'process'})
-except Exception as e:
-    logger.error(f"Failed to start queue monitoring: {e}", extra={'emoji_type': 'error'})

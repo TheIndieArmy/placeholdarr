@@ -84,20 +84,18 @@ Perfect for:
 
 ### Library Folder Strategies
 
-**You can use Placeholdarr in two ways:**
+To use Placeholdarr, create a dedicated folder for placeholders (for example, `/mnt/user/data/placeholder-movies` and `/mnt/user/data/placeholder-tv`).
 
-#### 1. **Single Folder (Simple)**
-- Set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to the same folders your *arr (Radarr/Sonarr) use as their root folders.
-- Both real files and placeholders will be created in the same folder.
-- Plex/Jellyfin will see both real and placeholder files in the same library.
-- **Recommended:** Create a `placeholders` subfolder inside your library folder (e.g., `/mnt/user/data/movies/placeholders`) and set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to this subfolder.  
-  This keeps placeholders organized and makes cleanup easier, while still allowing Plex/Jellyfin to scan them.
+Once you have created your placeholder folders, you have two options for adding them to your Plex and/or Jellyfin libraries:
 
-#### 2. **Separate Folders for Placeholders and Real Files (Advanced)**
-- Set `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` to a dedicated "placeholder" folder (e.g., `/mnt/user/data/placeholder-movies`).
-- Configure your *arr to import/move real files to a different folder (e.g., `/mnt/user/data/movies`).
-- In Plex/Jellyfin, add both folders as separate libraries if you want users to browse placeholders and real files separately (e.g., "Requests" vs "Movies").
-- This is useful if you want to keep placeholders out of your main library or provide a dedicated "request" library for users.
+#### Option 1: Add Placeholders and Real Files in the Same Library
+- Add both your placeholder folder(s) and your real file folder(s) to the same library in Plex/Jellyfin.
+- Both real files and placeholders will appear together in the same library. This is simpler to set up, but does not provide as much clarity or separation between real and placeholder content.
+
+#### Option 2: Add Placeholders and Real Files as Separate Libraries
+- Add your placeholder folder(s) as a separate library in Plex/Jellyfin (for example, a "Requests" library).
+- Keep your real file libraries (e.g., `/mnt/user/data/movies`, `/mnt/user/data/tv`) as separate libraries.
+- This setup makes it clear to users which items are placeholders (requests) and which are available to play immediately, and keeps your real and placeholder files fully separated for easy management and cleanup.
 
 **Note:**  
 Placeholdarr does not need to know your *arr root folders—just set the library folders to wherever you want placeholders to appear.
@@ -130,6 +128,14 @@ Optional settings:
   - `PREFERRED_MOVIE_DATE_TYPE`: Which movie release date to use (`inCinemas`, `digitalRelease`, `physicalRelease`)
   - `ENABLE_COMING_SOON_COUNTDOWN`: Show countdown in "Coming Soon" status (`true`/`false`)
   - `CALENDAR_PLACEHOLDER_MODE`: Add placeholders as each episode enters lookahead window (`episode`) or add all known episodes of a season when any enters window (`season`)
+
+---
+
+### Placeholder Video Files
+
+- `DUMMY_FILE_PATH`: Path to your standard dummy video file (used for available/requestable placeholders).
+- `COMING_SOON_DUMMY_FILE_PATH`: (Optional) Path to a special dummy video file used for "Coming Soon" placeholders (future releases).  
+  If not set, the standard dummy file will be used for all placeholders.
 
 ---
 
@@ -278,7 +284,6 @@ You can use the sample `dummy.mp4` provided in this repository, or supply your o
      ```
 4. **Set the path in your `.env`:**  
    - `DUMMY_FILE_PATH=/data/dummy.mp4`
-
 
 ---
 
