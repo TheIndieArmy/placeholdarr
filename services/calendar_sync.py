@@ -327,6 +327,22 @@ def sync_calendar_episodes():
             else:
                 status = "Request"
                 dummy_file = settings.DUMMY_FILE_PATH
+
+            # --- Check for real file presence before creating dummy ---
+            real_file_exists = False
+            if folder_path and os.path.isdir(folder_path):
+                for fname in os.listdir(folder_path):
+                    if fname.lower().endswith(('.mp4', '.mkv', '.avi')):
+                        fpath = os.path.join(folder_path, fname)
+                        # Skip if it's the dummy file (by content, not just name)
+                        if not is_same_file(fpath, dummy_file):
+                            real_file_exists = True
+                            logger.debug(f"Real movie file exists, skipping dummy: {fpath}", extra={'emoji_type': 'debug'})
+                            break
+            if real_file_exists:
+                continue
+            # --- END real file check ---
+
             dummy_path = place_dummy_file(
                 "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER,
                 dummy_file_override=dummy_file,
