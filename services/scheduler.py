@@ -71,7 +71,7 @@ class ActionScheduler:
             logger.error(f"Failed to start scheduler for '{self.action}': {e}", extra={'emoji_type': 'error'})
 
     def poll_and_enqueue(self):
-        logger.debug(f"Polling for subflows - action: {self.action}", extra={'emoji_type': 'search'})
+        logger.verbose(f"Polling for subflows - action: {self.action}", extra={'emoji_type': 'search'})
         session = get_session()
         try:
             with session.begin():
@@ -90,7 +90,7 @@ class ActionScheduler:
                     .first()
                 )
                 if not sf:
-                    logger.debug(f"No pending/failed subflows found for action '{self.action}'", extra={'emoji_type': 'debug'})
+                    logger.verbose(f"No pending/failed subflows found for action '{self.action}'", extra={'emoji_type': 'debug'})
                     return
                     
                 logger.info(f"Found subflow {sf.id} to process (status: {sf.status}, retry: {sf.retry_count})", extra={'emoji_type': 'processing'})

@@ -135,60 +135,62 @@ def trigger_radarr_search(movie_id, movie_title=None):
         logger.error(f"Radarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-def search_in_radarr(session: Session, episode_id: int, model: Type, is_4k: bool = False):
+def search_in_radarr(session: Session, ent_id: int, model: Type, is_4k: bool = False):
     """Search for a movie in Radarr"""
-    # MOVIE CASE
     if model is Movie:
-        m = dbsession.query(Movie).get(ent_id)
+        m = session.query(Movie).get(ent_id)
+        if not m:
+            logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
         config = get_arr_config('movie', is_4k)
-        tmdb_id_int = int(m.tmdb_id)
-        movie_response = requests.get(f"{config['url']}/movie/{m.radarrid}", headers={'X-Api-Key': config['api_key']})
-        movie_response.raise_for_status()
-        movie = movie_response.json()
-        if movies:
-            movie_data = existing[0]
-            logger.info(f"Movie already exists in Radarr: {movie_data['title']}", extra={'emoji_type': 'info'})
-            if not movie_data.get("monitored", False):
-                movie_data["monitored"] = True
-                put_response = requests.put(f"{config['url']}/movie/{movie_data['id']}", json=movie_data, headers={'X-Api-Key': config['api_key']})
-                put_response.raise_for_status()
-                logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'monitored'})
-            now = time.time()
-            if not m.last_search or (now - m.last_search >= 30):
-                m.last_search = now
-                m.commit()
-                trigger_radarr_search(movie_data['id'], movie_data['title'])
-            else:
-                logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-            return True
-        else:
-            logger.error(f"Movie not found in radarr (adding manually): {m.title}", extra={'emoji_type': 'error'})
-            lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
-            lookup.raise_for_status()
-            movie_data = lookup.json()[0]
-            payload = {
-                'title': movie_data['title'],
-                'qualityProfileId': 7,
-                'tmdbId': int(movie_data['tmdbId']),
-                'year': int(movie_data['year']),
-                'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,  # Use .env value
-                'monitored': True,
-                'addOptions': {
-                    'searchForMovie': True,
-                    'addMethod': 'manual',
-                    'monitor': 'movieOnly'
-                }
+        tmdb_id_int = int(getattr(m, 'tmdb_id', getattr(m, 'tmdbid', 0)))
+        radarr_id = getattr(m, 'radarrid', getattr(m, 'radarr_id', None))
+        headers = {'X-Api-Key': config['api_key']}
+        if radarr_id:
+            movie_response = requests.get(f"{config['url']}/movie/{radarr_id}", headers=headers)
+            if movie_response.status_code == 200:
+                movie_data = movie_response.json()
+                logger.info(f"Movie already exists in Radarr: {movie_data['title']}", extra={'emoji_type': 'info'})
+                if not movie_data.get("monitored", False):
+                    movie_data["monitored"] = True
+                    put_response = requests.put(f"{config['url']}/movie/{movie_data['id']}", json=movie_data, headers=headers)
+                    put_response.raise_for_status()
+                    logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'monitored'})
+                now = time.time()
+                if not getattr(m, 'last_search', 0) or (now - getattr(m, 'last_search', 0) >= 30):
+                    m.last_search = now
+                    session.commit()
+                    trigger_radarr_search(movie_data['id'], movie_data['title'])
+                else:
+                    logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
+                return True
+        # If not found by radarr_id, try lookup by tmdb_id
+        lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers=headers)
+        lookup.raise_for_status()
+        movie_data = lookup.json()[0]
+        payload = {
+            'title': movie_data['title'],
+            'qualityProfileId': 7,
+            'tmdbId': int(movie_data['tmdbId']),
+            'year': int(movie_data['year']),
+            'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,
+            'monitored': True,
+            'addOptions': {
+                'searchForMovie': True,
+                'addMethod': 'manual',
+                'monitor': 'movieOnly'
             }
-            response = requests.post(f"{config['url']}/movie", json=payload, headers={'X-Api-Key': config['api_key']})
-            response.raise_for_status()
-            logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
-            now = time.time()
-            if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
-                LAST_RADARR_SEARCH[rating_key] = now
-                trigger_radarr_search(response.json()['id'], movie_data['title'])
-            else:
-                logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-            return True
+        }
+        response = requests.post(f"{config['url']}/movie", json=payload, headers=headers)
+        response.raise_for_status()
+        logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
+        now = time.time()
+        if ent_id not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH.get(ent_id, 0) >= 30):
+            LAST_RADARR_SEARCH[ent_id] = now
+            trigger_radarr_search(response.json()['id'], movie_data['title'])
+        else:
+            logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
+        return True
     else:
         logger.error(f"Unable to search for type not movie", extra={'emoji_type': 'error'})
     return False
@@ -673,7 +675,7 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         return None
 
 def delete_dummy_file(
-    dbsession: Session,
+    session: Session,
     ent_id: int,
     model: Type,
     action: str
@@ -682,7 +684,7 @@ def delete_dummy_file(
     try:
         if model is Movie:
             # For movies, delete the dummy file
-            movie = dbsession.query(Movie).get(ent_id)
+            movie = session.query(Movie).get(ent_id)
             if not movie:
                 logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
                 return False
@@ -693,32 +695,26 @@ def delete_dummy_file(
                 movie.is_deleted = True
                 movie.jellyfin_dummy_id = None
                 movie.dummypath = None
-                dbsession.commit()
+                session.commit()
                 logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
-                
                 return True
             else:
                 logger.debug(f"Dummy file path is None or file not found: {dummy_file_path}", extra={'emoji_type': 'debug'})
                 return False
-            
-
-        
         elif model is Episode:
             # For episodes, delete the dummy file
-            episode = dbsession.query(Episode).get(ent_id)
+            episode = session.query(Episode).get(ent_id)
             if not episode:
                 logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
                 return False
-            
             dummy_file_path = episode.dummypath
-            
             if dummy_file_path and os.path.exists(dummy_file_path):
                 os.remove(dummy_file_path)
                 logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
                 episode.is_deleted = True
                 episode.jellyfin_dummy_id = None
                 episode.dummypath = None
-                dbsession.commit()
+                session.commit()
                 logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
                 parent_dir = os.path.dirname(dummy_file_path)
                 if os.path.exists(parent_dir) and not os.listdir(parent_dir):
@@ -729,7 +725,7 @@ def delete_dummy_file(
                         season.is_deleted = True
                         season.jellyfin_dummy_id = None
                         season.dummypath = None
-                        dbsession.commit()
+                        session.commit()
                         logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
                     parent_dir = os.path.dirname(parent_dir)
                     if os.path.exists(parent_dir) and not os.listdir(parent_dir):   
@@ -740,13 +736,12 @@ def delete_dummy_file(
                             series.is_deleted = True
                             series.jellyfin_dummy_id = None
                             series.dummypath = None
-                            dbsession.commit()
+                            session.commit()
                             logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
                 return True
             else:
                 logger.debug(f"Dummy file path is None or file not found: {dummy_file_path}", extra={'emoji_type': 'debug'})
                 return False
-        
         else:
             logger.error(f'Unsupported model type for delete_dummy_file: {model}', extra={'emoji_type': 'error'})
             return False
