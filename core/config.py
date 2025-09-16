@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     SONARR_4K_URL: str = ""
     SONARR_4K_API_KEY: str = ""
 
+    # Sync Settings (grouped by instance)
+    RADARR_SYNC_ON_STARTUP: bool = os.getenv("RADARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    RADARR_SYNC_CRON: str = os.getenv("RADARR_SYNC_CRON", "")
+    RADARR_4K_SYNC_ON_STARTUP: bool = os.getenv("RADARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    RADARR_4K_SYNC_CRON: str = os.getenv("RADARR_4K_SYNC_CRON", "")
+    SONARR_SYNC_ON_STARTUP: bool = os.getenv("SONARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    SONARR_SYNC_CRON: str = os.getenv("SONARR_SYNC_CRON", "")
+    SONARR_4K_SYNC_ON_STARTUP: bool = os.getenv("SONARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    SONARR_4K_SYNC_CRON: str = os.getenv("SONARR_4K_SYNC_CRON", "")
+
     # Library Paths
     MOVIE_LIBRARY_FOLDER: str
     TV_LIBRARY_FOLDER: str

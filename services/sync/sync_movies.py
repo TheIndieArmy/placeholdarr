@@ -1,90 +1,83 @@
 """
 Movie sync logic for Placeholdarr: syncs all movies from Radarr (standard and 4K) to the local DB.
-This file recreates the original implementation but keeps import-time side effects minimal
-and gracefully handles optional dependencies (requests/apscheduler) so imports won't fail.
+Uses consistent field determination and supports two instances.
 """
 
 import logging
-from typing import List
-
-logger = logging.getLogger("services.sync.sync_movies")
-
-# Optional dependencies
-try:
-    import requests
-except Exception:
-    requests = None
-
-try:
-    from apscheduler.schedulers.background import BackgroundScheduler
-    HAVE_APSCHED = True
-except Exception:
-    BackgroundScheduler = None
-    HAVE_APSCHED = False
-
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
 from services.postgres.db import get_session
 from services.postgres.models import Movie
 from core.config import settings
 from services.utils import is_4k_request
 
+logger = logging.getLogger("services.sync.sync_movies")
 
-def _fetch_radarr_movies(radarr_url: str, api_key: str) -> List[dict]:
-    if not requests:
-        raise RuntimeError("requests library not available")
-    url = f"{radarr_url.rstrip('/')}/api/v3/movie"
+
+def fetch_radarr_movies(radarr_url, api_key):
+    base = radarr_url.rstrip('/')
+    # If user included an API path already (e.g. /api or /api/v3), don't double-up the prefix
+    if '/api/v' in base:
+        url = f"{base}/movie"
+    elif base.endswith('/api') or '/api' in base:
+        url = f"{base}/v3/movie"
+    else:
+        url = f"{base}/api/v3/movie"
     headers = {"X-Api-Key": api_key}
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
-def sync_movies_with_radarr(instance_name: str | None = None) -> None:
+def sync_movies_with_radarr(instance_name=None):
     """Sync movies for a specific Radarr instance ('standard' or '4k').
-    If instance_name is None, sync both configured instances.
-    This function performs database upserts keyed by (tmdbid, is_4k).
+    If instance_name is None, sync both.
     """
+    logger.info(f"Starting movie sync for instance: {instance_name or 'both'}")
     instances = []
-    if instance_name in (None, "standard"):
+    if instance_name is None or instance_name == "standard":
         if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
             instances.append({
                 "name": "standard",
                 "url": settings.RADARR_URL,
                 "api_key": settings.RADARR_API_KEY,
-                "library_folder": getattr(settings, 'MOVIE_LIBRARY_FOLDER', None),
+                "library_folder": getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
             })
-    if instance_name in (None, "4k"):
+    if instance_name is None or instance_name == "4k":
         if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
             instances.append({
                 "name": "4k",
                 "url": settings.RADARR_4K_URL,
                 "api_key": settings.RADARR_4K_API_KEY,
-                "library_folder": getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None),
+                "library_folder": getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None)
             })
-
-    if not instances:
-        logger.debug("No Radarr instances configured for sync")
-        return
-
-    if not requests:
-        logger.error("Cannot sync movies: 'requests' library not available", extra={'emoji_type': 'error'})
-        return
 
     session = get_session()
     try:
         existing_movies = {(m.tmdbid, m.is_4k): m for m in session.query(Movie).all()}
         added = 0
         updated = 0
-        for inst in instances:
+        for instance in instances:
+            logger.info(f"Fetching movies from Radarr instance '{instance.get('name')}' at {instance.get('url')}")
             try:
-                movies = _fetch_radarr_movies(inst['url'], inst['api_key'])
+                movies = fetch_radarr_movies(instance['url'], instance['api_key'])
             except Exception:
-                logger.exception(f"Failed to fetch movies from Radarr instance: {inst.get('name')}")
+                logger.exception(f"Failed to fetch movies from Radarr instance: {instance.get('name')}")
                 continue
 
             for movie in movies:
                 tmdbid = movie.get('tmdbId')
-                file_path = movie.get('path') or ''
-                is_4k = is_4k_request(file_path)
+
+                # Prefer movieFile details when present
+                movie_file = movie.get('movieFile') or {}
+                moviefile_path = movie_file.get('path') or ''
+                moviefile_size = movie_file.get('size') or movie_file.get('sizeInBytes')
+
+                # Radarr configured library path (folder) - present even if no file
+                radarrpath = movie.get('path') or ''
+                # Prefer file path from movieFile when deciding 4k and actual file presence
+                file_to_check = moviefile_path or radarrpath
+                is_4k = is_4k_request(file_to_check)
                 key = (tmdbid, is_4k)
                 db_movie = existing_movies.get(key)
 
@@ -92,21 +85,39 @@ def sync_movies_with_radarr(instance_name: str | None = None) -> None:
                 digital_release = movie.get('digitalRelease') or movie.get('physicalRelease')
                 physical_release = movie.get('physicalRelease')
 
+                has_file = bool(movie.get('hasFile', False) or movie_file)
+                # Radarr release lifecycle status (announced / inCinemas / released)
+                radarr_release_status = movie.get('status') or movie_file.get('status')
+                # Whether Radarr is monitoring this movie
+                radarr_monitored = bool(movie.get('monitored', False))
+
+                # Try to extract a friendly quality label
+                radarr_quality = None
+                q = movie_file.get('quality') or movie.get('quality')
+                if isinstance(q, dict):
+                    radarr_quality = q.get('name') or (q.get('quality') or {}).get('name')
+
                 if db_movie:
                     changed = False
-                    updates = {
+                    mapping = {
                         'title': movie.get('title'),
                         'year': movie.get('year'),
                         'radarrid': movie.get('id'),
-                        'radarrpath': file_path,
+                        'radarrpath': radarrpath,
+                        'moviefile_path': moviefile_path,
+                        'moviefile_size': moviefile_size,
+                        'has_file': has_file,
+                        'radarr_quality': radarr_quality,
+                        'radarr_release_status': radarr_release_status,
+                        'radarr_monitored': radarr_monitored,
                         'is_4k': is_4k,
                         'theater_release_date': theater_release,
                         'digital_release_date': digital_release,
                         'physical_release_date': physical_release,
                     }
-                    for field, val in updates.items():
-                        if getattr(db_movie, field, None) != val:
-                            setattr(db_movie, field, val)
+                    for field, new_val in mapping.items():
+                        if getattr(db_movie, field, None) != new_val:
+                            setattr(db_movie, field, new_val)
                             changed = True
                     if changed:
                         updated += 1
@@ -116,29 +127,33 @@ def sync_movies_with_radarr(instance_name: str | None = None) -> None:
                         title=movie.get('title'),
                         year=movie.get('year'),
                         radarrid=movie.get('id'),
-                        radarrpath=file_path,
+                        radarrpath=radarrpath,
+                        moviefile_path=moviefile_path,
+                        moviefile_size=moviefile_size,
+                        has_file=has_file,
+                        radarr_quality=radarr_quality,
+                        radarr_release_status=radarr_release_status,
+                        radarr_monitored=radarr_monitored,
                         is_4k=is_4k,
                         theater_release_date=theater_release,
                         digital_release_date=digital_release,
                         physical_release_date=physical_release,
-                        status='PENDING',
+                        status='PENDING'
                     )
                     session.add(new_movie)
                     added += 1
         session.commit()
-        logger.info(f"Movies synced: {added} added, {updated} updated")
+        processed = added + updated
+        logger.info(f"Movie sync complete: {added} added, {updated} updated, {processed} total processed")
     finally:
         session.close()
 
 
-def schedule_all_syncs() -> None:
-    """Schedule Radarr movie syncs based on settings. Safe to call at startup.
-
-    Behavior:
-    - If RADARR_SYNC_ON_STARTUP or RADARR_4K_SYNC_ON_STARTUP are set, run the corresponding sync once.
-    - If RADARR_SYNC_CRON / RADARR_4K_SYNC_CRON are set and APScheduler is available, start cron jobs.
+def schedule_all_syncs():
+    """Schedule Radarr syncs for both instances based on ENV settings.
+    Handles startup syncs and cron scheduling.
     """
-    # Run startup syncs
+    # Startup syncs
     try:
         if getattr(settings, 'RADARR_SYNC_ON_STARTUP', False):
             logger.info("Running Radarr (standard) movie sync on startup...")
@@ -153,22 +168,19 @@ def schedule_all_syncs() -> None:
     except Exception:
         logger.exception('Failed running RADARR 4K startup sync')
 
-    # Cron scheduling (use APScheduler if present)
-    def _start_cron_safe(cron_str, target_fn, label):
+    # Cron scheduling – parse simple cron-like strings split by whitespace into minute hour day month day_of_week
+    def _start_cron(cron_str, target, label):
         if not cron_str:
-            return
-        if not HAVE_APSCHED:
-            logger.warning(f"Cron configured for {label} but APScheduler not installed; skipping scheduler")
             return
         try:
             parts = cron_str.replace('"', '').split()
             cron_kwargs = {k: v for k, v in zip(['minute', 'hour', 'day', 'month', 'day_of_week'], parts) if v != '*'}
             sched = BackgroundScheduler()
-            sched.add_job(target_fn, 'cron', **cron_kwargs)
+            sched.add_job(lambda: target(), 'cron', **cron_kwargs)
             sched.start()
-            logger.info(f"Started {label} scheduler with cron: {cron_str}")
+            logger.info(f"{label} scheduler started with cron: {cron_str}")
         except Exception:
             logger.exception(f"Failed to start scheduler for {label}")
 
-    _start_cron_safe(getattr(settings, 'RADARR_SYNC_CRON', None), lambda: sync_movies_with_radarr(instance_name='standard'), 'Radarr (standard)')
-    _start_cron_safe(getattr(settings, 'RADARR_4K_SYNC_CRON', None), lambda: sync_movies_with_radarr(instance_name='4k'), 'Radarr (4K)')
+    _start_cron(getattr(settings, 'RADARR_SYNC_CRON', None), lambda: sync_movies_with_radarr(instance_name='standard'), 'Radarr (standard)')
+    _start_cron(getattr(settings, 'RADARR_4K_SYNC_CRON', None), lambda: sync_movies_with_radarr(instance_name='4k'), 'Radarr (4K)')

@@ -12,8 +12,10 @@ from services.postgres.utils import check_db
 from services.postgres.db import get_engine, init_db, get_session
 from services.postgres.models import Movie
 from services.scheduler import *
+from services.sync.sync_movies import schedule_all_syncs
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def load_env_and_migrate():
     load_dotenv(override=True)
@@ -76,6 +78,14 @@ async def lifespan(app: FastAPI):
             if name.endswith('_scheduler') and hasattr(sched, 'start'):
                 sched.start()
                 logger.info(f"Started scheduler: {name}", extra={'emoji_type': 'gear'})
+
+        # --- Schedule all Radarr syncs (startup and cron) ---
+        schedule_all_syncs()
+
+        # --- Placeholder for future Sonarr sync entrypoint ---
+        # from services.sync import sync_series
+        # sync_series.schedule_all_syncs()
+        yield
     else:
         logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})
 

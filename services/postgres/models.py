@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from services.postgres.db import Base
@@ -11,7 +11,20 @@ class Movie(Base):
     tmdbid = Column(Integer, unique=True, nullable=False)
     is_4k  = Column(Boolean, default=False)
     dummypath = Column(String, nullable=True)
+    # Radarr configured library path (the folder configured in Radarr for the movie)
     radarrpath = Column(String, nullable=True)
+    # Exact path to the actual movie file when Radarr has imported one (movieFile.path)
+    moviefile_path = Column(String, nullable=True)
+    # Size in bytes reported for the movie file (if available)
+    moviefile_size = Column(BigInteger, nullable=True)
+    # boolean indicating Radarr reports a movie file exists for this movie
+    has_file = Column(Boolean, default=False)
+    # human-friendly quality label reported by Radarr (if available)
+    radarr_quality = Column(String, nullable=True)
+    # Radarr release lifecycle status (announced / inCinemas / released)
+    radarr_release_status = Column(String, nullable=True)
+    # Whether Radarr is monitoring this movie for downloads
+    radarr_monitored = Column(Boolean, default=False)
     radarrid = Column(Integer, nullable=True)
     action = Column(String, nullable=True)
     status = Column(String, default='PENDING')
@@ -27,6 +40,9 @@ class Movie(Base):
     placeholder_status = Column(String, nullable=True)
     filepath = Column(String, nullable=True)
     last_search = Column(Date, nullable=True)
+    theater_release_date = Column(Date, nullable=True)
+    digital_release_date = Column(Date, nullable=True)
+    physical_release_date = Column(Date, nullable=True)
     radarr_progress = Column(Integer, nullable=True, default=0)
     radarr_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
@@ -68,7 +84,15 @@ class Series(Base):
     is_4k  = Column(Boolean, default=False)
     dummypath = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
+    # Aggregate flags for files under this series
+    has_files = Column(Boolean, default=False)
+    seriesfile_count = Column(BigInteger, nullable=True)
+    # human-friendly quality label aggregated or representative for the series
+    sonarr_quality = Column(String, nullable=True)
+    sonarr_status = Column(String, nullable=True)
     sonarrid = Column(Integer, nullable=True)
+    # Whether Sonarr is monitoring this series
+    sonarr_monitored = Column(Boolean, default=False)
     status = Column(String, default='PENDING')
     jellyfin_title = Column(String, nullable=True)
     jellyfin_id = Column(String, nullable=True)
@@ -98,7 +122,12 @@ class Season(Base):
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
+    # Aggregate per-season file info
+    has_files = Column(Boolean, default=False)
+    seasonfile_count = Column(BigInteger, nullable=True)
+    sonarr_status = Column(String, nullable=True)
     sonarrid = Column(Integer, nullable=True)
+    sonarr_monitored = Column(Boolean, default=False)
     jellyfin_title = Column(String, nullable=True)
     jellyfin_id = Column(String, nullable=True)
     jellyfin_dummy_id = Column(String, nullable=True)
@@ -129,6 +158,15 @@ class Episode(Base):
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
+    # Exact path to the episode file when Sonarr has it
+    episodefile_path = Column(String, nullable=True)
+    episodefile_size = Column(BigInteger, nullable=True)
+    # boolean indicating Sonarr reports a file exists for this episode
+    has_file = Column(Boolean, default=False)
+    sonarr_quality = Column(String, nullable=True)
+    sonarr_status = Column(String, nullable=True)
+    # Whether Sonarr is monitoring this episode
+    sonarr_monitored = Column(Boolean, default=False)
     sonarrid = Column(Integer, nullable=True)
     action = Column(String, nullable=True)
     status = Column(String, default='PENDING')
@@ -145,6 +183,7 @@ class Episode(Base):
     filepath = Column(String, nullable=True)
     sonarr_progress = Column(Integer, nullable=True, default=0)
     sonarr_status = Column(String, nullable=True)
+    air_date = Column(Date, nullable=True)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='episode')

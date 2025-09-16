@@ -287,24 +287,71 @@ def handle_movieadd(data: dict, is_4k: bool = False):
         year = movie.get('year', '')
         radarr_id = movie.get('id')
 
+        # Extract movieFile / hasFile / quality information when present in the webhook
+        movie_file = movie.get('movieFile') or data.get('movieFile') or {}
+        moviefile_path = movie_file.get('path') or movie.get('folderPath') or movie_path or ''
+        moviefile_size = movie_file.get('size') or movie_file.get('sizeInBytes')
+        has_file = bool(movie.get('hasFile', False) or movie_file)
+        radarr_quality = None
+        q = movie_file.get('quality') or movie.get('quality')
+        if isinstance(q, dict):
+            radarr_quality = q.get('name') or (q.get('quality') or {}).get('name')
+
+        # Release lifecycle and monitored flag
+        radarr_release_status = movie.get('status')
+        radarr_monitored = bool(movie.get('monitored', False))
+
+        # Determine is_4k based on provided paths
+        is_4k = is_4k or is_4k_request(moviefile_path or movie_path or '')
+
         session = get_session()
         repo = MovieRepository(session)
         m = repo.get_by_tmdbid(tmdb_id, is_4k)
         if not m:
             m = repo.add(
-                title=title, year=year,
-                tmdbid=tmdb_id, dummypath="",
-                radarrpath=movie_path, radarrid=radarr_id, status="PENDING", is_4k=is_4k
+                title=title,
+                year=year,
+                tmdbid=tmdb_id,
+                dummypath="",
+                radarrpath=movie_path,
+                radarrid=radarr_id,
+                status="PENDING",
+                is_4k=is_4k,
+                moviefile_path=moviefile_path,
+                moviefile_size=moviefile_size,
+                has_file=has_file,
+                radarr_quality=radarr_quality,
+                radarr_release_status=radarr_release_status,
+                radarr_monitored=radarr_monitored
             )
-            print("Added:", m)
+            logger.info(f"Added: {m}", extra={'emoji_type': 'success'})
         else:
-            repo.is_deleted(m, False)
-            print("Already present")        
+            # Update existing record with any new fields provided by the webhook
+            updated_fields = {
+                'title': title,
+                'year': year,
+                'radarrpath': movie_path,
+                'radarrid': radarr_id,
+                'moviefile_path': moviefile_path,
+                'moviefile_size': moviefile_size,
+                'has_file': has_file,
+                'radarr_quality': radarr_quality,
+                'radarr_release_status': radarr_release_status,
+                'radarr_monitored': radarr_monitored,
+            }
+            for k, v in updated_fields.items():
+                if getattr(m, k, None) != v:
+                    setattr(m, k, v)
+            session.commit()
+            logger.info("Updated existing movie with webhook data", extra={'emoji_type': 'update'})
+
         job_scheduled = handle_movieadd_scheduler.enqueue(m)
         if job_scheduled:
             logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}")
         else:
             logger.warning(f"Failed to enqueue 'handle_movieadd' action for TMDB ID {m.tmdbid}")
+
+        session.close()
 
         return JSONResponse({"status": "success", "message": "MovieAdd scheduled"})
 
