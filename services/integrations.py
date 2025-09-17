@@ -490,7 +490,7 @@ def delete_dummy_file(
             movie.is_deleted = True
             movie.jellyfin_dummy_id = None
             movie.dummypath = None
-            dbsession.commit()
+            session.commit()
             logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
             
             return True
@@ -522,7 +522,7 @@ def delete_dummy_file(
             episode.is_deleted = True
             episode.jellyfin_dummy_id = None
             episode.dummypath = None
-            dbsession.commit()
+            session.commit()
             logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
             
             # Check if we should clean up parent directories and mark season/series as deleted
@@ -532,7 +532,7 @@ def delete_dummy_file(
                     season.is_deleted = True
                     season.jellyfin_dummy_id = None
                     season.dummypath = None
-                    dbsession.commit()
+                    session.commit()
                     logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
                     
                 parent_dir = os.path.dirname(parent_dir) if parent_dir else None
@@ -544,7 +544,7 @@ def delete_dummy_file(
                         series.is_deleted = True
                         series.jellyfin_dummy_id = None
                         series.dummypath = None
-                        dbsession.commit()
+                        session.commit()
                         logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
             return True
         
