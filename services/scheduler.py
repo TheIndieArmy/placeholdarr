@@ -558,14 +558,29 @@ class ActionScheduler:
             if sf.status != "DONE":
                 logger.debug(f"Executing step '{step_name}' for subflow {sf_id} (attempt 1)", extra={'emoji_type': 'step'})
                 
+                # Determine model type for dynamic actions like playback
+                current_model = self.model
+                if current_model is None:
+                    # For dynamic actions, determine model type from SubFlow data
+                    if sf.movie_id is not None:
+                        current_model = Movie
+                    elif sf.episode_id is not None:
+                        current_model = Episode  
+                    elif sf.series_id is not None:
+                        current_model = Series
+                    else:
+                        logger.error(f"SubFlow {sf_id} has no entity ID set", extra={'emoji_type': 'error'})
+                        return
+                    logger.debug(f"Determined model type for SubFlow {sf_id}: {current_model.__name__}", extra={'emoji_type': 'debug'})
+                
                 for attempt in range(self.max_retries):
                     try:
                         arg = context if context is not None else sf.movie_id
                         # Verbose instead of noisy debug for per-call details
-                        logger.verbose(f"Calling {step_name} with arg={arg}, model={self.model}, action={self.action}", extra={'emoji_type': 'debug'})
+                        logger.verbose(f"Calling {step_name} with arg={arg}, model={current_model}, action={self.action}", extra={'emoji_type': 'debug'})
                         
                         flow_func = self._get_flow_function(step_name)
-                        result = flow_func(session, arg, self.model, self.action)
+                        result = flow_func(session, arg, current_model, self.action)
                         success = bool(result)
 
                         if success:
@@ -623,7 +638,10 @@ class ActionScheduler:
                     advance_id = None
                     
                     # Check if all subflows for this entity AND ACTION are complete
-                    if self.model is Movie:
+                    # Use dynamically determined model if available
+                    check_model = current_model if 'current_model' in locals() else self.model
+                    
+                    if check_model is Movie:
                         all_subflows = session.query(SubFlow).filter(
                             SubFlow.movie_id == sf.movie_id,
                             SubFlow.action == self.action
@@ -653,7 +671,7 @@ class ActionScheduler:
                         advance_id = sf.movie_id
                         logger.debug(f"Movie {sf.movie_id} action {self.action}: still_pending = {still_pending.id if still_pending else None}", extra={'emoji_type': 'debug'})
                         
-                    elif self.model is Series:
+                    elif check_model is Series:
                         # for Series flows, look at all SubFlows whose episodes belong to this series
                         episode = session.query(Episode).get(sf.episode_id)
                         if episode:
@@ -686,7 +704,7 @@ class ActionScheduler:
                             still_pending = True  # Don't advance if we can't determine series
                             advance_id = None
                             
-                    elif self.model is Episode:
+                    elif check_model is Episode:
                         # Only check the latest non-cancelled SubFlows for pending work
                         latest_subflows = session.query(SubFlow).filter(
                             SubFlow.episode_id == sf.episode_id,
@@ -705,28 +723,28 @@ class ActionScheduler:
                     
                     else:
                         # Unknown model type - don't advance
-                        logger.warning(f"Unknown model type for SubFlow advancement: {self.model}", extra={'emoji_type': 'warning'})
+                        logger.warning(f"Unknown model type for SubFlow advancement: {check_model}", extra={'emoji_type': 'warning'})
                         still_pending = True  # Prevent advancement
                         advance_id = None
                         
                     if not still_pending and advance_id:
-                        logger.info(f"All subflows complete for {self.model.__name__} {advance_id} action {self.action}, advancing entity", extra={'emoji_type': 'success'})
+                        logger.info(f"All subflows complete for {check_model.__name__} {advance_id} action {self.action}, advancing entity", extra={'emoji_type': 'success'})
                         
                         # Update entity's current_step_name to reflect the completed step
-                        entity = session.query(self.model).get(advance_id)
+                        entity = session.query(check_model).get(advance_id)
                         if entity:
                             # Get the step name that was just completed
                             completed_step_name = step_name  # This is the step that just finished
-                            logger.debug(f"Updating {self.model.__name__} {advance_id} current_step_name from '{entity.current_step_name}' to '{completed_step_name}'", extra={'emoji_type': 'debug'})
+                            logger.debug(f"Updating {check_model.__name__} {advance_id} current_step_name from '{entity.current_step_name}' to '{completed_step_name}'", extra={'emoji_type': 'debug'})
                             entity.current_step_name = completed_step_name
                             session.add(entity)
                             session.commit()
                         
-                        self._advance_entity(advance_id)
+                        self._advance_entity(advance_id, check_model)
                     elif still_pending:
-                        logger.debug(f"Still have pending subflows for {self.model.__name__} action {self.action}, not advancing yet", extra={'emoji_type': 'info'})
+                        logger.debug(f"Still have pending subflows for {check_model.__name__ if check_model else 'unknown'} action {self.action}, not advancing yet", extra={'emoji_type': 'info'})
                     else:
-                        logger.warning(f"Could not determine advance_id for {self.model.__name__}", extra={'emoji_type': 'warning'})
+                        logger.warning(f"Could not determine advance_id for {check_model.__name__ if check_model else 'unknown'}", extra={'emoji_type': 'warning'})
 
             else:
                 sf.status = 'FAILED'
@@ -755,13 +773,19 @@ class ActionScheduler:
         finally:
             session.close()
 
-    def _advance_entity(self, ent_id: int):
-        logger.info(f"Advancing {self.model.__name__} {ent_id} to next flow stage", extra={'emoji_type': 'processing'})
+    def _advance_entity(self, ent_id: int, model_type=None):
+        logger.info(f"Advancing entity {ent_id} to next flow stage", extra={'emoji_type': 'processing'})
         session = get_session()
         try:
-            ent = session.query(self.model).get(ent_id)
+            # Use provided model type or fall back to scheduler's model
+            entity_model = model_type or self.model
+            if not entity_model:
+                logger.error(f"No model type available for advancing entity {ent_id}", extra={'emoji_type': 'error'})
+                return
+            
+            ent = session.query(entity_model).get(ent_id)
             if not ent:
-                logger.error(f"{self.model.__name__} {ent_id} not found", extra={'emoji_type': 'error'})
+                logger.error(f"{entity_model.__name__} {ent_id} not found", extra={'emoji_type': 'error'})
                 return
                 
             logger.debug(f"Current entity status: {ent.status}, current_step_name: {getattr(ent, 'current_step_name', 'None')}", extra={'emoji_type': 'debug'})
@@ -770,27 +794,34 @@ class ActionScheduler:
             
             if entry:
                 new_step_name = flow_manager.get_entry_id(self.action, entry)
-                logger.info(f"Advancing {self.model.__name__} {ent_id} from '{ent.current_step_name}' to '{new_step_name}'", extra={'emoji_type': 'step'})
+                logger.info(f"Advancing {entity_model.__name__} {ent_id} from '{ent.current_step_name}' to '{new_step_name}'", extra={'emoji_type': 'step'})
                 
                 ent.current_step_name = new_step_name
                 ent.status = 'QUEUED'                    
                 session.add(ent)
                 session.commit()
                 
+                # Temporarily set the model for subflow creation
+                old_model = self.model
+                self.model = entity_model
+                
                 logger.debug(f"Creating subflows for next entry: {type(entry)}", extra={'emoji_type': 'debug'})
                 # now create SubFlows for the next entry
                 self._create_subflows(ent_id, entry)
-                logger.info(f"Successfully advanced {self.model.__name__} {ent_id} to next stage", extra={'emoji_type': 'success'})
+                logger.info(f"Successfully advanced {entity_model.__name__} {ent_id} to next stage", extra={'emoji_type': 'success'})
+                
+                # Restore original model
+                self.model = old_model
                 
             else:
-                logger.info(f"No more entries for {self.model.__name__} {ent_id} - marking as DONE", extra={'emoji_type': 'success'})
+                logger.info(f"No more entries for {entity_model.__name__} {ent_id} - marking as DONE", extra={'emoji_type': 'success'})
                 ent.status = 'DONE'
                 session.add(ent)
                 session.commit()
-                logger.info(f"{self.model.__name__} {ent_id} processing complete", extra={'emoji_type': 'success'})
+                logger.info(f"{entity_model.__name__} {ent_id} processing complete", extra={'emoji_type': 'success'})
                 
         except Exception as e:
-            logger.error(f"Error advancing {self.model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Error advancing entity {ent_id}: {e}", extra={'emoji_type': 'error'})
             session.rollback()
         finally:
             session.close()
@@ -867,6 +898,9 @@ def get_model_for_action(action: str):
         return Series  
     elif 'episode' in action.lower():
         return Episode
+    elif action.lower() == 'playback':
+        # For playback actions, model type is determined dynamically when objects are enqueued
+        return None
     else:
         logger.warning(f"Unknown model type for action '{action}', defaulting to Movie", extra={'emoji_type': 'warning'})
         return Movie
@@ -883,10 +917,15 @@ for action in actions:
         
         # Set the model type based on action name
         scheduler.model = get_model_for_action(action)
-        logger.debug(f"Set model type for {action}_scheduler: {scheduler.model.__name__}", extra={'emoji_type': 'debug'})
+        if scheduler.model:
+            logger.debug(f"Set model type for {action}_scheduler: {scheduler.model.__name__}", extra={'emoji_type': 'debug'})
+            log_message = f"Successfully created scheduler: {action}_scheduler with model {scheduler.model.__name__}"
+        else:
+            logger.debug(f"Set dynamic model type for {action}_scheduler (determined at runtime)", extra={'emoji_type': 'debug'})
+            log_message = f"Successfully created scheduler: {action}_scheduler with dynamic model type"
         
         globals()[f"{action}_scheduler"] = scheduler
-        logger.info(f"Successfully created scheduler: {action}_scheduler with model {scheduler.model.__name__}", extra={'emoji_type': 'success'})
+        logger.info(log_message, extra={'emoji_type': 'success'})
     except Exception as e:
         logger.error(f"Failed to create scheduler for action '{action}': {e}", extra={'emoji_type': 'error'})
 
