@@ -135,132 +135,6 @@ def trigger_radarr_search(movie_id, movie_title=None):
         logger.error(f"Radarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-def search_in_radarr(session: Session, ent_id: int, model: Type, is_4k: bool = False):
-    """Search for a movie in Radarr"""
-    if model is Movie:
-        m = session.query(Movie).get(ent_id)
-        if not m:
-            logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
-            return False
-        config = get_arr_config('movie', is_4k)
-        tmdb_id_int = int(getattr(m, 'tmdb_id', getattr(m, 'tmdbid', 0)))
-        radarr_id = getattr(m, 'radarrid', getattr(m, 'radarr_id', None))
-        headers = {'X-Api-Key': config['api_key']}
-        if radarr_id:
-            movie_response = requests.get(f"{config['url']}/movie/{radarr_id}", headers=headers)
-            if movie_response.status_code == 200:
-                movie_data = movie_response.json()
-                logger.info(f"Movie already exists in Radarr: {movie_data['title']}", extra={'emoji_type': 'info'})
-                if not movie_data.get("monitored", False):
-                    movie_data["monitored"] = True
-                    put_response = requests.put(f"{config['url']}/movie/{movie_data['id']}", json=movie_data, headers=headers)
-                    put_response.raise_for_status()
-                    logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'monitored'})
-                now = time.time()
-                if not getattr(m, 'last_search', 0) or (now - getattr(m, 'last_search', 0) >= 30):
-                    m.last_search = now
-                    session.commit()
-                    trigger_radarr_search(movie_data['id'], movie_data['title'])
-                else:
-                    logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-                return True
-        # If not found by radarr_id, try lookup by tmdb_id
-        lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers=headers)
-        lookup.raise_for_status()
-        movie_data = lookup.json()[0]
-        payload = {
-            'title': movie_data['title'],
-            'qualityProfileId': 7,
-            'tmdbId': int(movie_data['tmdbId']),
-            'year': int(movie_data['year']),
-            'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,
-            'monitored': True,
-            'addOptions': {
-                'searchForMovie': True,
-                'addMethod': 'manual',
-                'monitor': 'movieOnly'
-            }
-        }
-        response = requests.post(f"{config['url']}/movie", json=payload, headers=headers)
-        response.raise_for_status()
-        logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
-        now = time.time()
-        if ent_id not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH.get(ent_id, 0) >= 30):
-            LAST_RADARR_SEARCH[ent_id] = now
-            trigger_radarr_search(response.json()['id'], movie_data['title'])
-        else:
-            logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-        return True
-    else:
-        logger.error(f"Unable to search for type not movie", extra={'emoji_type': 'error'})
-    return False
-
-# Sonarr integration functions would follow a similar pattern.
-def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, is_4k=False):
-    """Search for a series in Sonarr but don't automatically mark as monitored"""
-    try:
-        config = get_arr_config('tv', is_4k)
-        # First check if series exists
-        existing_response = requests.get(
-            f"{config['url']}/series", 
-            params={'tvdbId': tvdb_id}, 
-            headers={'X-Api-Key': config['api_key']}
-        )
-        existing_response.raise_for_status()
-        
-        if existing_response.status_code == 200 and existing_response.json():
-            series = existing_response.json()[0]
-            logger.info(f"Series already exists in Sonarr: {series['title']}", extra={'emoji_type': 'info'})
-            
-            return series['id']
-                
-            # Only trigger series-wide search if not in episode mode
-            trigger_sonarr_search(series['id'], series_title=series['title'], is_4k=is_4k)
-            return series['id']
-        
-        # If series doesn't exist, look it up and add it
-        lookup_response = requests.get(
-            f"{config['url']}/series/lookup", 
-            params={'term': f"tvdb:{tvdb_id}"},
-            headers={'X-Api-Key': config['api_key']}
-        )
-        lookup_response.raise_for_status()
-        series_data = lookup_response.json()[0]
-        
-        payload = {
-            'title': series_data['title'],
-            'qualityProfileId': 3,
-            'titleSlug': series_data['titleSlug'],
-            'tvdbId': series_data['tvdbId'],
-            'year': series_data['year'],
-            'rootFolderPath': settings.TV_LIBRARY_FOLDER,  # Use .env value
-            'monitored': True,
-            'addOptions': {'searchForMissingEpisodes': True},
-            'seasons': []
-        }
-        
-        # Add all seasons as monitored
-        for season in series_data.get('seasons', []):
-            if season.get('seasonNumber', 0) > 0:  # Skip season 0
-                payload['seasons'].append({
-                    'seasonNumber': season['seasonNumber'],
-                    'monitored': True
-                })
-        
-        add_response = requests.post(
-            f"{config['url']}/series",
-            json=payload,
-            headers={'X-Api-Key': config['api_key']}
-        )
-        add_response.raise_for_status()
-        added_series = add_response.json()
-        logger.info(f"Added series: {series_data['title']}", extra={'emoji_type': 'success'})
-        
-        return added_series['id']
-        
-    except Exception as e:
-        logger.error(f"Sonarr operation failed: {e}", extra={'emoji_type': 'error'})
-        return None
 
 def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, series_title="Unknown Series", is_4k=False):
     """Trigger a search in Sonarr for episodes"""
@@ -589,91 +463,6 @@ def get_radarr_queue(is_4k=False):
         logger.error(f"Error fetching Radarr queue: {e}", extra={'emoji_type': 'error'})
         return []
 
-def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, season_number=None, episode_number=None, is_4k=False, file_path=None):
-    """
-    Find a TV series in Sonarr using multiple fallback methods:
-    1. Path-based ID matching (most reliable)
-    2. TVDB ID matching
-    3. Title matching
-    Returns the series ID if found, None otherwise
-    """
-    try:
-        # Determine which Sonarr instance to use
-        sonarr_url = settings.SONARR_URL_4K if is_4k else settings.SONARR_URL
-        sonarr_api_key = settings.SONARR_API_KEY_4K if is_4k else settings.SONARR_API_KEY
-        headers = {"X-Api-Key": sonarr_api_key}
-        
-        # Get all series from Sonarr for efficient matching
-        series_url = f"{sonarr_url}/series"
-        series_response = requests.get(series_url, headers=headers)
-        
-        if series_response.status_code != 200:
-            logger.error(f"Failed to get series from Sonarr: {series_response.text}", extra={'emoji_type': 'error'})
-            return None
-            
-        all_series = series_response.json()
-        
-        # METHOD 1: Try to match by filepath ID (most reliable)
-        if file_path:
-            # Extract ID using regex pattern matching
-            imdb_match = re.search(r'{imdb-([^}]+)}', file_path)
-            tvdb_match = re.search(r'{tvdb-(\d+)}', file_path)
-            tmdb_match = re.search(r'{tmdb-(\d+)}', file_path)
-            
-            if imdb_match:
-                path_id = imdb_match.group(1)
-                for series in all_series:
-                    if series.get('imdbId') == path_id:
-                        logger.info(f"Found series in Sonarr by path IMDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                        return series['id']
-            
-            if tvdb_match:
-                path_id = tvdb_match.group(1)
-                for series in all_series:
-                    if str(series.get('tvdbId')) == str(path_id):
-                        logger.info(f"Found series in Sonarr by path TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                        return series['id']
-            
-            if tmdb_match:
-                path_id = tmdb_match.group(1)
-                for series in all_series:
-                    if str(series.get('tmdbId')) == str(path_id):
-                        logger.info(f"Found series in Sonarr by path TMDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                        return series['id']
-                        
-            # Also try to match by series folder name in path
-            path_parts = file_path.split('/')
-            for idx, part in enumerate(path_parts):
-                if idx > 0 and idx < len(path_parts) - 1 and 'Season' in path_parts[idx+1]:
-                    series_folder = part
-                    for series in all_series:
-                        if series_folder in series.get('path', ''):
-                            logger.info(f"Found series in Sonarr by folder path match: {series['title']}", extra={'emoji_type': 'info'})
-                            return series['id']
-        
-        # METHOD 2: Try TVDB ID matching (next most reliable)
-        if tvdb_id:
-            for series in all_series:
-                if str(series.get('tvdbId')) == str(tvdb_id):
-                    logger.info(f"Found series in Sonarr by TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                    return series['id']
-        
-        # METHOD 3: Try title matching (least reliable but good fallback)
-        if title:
-            # Try exact match first
-            for series in all_series:
-                if series.get('title', '').lower() == title.lower():
-                    logger.info(f"Found series in Sonarr by title: {series['title']}", extra={'emoji_type': 'info'})
-                    return series['id']
-        
-        # If we get here, series wasn't found
-        logger.warning(f"Series not found in Sonarr: {'TVDB:'+str(tvdb_id) if tvdb_id else title}", extra={'emoji_type': 'warning'})
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error finding series in Sonarr: {e}", extra={'emoji_type': 'error'})
-        return None
-
 def delete_dummy_file(
     session: Session,
     ent_id: int,
@@ -692,15 +481,22 @@ def delete_dummy_file(
             if dummy_file_path and os.path.exists(dummy_file_path):
                 os.remove(dummy_file_path)
                 logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
-                movie.is_deleted = True
-                movie.jellyfin_dummy_id = None
-                movie.dummypath = None
-                session.commit()
-                logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
-                return True
+            elif dummy_file_path:
+                logger.info(f"Dummy file already removed (likely by *arr): {dummy_file_path}", extra={'emoji_type': 'info'})
             else:
-                logger.debug(f"Dummy file path is None or file not found: {dummy_file_path}", extra={'emoji_type': 'debug'})
-                return False
+                logger.debug(f"No dummy file path set for movie: {movie.title}", extra={'emoji_type': 'debug'})
+            
+            # Always mark movie as deleted and clear dummy references, regardless of file existence
+            movie.is_deleted = True
+            movie.jellyfin_dummy_id = None
+            movie.placeholder_exists = False  # Keep dummypath for scan purposes
+            session.commit()
+            logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
+            
+            return True
+            
+
+        
         elif model is Episode:
             # For episodes, delete the dummy file
             episode = session.query(Episode).get(ent_id)
@@ -711,37 +507,47 @@ def delete_dummy_file(
             if dummy_file_path and os.path.exists(dummy_file_path):
                 os.remove(dummy_file_path)
                 logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
-                episode.is_deleted = True
-                episode.jellyfin_dummy_id = None
-                episode.dummypath = None
-                session.commit()
-                logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
                 parent_dir = os.path.dirname(dummy_file_path)
                 if os.path.exists(parent_dir) and not os.listdir(parent_dir):
                     os.rmdir(parent_dir)
                     logger.info(f"Removed empty parent directory: {parent_dir}", extra={'emoji_type': 'delete'})
-                    season = episode.season
-                    if season:
-                        season.is_deleted = True
-                        season.jellyfin_dummy_id = None
-                        season.dummypath = None
-                        session.commit()
-                        logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
-                    parent_dir = os.path.dirname(parent_dir)
-                    if os.path.exists(parent_dir) and not os.listdir(parent_dir):   
-                        os.rmdir(parent_dir)
-                        logger.debug(f"Parent directory marked as deleted: {parent_dir}", extra={'emoji_type': 'debug'})
-                        series = season.series
-                        if series:
-                            series.is_deleted = True
-                            series.jellyfin_dummy_id = None
-                            series.dummypath = None
-                            session.commit()
-                            logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
-                return True
+            elif dummy_file_path:
+                logger.info(f"Dummy file already removed (likely by *arr): {dummy_file_path}", extra={'emoji_type': 'info'})
+                parent_dir = os.path.dirname(dummy_file_path)
             else:
-                logger.debug(f"Dummy file path is None or file not found: {dummy_file_path}", extra={'emoji_type': 'debug'})
-                return False
+                logger.debug(f"No dummy file path set for episode: {episode.title}", extra={'emoji_type': 'debug'})
+                parent_dir = None
+            
+            # Always mark episode as deleted and clear dummy references
+            episode.is_deleted = True
+            episode.jellyfin_dummy_id = None
+            episode.placeholder_exists = False  # Keep dummypath for scan purposes
+            session.commit()
+            logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
+            
+            # Check if we should clean up parent directories and mark season/series as deleted
+            if parent_dir and dummy_file_path:
+                season = episode.season
+                if season:
+                    season.is_deleted = True
+                    season.jellyfin_dummy_id = None
+                    season.placeholder_exists = False  # Keep dummypath for scan purposes
+                    session.commit()
+                    logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
+                    
+                parent_dir = os.path.dirname(parent_dir) if parent_dir else None
+                if parent_dir and os.path.exists(parent_dir) and not os.listdir(parent_dir):   
+                    os.rmdir(parent_dir)
+                    logger.debug(f"Parent directory marked as deleted: {parent_dir}", extra={'emoji_type': 'debug'})
+                    series = season.series if season else None
+                    if series:
+                        series.is_deleted = True
+                        series.jellyfin_dummy_id = None
+                        series.placeholder_exists = False  # Keep dummypath for scan purposes
+                        session.commit()
+                        logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
+            return True
+        
         else:
             logger.error(f'Unsupported model type for delete_dummy_file: {model}', extra={'emoji_type': 'error'})
             return False

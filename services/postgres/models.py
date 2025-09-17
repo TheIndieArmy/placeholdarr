@@ -38,6 +38,8 @@ class Movie(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
+    # Boolean to track if placeholder file physically exists
+    placeholder_exists = Column(Boolean, default=False)
     filepath = Column(String, nullable=True)
     last_search = Column(Date, nullable=True)
     theater_release_date = Column(Date, nullable=True)
@@ -103,6 +105,8 @@ class Series(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
+    # Boolean to track if placeholder file physically exists
+    placeholder_exists = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='series')
@@ -137,6 +141,8 @@ class Season(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
+    # Boolean to track if placeholder file physically exists
+    placeholder_exists = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='season')
@@ -180,6 +186,8 @@ class Episode(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
+    # Boolean to track if placeholder file physically exists
+    placeholder_exists = Column(Boolean, default=False)
     filepath = Column(String, nullable=True)
     sonarr_progress = Column(Integer, nullable=True, default=0)
     sonarr_status = Column(String, nullable=True)

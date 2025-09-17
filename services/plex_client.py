@@ -213,11 +213,13 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
     Returns:
         True if any refresh occurred, False otherwise.
     """
-    # 1) Query all QUEUED/PENDING subflows whose current step is this function
+    logger.info("Starting bulk refresh for 'refresh_plex_dummy' subflows", extra={'emoji_type': 'processing'})
+    
+    # 1) Query all QUEUED subflows whose current step is this function
     pending: list[SubFlow] = (
         dbsession.query(SubFlow)
         .filter(
-            SubFlow.status.in_(['QUEUED', 'PENDING'])
+            SubFlow.status == 'QUEUED'
         )
         .all()
     )
@@ -228,8 +230,11 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
         if sf.step_index < len(steps) and steps[sf.step_index] == 'refresh_plex_dummy':
             matching.append(sf)
 
+    logger.info(f"Found {len(matching)} subflows matching 'refresh_plex_dummy' step", extra={'emoji_type': 'info'})
+
     if not matching:
-        return False
+        logger.debug("No matching subflows found for dummy refresh", extra={'emoji_type': 'debug'})
+        return True
 
     # 2) Collect unique paths for all matching subflows
     paths = set()
@@ -238,33 +243,71 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
             obj = dbsession.query(Episode).get(sf.episode_id)
         else:
             obj = dbsession.query(Movie).get(sf.movie_id)
+        if obj and obj.dummypath:
+            paths.add(obj.dummypath)
 
-        dpath = getattr(obj, 'dummypath', None) if obj else None
-
-        if obj and dpath:
-            paths.add(dpath)
+    logger.info(f"Collected {len(paths)} unique dummy paths to refresh", extra={'emoji_type': 'dummy'})
 
     if not paths:
-        return False
+        # Check if this is a delete action - if so, no files is expected and OK
+        sf_action = matching[0].action.lower()
+        if 'delete' in sf_action:
+            logger.info("No dummy paths found for delete action - this is expected if files were already deleted", extra={'emoji_type': 'info'})
+            # Return success for delete actions with no paths - let scheduler handle advancement
+            logger.info(f"Successfully processed {len(matching)} delete action subflows (no dummy paths to refresh)", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning("No dummy paths found to refresh", extra={'emoji_type': 'warning'})
+            return False
 
-    # 3) Determine update type from any parent entity
-    parent = dbsession.query(Movie).get(matching[0].movie_id)
-    action = (parent.action or '').lower()
-    if any(k in action for k in ('add')):
+    # 3) Determine update type from SubFlow action (not parent entity action)
+    sf_action = matching[0].action.lower()
+    if any(k in sf_action for k in ('add',)):
         update_type = 'Created'
-    elif any(k in action for k in ('delete', 'import')):
+    elif any(k in sf_action for k in ('delete',)):
         update_type = 'Deleted'
+    elif 'import' in sf_action:
+        update_type = 'Created'  # Import events should create placeholders
     else:
         update_type = 'Updated'
+
+    logger.info(f"Determined update type as '{update_type}' based on SubFlow action '{matching[0].action}'", extra={'emoji_type': 'update'})
 
     # 4) Bulk refresh call
     refresh_plex_item(list(paths), update_type)
 
-    # NOTE: Do NOT mark all matching SubFlows DONE here. The scheduler expects the
-    # current subflow (the one that invoked this function) to be advanced by its
-    # normal success path. Leaving other subflows untouched allows them to be
-    # processed individually and ensures verify/update steps run for each.
-
+    # 5) Manually advance all processed SubFlows to next step (for bulk processing efficiency)
+    advanced_count = 0
+    for sf in matching:
+        # Get the steps for this SubFlow
+        steps = sf.steps.split(',') if sf.steps else []
+        
+        # Check if there are more steps after current one
+        if sf.step_index + 1 < len(steps):
+            # Advance to next step
+            sf.step_index += 1
+            next_step = steps[sf.step_index]
+            
+            # Keep as QUEUED so scheduler can pick up the next step
+            sf.status = 'QUEUED'
+            dbsession.add(sf)
+            advanced_count += 1
+            
+            logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
+        else:
+            # This was the last step, mark as DONE
+            sf.status = 'DONE'
+            dbsession.add(sf)
+            logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
+    
+    # Commit all the SubFlow updates
+    dbsession.flush()
+    
+    logger.info(f"Bulk processed {len(matching)} subflows: {advanced_count} advanced to next step", extra={'emoji_type': 'success'})
+    
+    # Return success - let the scheduler handle SubFlow advancement
+    # DO NOT mark SubFlows as DONE here - that's the scheduler's job
+    logger.info(f"Successfully refreshed {len(matching)} subflows for 'refresh_plex_dummy' step", extra={'emoji_type': 'success'})
     return True
 
 
@@ -279,11 +322,13 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
     Returns:
         True if any refresh occurred, False otherwise.
     """
-    # 1) Query all QUEUED/PENDING subflows whose current step is this function
+    logger.info("Starting bulk refresh for 'refresh_plex_arr_path' subflows", extra={'emoji_type': 'processing'})
+    
+    # 1) Query all QUEUED subflows whose current step is this function
     pending: list[SubFlow] = (
         dbsession.query(SubFlow)
         .filter(
-            SubFlow.status.in_(['QUEUED', 'PENDING'])
+            SubFlow.status == 'QUEUED'
         )
         .all()
     )
@@ -294,8 +339,11 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
         if sf.step_index < len(steps) and steps[sf.step_index] == 'refresh_plex_arr_path':
             matching.append(sf)
 
+    logger.info(f"Found {len(matching)} subflows matching 'refresh_plex_arr_path' step", extra={'emoji_type': 'info'})
+
     if not matching:
-        return False
+        logger.debug("No matching subflows found for arr path refresh", extra={'emoji_type': 'debug'})
+        return True
 
     # 2) Collect unique paths for all matching subflows
     paths = set()
@@ -307,25 +355,66 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
         if obj and obj.filepath:
             paths.add(obj.filepath)
 
-    if not paths:
-        return False
+    logger.info(f"Collected {len(paths)} unique file paths to refresh", extra={'emoji_type': 'file'})
 
-    # 3) Determine update type from any parent entity
-    parent = dbsession.query(Movie).get(matching[0].movie_id)
-    action = (parent.action or '').lower()
-    if any(k in action for k in ('add', 'import')):
+    if not paths:
+        # Check if this is a delete action - if so, no files is expected and OK
+        sf_action = matching[0].action.lower()
+        if 'delete' in sf_action:
+            logger.info("No file paths found for delete action - this is expected if files were already deleted", extra={'emoji_type': 'info'})
+            # Return success for delete actions with no paths - let scheduler handle advancement
+            logger.info(f"Successfully processed {len(matching)} delete action subflows (no file paths to refresh)", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning("No file paths found to refresh", extra={'emoji_type': 'warning'})
+            return False
+
+    # 3) Determine update type from SubFlow action (not parent entity action)
+    sf_action = matching[0].action.lower()
+    if any(k in sf_action for k in ('add', 'import')):
         update_type = 'Created'
-    elif any(k in action for k in ('delete')):
+    elif any(k in sf_action for k in ('delete',)):
         update_type = 'Deleted'
     else:
         update_type = 'Updated'
 
+    logger.info(f"Determined update type as '{update_type}' based on SubFlow action '{matching[0].action}'", extra={'emoji_type': 'update'})
+
     # 4) Bulk refresh call
     refresh_plex_item(list(paths), update_type)
 
-    # NOTE: Do NOT mark subflows DONE here. Allow scheduler to advance the invoking
-    # subflow and let other subflows be processed individually so verification
-    # and title-update steps run correctly for each entity.
+    # 5) Manually advance all processed SubFlows to next step (for bulk processing efficiency)
+    advanced_count = 0
+    for sf in matching:
+        # Get the steps for this SubFlow
+        steps = sf.steps.split(',') if sf.steps else []
+        
+        # Check if there are more steps after current one
+        if sf.step_index + 1 < len(steps):
+            # Advance to next step
+            sf.step_index += 1
+            next_step = steps[sf.step_index]
+            
+            # Keep as QUEUED so scheduler can pick up the next step
+            sf.status = 'QUEUED'
+            dbsession.add(sf)
+            advanced_count += 1
+            
+            logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
+        else:
+            # This was the last step, mark as DONE
+            sf.status = 'DONE'
+            dbsession.add(sf)
+            logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
+    
+    # Commit all the SubFlow updates
+    dbsession.flush()
+    
+    logger.info(f"Bulk processed {len(matching)} subflows: {advanced_count} advanced to next step", extra={'emoji_type': 'success'})
+
+    # Return success - let the scheduler handle SubFlow advancement
+    # DO NOT mark SubFlows as DONE here - that's the scheduler's job
+    logger.info(f"Successfully refreshed {len(matching)} subflows for arr path refresh", extra={'emoji_type': 'success'})
 
     return True
 
@@ -784,253 +873,177 @@ def update_plex_title_status(
     """
     Update title & summary in Plex for a Movie or Episode hierarchy.
 
-    Simplified lookup: for placeholder updates we scan the configured Plex
-    section's items (section.all()) and match ratingKey against the
-    stored plex_dummy_id (or plex_id when not a placeholder). This mirrors
-    the simplest successful method used by the standalone test script.
+    Movie: update its own item using placeholder status.
+    Episode: update Series, Season, and Episode items if needed.
+    Returns True if any update succeeded.
     """
     if not plex:
         logger.error("Plex server not available", extra={'emoji_type': 'error'})
         return False
-
+        
     updated_any = False
 
     try:
-        # MOVIE
+        # prepare update DTOs based on current status fields
         if model is Movie:
             movie = dbsession.query(Movie).get(ent_id)
             if not movie:
                 return False
-
-            # For placeholder updates we require the dummy id; otherwise use plex_id
-            if movie.placeholder_status:
-                target_id = getattr(movie, 'plex_dummy_id', None)
-                if not target_id:
-                    logger.warning(f"⚠️ Movie {movie.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
-                    return False
-            else:
-                target_id = getattr(movie, 'plex_id', None)
-                if not target_id:
-                    logger.warning(f"⚠️ Movie {movie.id} has no plex_id to update", extra={'emoji_type': 'warning'})
-                    return False
-
-            # Scan the configured movie section for the matching ratingKey
-            try:
-                movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
-            except Exception as ex:
-                logger.error(f"❌ Cannot access movie section {settings.PLEX_MOVIE_SECTION_ID}: {ex}", extra={'emoji_type': 'error'})
-                return False
-
+                
+            # If movie is marked as deleted, skip updating title status (return success to avoid endless retries)
+            if movie.is_deleted:
+                logger.info(f"Movie {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
+                return True
+                
+            if not movie.plex_id:
+                # If movie has no plex_id, it may have been deleted from Plex or not yet scanned
+                # Return True to avoid endless retries (especially for partially deleted movies)
+                logger.warning(f"Movie {ent_id} missing plex_id, skipping title status update", extra={'emoji_type': 'warning'})
+                return True
+                
+            # Find the movie in Plex
             movie_obj = None
-            try:
-                for m in movie_section.all():
-                    try:
-                        rk = getattr(m, 'ratingKey', None)
-                        if rk is None:
-                            continue
-                        if str(rk) == str(target_id):
-                            movie_obj = m
-                            break
-                    except Exception:
-                        continue
-            except Exception as ex:
-                logger.error(f"❌ Error scanning movie section: {ex}", extra={'emoji_type': 'error'})
-                return False
-
+            for section in plex.library.sections():
+                try:
+                    movie_obj = section.getByRatingKey(movie.plex_id)
+                    break
+                except:
+                    continue
+                    
             if not movie_obj:
-                logger.error(f"❌ Movie with ID {target_id} not found by scanning movie section", extra={"emoji_type": "error"})
+                logger.error(f"❌ Movie with ID {movie.plex_id} not found in Plex", extra={"emoji_type": "error"})
                 return False
-
+                
+            # Update summary with status
             current_summary = movie_obj.summary if hasattr(movie_obj, 'summary') else ""
             new_summary = _prepend_status_to_summary(current_summary, movie.placeholder_status)
-
+            
             def do_update():
                 movie_obj.editSummary(new_summary)
                 movie_obj.reload()
                 return True
-
+                
             success = retry_call(
                 func=do_update,
-                on_error=lambda ex: logger.error(f"❌ Failed to update movie {target_id}: {ex}"),
+                on_error=lambda ex: logger.error(f"❌ Failed to update movie {movie.plex_id}: {ex}"),
                 retry_interval=retry_interval,
                 retry_timeout=retry_timeout,
                 success_condition=lambda res: res is True
             )
-
+            
             if success:
                 updated_any = True
-
-            return updated_any
-
-        # EPISODE (and parent series/season) case
-        ep = dbsession.query(Episode).get(ent_id)
-        if not ep:
-            return False
-
-        seas = dbsession.query(Season).get(ep.season_id)
-        series = dbsession.query(Series).get(seas.series_id) if seas else None
-
-        try:
-            tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
-        except Exception as ex:
-            logger.error(f"❌ Cannot access TV section {settings.PLEX_TV_SECTION_ID}: {ex}", extra={'emoji_type': 'error'})
-            return False
-
-        # Update Series (scan by ratingKey when placeholder)
-        if series and series.placeholder_status:
-            series_target = getattr(series, 'plex_dummy_id', None)
-            if not series_target:
-                logger.warning(f"⚠️ Series {series.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
-            else:
+                
+        else:  # Episode case
+            ep = dbsession.query(Episode).get(ent_id)
+            if not ep:
+                return False
+                
+            # If episode is marked as deleted, skip updating title status (return success to avoid endless retries)
+            if ep.is_deleted:
+                logger.info(f"Episode {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
+                return True
+                
+            if not ep.plex_id:
+                # If episode has no plex_id, it may have been deleted from Plex or not yet scanned
+                # Return True to avoid endless retries (especially for partially deleted episodes)
+                logger.warning(f"Episode {ent_id} missing plex_id, skipping title status update", extra={'emoji_type': 'warning'})
+                return True
+                
+            seas = dbsession.query(Season).get(ep.season_id)
+            series = dbsession.query(Series).get(seas.series_id)
+            
+            # Update Series
+            if series and series.plex_id:
                 series_obj = None
-                try:
-                    for s in tv_section.all():
-                        try:
-                            if str(getattr(s, 'ratingKey', None)) == str(series_target):
-                                series_obj = s
-                                break
-                        except Exception:
-                            continue
-                except Exception as ex:
-                    logger.error(f"❌ Error scanning TV section for series: {ex}", extra={'emoji_type': 'error'})
-                    series_obj = None
-
+                for section in plex.library.sections():
+                    try:
+                        series_obj = section.getByRatingKey(series.plex_id)
+                        break
+                    except:
+                        continue
+                        
                 if series_obj:
                     current_summary = series_obj.summary if hasattr(series_obj, 'summary') else ""
                     new_summary = _prepend_status_to_summary(current_summary, series.placeholder_status)
-
+                    
                     def update_series():
                         series_obj.editSummary(new_summary)
                         series_obj.reload()
                         return True
-
+                        
                     success = retry_call(
                         func=update_series,
-                        on_error=lambda ex: logger.error(f"❌ Failed to update series {series_target}: {ex}"),
+                        on_error=lambda ex: logger.error(f"❌ Failed to update series {series.plex_id}: {ex}"),
                         retry_interval=retry_interval,
                         retry_timeout=retry_timeout,
                         success_condition=lambda res: res is True
                     )
-
+                    
                     if success:
                         updated_any = True
-
-        # Update Season (scan by ratingKey when placeholder)
-        if seas and seas.placeholder_status:
-            season_target = getattr(seas, 'plex_dummy_id', None)
-            if not season_target:
-                logger.warning(f"⚠️ Season {seas.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
-            else:
+            
+            # Update Season
+            if seas and seas.plex_id:
                 season_obj = None
-                try:
-                    for s in tv_section.all():
-                        try:
-                            if str(getattr(s, 'ratingKey', None)) == str(season_target):
-                                season_obj = s
-                                break
-                        except Exception:
-                            continue
-                except Exception as ex:
-                    logger.error(f"❌ Error scanning TV section for season: {ex}", extra={'emoji_type': 'error'})
-                    season_obj = None
-
+                for section in plex.library.sections():
+                    try:
+                        season_obj = section.getByRatingKey(seas.plex_id)
+                        break
+                    except:
+                        continue
+                        
                 if season_obj:
                     current_summary = season_obj.summary if hasattr(season_obj, 'summary') else ""
                     new_summary = _prepend_status_to_summary(current_summary, seas.placeholder_status)
-
+                    
                     def update_season():
                         season_obj.editSummary(new_summary)
                         season_obj.reload()
                         return True
-
+                        
                     success = retry_call(
                         func=update_season,
-                        on_error=lambda ex: logger.error(f"❌ Failed to update season {season_target}: {ex}"),
+                        on_error=lambda ex: logger.error(f"❌ Failed to update season {seas.plex_id}: {ex}"),
                         retry_interval=retry_interval,
                         retry_timeout=retry_timeout,
                         success_condition=lambda res: res is True
                     )
-
+                    
                     if success:
                         updated_any = True
-
-        # Update Episode (scan by ratingKey for dummy item)
-        if ep.placeholder_status:
-            episode_target = getattr(ep, 'plex_dummy_id', None)
-            if not episode_target:
-                logger.warning(f"⚠️ Episode {ep.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
-            else:
-                episode_obj = None
+            
+            # Update Episode
+            episode_obj = None
+            for section in plex.library.sections():
                 try:
-                    for e in tv_section.all():
-                        try:
-                            if str(getattr(e, 'ratingKey', None)) == str(episode_target):
-                                episode_obj = e
-                                break
-                        except Exception:
-                            continue
-                except Exception as ex:
-                    logger.error(f"❌ Error scanning TV section for episode: {ex}", extra={'emoji_type': 'error'})
-                    episode_obj = None
-
-                if episode_obj:
-                    current_summary = episode_obj.summary if hasattr(episode_obj, 'summary') else ""
-                    new_summary = _prepend_status_to_summary(current_summary, ep.placeholder_status)
-
-                    def update_episode():
-                        episode_obj.editSummary(new_summary)
-                        episode_obj.reload()
-                        return True
-
-                    success = retry_call(
-                        func=update_episode,
-                        on_error=lambda ex: logger.error(f"❌ Failed to update episode {episode_target}: {ex}"),
-                        retry_interval=retry_interval,
-                        retry_timeout=retry_timeout,
-                        success_condition=lambda res: res is True
-                    )
-
-                    if success:
-                        updated_any = True
-        else:
-            # No placeholder for episode: attempt to update real episode item only if plex_id present
-            episode_target = getattr(ep, 'plex_id', None)
-            if episode_target:
-                episode_obj = None
-                try:
-                    for e in tv_section.all():
-                        try:
-                            if str(getattr(e, 'ratingKey', None)) == str(episode_target):
-                                episode_obj = e
-                                break
-                        except Exception:
-                            continue
-                except Exception as ex:
-                    logger.error(f"❌ Error scanning TV section for episode: {ex}", extra={'emoji_type': 'error'})
-                    episode_obj = None
-
-                if episode_obj:
-                    current_summary = episode_obj.summary if hasattr(episode_obj, 'summary') else ""
-                    new_summary = _prepend_status_to_summary(current_summary, ep.placeholder_status)
-
-                    def update_episode_real():
-                        episode_obj.editSummary(new_summary)
-                        episode_obj.reload()
-                        return True
-
-                    success = retry_call(
-                        func=update_episode_real,
-                        on_error=lambda ex: logger.error(f"❌ Failed to update episode {episode_target}: {ex}"),
-                        retry_interval=retry_interval,
-                        retry_timeout=retry_timeout,
-                        success_condition=lambda res: res is True
-                    )
-
-                    if success:
-                        updated_any = True
-
+                    episode_obj = section.getByRatingKey(ep.plex_id)
+                    break
+                except:
+                    continue
+                    
+            if episode_obj:
+                current_summary = episode_obj.summary if hasattr(episode_obj, 'summary') else ""
+                new_summary = _prepend_status_to_summary(current_summary, ep.placeholder_status)
+                
+                def update_episode():
+                    episode_obj.editSummary(new_summary)
+                    episode_obj.reload()
+                    return True
+                    
+                success = retry_call(
+                    func=update_episode,
+                    on_error=lambda ex: logger.error(f"❌ Failed to update episode {ep.plex_id}: {ex}"),
+                    retry_interval=retry_interval,
+                    retry_timeout=retry_timeout,
+                    success_condition=lambda res: res is True
+                )
+                
+                if success:
+                    updated_any = True
+                    
         return updated_any
-
+        
     except Exception as ex:
         logger.error(f"❌ Error in update_plex_title_status: {ex}", extra={"emoji_type": "error"})
         return False

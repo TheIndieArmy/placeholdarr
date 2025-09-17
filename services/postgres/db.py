@@ -32,8 +32,37 @@ def init_db(engine=None):
 
     logger.info(f"Tables registered in Base.metadata: {list(Base.metadata.tables.keys())}", extra={'emoji_type': 'info'})
 
+    # Create missing tables
     Base.metadata.create_all(bind=engine, checkfirst=True)
+
+    # Add missing columns to existing tables
+    _migrate_columns(engine, inspector)
 
     inspector = inspect(engine)
     created_tables = inspector.get_table_names()
     logger.info(f"Tables AFTER create_all(): {created_tables}", extra={'emoji_type': 'info'})
+
+
+def _migrate_columns(engine, inspector):
+    """Add missing columns to existing tables"""
+    from sqlalchemy import text
+    
+    # Check if placeholder_exists column exists in movie table
+    if 'movie' in inspector.get_table_names():
+        movie_columns = [col['name'] for col in inspector.get_columns('movie')]
+        if 'placeholder_exists' not in movie_columns:
+            logger.info("Adding placeholder_exists column to movie table", extra={'emoji_type': 'info'})
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE movie ADD COLUMN placeholder_exists BOOLEAN DEFAULT FALSE"))
+                conn.commit()
+                logger.info("Successfully added placeholder_exists column", extra={'emoji_type': 'success'})
+    
+    # Add more column migrations here as needed
+    # Example:
+    # if 'series' in inspector.get_table_names():
+    #     series_columns = [col['name'] for col in inspector.get_columns('series')]
+    #     if 'new_column' not in series_columns:
+    #         logger.info("Adding new_column to series table", extra={'emoji_type': 'info'})
+    #         with engine.connect() as conn:
+    #             conn.execute(text("ALTER TABLE series ADD COLUMN new_column VARCHAR(255)"))
+    #             conn.commit()
