@@ -16,12 +16,27 @@ logger = logging.getLogger("playback_flow")
 logger.setLevel(logging.INFO)
 
 
-def identify_source(session: Session, ent_id: int, model: Type) -> bool:
+def identify_source(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
+    """Check that the placeholder file exists for the given record.
+
+    The scheduler invokes this function with (session, ent_id, model, action).
+    Previously the function accepted only three args which caused a TypeError
+    when scheduler passed the extra action parameter. This keeps behavior the
+    same but accepts the extra parameter and logs more info for debugging.
+    """
+    logger.info(f"identify_source called for {model.__name__} id={ent_id} action={action}")
     rec = session.query(model).get(ent_id)
     path = getattr(rec, 'dummypath', None)
-    if not path or not os.path.exists(path):
-        logger.error(f"[{model.__name__}] placeholder missing for id {ent_id}")
+    logger.debug(f"Placeholder path from DB: {path}")
+    if not path:
+        logger.error(f"[{model.__name__}] no placeholder path recorded for id {ent_id}")
         return False
+
+    if not os.path.exists(path):
+        logger.error(f"[{model.__name__}] placeholder missing on disk for id {ent_id}: {path}")
+        return False
+
+    logger.info(f"[{model.__name__}] placeholder present for id {ent_id}: {path}")
     return True
 
 def db_get_episodes(session: Session, series_id: int, season_num: int, ep_num: int, lookahead: int) -> List[Episode]:
