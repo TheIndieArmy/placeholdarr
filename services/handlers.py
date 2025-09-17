@@ -21,6 +21,7 @@ from services.scheduler import (
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
+from services.integrations import enrich_movie_from_radarr
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -342,8 +343,51 @@ def handle_movieadd(data: dict, is_4k: bool = False):
             for k, v in updated_fields.items():
                 if getattr(m, k, None) != v:
                     setattr(m, k, v)
+
+            # If this movie was previously marked as deleted, resurrect it so it is
+            # treated the same as a fresh user add: reset deleted flag, status, and
+            # current step so the scheduler will process it again.
+            resurrected = False
+            if getattr(m, 'is_deleted', False):
+                m.is_deleted = False
+                resurrected = True
+
+            if getattr(m, 'status', None) != 'PENDING':
+                m.status = 'PENDING'
+                resurrected = True
+
+            # Reset step pointer so flow starts from the beginning
+            m.current_step_name = None
+
+            # Clear stale placeholder indicators so placeholder creation runs anew
+            cleared_any = False
+            if getattr(m, 'dummypath', None):
+                m.dummypath = None
+                cleared_any = True
+
+            for fld in ('plex_dummy_id', 'jellyfin_dummy_id', 'plex_title', 'jellyfin_title', 'plex_overview', 'jellyfin_overview'):
+                if getattr(m, fld, None):
+                    setattr(m, fld, None)
+                    cleared_any = True
+
             session.commit()
             logger.info("Updated existing movie with webhook data", extra={'emoji_type': 'update'})
+
+            if resurrected:
+                logger.info(f"Resurrected previously deleted movie {m.tmdbid} and reset status to PENDING", extra={'emoji_type': 'refresh'})
+            elif cleared_any:
+                logger.debug(f"Cleared stale placeholder metadata for movie {m.tmdbid}", extra={'emoji_type': 'debug'})
+
+        # Start enrichment in background to fetch authoritative data from Radarr
+        try:
+            threading.Thread(
+                target=enrich_movie_from_radarr,
+                args=(tmdb_id, radarr_id, is_4k),
+                daemon=True
+            ).start()
+            logger.debug(f"Enrichment started for TMDB {tmdb_id} radarr {radarr_id}", extra={'emoji_type': 'debug'})
+        except Exception as e:
+            logger.error(f"Failed to start enrichment thread: {e}", extra={'emoji_type': 'error'})
 
         job_scheduled = handle_movieadd_scheduler.enqueue(m)
         if job_scheduled:
