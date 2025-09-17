@@ -285,28 +285,37 @@ def trigger_monitoring():
 
 def check_movie_has_file(radarr_id, is_4k=False):
     """
-    Check if a movie has a file in Radarr
-    
-    Args:
-        radarr_id: Radarr movie ID
-        is_4k: Whether to use 4K Radarr
-    
-    Returns:
-        True if the movie has a file, False otherwise
+    Lean check: require a Radarr internal ID and perform a single API fetch.
+
+    Returns True if Radarr reports a file (hasFile or movieFile present), False otherwise.
+    This function no longer attempts a TMDB lookup fallback to avoid extra requests and noisy logs.
     """
     try:
         base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
         api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-        
-        url = f"{base_url}/movie/{radarr_id}"
         headers = {'X-Api-Key': api_key}
-        
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        
-        movie_data = response.json()
-        return movie_data.get('hasFile', False)
-    
+        timeout = 10
+
+        # Direct fetch by Radarr internal id only
+        url = f"{base_url}/movie/{radarr_id}"
+        r = requests.get(url, headers=headers, timeout=timeout)
+
+        if r.status_code == 200:
+            movie_data = r.json()
+            return bool(movie_data.get('hasFile', False) or movie_data.get('movieFile'))
+        elif r.status_code == 404:
+            # Not found is a normal condition when the movie isn't tracked in this Radarr instance
+            logger.debug(f"Radarr movie id {radarr_id} not found (404)", extra={'emoji_type': 'debug'})
+            return False
+        else:
+            # Unexpected status — log details for troubleshooting
+            logger.error(f"Unexpected Radarr response {r.status_code} for movie {radarr_id}: {r.text}", extra={'emoji_type': 'error'})
+            return False
+
+    except requests.RequestException as re:
+        # Network/timeout/connection related exceptions
+        logger.error(f"Request error checking Radarr movie {radarr_id}: {re}", extra={'emoji_type': 'error'})
+        return False
     except Exception as e:
         logger.error(f"Error checking if movie has file: {e}", extra={'emoji_type': 'error'})
         return False

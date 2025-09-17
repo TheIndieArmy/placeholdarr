@@ -21,6 +21,7 @@ from services.scheduler import (
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
+from services.integrations import enrich_movie_from_radarr
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -39,7 +40,8 @@ def handle_webhook(data: dict, source_port: int = None):
                  get_jellyfin_file_path(data.get("ItemId"), data.get("UserId")))
     
     is_4k = is_4k_request(file_path, source_port)
-    logger.debug(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
+    # Quality determination is helpful when debugging but noisy in normal logs
+    logger.verbose(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
     
     event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
@@ -287,24 +289,114 @@ def handle_movieadd(data: dict, is_4k: bool = False):
         year = movie.get('year', '')
         radarr_id = movie.get('id')
 
+        # Extract movieFile / hasFile / quality information when present in the webhook
+        movie_file = movie.get('movieFile') or data.get('movieFile') or {}
+        moviefile_path = movie_file.get('path') or movie.get('folderPath') or movie_path or ''
+        moviefile_size = movie_file.get('size') or movie_file.get('sizeInBytes')
+        has_file = bool(movie.get('hasFile', False) or movie_file)
+        radarr_quality = None
+        q = movie_file.get('quality') or movie.get('quality')
+        if isinstance(q, dict):
+            radarr_quality = q.get('name') or (q.get('quality') or {}).get('name')
+
+        # Release lifecycle and monitored flag
+        radarr_release_status = movie.get('status')
+        radarr_monitored = bool(movie.get('monitored', False))
+
+        # Determine is_4k based on provided paths
+        is_4k = is_4k or is_4k_request(moviefile_path or movie_path or '')
+
         session = get_session()
         repo = MovieRepository(session)
         m = repo.get_by_tmdbid(tmdb_id, is_4k)
         if not m:
             m = repo.add(
-                title=title, year=year,
-                tmdbid=tmdb_id, dummypath="",
-                radarrpath=movie_path, radarrid=radarr_id, status="PENDING", is_4k=is_4k
+                title=title,
+                year=year,
+                tmdbid=tmdb_id,
+                dummypath="",
+                radarrpath=movie_path,
+                radarrid=radarr_id,
+                status="PENDING",
+                is_4k=is_4k,
+                moviefile_path=moviefile_path,
+                moviefile_size=moviefile_size,
+                has_file=has_file,
+                radarr_quality=radarr_quality,
+                radarr_release_status=radarr_release_status,
+                radarr_monitored=radarr_monitored
             )
-            print("Added:", m)
+            logger.info(f"Added: {m}", extra={'emoji_type': 'success'})
         else:
-            repo.is_deleted(m, False)
-            print("Already present")        
+            # Update existing record with any new fields provided by the webhook
+            updated_fields = {
+                'title': title,
+                'year': year,
+                'radarrpath': movie_path,
+                'radarrid': radarr_id,
+                'moviefile_path': moviefile_path,
+                'moviefile_size': moviefile_size,
+                'has_file': has_file,
+                'radarr_quality': radarr_quality,
+                'radarr_release_status': radarr_release_status,
+                'radarr_monitored': radarr_monitored,
+            }
+            for k, v in updated_fields.items():
+                if getattr(m, k, None) != v:
+                    setattr(m, k, v)
+
+            # If this movie was previously marked as deleted, resurrect it so it is
+            # treated the same as a fresh user add: reset deleted flag, status, and
+            # current step so the scheduler will process it again.
+            resurrected = False
+            if getattr(m, 'is_deleted', False):
+                m.is_deleted = False
+                resurrected = True
+
+            if getattr(m, 'status', None) != 'PENDING':
+                m.status = 'PENDING'
+                resurrected = True
+
+            # Reset step pointer so flow starts from the beginning
+            m.current_step_name = None
+
+            # Clear stale placeholder indicators so placeholder creation runs anew
+            cleared_any = False
+            if getattr(m, 'dummypath', None):
+                m.dummypath = None
+                cleared_any = True
+
+            for fld in ('plex_dummy_id', 'jellyfin_dummy_id', 'plex_title', 'jellyfin_title', 'plex_overview', 'jellyfin_overview'):
+                if getattr(m, fld, None):
+                    setattr(m, fld, None)
+                    cleared_any = True
+
+            session.commit()
+            logger.info("Updated existing movie with webhook data", extra={'emoji_type': 'update'})
+
+            if resurrected:
+                logger.info(f"Resurrected previously deleted movie {m.tmdbid} and reset status to PENDING", extra={'emoji_type': 'refresh'})
+            elif cleared_any:
+                logger.debug(f"Cleared stale placeholder metadata for movie {m.tmdbid}", extra={'emoji_type': 'debug'})
+
+        # Start enrichment in background to fetch authoritative data from Radarr
+        try:
+            threading.Thread(
+                target=enrich_movie_from_radarr,
+                args=(tmdb_id, radarr_id, is_4k),
+                daemon=True
+            ).start()
+            logger.debug(f"Enrichment started for TMDB {tmdb_id} radarr {radarr_id}", extra={'emoji_type': 'debug'})
+        except Exception as e:
+            logger.error(f"Failed to start enrichment thread: {e}", extra={'emoji_type': 'error'})
+
         job_scheduled = handle_movieadd_scheduler.enqueue(m)
         if job_scheduled:
             logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}")
         else:
             logger.warning(f"Failed to enqueue 'handle_movieadd' action for TMDB ID {m.tmdbid}")
+
+        session.close()
 
         return JSONResponse({"status": "success", "message": "MovieAdd scheduled"})
 

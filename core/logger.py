@@ -2,6 +2,15 @@ import logging
 import os
 from core.config import settings
 
+# Add VERBOSE log level
+VERBOSE_LEVEL_NUM = 5
+logging.addLevelName(VERBOSE_LEVEL_NUM, "VERBOSE")
+
+def verbose(self, message, *args, **kws):
+    if self.isEnabledFor(VERBOSE_LEVEL_NUM):
+        self._log(VERBOSE_LEVEL_NUM, message, args, **kws)
+logging.Logger.verbose = verbose
+
 LOG_EMOJIS = {
     'success': '✅', 'error': '❌', 'info': 'ℹ️', 'debug': '🐛',
     'webhook': '🌐', 'playback': '🎬', 'dummy': '📁', 'search': '🔍',
@@ -13,36 +22,24 @@ LOG_EMOJIS = {
 
 class EnhancedEmojiLogFormatter(logging.Formatter):
     def format(self, record):
-        # Add source file information
         filename = os.path.basename(record.pathname)
         line_num = record.lineno
-        
-        # Add emoji
         emoji = LOG_EMOJIS.get(record.__dict__.get('emoji_type', ''), '➡️')
-        
-        # Modify the message format to include file:line and emoji
         record.msg = f"{emoji} {record.msg}"
-        
-        # Store original format
         old_format = self._style._fmt
-        
-        # Temporarily update format to include source information
         self._style._fmt = old_format.replace('%(name)s', f'{filename}:{line_num}')
-        
-        # Format the record
         formatted = super().format(record)
-        
-        # Restore original format
         self._style._fmt = old_format
-        
-        # Add newline if needed
         if not formatted.endswith("\n"):
             formatted += "\n"
-            
         return formatted
 
 logger = logging.getLogger(__name__)
-logger.setLevel(settings.LOG_LEVEL)
+log_level = getattr(settings, 'LOG_LEVEL', 'INFO').upper()
+if log_level == 'VERBOSE':
+    logger.setLevel(VERBOSE_LEVEL_NUM)
+else:
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
 
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))

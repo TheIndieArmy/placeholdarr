@@ -464,7 +464,7 @@ def get_radarr_queue(is_4k=False):
         return []
 
 def delete_dummy_file(
-    dbsession: Session,
+    session: Session,
     ent_id: int,
     model: Type,
     action: str
@@ -473,7 +473,7 @@ def delete_dummy_file(
     try:
         if model is Movie:
             # For movies, delete the dummy file
-            movie = dbsession.query(Movie).get(ent_id)
+            movie = session.query(Movie).get(ent_id)
             if not movie:
                 logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
                 return False
@@ -499,13 +499,11 @@ def delete_dummy_file(
         
         elif model is Episode:
             # For episodes, delete the dummy file
-            episode = dbsession.query(Episode).get(ent_id)
+            episode = session.query(Episode).get(ent_id)
             if not episode:
                 logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
                 return False
-            
             dummy_file_path = episode.dummypath
-            
             if dummy_file_path and os.path.exists(dummy_file_path):
                 os.remove(dummy_file_path)
                 logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
@@ -1003,3 +1001,131 @@ def api_monitor_episodes(series_id, episode_ids, is_4k=False):
     except Exception as e:
         logger.error(f"Failed to monitor episodes: {e}", extra={'emoji_type': 'error'})
         return False
+
+def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
+    """Fetch authoritative movie data from Radarr and update local DB record.
+    Prefers Radarr internal ID; falls back to lookup by TMDB when needed.
+    This is safe to run in a background thread/process.
+    Returns the Radarr movie JSON on success, or None on failure.
+    """
+    try:
+        # Lazy import to avoid circular deps at module import time
+        from services.postgres.db import get_session
+        from services.postgres.models import Movie
+        config = get_arr_config('movie', is_4k)
+        if not config:
+            logger.error("Radarr config missing for enrichment", extra={'emoji_type': 'error'})
+            return None
+
+        headers = {'X-Api-Key': config['api_key']}
+        base_url = config['url']
+        movie_data = None
+
+        # Try direct fetch by Radarr internal id first
+        if radarr_id:
+            try:
+                r = requests.get(f"{base_url}/movie/{radarr_id}", headers=headers, timeout=10)
+                if r.status_code == 200:
+                    movie_data = r.json()
+                else:
+                    logger.debug(f"Radarr movie fetch by id {radarr_id} returned {r.status_code}")
+            except Exception as e:
+                logger.error(f"Radarr direct fetch failed: {e}", extra={'emoji_type': 'error'})
+
+        # Fallback: lookup by TMDB
+        if movie_data is None and tmdb_id:
+            try:
+                r = requests.get(f"{base_url}/movie/lookup", params={'term': f"tmdb:{int(tmdb_id)}"}, headers=headers, timeout=10)
+                r.raise_for_status()
+                results = r.json()
+                if isinstance(results, list) and results:
+                    movie_data = results[0]
+                    # If lookup returned radarr id, try to fetch full movie by id for complete fields
+                    _id = movie_data.get('id')
+                    if _id:
+                        try:
+                            r2 = requests.get(f"{base_url}/movie/{_id}", headers=headers, timeout=10)
+                            if r2.status_code == 200:
+                                movie_data = r2.json()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"Radarr lookup by tmdb failed: {e}", extra={'emoji_type': 'error'})
+
+        if not movie_data:
+            logger.debug("No Radarr movie data found during enrichment", extra={'emoji_type': 'debug'})
+            return None
+
+        # Map fields into DB
+        session = get_session()
+        try:
+            # Try to find movie by tmdbid + is_4k, fallback to radarrid
+            m = None
+            if tmdb_id is not None:
+                m = session.query(Movie).filter_by(tmdbid=int(tmdb_id), is_4k=is_4k).first()
+            if not m and movie_data.get('id'):
+                m = session.query(Movie).filter_by(radarrid=movie_data.get('id')).first()
+
+            if not m:
+                logger.warning(f"Enrichment: local Movie not found for tmdb={tmdb_id} radarr={radarr_id}", extra={'emoji_type': 'warning'})
+                return movie_data
+
+            # movieFile may be nested
+            mf = movie_data.get('movieFile') or {}
+            file_path = mf.get('path') or movie_data.get('folderPath') or None
+            file_size = mf.get('size') or mf.get('sizeInBytes')
+            try:
+                if file_size is not None:
+                    file_size = int(file_size)
+            except Exception:
+                file_size = None
+
+            has_file = bool(movie_data.get('hasFile', False) or mf)
+            quality = None
+            q = mf.get('quality') or movie_data.get('quality')
+            if isinstance(q, dict):
+                quality = q.get('name') or (q.get('quality') or {}).get('name')
+
+            monitored = bool(movie_data.get('monitored', False))
+            release_status = movie_data.get('status')
+
+            # Update DB fields conservatively
+            changed = False
+            if file_path and m.moviefile_path != file_path:
+                m.moviefile_path = file_path
+                changed = True
+            if file_size is not None and m.moviefile_size != file_size:
+                m.moviefile_size = file_size
+                changed = True
+            if m.has_file != has_file:
+                m.has_file = has_file
+                changed = True
+            if quality and m.radarr_quality != quality:
+                m.radarr_quality = quality
+                changed = True
+            if m.radarr_monitored != monitored:
+                m.radarr_monitored = monitored
+                changed = True
+            if release_status and m.radarr_release_status != release_status:
+                m.radarr_release_status = release_status
+                changed = True
+
+            # also update radarrid if missing
+            if movie_data.get('id') and m.radarrid != movie_data.get('id'):
+                m.radarrid = movie_data.get('id')
+                changed = True
+
+            if changed:
+                session.add(m)
+                session.commit()
+                logger.info(f"Enriched movie {m.tmdbid} from Radarr", extra={'emoji_type': 'update'})
+            else:
+                logger.debug(f"Enrichment for movie {m.tmdbid} found no changes", extra={'emoji_type': 'debug'})
+
+            return movie_data
+        finally:
+            session.close()
+
+    except Exception as e:
+        logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
+        return None
