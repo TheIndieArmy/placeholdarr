@@ -35,15 +35,22 @@ def strip_movie_status(title: str) -> str:
     return title
 
 def strip_status_markers(title: str) -> str:
-    """Keep only the base title by removing everything after first dash or bracket"""
-    # First split on '[' and take the first part
-    title = title.split('[')[0].strip()
-    # Then split on '-' and take the first part
-    title = title.split('-')[0].strip()
+    """Remove status markers like [Request], [Status], etc. and trailing dash markers"""
+    if not title:
+        return ""
+    
+    # Remove markers in brackets like [Request], [Status], etc.
+    title = re.sub(r'\[.*?\]\s*', '', title)
+    
+    # Remove trailing dash markers like " - [Status]" or just trailing " -"
+    title = re.sub(r'\s*-\s*(\[.*?\])?\s*$', '', title)
+    
     # Clean up any extra whitespace
     title = re.sub(r'\s+', ' ', title).strip()
+    
     # Remove ellipsis if present
     title = title.replace('...', '')
+    
     return title
 
 def get_series_folder(media_type, target_base_folder, title, year, media_id, season_number=None) -> str:

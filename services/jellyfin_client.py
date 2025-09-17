@@ -192,8 +192,90 @@ def retry_call(
 
 def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
     """
-    Bulk-refresh all pending 'refresh_jellyfin_dummy' subflows in one call,
-    using step_index and steps to find exact matches.
+    Refresh Jellyfin with dummy file for a specific entity.
+    This function is called by the scheduler for individual subflows.
+
+    Args:
+        dbsession: SQLAlchemy session.
+        ent_id: Entity ID (movie_id or episode_id).
+        model: Model type (Movie or Episode).
+        action: Action name from SubFlow.
+
+    Returns:
+        True if refresh succeeded, False otherwise.
+    """
+    logger.info(f"Starting refresh_jellyfin_dummy for {model.__name__} ID {ent_id}, action '{action}'", extra={'emoji_type': 'processing'})
+
+    # Get the entity (Movie or Episode) using the provided model and ID
+    try:
+        entity = dbsession.query(model).get(ent_id)
+        if not entity:
+            logger.error(f"{model.__name__} with ID {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+    except Exception as e:
+        logger.error(f"Failed to query {model.__name__} with ID {ent_id}: {e}", extra={'emoji_type': 'error'})
+        return False
+
+    # Get the dummy path
+    dummy_path = getattr(entity, 'dummypath', None)
+    
+    if not dummy_path:
+        logger.warning(f"No dummy path found for {model.__name__} ID {ent_id}. This should be retried.", extra={'emoji_type': 'warning'})
+        return False
+
+    logger.info(f"Found dummy path: {dummy_path}", extra={'emoji_type': 'dummy'})
+
+    # Check if file physically exists
+    import os
+    file_exists = os.path.exists(dummy_path)
+    
+    # For delete actions, always trigger scan to clean up Jellyfin database
+    if 'delete' in action.lower():
+        if not file_exists:
+            logger.info(f"Placeholder file {dummy_path} already deleted - triggering cleanup scan", extra={'emoji_type': 'scan'})
+        else:
+            logger.info(f"Placeholder file {dummy_path} still exists - triggering deletion scan", extra={'emoji_type': 'scan'})
+        
+        # Update placeholder_exists status
+        if hasattr(entity, 'placeholder_exists'):
+            entity.placeholder_exists = False
+            dbsession.add(entity)
+            dbsession.commit()
+        # Continue to trigger scan regardless of file existence
+    else:
+        # For non-delete actions, update placeholder_exists status
+        if hasattr(entity, 'placeholder_exists'):
+            entity.placeholder_exists = file_exists
+            dbsession.add(entity)
+            dbsession.commit()
+
+    # Determine update type from action
+    action_lower = action.lower()
+    if 'add' in action_lower:
+        update_type = 'Created'
+    elif 'delete' in action_lower:
+        update_type = 'Deleted'
+    elif 'import' in action_lower:
+        update_type = 'Created'  # Import events should create placeholders
+    else:
+        update_type = 'Updated'
+
+    logger.info(f"Determined update type as '{update_type}' based on action '{action}'", extra={'emoji_type': 'update'})
+
+    # Perform the refresh
+    try:
+        refresh_jellyfin_item([dummy_path], update_type)
+        logger.info(f"Successfully called refresh_jellyfin_item with path '{dummy_path}' and update type '{update_type}'", extra={'emoji_type': 'success'})
+        return True
+    except Exception as e:
+        logger.error(f"refresh_jellyfin_item failed: {e}", extra={'emoji_type': 'error'})
+        return False
+
+
+def refresh_jellyfin_dummy_bulk(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
+    """
+    Bulk-refresh all pending 'refresh_jellyfin_dummy' subflows in one call.
+    This is the original bulk function, renamed to avoid confusion.
 
     Args:
         dbsession: SQLAlchemy session.
@@ -551,8 +633,8 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
         if not m or not m.radarrpath:
             logger.warning(f"Movie {ent_id} not found or missing radarrpath", extra={'emoji_type': 'warning'})
             return False
-        if m.jellyfin_movie_id:
-            logger.debug(f"Movie {ent_id} already has jellyfin_movie_id: {m.jellyfin_movie_id}", extra={'emoji_type': 'debug'})
+        if m.jellyfin_id:
+            logger.debug(f"Movie {ent_id} already has jellyfin_id: {m.jellyfin_id}", extra={'emoji_type': 'debug'})
             it = None
             try:
                 movie_url = build_jellyfin_url(f"Items?{m.jellyfin_id}/?userId={user_id}&includeItemTypes=Movie&fields=ProviderIds,Name,ProductionYear,Overview,Path")
@@ -809,33 +891,57 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
     if model is Movie:
         logger.debug("Processing movie case", extra={'emoji_type': 'movie'})
         m = dbsession.query(Movie).get(ent_id)
-        if not m or not m.dummypath:
-            logger.warning(f"Movie {ent_id} not found or missing dummypath", extra={'emoji_type': 'warning'})
+        if not m:
+            logger.warning(f"Movie {ent_id} not found", extra={'emoji_type': 'warning'})
             return False
+        
+        # Check if we should skip verification based on placeholder existence
+        if not m.dummypath:
+            logger.warning(f"Movie {ent_id} missing dummypath", extra={'emoji_type': 'warning'})
+            return False
+            
+        # For delete actions, check if placeholder file actually exists
+        import os
+        if 'delete' in action.lower() and not os.path.exists(m.dummypath):
+            logger.info(f"Placeholder file {m.dummypath} already deleted - verification complete", extra={'emoji_type': 'success'})
+            # Update placeholder_exists status
+            if hasattr(m, 'placeholder_exists'):
+                m.placeholder_exists = False
+                dbsession.add(m)
+                dbsession.commit()
+            return True
+            
         logger.debug(f"Movie {m.id} has dummypath: {m.dummypath}", extra={'emoji_type': 'debug'})
-        if m.jellyfin_movie_id:
+        if m.jellyfin_id:
             logger.debug(f"Movie {m.id} already has Jellyfin ID, checking if still exists", extra={'emoji_type': 'search'})
             it = None
             try:
-                movie_url = build_jellyfin_url(f"Items?{m.jellyfin_id}/?userId={user_id}&includeItemTypes=Movie&fields=ProviderIds,Name,ProductionYear,Overview,Path")
+                # Fix URL format: use Items/{id} instead of Items?{id}/
+                movie_url = build_jellyfin_url(f"Items/{m.jellyfin_id}?userId={user_id}&fields=ProviderIds,Name,ProductionYear,Overview,Path")
                 logger.debug(f"Checking movie existence with URL: {movie_url}", extra={'emoji_type': 'debug'})
+                logger.debug(f"Movie jellyfin_id: {m.jellyfin_id}, user_id: {user_id}", extra={'emoji_type': 'debug'})
+                
                 def success_movie(res):
                     if res.status_code in (200, 204, 404):
                         if res.status_code == 200:
-                            res = res.json()
-                            return (
-                                res and isinstance(res, dict) and
-                                res.get('Items') and isinstance(res['Items'], list) and
-                                len(res['Items']) > 0
-                            )
-                        return True
+                            data = res.json()
+                            # For single item query, response is the item directly, not wrapped in Items array
+                            return data and isinstance(data, dict) and data.get('Id')
+                        return True  # 404 means item doesn't exist, which is also a valid response
                     return False
-                items = retry_call(
+                
+                response = retry_call(
                     func=lambda: session.get(movie_url, timeout=5),
                     on_error=lambda ex: logger.error(f"Movie search error: {ex}", extra={'emoji_type': 'error'}),
                     retry_interval=3, retry_timeout=30,
                     success_condition=lambda res: success_movie(res)
-                ) or []
+                )
+                
+                items = []
+                if response and response.status_code == 200:
+                    data = response.json()
+                    # Single item response - wrap in array for compatibility
+                    items = [data] if data and data.get('Id') else []
                 
                 logger.debug(f"Found {len(items)} items when checking movie", extra={'emoji_type': 'debug'})
                 for candidate in items:
@@ -854,8 +960,12 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                 save_jellyfin_dummy_id(dbsession, Movie, m.id, it)
                 return True
             else:
-                logger.warning(f"Movie {m.id} has jellyfin_id but item not found in Jellyfin - should retry", extra={'emoji_type': 'warning'})
-                return False
+                logger.warning(f"Movie {m.id} has jellyfin_id but item not found in Jellyfin - clearing old ID and searching by title", extra={'emoji_type': 'warning'})
+                # Clear the old jellyfin_id so we can search by title/tmdb instead
+                m.jellyfin_id = None
+                dbsession.add(m)
+                dbsession.commit()
+                # Fall through to search by title
             
         logger.debug(f"Searching for new movie match: {m.title}", extra={'emoji_type': 'search'})
         clean_title = re.sub(r"\s*\(\d{4}\)$", "", m.title)
@@ -871,18 +981,20 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                 return True
             it = res.json().get('Items', [])
             return [
-                it for it in (items or [])
+                item for item in (it or [])
                 if (
-                    int(it.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and it.get('Path',{}) == m.dummypath
+                    int(item.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and item.get('Path',{}) == m.dummypath
                 )
-                and (not m.year or int(it.get("ProductionYear", -1)) == m.year)
+                and (not m.year or int(item.get("ProductionYear", -1)) == m.year)
             ]
-        items = retry_call(
+        response = retry_call(
             func=lambda: session.get(url, timeout=5),
             on_error=lambda ex: logger.error(f"Movie search error: {ex}", extra={'emoji_type': 'error'}),
             retry_interval=3, retry_timeout=30,
             success_condition=lambda res: bool(filter_movies(res))
-        ) or []
+        )
+        
+        items = filter_movies(response) if response else []
         
         logger.debug(f"Found {len(items)} candidate movies from search", extra={'emoji_type': 'debug'})
         
@@ -1101,15 +1213,55 @@ def update_jellyfin_title_status(
             logger.info(f"Movie {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
             return True
             
-        if not movie.jellyfin_id:
-            # If movie has no jellyfin_id, it may have been deleted from Jellyfin or not yet scanned
-            # Return True to avoid endless retries (especially for partially deleted movies)
-            logger.warning(f"Movie {ent_id} missing jellyfin_id, skipping title status update", extra={'emoji_type': 'warning'})
-            return True
+        # Get Jellyfin ID - either from jellyfin_id or by finding via jellyfin_dummy_id
+        jellyfin_item_id = movie.jellyfin_id
+        if not jellyfin_item_id and movie.jellyfin_dummy_id:
+            logger.info(f"Movie {ent_id} missing jellyfin_id, searching by dummy ID: {movie.jellyfin_dummy_id}", extra={'emoji_type': 'search'})
+            # Find the movie in Jellyfin using the dummy path
+            clean_title = re.sub(r"\s*\(\d{4}\)$", "", movie.title)
+            search_url = build_jellyfin_url(
+                f"Items?searchTerm={quote_plus(clean_title)}"
+                "&includeItemTypes=Movie&recursive=true&fields=ProviderIds,Name,ProductionYear,Overview,Path"
+            )
+            try:
+                response = session.get(search_url, timeout=5)
+                response.raise_for_status()
+                items = response.json().get('Items', [])
+                
+                # Find item matching our dummy path
+                for item in items:
+                    if (item.get('Path', '') == movie.dummypath and 
+                        int(item.get("ProviderIds", {}).get("Tmdb", -1)) == movie.tmdbid):
+                        jellyfin_item_id = item['Id']
+                        # Update the movie with the found jellyfin_id
+                        movie.jellyfin_id = jellyfin_item_id
+                        dbsession.add(movie)
+                        dbsession.commit()
+                        logger.info(f"Found and set jellyfin_id {jellyfin_item_id} for movie {ent_id}", extra={'emoji_type': 'success'})
+                        break
+                else:
+                    logger.warning(f"Movie {ent_id} not found in Jellyfin with dummy path {movie.dummypath}", extra={'emoji_type': 'warning'})
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to search Jellyfin for movie {ent_id}: {e}", extra={'emoji_type': 'error'})
+                return False
+        elif not jellyfin_item_id:
+            logger.warning(f"Movie {ent_id} missing both jellyfin_id and jellyfin_dummy_id, cannot update title status", extra={'emoji_type': 'warning'})
+            return False
+        
         orig = strip_status_markers(movie.jellyfin_title)
-        new_name = f"{orig} - [{movie.placeholder_status}]" if movie.placeholder_status else orig
+        new_name = f"[Request] {orig}" if movie.placeholder_status == "Request" else f"{orig} - [{movie.placeholder_status}]" if movie.placeholder_status else orig
         new_ovr = _prepend_status_to_summary(movie.jellyfin_overview, movie.placeholder_status)
-        targets.append((movie.jellyfin_id, new_name, new_ovr))
+        
+        # Update the database record immediately
+        movie.jellyfin_title = new_name
+        movie.jellyfin_overview = new_ovr
+        dbsession.add(movie)
+        dbsession.commit()
+        logger.info(f"Updated database record for movie {ent_id}: '{new_name}'", extra={'emoji_type': 'success'})
+        
+        # Always prepare for Jellyfin API update (dummy files also need title updates)
+        targets.append((jellyfin_item_id, new_name, new_ovr))
         logger.debug(f"Preparing movie title update: '{new_name}'", extra={'emoji_type': 'debug'})
     else:
         ep = dbsession.query(Episode).get(ent_id)
@@ -1148,7 +1300,7 @@ def update_jellyfin_title_status(
         targets.append((ep.jellyfin_id, new_name, new_ovr))
         logger.debug(f"Preparing episode title update: '{new_name}'", extra={'emoji_type': 'debug'})
 
-    # perform updates
+    # Perform updates for all items (including dummy files)
     logger.info(f"Updating {len(targets)} Jellyfin items", extra={'emoji_type': 'update'})
     for item_id, name, overview in targets:
         dto = {"Name": name, "Overview": overview}
@@ -1210,9 +1362,6 @@ def retry_failed_jellyfin_title_updates(
     
     logger.info(f"Found {len(to_retry)} subflows ready for title update retry", extra={'emoji_type': 'retry'})
 
-    successful_retries = 0
-    failed_retries = 0
-    
     for sf, update_idx in to_retry:
         logger.debug(f"Processing subflow {sf.id} for title update verification", extra={'emoji_type': 'processing'})
         
@@ -1263,12 +1412,13 @@ def retry_failed_jellyfin_title_updates(
 
     try:
         dbsession.commit()
-        logger.info(f"Title update retry completed: {successful_retries} successful, {failed_retries} failed", extra={'emoji_type': 'success' if successful_retries > 0 else 'info'})
+        logger.info(f"Title update retry completed for {len(to_retry)} subflows", extra={'emoji_type': 'success'})
     except Exception as e:
         logger.error(f"Failed to commit title update retry changes: {e}", extra={'emoji_type': 'error'})
         return False
     
-    return successful_retries > 0
+    # Return True since this step completed successfully (whether retries were needed or not)
+    return True
 
 def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
     if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:

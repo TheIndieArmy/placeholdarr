@@ -75,7 +75,7 @@ class ActionScheduler:
         session = get_session()
         try:
             with session.begin():
-                # Find a PENDING or FAILED subflow for this action/model
+                # Find a PENDING or FAILED subflow for this action/model (exclude QUEUED since it's already scheduled)
                 sf = (
                     session.query(SubFlow)
                     .with_for_update(skip_locked=True)
@@ -158,6 +158,39 @@ class ActionScheduler:
             
         except Exception as e:
             logger.error(f"retry_failed_subflows error for action '{self.action}': {e}", extra={'emoji_type': 'error'})
+            session.rollback()
+        finally:
+            session.close()
+
+    def _reset_failed_subflow(self, sf_id: int):
+        """
+        Reset a failed subflow to retry it from the last step index.
+        """
+        logger.info(f"Attempting to reset failed SubFlow {sf_id} for retry", extra={'emoji_type': 'retry'})
+        session = get_session()
+        try:
+            sf = session.query(SubFlow).filter(SubFlow.id == sf_id).first()
+            if not sf:
+                logger.warning(f"SubFlow {sf_id} not found for reset", extra={'emoji_type': 'warning'})
+                return
+                
+            if sf.status != 'FAILED':
+                logger.debug(f"SubFlow {sf_id} status is {sf.status}, not resetting", extra={'emoji_type': 'debug'})
+                return
+                
+            # Reset retry count and status to allow retry
+            old_retry_count = sf.retry_count
+            sf.retry_count = 0
+            sf.status = 'PENDING'
+            sf.error_message = None
+            
+            session.add(sf)
+            session.commit()
+            
+            logger.info(f"Reset SubFlow {sf_id}: retry_count {old_retry_count}→0, status FAILED→PENDING", extra={'emoji_type': 'success'})
+            
+        except Exception as e:
+            logger.error(f"Failed to reset SubFlow {sf_id}: {e}", extra={'emoji_type': 'error'})
             session.rollback()
         finally:
             session.close()
@@ -766,6 +799,16 @@ class ActionScheduler:
                 # Commit the failed status
                 session.add(sf)
                 session.commit()
+                
+                # Schedule a retry after 10 seconds to reset retry_count and try again
+                logger.info(f"Scheduling retry for failed SubFlow {sf_id} in 10 seconds", extra={'emoji_type': 'retry'})
+                self.scheduler.add_job(
+                    func=self._reset_failed_subflow,
+                    args=[sf_id],
+                    id=f'retry_failed_{sf_id}',
+                    seconds=10,
+                    replace_existing=True
+                )
             
         except Exception as outer_error:
             logger.error(f"Critical error in _run_subflow for {sf_id}: {outer_error}", extra={'emoji_type': 'error'})

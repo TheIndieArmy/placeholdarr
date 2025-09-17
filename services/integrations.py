@@ -489,7 +489,7 @@ def delete_dummy_file(
             # Always mark movie as deleted and clear dummy references, regardless of file existence
             movie.is_deleted = True
             movie.jellyfin_dummy_id = None
-            movie.dummypath = None
+            movie.placeholder_exists = False  # Keep dummypath for scan purposes
             session.commit()
             logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
             
@@ -521,7 +521,7 @@ def delete_dummy_file(
             # Always mark episode as deleted and clear dummy references
             episode.is_deleted = True
             episode.jellyfin_dummy_id = None
-            episode.dummypath = None
+            episode.placeholder_exists = False  # Keep dummypath for scan purposes
             session.commit()
             logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
             
@@ -531,7 +531,7 @@ def delete_dummy_file(
                 if season:
                     season.is_deleted = True
                     season.jellyfin_dummy_id = None
-                    season.dummypath = None
+                    season.placeholder_exists = False  # Keep dummypath for scan purposes
                     session.commit()
                     logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
                     
@@ -543,7 +543,7 @@ def delete_dummy_file(
                     if series:
                         series.is_deleted = True
                         series.jellyfin_dummy_id = None
-                        series.dummypath = None
+                        series.placeholder_exists = False  # Keep dummypath for scan purposes
                         session.commit()
                         logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
             return True
