@@ -216,8 +216,10 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
     # 1) Query all QUEUED subflows whose current step is this function
     pending: list[SubFlow] = (
         dbsession.query(SubFlow)
+        # Include both QUEUED and PENDING so subflows created-and-scheduled immediately
+        # (but not yet promoted to QUEUED) are picked up by the bulk refresh.
         .filter(
-            SubFlow.status == 'QUEUED'
+            SubFlow.status.in_(['QUEUED', 'PENDING'])
         )
         .all()
     )
@@ -238,8 +240,11 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
             obj = dbsession.query(Episode).get(sf.episode_id)
         else:
             obj = dbsession.query(Movie).get(sf.movie_id)
-        if obj and obj.dummypath:
-            paths.add(obj.dummypath)
+
+        dpath = getattr(obj, 'dummypath', None) if obj else None
+
+        if obj and dpath:
+            paths.add(dpath)
 
     if not paths:
         return False
@@ -280,8 +285,10 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
     # 1) Query all QUEUED subflows whose current step is this function
     pending: list[SubFlow] = (
         dbsession.query(SubFlow)
+        # Include both QUEUED and PENDING so subflows created-and-scheduled immediately
+        # (but not yet promoted to QUEUED) are picked up by the bulk refresh.
         .filter(
-            SubFlow.status == 'QUEUED'
+            SubFlow.status.in_(['QUEUED', 'PENDING'])
         )
         .all()
     )
