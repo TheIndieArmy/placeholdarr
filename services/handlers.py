@@ -40,7 +40,8 @@ def handle_webhook(data: dict, source_port: int = None):
                  get_jellyfin_file_path(data.get("ItemId"), data.get("UserId")))
     
     is_4k = is_4k_request(file_path, source_port)
-    logger.debug(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
+    # Quality determination is helpful when debugging but noisy in normal logs
+    logger.verbose(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
     
     event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})

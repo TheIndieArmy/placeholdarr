@@ -489,7 +489,7 @@ class ActionScheduler:
         else:
             executor = 'default'
             
-        logger.debug(f"Scheduling subflow {sf_id} function '{func.__name__}' on executor '{executor}'", extra={'emoji_type': 'schedule'})
+        logger.verbose(f"Scheduling subflow {sf_id} function '{func.__name__}' on executor '{executor}'", extra={'emoji_type': 'schedule'})
         
         try:
             self.scheduler.add_job(
@@ -506,7 +506,7 @@ class ActionScheduler:
                 executor=executor,
                 max_instances=1
             )
-            logger.debug(f"Successfully scheduled job {job_id} for subflow {sf_id}", extra={'emoji_type': 'success'})
+            logger.verbose(f"Successfully scheduled job {job_id} for subflow {sf_id}", extra={'emoji_type': 'success'})
         except Exception as e:
             logger.error(f"Failed to schedule subflow {sf_id} function '{func.__name__}': {e}", extra={'emoji_type': 'error'})
 
@@ -548,7 +548,7 @@ class ActionScheduler:
                 logger.info(f"SubFlow {sf_id} was cancelled, skipping execution: {sf.error_message}", extra={'emoji_type': 'cancel'})
                 return
                 
-            logger.debug(f"SubFlow {sf_id} details: action={sf.action}, status={sf.status}, step_index={sf.step_index}", extra={'emoji_type': 'debug'})
+            logger.verbose(f"SubFlow {sf_id} details: action={sf.action}, status={sf.status}, step_index={sf.step_index}", extra={'emoji_type': 'debug'})
             
             steps = sf.steps.split(',')
             retries = sf.retry_count or 0
@@ -561,7 +561,8 @@ class ActionScheduler:
                 for attempt in range(self.max_retries):
                     try:
                         arg = context if context is not None else sf.movie_id
-                        logger.debug(f"Calling {step_name} with arg={arg}, model={self.model}, action={self.action}", extra={'emoji_type': 'debug'})
+                        # Verbose instead of noisy debug for per-call details
+                        logger.verbose(f"Calling {step_name} with arg={arg}, model={self.model}, action={self.action}", extra={'emoji_type': 'debug'})
                         
                         flow_func = self._get_flow_function(step_name)
                         result = flow_func(session, arg, self.model, self.action)
@@ -571,14 +572,17 @@ class ActionScheduler:
                             logger.info(f"Step '{step_name}' succeeded for subflow {sf_id} on attempt {attempt + 1}", extra={'emoji_type': 'success'})
                             break
                         else:
+                            # Non-exceptional failure: count as a retry so we don't loop forever
+                            retries += 1
                             logger.warning(f"Step '{step_name}' returned False for subflow {sf_id} on attempt {attempt + 1}", extra={'emoji_type': 'warning'})
+                            error = Exception('Step returned False')
                             
                     except Exception as e:
                         error = e
                         retries += 1
                         tb = traceback.format_exc()
                         logger.warning(f"Step '{step_name}' subflow {sf_id} attempt {attempt + 1} failed: {e}", extra={'emoji_type': 'warning'})
-                        logger.debug(f"Full traceback for subflow {sf_id} attempt {attempt + 1}:\n{tb}", extra={'emoji_type': 'debug'})
+                        logger.verbose(f"Full traceback for subflow {sf_id} attempt {attempt + 1}:\n{tb}", extra={'emoji_type': 'debug'})
                         
                         if attempt < self.max_retries - 1:
                             logger.debug(f"Will retry step '{step_name}' for subflow {sf_id}", extra={'emoji_type': 'retry'})
@@ -594,10 +598,10 @@ class ActionScheduler:
             
             # Update subflow status
             sf.retry_count = retries
-            
+
             if success:
                 logger.info(f"SubFlow {sf_id} step '{step_name}' completed successfully", extra={'emoji_type': 'success'})
-                
+
                 if sf.step_index + 1 < len(steps):
                     sf.step_index += 1
                     next_name = steps[sf.step_index]
@@ -753,7 +757,7 @@ class ActionScheduler:
         finally:
             session.close()
     def _get_flow_function(self, func_name: str) -> Callable:
-        logger.debug(f"Getting flow function '{func_name}' for action '{self.action}'", extra={'emoji_type': 'debug'})
+        logger.verbose(f"Getting flow function '{func_name}' for action '{self.action}'", extra={'emoji_type': 'debug'})
         try:
             module_name = f'services.actions.{self.action}_flow'
             module = import_module(module_name)
@@ -772,16 +776,16 @@ class ActionScheduler:
 
 
 # Instantiate schedulers
-logger.info("Initializing ActionSchedulers for all configured flows", extra={'emoji_type': 'start'})
+logger.verbose("Initializing ActionSchedulers for all configured flows", extra={'emoji_type': 'start'})
 actions = list(flow_manager.flows.keys())
-logger.debug(f"Available actions: {actions}", extra={'emoji_type': 'debug'})
+logger.verbose(f"Available actions: {actions}", extra={'emoji_type': 'debug'})
 
 for action in actions:
     try:
         logger.debug(f"Creating scheduler for action '{action}'", extra={'emoji_type': 'processing'})
         globals()[f"{action}_scheduler"] = ActionScheduler(action)
-        logger.info(f"Successfully created scheduler: {action}_scheduler", extra={'emoji_type': 'success'})
+        logger.verbose(f"Successfully created scheduler: {action}_scheduler", extra={'emoji_type': 'success'})
     except Exception as e:
         logger.error(f"Failed to create scheduler for action '{action}': {e}", extra={'emoji_type': 'error'})
 
-logger.info(f"Scheduler initialization complete - created {len(actions)} schedulers", extra={'emoji_type': 'success'})
+logger.verbose(f"Scheduler initialization complete - created {len(actions)} schedulers", extra={'emoji_type': 'success'})
