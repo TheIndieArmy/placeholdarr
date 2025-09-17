@@ -614,6 +614,10 @@ class ActionScheduler:
                     session.add(sf)
                     session.commit()
                     
+                    # Initialize variables to prevent UnboundLocalError
+                    still_pending = None
+                    advance_id = None
+                    
                     # Check if all subflows for this entity AND ACTION are complete
                     if self.model is Movie:
                         all_subflows = session.query(SubFlow).filter(
@@ -625,11 +629,23 @@ class ActionScheduler:
                         for subflow in all_subflows:
                             logger.debug(f"  SubFlow {subflow.id}: status={subflow.status}, action={subflow.action}, steps={subflow.steps}, branch={subflow.branch}", extra={'emoji_type': 'debug'})
                         
-                        still_pending = session.query(SubFlow).filter(
-                            SubFlow.movie_id == sf.movie_id,
-                            SubFlow.action == self.action,
-                            SubFlow.status.in_(['PENDING', 'QUEUED', 'FAILED'])  # Exclude DONE and CANCELLED
-                        ).first()
+                        # Only check the latest non-cancelled SubFlows for pending work
+                        # Get the maximum SubFlow ID for each branch to find the latest SubFlows
+                        latest_subflows = (
+                            session.query(SubFlow)
+                            .filter(
+                                SubFlow.movie_id == sf.movie_id,
+                                SubFlow.action == self.action,
+                                SubFlow.status != 'CANCELLED'  # Exclude cancelled ones entirely
+                            ).all()
+                        )
+                        
+                        still_pending = None
+                        for latest_sf in latest_subflows:
+                            if latest_sf.status in ['PENDING', 'QUEUED', 'FAILED']:
+                                still_pending = latest_sf
+                                break
+                                
                         advance_id = sf.movie_id
                         logger.debug(f"Movie {sf.movie_id} action {self.action}: still_pending = {still_pending.id if still_pending else None}", extra={'emoji_type': 'debug'})
                         
@@ -643,15 +659,23 @@ class ActionScheduler:
                             series_id = None
                             
                         if series_id:
-                            still_pending = (
+                            # Only check the latest non-cancelled SubFlows for pending work
+                            latest_subflows = (
                                 session.query(SubFlow)
                                 .join(Episode, SubFlow.episode_id == Episode.id)
                                 .filter(
                                     Episode.season.has(series_id=series_id),
                                     SubFlow.action == self.action,
-                                    SubFlow.status.in_(['PENDING', 'QUEUED', 'FAILED'])  # Exclude DONE and CANCELLED
-                                ).first()
+                                    SubFlow.status != 'CANCELLED'  # Exclude cancelled ones entirely
+                                ).all()
                             )
+                            
+                            still_pending = None
+                            for latest_sf in latest_subflows:
+                                if latest_sf.status in ['PENDING', 'QUEUED', 'FAILED']:
+                                    still_pending = latest_sf
+                                    break
+                                    
                             advance_id = series_id
                             logger.debug(f"Series {series_id} action {self.action}: still_pending = {still_pending.id if still_pending else None}", extra={'emoji_type': 'debug'})
                         else:
@@ -659,13 +683,27 @@ class ActionScheduler:
                             advance_id = None
                             
                     elif self.model is Episode:
-                        still_pending = session.query(SubFlow).filter(
+                        # Only check the latest non-cancelled SubFlows for pending work
+                        latest_subflows = session.query(SubFlow).filter(
                             SubFlow.episode_id == sf.episode_id,
                             SubFlow.action == self.action,
-                            SubFlow.status.in_(['PENDING', 'QUEUED', 'FAILED'])  # Exclude DONE and CANCELLED
-                        ).first()
+                            SubFlow.status != 'CANCELLED'  # Exclude cancelled ones entirely
+                        ).all()
+                        
+                        still_pending = None
+                        for latest_sf in latest_subflows:
+                            if latest_sf.status in ['PENDING', 'QUEUED', 'FAILED']:
+                                still_pending = latest_sf
+                                break
+                                
                         advance_id = sf.episode_id
                         logger.debug(f"Episode {sf.episode_id} action {self.action}: still_pending = {still_pending.id if still_pending else None}", extra={'emoji_type': 'debug'})
+                    
+                    else:
+                        # Unknown model type - don't advance
+                        logger.warning(f"Unknown model type for SubFlow advancement: {self.model}", extra={'emoji_type': 'warning'})
+                        still_pending = True  # Prevent advancement
+                        advance_id = None
                         
                     if not still_pending and advance_id:
                         logger.info(f"All subflows complete for {self.model.__name__} {advance_id} action {self.action}, advancing entity", extra={'emoji_type': 'success'})
@@ -752,6 +790,49 @@ class ActionScheduler:
             session.rollback()
         finally:
             session.close()
+
+    def check_entity_advancement(self, ent_id: int):
+        """
+        Manually check if an entity should be advanced based on completed SubFlows.
+        This can be used to fix entities that got stuck due to timing issues.
+        """
+        logger.info(f"Manually checking advancement for {self.model.__name__} {ent_id}", extra={'emoji_type': 'check'})
+        session = get_session()
+        try:
+            # Get all non-cancelled SubFlows for this entity and action
+            if self.model is Movie:
+                active_subflows = session.query(SubFlow).filter(
+                    SubFlow.movie_id == ent_id,
+                    SubFlow.action == self.action,
+                    SubFlow.status != 'CANCELLED'
+                ).all()
+            elif self.model is Episode:
+                active_subflows = session.query(SubFlow).filter(
+                    SubFlow.episode_id == ent_id,
+                    SubFlow.action == self.action,
+                    SubFlow.status != 'CANCELLED'
+                ).all()
+            else:
+                logger.warning(f"Manual advancement check not implemented for {self.model.__name__}", extra={'emoji_type': 'warning'})
+                return
+            
+            logger.info(f"Found {len(active_subflows)} active SubFlows for {self.model.__name__} {ent_id}", extra={'emoji_type': 'info'})
+            
+            # Check if any are still pending
+            pending = [sf for sf in active_subflows if sf.status in ['PENDING', 'QUEUED', 'FAILED']]
+            
+            if not pending:
+                logger.info(f"No pending SubFlows found, advancing {self.model.__name__} {ent_id}", extra={'emoji_type': 'success'})
+                self._advance_entity(ent_id)
+            else:
+                logger.info(f"Still have {len(pending)} pending SubFlows, not advancing yet", extra={'emoji_type': 'info'})
+                for sf in pending:
+                    logger.debug(f"  Pending SubFlow {sf.id}: {sf.status} - {sf.steps}", extra={'emoji_type': 'debug'})
+        except Exception as e:
+            logger.error(f"Error checking entity advancement: {e}", extra={'emoji_type': 'error'})
+        finally:
+            session.close()
+            
     def _get_flow_function(self, func_name: str) -> Callable:
         logger.debug(f"Getting flow function '{func_name}' for action '{self.action}'", extra={'emoji_type': 'debug'})
         try:
@@ -771,6 +852,21 @@ class ActionScheduler:
             raise
 
 
+# Function to determine model type from action name
+def get_model_for_action(action: str):
+    """Map action names to their corresponding model classes."""
+    from services.postgres.models import Movie, Series, Episode
+    
+    if 'movie' in action.lower():
+        return Movie
+    elif 'series' in action.lower():
+        return Series  
+    elif 'episode' in action.lower():
+        return Episode
+    else:
+        logger.warning(f"Unknown model type for action '{action}', defaulting to Movie", extra={'emoji_type': 'warning'})
+        return Movie
+
 # Instantiate schedulers
 logger.info("Initializing ActionSchedulers for all configured flows", extra={'emoji_type': 'start'})
 actions = list(flow_manager.flows.keys())
@@ -779,8 +875,14 @@ logger.debug(f"Available actions: {actions}", extra={'emoji_type': 'debug'})
 for action in actions:
     try:
         logger.debug(f"Creating scheduler for action '{action}'", extra={'emoji_type': 'processing'})
-        globals()[f"{action}_scheduler"] = ActionScheduler(action)
-        logger.info(f"Successfully created scheduler: {action}_scheduler", extra={'emoji_type': 'success'})
+        scheduler = ActionScheduler(action)
+        
+        # Set the model type based on action name
+        scheduler.model = get_model_for_action(action)
+        logger.debug(f"Set model type for {action}_scheduler: {scheduler.model.__name__}", extra={'emoji_type': 'debug'})
+        
+        globals()[f"{action}_scheduler"] = scheduler
+        logger.info(f"Successfully created scheduler: {action}_scheduler with model {scheduler.model.__name__}", extra={'emoji_type': 'success'})
     except Exception as e:
         logger.error(f"Failed to create scheduler for action '{action}': {e}", extra={'emoji_type': 'error'})
 

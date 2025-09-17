@@ -246,8 +246,16 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
     logger.info(f"Collected {len(paths)} unique dummy paths to refresh", extra={'emoji_type': 'dummy'})
 
     if not paths:
-        logger.warning("No dummy paths found to refresh. This should be retried.", extra={'emoji_type': 'warning'})
-        return False
+        # Check if this is a delete action - if so, no dummy files is expected and OK
+        sf_action = matching[0].action.lower()
+        if 'delete' in sf_action:
+            logger.info("No dummy paths found for delete action - this is expected if files were already deleted", extra={'emoji_type': 'info'})
+            # Return success for delete actions with no paths - let scheduler handle advancement
+            logger.info(f"Successfully processed {len(matching)} delete action subflows (no dummy files to refresh)", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning("No dummy paths found to refresh. This should be retried.", extra={'emoji_type': 'warning'})
+            return False
 
     # 3) Determine update type from SubFlow action (not parent entity action)
     sf_action = matching[0].action.lower()
@@ -271,19 +279,40 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
         logger.error(f"refresh_jellyfin_item failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-    # 5) Mark matching subflows as DONE and flush session
+    # 5) Manually advance all processed SubFlows to next step (for bulk processing efficiency)
+    from services.flow_manager import flow_manager
+    
+    advanced_count = 0
     for sf in matching:
-        sf.status = 'DONE'
-        dbsession.add(sf)
-
-    try:
-        dbsession.flush()
-        logger.info(f"Marked {len(matching)} subflows as DONE and flushed session", extra={'emoji_type': 'success'})
-    except Exception as e:
-        logger.error(f"Failed to flush updated subflows: {e}", extra={'emoji_type': 'error'})
-        return False
-
-    logger.info("Bulk refresh of 'refresh_jellyfin_dummy' subflows completed successfully", extra={'emoji_type': 'success'})
+        # Get the steps for this SubFlow
+        steps = sf.steps.split(',') if sf.steps else []
+        
+        # Check if there are more steps after current one
+        if sf.step_index + 1 < len(steps):
+            # Advance to next step
+            sf.step_index += 1
+            next_step = steps[sf.step_index]
+            
+            # Keep as QUEUED so scheduler can pick up the next step
+            sf.status = 'QUEUED'
+            dbsession.add(sf)
+            advanced_count += 1
+            
+            logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
+        else:
+            # This was the last step, mark as DONE
+            sf.status = 'DONE'
+            dbsession.add(sf)
+            logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
+    
+    # Commit all the SubFlow updates
+    dbsession.flush()
+    
+    logger.info(f"Bulk processed {len(matching)} subflows: {advanced_count} advanced to next step", extra={'emoji_type': 'success'})
+    
+    # Return success - let the scheduler handle SubFlow advancement
+    # DO NOT mark SubFlows as DONE here - that's the scheduler's job
+    logger.info(f"Successfully refreshed {len(matching)} subflows for 'refresh_jellyfin_dummy' step", extra={'emoji_type': 'success'})
     return True
 
 def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, action:str) -> bool:
@@ -333,8 +362,16 @@ def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, acti
     logger.info(f"Collected {len(paths)} unique file paths to refresh", extra={'emoji_type': 'dummy'})
     
     if not paths:
-        logger.warning("No file paths found to refresh", extra={'emoji_type': 'warning'})
-        return False
+        # Check if this is a delete action - if so, no files is expected and OK
+        sf_action = matching[0].action.lower()
+        if 'delete' in sf_action:
+            logger.info("No file paths found for delete action - this is expected if files were already deleted", extra={'emoji_type': 'info'})
+            # Return success for delete actions with no paths - let scheduler handle advancement
+            logger.info(f"Successfully processed {len(matching)} delete action subflows (no file paths to refresh)", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning("No file paths found to refresh", extra={'emoji_type': 'warning'})
+            return False
 
     # 3) Determine update type from SubFlow action (not parent entity action)
     sf_action = matching[0].action.lower()
@@ -352,13 +389,38 @@ def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, acti
     # 4) Bulk refresh call
     refresh_jellyfin_item(list(paths), update_type)
 
-    # 5) Mark all matching subflows DONE and flush
+    # 5) Manually advance all processed SubFlows to next step (for bulk processing efficiency)
+    advanced_count = 0
     for sf in matching:
-        sf.status = 'DONE'
-        dbsession.add(sf)
+        # Get the steps for this SubFlow
+        steps = sf.steps.split(',') if sf.steps else []
+        
+        # Check if there are more steps after current one
+        if sf.step_index + 1 < len(steps):
+            # Advance to next step
+            sf.step_index += 1
+            next_step = steps[sf.step_index]
+            
+            # Keep as QUEUED so scheduler can pick up the next step
+            sf.status = 'QUEUED'
+            dbsession.add(sf)
+            advanced_count += 1
+            
+            logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
+        else:
+            # This was the last step, mark as DONE
+            sf.status = 'DONE'
+            dbsession.add(sf)
+            logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
+    
+    # Commit all the SubFlow updates
     dbsession.flush()
     
-    logger.info(f"Marked {len(matching)} subflows as DONE for arr path refresh", extra={'emoji_type': 'success'})
+    logger.info(f"Bulk processed {len(matching)} subflows: {advanced_count} advanced to next step", extra={'emoji_type': 'success'})
+
+    # 5) Return success - let the scheduler handle SubFlow advancement  
+    # DO NOT mark SubFlows as DONE here - that's the scheduler's job
+    logger.info(f"Successfully refreshed {len(matching)} subflows for arr path refresh", extra={'emoji_type': 'success'})
 
     return True
 
@@ -1030,9 +1092,20 @@ def update_jellyfin_title_status(
     # prepare update DTOs based on current status fields
     if model is Movie:
         movie = dbsession.query(Movie).get(ent_id)
-        if not movie or not movie.jellyfin_id:
-            logger.warning(f"Movie {ent_id} not found or missing jellyfin_id", extra={'emoji_type': 'warning'})
+        if not movie:
+            logger.warning(f"Movie {ent_id} not found", extra={'emoji_type': 'warning'})
             return False
+        
+        # If movie is marked as deleted, skip updating title status (return success to avoid endless retries)
+        if movie.is_deleted:
+            logger.info(f"Movie {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
+            return True
+            
+        if not movie.jellyfin_id:
+            # If movie has no jellyfin_id, it may have been deleted from Jellyfin or not yet scanned
+            # Return True to avoid endless retries (especially for partially deleted movies)
+            logger.warning(f"Movie {ent_id} missing jellyfin_id, skipping title status update", extra={'emoji_type': 'warning'})
+            return True
         orig = strip_status_markers(movie.jellyfin_title)
         new_name = f"{orig} - [{movie.placeholder_status}]" if movie.placeholder_status else orig
         new_ovr = _prepend_status_to_summary(movie.jellyfin_overview, movie.placeholder_status)
@@ -1040,9 +1113,20 @@ def update_jellyfin_title_status(
         logger.debug(f"Preparing movie title update: '{new_name}'", extra={'emoji_type': 'debug'})
     else:
         ep = dbsession.query(Episode).get(ent_id)
-        if not ep or not ep.jellyfin_id:
-            logger.warning(f"Episode {ent_id} not found or missing jellyfin_id", extra={'emoji_type': 'warning'})
+        if not ep:
+            logger.warning(f"Episode {ent_id} not found", extra={'emoji_type': 'warning'})
             return False
+            
+        # If episode is marked as deleted, skip updating title status (return success to avoid endless retries)
+        if ep.is_deleted:
+            logger.info(f"Episode {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
+            return True
+            
+        if not ep.jellyfin_id:
+            # If episode has no jellyfin_id, it may have been deleted from Jellyfin or not yet scanned
+            # Return True to avoid endless retries (especially for partially deleted episodes)
+            logger.warning(f"Episode {ent_id} missing jellyfin_id, skipping title status update", extra={'emoji_type': 'warning'})
+            return True
         seas = dbsession.query(Season).get(ep.season_id)
         series = dbsession.query(Series).get(seas.series_id)
         # Series

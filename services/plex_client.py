@@ -213,6 +213,8 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
     Returns:
         True if any refresh occurred, False otherwise.
     """
+    logger.info("Starting bulk refresh for 'refresh_plex_dummy' subflows", extra={'emoji_type': 'processing'})
+    
     # 1) Query all QUEUED subflows whose current step is this function
     pending: list[SubFlow] = (
         dbsession.query(SubFlow)
@@ -228,8 +230,11 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
         if sf.step_index < len(steps) and steps[sf.step_index] == 'refresh_plex_dummy':
             matching.append(sf)
 
+    logger.info(f"Found {len(matching)} subflows matching 'refresh_plex_dummy' step", extra={'emoji_type': 'info'})
+
     if not matching:
-        return False
+        logger.debug("No matching subflows found for dummy refresh", extra={'emoji_type': 'debug'})
+        return True
 
     # 2) Collect unique paths for all matching subflows
     paths = set()
@@ -241,28 +246,68 @@ def refresh_plex_dummy(dbsession: Session, ent_id: int, model: type, action: str
         if obj and obj.dummypath:
             paths.add(obj.dummypath)
 
-    if not paths:
-        return False
+    logger.info(f"Collected {len(paths)} unique dummy paths to refresh", extra={'emoji_type': 'dummy'})
 
-    # 3) Determine update type from any parent entity
-    parent = dbsession.query(Movie).get(matching[0].movie_id)
-    action = (parent.action or '').lower()
-    if any(k in action for k in ('add')):
+    if not paths:
+        # Check if this is a delete action - if so, no files is expected and OK
+        sf_action = matching[0].action.lower()
+        if 'delete' in sf_action:
+            logger.info("No dummy paths found for delete action - this is expected if files were already deleted", extra={'emoji_type': 'info'})
+            # Return success for delete actions with no paths - let scheduler handle advancement
+            logger.info(f"Successfully processed {len(matching)} delete action subflows (no dummy paths to refresh)", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning("No dummy paths found to refresh", extra={'emoji_type': 'warning'})
+            return False
+
+    # 3) Determine update type from SubFlow action (not parent entity action)
+    sf_action = matching[0].action.lower()
+    if any(k in sf_action for k in ('add',)):
         update_type = 'Created'
-    elif any(k in action for k in ('delete', 'import')):
+    elif any(k in sf_action for k in ('delete',)):
         update_type = 'Deleted'
+    elif 'import' in sf_action:
+        update_type = 'Created'  # Import events should create placeholders
     else:
         update_type = 'Updated'
+
+    logger.info(f"Determined update type as '{update_type}' based on SubFlow action '{matching[0].action}'", extra={'emoji_type': 'update'})
 
     # 4) Bulk refresh call
     refresh_plex_item(list(paths), update_type)
 
-    # 5) Mark all matching subflows DONE and flush
+    # 5) Manually advance all processed SubFlows to next step (for bulk processing efficiency)
+    advanced_count = 0
     for sf in matching:
-        sf.status = 'DONE'
-        dbsession.add(sf)
+        # Get the steps for this SubFlow
+        steps = sf.steps.split(',') if sf.steps else []
+        
+        # Check if there are more steps after current one
+        if sf.step_index + 1 < len(steps):
+            # Advance to next step
+            sf.step_index += 1
+            next_step = steps[sf.step_index]
+            
+            # Keep as QUEUED so scheduler can pick up the next step
+            sf.status = 'QUEUED'
+            dbsession.add(sf)
+            advanced_count += 1
+            
+            logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
+        else:
+            # This was the last step, mark as DONE
+            sf.status = 'DONE'
+            dbsession.add(sf)
+            logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
+    
+    # Commit all the SubFlow updates
     dbsession.flush()
-
+    
+    logger.info(f"Bulk processed {len(matching)} subflows: {advanced_count} advanced to next step", extra={'emoji_type': 'success'})
+    
+    # Return success - let the scheduler handle SubFlow advancement
+    # DO NOT mark SubFlows as DONE here - that's the scheduler's job
+    logger.info(f"Successfully refreshed {len(matching)} subflows for 'refresh_plex_dummy' step", extra={'emoji_type': 'success'})
     return True
 
 
@@ -277,6 +322,8 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
     Returns:
         True if any refresh occurred, False otherwise.
     """
+    logger.info("Starting bulk refresh for 'refresh_plex_arr_path' subflows", extra={'emoji_type': 'processing'})
+    
     # 1) Query all QUEUED subflows whose current step is this function
     pending: list[SubFlow] = (
         dbsession.query(SubFlow)
@@ -292,8 +339,11 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
         if sf.step_index < len(steps) and steps[sf.step_index] == 'refresh_plex_arr_path':
             matching.append(sf)
 
+    logger.info(f"Found {len(matching)} subflows matching 'refresh_plex_arr_path' step", extra={'emoji_type': 'info'})
+
     if not matching:
-        return False
+        logger.debug("No matching subflows found for arr path refresh", extra={'emoji_type': 'debug'})
+        return True
 
     # 2) Collect unique paths for all matching subflows
     paths = set()
@@ -305,27 +355,66 @@ def refresh_plex_arr_path(dbsession: Session, ent_id: int, model: type, action:s
         if obj and obj.filepath:
             paths.add(obj.filepath)
 
-    if not paths:
-        return False
+    logger.info(f"Collected {len(paths)} unique file paths to refresh", extra={'emoji_type': 'file'})
 
-    # 3) Determine update type from any parent entity
-    parent = dbsession.query(Movie).get(matching[0].movie_id)
-    action = (parent.action or '').lower()
-    if any(k in action for k in ('add', 'import')):
+    if not paths:
+        # Check if this is a delete action - if so, no files is expected and OK
+        sf_action = matching[0].action.lower()
+        if 'delete' in sf_action:
+            logger.info("No file paths found for delete action - this is expected if files were already deleted", extra={'emoji_type': 'info'})
+            # Return success for delete actions with no paths - let scheduler handle advancement
+            logger.info(f"Successfully processed {len(matching)} delete action subflows (no file paths to refresh)", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning("No file paths found to refresh", extra={'emoji_type': 'warning'})
+            return False
+
+    # 3) Determine update type from SubFlow action (not parent entity action)
+    sf_action = matching[0].action.lower()
+    if any(k in sf_action for k in ('add', 'import')):
         update_type = 'Created'
-    elif any(k in action for k in ('delete')):
+    elif any(k in sf_action for k in ('delete',)):
         update_type = 'Deleted'
     else:
         update_type = 'Updated'
 
+    logger.info(f"Determined update type as '{update_type}' based on SubFlow action '{matching[0].action}'", extra={'emoji_type': 'update'})
+
     # 4) Bulk refresh call
     refresh_plex_item(list(paths), update_type)
 
-    # 5) Mark all matching subflows DONE and flush
+    # 5) Manually advance all processed SubFlows to next step (for bulk processing efficiency)
+    advanced_count = 0
     for sf in matching:
-        sf.status = 'DONE'
-        dbsession.add(sf)
+        # Get the steps for this SubFlow
+        steps = sf.steps.split(',') if sf.steps else []
+        
+        # Check if there are more steps after current one
+        if sf.step_index + 1 < len(steps):
+            # Advance to next step
+            sf.step_index += 1
+            next_step = steps[sf.step_index]
+            
+            # Keep as QUEUED so scheduler can pick up the next step
+            sf.status = 'QUEUED'
+            dbsession.add(sf)
+            advanced_count += 1
+            
+            logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
+        else:
+            # This was the last step, mark as DONE
+            sf.status = 'DONE'
+            dbsession.add(sf)
+            logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
+    
+    # Commit all the SubFlow updates
     dbsession.flush()
+    
+    logger.info(f"Bulk processed {len(matching)} subflows: {advanced_count} advanced to next step", extra={'emoji_type': 'success'})
+
+    # Return success - let the scheduler handle SubFlow advancement
+    # DO NOT mark SubFlows as DONE here - that's the scheduler's job
+    logger.info(f"Successfully refreshed {len(matching)} subflows for arr path refresh", extra={'emoji_type': 'success'})
 
     return True
 
@@ -798,8 +887,19 @@ def update_plex_title_status(
         # prepare update DTOs based on current status fields
         if model is Movie:
             movie = dbsession.query(Movie).get(ent_id)
-            if not movie or not movie.plex_id:
+            if not movie:
                 return False
+                
+            # If movie is marked as deleted, skip updating title status (return success to avoid endless retries)
+            if movie.is_deleted:
+                logger.info(f"Movie {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
+                return True
+                
+            if not movie.plex_id:
+                # If movie has no plex_id, it may have been deleted from Plex or not yet scanned
+                # Return True to avoid endless retries (especially for partially deleted movies)
+                logger.warning(f"Movie {ent_id} missing plex_id, skipping title status update", extra={'emoji_type': 'warning'})
+                return True
                 
             # Find the movie in Plex
             movie_obj = None
@@ -836,8 +936,19 @@ def update_plex_title_status(
                 
         else:  # Episode case
             ep = dbsession.query(Episode).get(ent_id)
-            if not ep or not ep.plex_id:
+            if not ep:
                 return False
+                
+            # If episode is marked as deleted, skip updating title status (return success to avoid endless retries)
+            if ep.is_deleted:
+                logger.info(f"Episode {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
+                return True
+                
+            if not ep.plex_id:
+                # If episode has no plex_id, it may have been deleted from Plex or not yet scanned
+                # Return True to avoid endless retries (especially for partially deleted episodes)
+                logger.warning(f"Episode {ent_id} missing plex_id, skipping title status update", extra={'emoji_type': 'warning'})
+                return True
                 
             seas = dbsession.query(Season).get(ep.season_id)
             series = dbsession.query(Series).get(seas.series_id)
