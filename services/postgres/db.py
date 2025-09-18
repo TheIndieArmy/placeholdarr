@@ -139,3 +139,40 @@ def _migrate_columns(engine, inspector):
                     logger.info(f"Successfully added column {tbl}.{col.name}", extra={'emoji_type': 'success'})
             except Exception as ex:
                 logger.error(f"Failed to add column {tbl}.{col.name}: {ex}", extra={'emoji_type': 'error'})
+
+        # Detect and remove legacy global-unique indexes that conflict with newer model semantics.
+        # Historically the code incorrectly created unique indexes on season_number and episode_number
+        # across the whole table. That prevents inserting multiple episodes with episode_number=1
+        # (for different seasons). We will drop those unique indexes if present.
+        try:
+            idxs = inspector.get_indexes(tbl)
+        except Exception:
+            idxs = []
+
+        problematic = [
+            # (table, column_name)
+            ('season', 'season_number'),
+            ('episode', 'episode_number'),
+        ]
+        for (tname, colname) in problematic:
+            if tname != tbl:
+                continue
+            for idx in idxs:
+                # Some inspectors return 'unique' key, some may omit it
+                is_unique = idx.get('unique', False)
+                cols = idx.get('column_names') or idx.get('column_names', [])
+                # Normalize column names list
+                if isinstance(cols, list) and cols == [colname] and is_unique:
+                    idx_name = idx.get('name')
+                    if idx_name:
+                        drop_sql = f'DROP INDEX IF EXISTS "{idx_name}"'
+                        try:
+                            with engine.connect() as conn:
+                                logger.info(f"Dropping legacy unique index {idx_name} on {tname}({colname})", extra={'emoji_type': 'info'})
+                                conn.execute(text(drop_sql))
+                                conn.commit()
+                                logger.info(f"Dropped index {idx_name}", extra={'emoji_type': 'success'})
+                        except Exception as ex:
+                            logger.error(f"Failed to drop index {idx_name}: {ex}", extra={'emoji_type': 'error'})
+                    else:
+                        logger.debug(f"Found problematic unique index on {tname}.{colname} but no name returned by inspector", extra={'emoji_type': 'debug'})

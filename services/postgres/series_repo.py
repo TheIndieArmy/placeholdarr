@@ -1,9 +1,58 @@
 import logging
+import re
 from sqlalchemy.orm import Session
 from services.postgres.models import Episode, Series, Season
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+
+def _camel_candidates(key: str) -> list:
+    """Return candidate column names for a camelCase key.
+    Examples:
+      tvdbId -> ['tvdbId','tvdbid','tvdb_id']
+      sonarrMonitored -> ['sonarrMonitored','sonarrmonitored','sonarr_monitored']
+    """
+    # original and lower
+    orig = key
+    lower = key.lower()
+    # snake_case
+    snake = re.sub(r'([A-Z])', lambda m: '_' + m.group(1).lower(), key)
+    # joined lower (remove underscores for keys that are like tvdbId -> tvdbid)
+    joined = re.sub(r'[_\-]', '', snake)
+    return [orig, lower, joined, snake]
+
+
+def _map_keys_to_allowed(payload: dict, allowed: set) -> dict:
+    mapped = {}
+    for k, v in payload.items():
+        # special-case known fields we intentionally drop or rename
+        if k in ('tmdbId', 'tmdbid', 'tmdb_id'):
+            # we intentionally do not persist tmdb for Series
+            continue
+
+        candidates = _camel_candidates(k)
+        found = None
+        for c in candidates:
+            if c in allowed:
+                found = c
+                break
+        if found:
+            mapped[found] = v
+        else:
+            # also allow exact underscore removal mapping: e.g. sonarr_path -> sonarrpath
+            no_underscore = k.replace('_', '').replace('-', '')
+            for c in _camel_candidates(no_underscore):
+                if c in allowed:
+                    found = c
+                    break
+            if found:
+                mapped[found] = v
+            else:
+                # not a known column, ignore silently
+                continue
+    return mapped
+
 
 class SeriesRepository:
     def __init__(self, session: Session):
@@ -16,13 +65,33 @@ class SeriesRepository:
         return self.session.query(Series).filter_by(id=seriesid).first()
 
     def add(self, **kwargs) -> Series:
-        series = Series(**kwargs)
+        # Filter incoming keys to model columns and map camelCase to column names
+        allowed = {c.name for c in Series.__table__.columns}
+        mapped = _map_keys_to_allowed(kwargs, allowed)
+
+        # Helpful debug logging to inspect what will be persisted
+        logger.debug("Series mapped payload before create: %s", mapped)
+
+        # Ensure tvdbid is present if available under different key forms
+        if 'tvdbid' not in mapped:
+            # look for tvdb variants in raw kwargs
+            for k in ('tvdbId', 'tvdb', 'tvdb_id', 'tvdbid'):
+                if k in kwargs:
+                    mapped['tvdbid'] = kwargs[k]
+                    break
+
+        # If tvdbid is still missing, log and raise a clear error to avoid DB integrity exceptions
+        if 'tvdbid' not in mapped or mapped.get('tvdbid') is None:
+            logger.error("Attempting to create Series without tvdbid. Mapped: %s Raw: %s", mapped, kwargs)
+            raise ValueError("tvdbid is required to create Series")
+
+        series = Series(**mapped)
         self.session.add(series)
         self.session.commit()
         return series
 
-    def delete_by_tvdbid(self, tvdbid: int) -> bool:
-        series = self.get_by_tvdbid(tvdbid)
+    def delete_by_tvdbid(self, tvdbid: int, is_4k: bool = False) -> bool:
+        series = self.get_by_tvdbid(tvdbid, is_4k)
         if series:
             self.session.delete(series)
             self.session.commit()
@@ -32,22 +101,27 @@ class SeriesRepository:
     def update(self, tvdbid: int, **kwargs) -> Series | None:
         series = self.get_by_tvdbid(tvdbid)
         if series:
-            for k, v in kwargs.items():
+            allowed = {c.name for c in Series.__table__.columns}
+            mapped = _map_keys_to_allowed(kwargs, allowed)
+            for k, v in mapped.items():
                 setattr(series, k, v)
             self.session.commit()
         return series
 
-    def get_or_create(model, session: Session, defaults=None, **kwargs):
+    def get_or_create(self, model, session: Session, defaults=None, **kwargs):
         """
         Try to get an object by kwargs; if not found, create with defaults.
         Returns (instance, created_bool).
         """
-        instance = session.query(model).filter_by(**kwargs).first()
+        allowed = {c.name for c in model.__table__.columns}
+        mapped_kwargs = _map_keys_to_allowed(kwargs, allowed)
+        instance = session.query(model).filter_by(**mapped_kwargs).first()
         if instance:
             return instance, False
-        params = dict(kwargs)
+        params = dict(mapped_kwargs)
         if defaults:
-            params.update(defaults)
+            # map defaults similarly
+            params.update(_map_keys_to_allowed(defaults, allowed))
         instance = model(**params)
         session.add(instance)
         session.commit()
@@ -102,13 +176,23 @@ class SeriesRepository:
         # group episodes by season number
         by_season = {}
         for ep in episodes_data:
-            sn = ep['seasonNumber']
+            # be robust: Sonarr may provide seasonNumber as int or missing (treat missing as 0)
+            try:
+                sn = int(ep.get('seasonNumber', 0))
+            except Exception:
+                sn = 0
             by_season.setdefault(sn, []).append(ep)
-        
+         
         for season_num, eps in by_season.items():
             # 2) get or create the Season row
+            # Use a friendly title for specials (season 0)
+            if season_num == 0:
+                season_title = f"{series.title} Specials"
+            else:
+                season_title = f"{series.title} S{season_num:02d}"
+
             season_defaults = {
-                'title': f"{series.title} S{season_num:02d}",
+                'title': season_title,
                 'year': series.year,
                 'tvdbid': series.tvdbid
             }
@@ -122,30 +206,40 @@ class SeriesRepository:
             
             # 3) within that season, upsert episodes
             for ep in eps:
+                # episode number may be missing or string - be defensive
+                try:
+                    ep_num = int(ep.get('episodeNumber', 0))
+                except Exception:
+                    ep_num = 0
+
                 episode_defaults = {
-                    'title': ep.get('title', f"Ep {ep['episodeNumber']}"),
+                    'title': ep.get('title', f"Ep {ep_num}"),
                     'year': series.year,
-                    'tvdbid': ep.get('tvdbid', None) or 0
+                    # keep tvdbid as None when missing instead of coercing to 0
+                    'tvdbid': ep.get('tvdbid', None)
                 }
                 ep_instance, ep_created = self.get_or_create(
                     Episode,
                     self.session,
                     defaults=episode_defaults,
                     season_id=season.id,
-                    episode_number=ep['episodeNumber'],
+                    episode_number=ep_num,
                     status='PENDING',
                     action='handle_seriesadd',
                 )
                 if ep_created:
-                    logger.info(f"Marked Episode S{season_num}E{ep['episodeNumber']} for deletion")
+                    logger.info(f"Added Episode S{season_num}E{ep_num} and queued for processing")
 
     def get_ep_by_series(self, series, season_num, episode_num):
         """
         Get the episode based on Series ID, season number, and episode number.
         """
+        # Find the Season row for this series + season number
+        season = self.session.query(Season).filter_by(series_id=series.id, season_number=season_num).first()
+        if not season:
+            return None
         return self.session.query(Episode).filter(
-            Episode.series_id == series.id,
-            Episode.season_number == season_num,
+            Episode.season_id == season.id,
             Episode.episode_number == episode_num
         ).first()
 

@@ -119,7 +119,8 @@ class Season(Base):
     __tablename__ = "season"
     id = Column(Integer, primary_key=True, autoincrement=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=False)
-    season_number = Column(Integer, nullable=False, index=True, unique=True)
+    # season_number must NOT be unique across the whole table — uniqueness applies per series
+    season_number = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
@@ -155,7 +156,8 @@ class Episode(Base):
     __tablename__ = "episode"
     id = Column(Integer, primary_key=True, autoincrement=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=False)
-    episode_number = Column(Integer, nullable=False, index=True, unique=True)
+    # episode_number must NOT be unique across the whole table — uniqueness applies per season
+    episode_number = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
