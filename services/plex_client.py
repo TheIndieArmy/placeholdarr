@@ -873,177 +873,253 @@ def update_plex_title_status(
     """
     Update title & summary in Plex for a Movie or Episode hierarchy.
 
-    Movie: update its own item using placeholder status.
-    Episode: update Series, Season, and Episode items if needed.
-    Returns True if any update succeeded.
+    Simplified lookup: for placeholder updates we scan the configured Plex
+    section's items (section.all()) and match ratingKey against the
+    stored plex_dummy_id (or plex_id when not a placeholder). This mirrors
+    the simplest successful method used by the standalone test script.
     """
     if not plex:
         logger.error("Plex server not available", extra={'emoji_type': 'error'})
         return False
-        
+
     updated_any = False
 
     try:
-        # prepare update DTOs based on current status fields
+        # MOVIE
         if model is Movie:
             movie = dbsession.query(Movie).get(ent_id)
             if not movie:
                 return False
-                
-            # If movie is marked as deleted, skip updating title status (return success to avoid endless retries)
-            if movie.is_deleted:
-                logger.info(f"Movie {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
-                return True
-                
-            if not movie.plex_id:
-                # If movie has no plex_id, it may have been deleted from Plex or not yet scanned
-                # Return True to avoid endless retries (especially for partially deleted movies)
-                logger.warning(f"Movie {ent_id} missing plex_id, skipping title status update", extra={'emoji_type': 'warning'})
-                return True
-                
-            # Find the movie in Plex
-            movie_obj = None
-            for section in plex.library.sections():
-                try:
-                    movie_obj = section.getByRatingKey(movie.plex_id)
-                    break
-                except:
-                    continue
-                    
-            if not movie_obj:
-                logger.error(f"❌ Movie with ID {movie.plex_id} not found in Plex", extra={"emoji_type": "error"})
+
+            # For placeholder updates we require the dummy id; otherwise use plex_id
+            if movie.placeholder_status:
+                target_id = getattr(movie, 'plex_dummy_id', None)
+                if not target_id:
+                    logger.warning(f"⚠️ Movie {movie.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
+                    return False
+            else:
+                target_id = getattr(movie, 'plex_id', None)
+                if not target_id:
+                    logger.warning(f"⚠️ Movie {movie.id} has no plex_id to update", extra={'emoji_type': 'warning'})
+                    return False
+
+            # Scan the configured movie section for the matching ratingKey
+            try:
+                movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
+            except Exception as ex:
+                logger.error(f"❌ Cannot access movie section {settings.PLEX_MOVIE_SECTION_ID}: {ex}", extra={'emoji_type': 'error'})
                 return False
-                
-            # Update summary with status
+
+            movie_obj = None
+            try:
+                for m in movie_section.all():
+                    try:
+                        rk = getattr(m, 'ratingKey', None)
+                        if rk is None:
+                            continue
+                        if str(rk) == str(target_id):
+                            movie_obj = m
+                            break
+                    except Exception:
+                        continue
+            except Exception as ex:
+                logger.error(f"❌ Error scanning movie section: {ex}", extra={'emoji_type': 'error'})
+                return False
+
+            if not movie_obj:
+                logger.error(f"❌ Movie with ID {target_id} not found by scanning movie section", extra={"emoji_type": "error"})
+                return False
+
             current_summary = movie_obj.summary if hasattr(movie_obj, 'summary') else ""
             new_summary = _prepend_status_to_summary(current_summary, movie.placeholder_status)
-            
+
             def do_update():
                 movie_obj.editSummary(new_summary)
                 movie_obj.reload()
                 return True
-                
+
             success = retry_call(
                 func=do_update,
-                on_error=lambda ex: logger.error(f"❌ Failed to update movie {movie.plex_id}: {ex}"),
+                on_error=lambda ex: logger.error(f"❌ Failed to update movie {target_id}: {ex}"),
                 retry_interval=retry_interval,
                 retry_timeout=retry_timeout,
                 success_condition=lambda res: res is True
             )
-            
+
             if success:
                 updated_any = True
-                
-        else:  # Episode case
-            ep = dbsession.query(Episode).get(ent_id)
-            if not ep:
-                return False
-                
-            # If episode is marked as deleted, skip updating title status (return success to avoid endless retries)
-            if ep.is_deleted:
-                logger.info(f"Episode {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
-                return True
-                
-            if not ep.plex_id:
-                # If episode has no plex_id, it may have been deleted from Plex or not yet scanned
-                # Return True to avoid endless retries (especially for partially deleted episodes)
-                logger.warning(f"Episode {ent_id} missing plex_id, skipping title status update", extra={'emoji_type': 'warning'})
-                return True
-                
-            seas = dbsession.query(Season).get(ep.season_id)
-            series = dbsession.query(Series).get(seas.series_id)
-            
-            # Update Series
-            if series and series.plex_id:
+
+            return updated_any
+
+        # EPISODE (and parent series/season) case
+        ep = dbsession.query(Episode).get(ent_id)
+        if not ep:
+            return False
+
+        seas = dbsession.query(Season).get(ep.season_id)
+        series = dbsession.query(Series).get(seas.series_id) if seas else None
+
+        try:
+            tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
+        except Exception as ex:
+            logger.error(f"❌ Cannot access TV section {settings.PLEX_TV_SECTION_ID}: {ex}", extra={'emoji_type': 'error'})
+            return False
+
+        # Update Series (scan by ratingKey when placeholder)
+        if series and series.placeholder_status:
+            series_target = getattr(series, 'plex_dummy_id', None)
+            if not series_target:
+                logger.warning(f"⚠️ Series {series.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
+            else:
                 series_obj = None
-                for section in plex.library.sections():
-                    try:
-                        series_obj = section.getByRatingKey(series.plex_id)
-                        break
-                    except:
-                        continue
-                        
+                try:
+                    for s in tv_section.all():
+                        try:
+                            if str(getattr(s, 'ratingKey', None)) == str(series_target):
+                                series_obj = s
+                                break
+                        except Exception:
+                            continue
+                except Exception as ex:
+                    logger.error(f"❌ Error scanning TV section for series: {ex}", extra={'emoji_type': 'error'})
+                    series_obj = None
+
                 if series_obj:
                     current_summary = series_obj.summary if hasattr(series_obj, 'summary') else ""
                     new_summary = _prepend_status_to_summary(current_summary, series.placeholder_status)
-                    
+
                     def update_series():
                         series_obj.editSummary(new_summary)
                         series_obj.reload()
                         return True
-                        
+
                     success = retry_call(
                         func=update_series,
-                        on_error=lambda ex: logger.error(f"❌ Failed to update series {series.plex_id}: {ex}"),
+                        on_error=lambda ex: logger.error(f"❌ Failed to update series {series_target}: {ex}"),
                         retry_interval=retry_interval,
                         retry_timeout=retry_timeout,
                         success_condition=lambda res: res is True
                     )
-                    
+
                     if success:
                         updated_any = True
-            
-            # Update Season
-            if seas and seas.plex_id:
+
+        # Update Season (scan by ratingKey when placeholder)
+        if seas and seas.placeholder_status:
+            season_target = getattr(seas, 'plex_dummy_id', None)
+            if not season_target:
+                logger.warning(f"⚠️ Season {seas.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
+            else:
                 season_obj = None
-                for section in plex.library.sections():
-                    try:
-                        season_obj = section.getByRatingKey(seas.plex_id)
-                        break
-                    except:
-                        continue
-                        
+                try:
+                    for s in tv_section.all():
+                        try:
+                            if str(getattr(s, 'ratingKey', None)) == str(season_target):
+                                season_obj = s
+                                break
+                        except Exception:
+                            continue
+                except Exception as ex:
+                    logger.error(f"❌ Error scanning TV section for season: {ex}", extra={'emoji_type': 'error'})
+                    season_obj = None
+
                 if season_obj:
                     current_summary = season_obj.summary if hasattr(season_obj, 'summary') else ""
                     new_summary = _prepend_status_to_summary(current_summary, seas.placeholder_status)
-                    
+
                     def update_season():
                         season_obj.editSummary(new_summary)
                         season_obj.reload()
                         return True
-                        
+
                     success = retry_call(
                         func=update_season,
-                        on_error=lambda ex: logger.error(f"❌ Failed to update season {seas.plex_id}: {ex}"),
+                        on_error=lambda ex: logger.error(f"❌ Failed to update season {season_target}: {ex}"),
                         retry_interval=retry_interval,
                         retry_timeout=retry_timeout,
                         success_condition=lambda res: res is True
                     )
-                    
+
                     if success:
                         updated_any = True
-            
-            # Update Episode
-            episode_obj = None
-            for section in plex.library.sections():
+
+        # Update Episode (scan by ratingKey for dummy item)
+        if ep.placeholder_status:
+            episode_target = getattr(ep, 'plex_dummy_id', None)
+            if not episode_target:
+                logger.warning(f"⚠️ Episode {ep.id} has placeholder_status but no plex_dummy_id", extra={'emoji_type': 'warning'})
+            else:
+                episode_obj = None
                 try:
-                    episode_obj = section.getByRatingKey(ep.plex_id)
-                    break
-                except:
-                    continue
-                    
-            if episode_obj:
-                current_summary = episode_obj.summary if hasattr(episode_obj, 'summary') else ""
-                new_summary = _prepend_status_to_summary(current_summary, ep.placeholder_status)
-                
-                def update_episode():
-                    episode_obj.editSummary(new_summary)
-                    episode_obj.reload()
-                    return True
-                    
-                success = retry_call(
-                    func=update_episode,
-                    on_error=lambda ex: logger.error(f"❌ Failed to update episode {ep.plex_id}: {ex}"),
-                    retry_interval=retry_interval,
-                    retry_timeout=retry_timeout,
-                    success_condition=lambda res: res is True
-                )
-                
-                if success:
-                    updated_any = True
-                    
+                    for e in tv_section.all():
+                        try:
+                            if str(getattr(e, 'ratingKey', None)) == str(episode_target):
+                                episode_obj = e
+                                break
+                        except Exception:
+                            continue
+                except Exception as ex:
+                    logger.error(f"❌ Error scanning TV section for episode: {ex}", extra={'emoji_type': 'error'})
+                    episode_obj = None
+
+                if episode_obj:
+                    current_summary = episode_obj.summary if hasattr(episode_obj, 'summary') else ""
+                    new_summary = _prepend_status_to_summary(current_summary, ep.placeholder_status)
+
+                    def update_episode():
+                        episode_obj.editSummary(new_summary)
+                        episode_obj.reload()
+                        return True
+
+                    success = retry_call(
+                        func=update_episode,
+                        on_error=lambda ex: logger.error(f"❌ Failed to update episode {episode_target}: {ex}"),
+                        retry_interval=retry_interval,
+                        retry_timeout=retry_timeout,
+                        success_condition=lambda res: res is True
+                    )
+
+                    if success:
+                        updated_any = True
+        else:
+            # No placeholder for episode: attempt to update real episode item only if plex_id present
+            episode_target = getattr(ep, 'plex_id', None)
+            if episode_target:
+                episode_obj = None
+                try:
+                    for e in tv_section.all():
+                        try:
+                            if str(getattr(e, 'ratingKey', None)) == str(episode_target):
+                                episode_obj = e
+                                break
+                        except Exception:
+                            continue
+                except Exception as ex:
+                    logger.error(f"❌ Error scanning TV section for episode: {ex}", extra={'emoji_type': 'error'})
+                    episode_obj = None
+
+                if episode_obj:
+                    current_summary = episode_obj.summary if hasattr(episode_obj, 'summary') else ""
+                    new_summary = _prepend_status_to_summary(current_summary, ep.placeholder_status)
+
+                    def update_episode_real():
+                        episode_obj.editSummary(new_summary)
+                        episode_obj.reload()
+                        return True
+
+                    success = retry_call(
+                        func=update_episode_real,
+                        on_error=lambda ex: logger.error(f"❌ Failed to update episode {episode_target}: {ex}"),
+                        retry_interval=retry_interval,
+                        retry_timeout=retry_timeout,
+                        success_condition=lambda res: res is True
+                    )
+
+                    if success:
+                        updated_any = True
+
         return updated_any
-        
+
     except Exception as ex:
         logger.error(f"❌ Error in update_plex_title_status: {ex}", extra={"emoji_type": "error"})
         return False

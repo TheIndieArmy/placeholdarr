@@ -1,6 +1,34 @@
 import logging
 import os
-from core.config import settings
+import sys
+import traceback
+
+# Try to import settings; if pydantic validation fails (missing paths), print a friendly message and exit
+try:
+    from core.config import settings
+except Exception as ex:
+    # Attempt to extract helpful messages about missing paths
+    msg = str(ex)
+    missing_lines = []
+    for line in msg.splitlines():
+        if 'Path does not exist:' in line or 'Path does not exist' in line:
+            missing_lines.append(line.strip())
+    if missing_lines:
+        print('\n❌ Placeholdarr startup failed: missing configured library paths.\n', file=sys.stderr)
+        print('The following path validations failed:', file=sys.stderr)
+        for l in missing_lines:
+            print('  -', l, file=sys.stderr)
+        print('\nLikely causes:\n  * The folder locations have not been created\n  * A typo in your .env for MOVIE_LIBRARY_FOLDER / TV_LIBRARY_FOLDER\n ', file=sys.stderr)
+        print('\nSuggested actions:', file=sys.stderr)
+        print('  1) Ensure folder locations exist and create them if not.', file=sys.stderr)
+        print('  2) Verify the paths in your .env or environment variables (MOVIE_LIBRARY_FOLDER, TV_LIBRARY_FOLDER, MOVIE_LIBRARY_4K_FOLDER, TV_LIBRARY_4K_FOLDER).', file=sys.stderr)
+        print('\nOnce fixed, restart Placeholdarr.', file=sys.stderr)
+        sys.exit(1)
+    else:
+        # Unknown import error - print traceback and exit
+        print('\n❌ Placeholdarr failed to start due to an error importing settings:', file=sys.stderr)
+        traceback.print_exception(type(ex), ex, ex.__traceback__, file=sys.stderr)
+        sys.exit(1)
 
 # Add VERBOSE log level
 VERBOSE_LEVEL_NUM = 5

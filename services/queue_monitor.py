@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from core.config import settings
 
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Movie, SubFlow
+from services.postgres.models import Episode, Movie, SubFlow, Season
 from services.integrations import get_radarr_queue, get_sonarr_queue
 from services.postgres.models import Series
 import concurrent.futures
@@ -285,35 +285,98 @@ def trigger_monitoring():
 
 def check_movie_has_file(radarr_id, is_4k=False):
     """
-    Lean check: require a Radarr internal ID and perform a single API fetch.
-
-    Returns True if Radarr reports a file (hasFile or movieFile present), False otherwise.
-    This function no longer attempts a TMDB lookup fallback to avoid extra requests and noisy logs.
+    Fetch Radarr movie data and update the local Movie record with useful fields.
+    Returns True if Radarr reports a file exists (hasFile or movieFile present), False otherwise.
     """
-    try:
-        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-        headers = {'X-Api-Key': api_key}
-        timeout = 10
+    if not radarr_id:
+        return False
 
-        # Direct fetch by Radarr internal id only
+    try:
+        # Lazy import to avoid circular deps
+        from services.postgres.db import get_session
+        from services.utils import get_arr_config
+        config = get_arr_config('movie', is_4k)
+        if not config:
+            logger.error("Radarr config missing for has-file check", extra={'emoji_type': 'error'})
+            return False
+
+        headers = {'X-Api-Key': config['api_key']}
+        base_url = config['url']
+
         url = f"{base_url}/movie/{radarr_id}"
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = requests.get(url, headers=headers, timeout=10)
 
         if r.status_code == 200:
             movie_data = r.json()
+
+            # Map useful fields into DB
+            session = get_session()
+            try:
+                m = session.query(Movie).filter_by(radarrid=int(radarr_id)).first()
+                # Best effort: if not found, try to match by tmdbid
+                if not m and movie_data.get('tmdbId'):
+                    m = session.query(Movie).filter_by(tmdbid=int(movie_data.get('tmdbId'))).first()
+
+                if m:
+                    mf = movie_data.get('movieFile') or {}
+                    file_path = mf.get('path') or movie_data.get('folderPath') or None
+                    file_size = mf.get('size') or mf.get('sizeInBytes')
+                    try:
+                        if file_size is not None:
+                            file_size = int(file_size)
+                    except Exception:
+                        file_size = None
+
+                    has_file = bool(movie_data.get('hasFile', False) or mf)
+                    quality = None
+                    q = mf.get('quality') or movie_data.get('quality')
+                    if isinstance(q, dict):
+                        quality = q.get('name') or (q.get('quality') or {}).get('name')
+
+                    monitored = bool(movie_data.get('monitored', False))
+                    release_status = movie_data.get('status')
+
+                    changed = False
+                    if file_path and m.moviefile_path != file_path:
+                        m.moviefile_path = file_path
+                        changed = True
+                    if file_size is not None and m.moviefile_size != file_size:
+                        m.moviefile_size = file_size
+                        changed = True
+                    if m.has_file != has_file:
+                        m.has_file = has_file
+                        changed = True
+                    if quality and m.radarr_quality != quality:
+                        m.radarr_quality = quality
+                        changed = True
+                    if m.radarr_monitored != monitored:
+                        m.radarr_monitored = monitored
+                        changed = True
+                    if release_status and m.radarr_release_status != release_status:
+                        m.radarr_release_status = release_status
+                        changed = True
+                    if movie_data.get('id') and m.radarrid != movie_data.get('id'):
+                        m.radarrid = movie_data.get('id')
+                        changed = True
+
+                    if changed:
+                        session.add(m)
+                        session.commit()
+                        logger.info(f"Enriched movie {m.tmdbid} from Radarr during has-file check", extra={'emoji_type': 'update'})
+                # else: no local movie found to enrich
+            finally:
+                session.close()
+
             return bool(movie_data.get('hasFile', False) or movie_data.get('movieFile'))
+
         elif r.status_code == 404:
-            # Not found is a normal condition when the movie isn't tracked in this Radarr instance
             logger.debug(f"Radarr movie id {radarr_id} not found (404)", extra={'emoji_type': 'debug'})
             return False
         else:
-            # Unexpected status — log details for troubleshooting
             logger.error(f"Unexpected Radarr response {r.status_code} for movie {radarr_id}: {r.text}", extra={'emoji_type': 'error'})
             return False
 
     except requests.RequestException as re:
-        # Network/timeout/connection related exceptions
         logger.error(f"Request error checking Radarr movie {radarr_id}: {re}", extra={'emoji_type': 'error'})
         return False
     except Exception as e:
@@ -323,55 +386,127 @@ def check_movie_has_file(radarr_id, is_4k=False):
 
 def check_episode_has_file(tvdb_id, season_number, episode_number, is_4k=False):
     """
-    Check if an episode has a file in Sonarr
-    
-    Args:
-        tvdb_id: TVDB ID for the series
-        season_number: Season number
-        episode_number: Episode number
-        is_4k: Whether to use 4K Sonarr
-    
-    Returns:
-        True if the episode has a file, False otherwise
+    Fetch Sonarr series/episode data and update the local Series/Episode records.
+    Returns True if Sonarr reports the episode has a file, False otherwise.
     """
-    try:        # Get series ID from the database instead of API call
-        # Prefer getting series ID from the database instead of API call
-        session_db = get_session()
-        try:
-            series = session_db.query(Series).filter_by(tvdbid=tvdb_id, is_4k=is_4k).first()
-            series_id = series.sonarrid if series else None
-        finally:
-            session_db.close()
-        session_db = get_session()
-        try:
-            # Find the series by tvdb_id and is_4k flag
-            series = session_db.query(Series).filter_by(tvdbid=tvdb_id, is_4k=is_4k).first()
-            series_id = series.sonarrid if series else None
-        finally:
-            session_db.close()        
-        if not series_id:
-            return False
-        
-        # Then get episode details
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        url = f"{base_url}/episode"
-        params = {'seriesId': series_id}
-        headers = {'X-Api-Key': api_key}
-        
-        response = requests.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        
-        episodes = response.json()
-        
-        # Find the specific episode
-        for ep in episodes:
-            if ep.get('seasonNumber') == season_number and ep.get('episodeNumber') == episode_number:
-                return ep.get('hasFile', False)
-        
+    if not tvdb_id:
         return False
-    
+
+    try:
+        from services.postgres.db import get_session
+        from services.utils import get_arr_config
+
+        session = get_session()
+        try:
+            series = session.query(Series).filter_by(tvdbid=tvdb_id, is_4k=is_4k).first()
+            if not series:
+                return False
+
+            # Ensure we have a Sonarr internal id; try lookup by TVDB when missing
+            sonarr_id = getattr(series, 'sonarrid', None)
+            if not sonarr_id:
+                config = get_arr_config('tv', is_4k)
+                if config:
+                    headers = {'X-Api-Key': config['api_key']}
+                    try:
+                        lookup = requests.get(f"{config['url']}/series/lookup", params={'term': f"tvdb:{int(series.tvdbid)}"}, headers=headers, timeout=10)
+                        if lookup.ok:
+                            results = lookup.json()
+                            if isinstance(results, list) and results:
+                                found = results[0]
+                                if found.get('id'):
+                                    series.sonarrid = found.get('id')
+                                    session.add(series)
+                                    session.commit()
+                                    sonarr_id = series.sonarrid
+                    except Exception:
+                        logger.debug("Sonarr lookup by TVDB failed during has-file check", extra={'emoji_type': 'debug'})
+
+            if not sonarr_id:
+                return False
+
+            # Fetch episodes for the series from Sonarr and update matching episode entry
+            config = get_arr_config('tv', is_4k)
+            if not config:
+                logger.error("Sonarr config missing for has-file check", extra={'emoji_type': 'error'})
+                return False
+
+            headers = {'X-Api-Key': config['api_key']}
+            url = f"{config['url']}/episode"
+            params = {'seriesId': sonarr_id}
+            r = requests.get(url, params=params, headers=headers, timeout=10)
+            r.raise_for_status()
+            episodes = r.json()
+
+            # Find the specific episode
+            target = None
+            for ep in episodes:
+                if ep.get('seasonNumber') == season_number and ep.get('episodeNumber') == episode_number:
+                    target = ep
+                    break
+
+            if not target:
+                return False
+
+            # Update DB episode record if we can find it
+            try:
+                # find season and episode records
+                season = session.query(Season).filter_by(series_id=series.id, season_number=season_number).first()
+                if not season:
+                    # nothing to update locally
+                    pass
+                else:
+                    episode = session.query(Episode).filter_by(season_id=season.id, episode_number=episode_number).first()
+                    if episode:
+                        mf = target.get('hasFile', False) and target.get('episodeFile') or {}
+                        file_path = mf.get('path') if isinstance(mf, dict) else None
+                        file_size = mf.get('size') if isinstance(mf, dict) else None
+                        try:
+                            if file_size is not None:
+                                file_size = int(file_size)
+                        except Exception:
+                            file_size = None
+
+                        has_file = bool(target.get('hasFile', False) or mf)
+                        quality = None
+                        q = (target.get('quality') or {})
+                        if isinstance(q, dict):
+                            quality = q.get('quality', {}).get('name') or q.get('name')
+
+                        monitored = bool(series.sonarr_monitored if hasattr(series, 'sonarr_monitored') else False)
+
+                        changed = False
+                        if file_path and episode.episodefile_path != file_path:
+                            episode.episodefile_path = file_path
+                            changed = True
+                        if file_size is not None and episode.episodefile_size != file_size:
+                            episode.episodefile_size = file_size
+                            changed = True
+                        if episode.has_file != has_file:
+                            episode.has_file = has_file
+                            changed = True
+                        if quality and episode.sonarr_quality != quality:
+                            episode.sonarr_quality = quality
+                            changed = True
+                        if episode.sonarr_monitored != monitored:
+                            episode.sonarr_monitored = monitored
+                            changed = True
+
+                        if changed:
+                            session.add(episode)
+                            session.commit()
+                            logger.info(f"Enriched episode S{season_number}E{episode_number} for series {series.title} from Sonarr", extra={'emoji_type': 'update'})
+            except Exception:
+                logger.debug("Failed to update local Episode record during Sonarr has-file check", extra={'emoji_type': 'debug'})
+
+            return bool(target.get('hasFile', False) or target.get('episodeFile'))
+
+        finally:
+            session.close()
+
+    except requests.RequestException as re:
+        logger.error(f"Request error checking Sonarr series {tvdb_id}: {re}", extra={'emoji_type': 'error'})
+        return False
     except Exception as e:
         logger.error(f"Error checking if episode has file: {e}", extra={'emoji_type': 'error'})
         return False
