@@ -105,8 +105,6 @@ class Series(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
-    # Boolean to track if placeholder file physically exists
-    placeholder_exists = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='series')
@@ -141,8 +139,6 @@ class Season(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
-    # Boolean to track if placeholder file physically exists
-    placeholder_exists = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='season')
