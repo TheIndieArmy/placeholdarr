@@ -1,7 +1,7 @@
 import logging
 import os
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Union, Type
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -802,11 +802,13 @@ class ActionScheduler:
                 
                 # Schedule a retry after 10 seconds to reset retry_count and try again
                 logger.info(f"Scheduling retry for failed SubFlow {sf_id} in 10 seconds", extra={'emoji_type': 'retry'})
+                run_at = datetime.now() + timedelta(seconds=10)
                 self.scheduler.add_job(
                     func=self._reset_failed_subflow,
+                    trigger='date',
+                    run_date=run_at,
                     args=[sf_id],
                     id=f'retry_failed_{sf_id}',
-                    seconds=10,
                     replace_existing=True
                 )
             

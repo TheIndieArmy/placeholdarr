@@ -62,7 +62,8 @@ def db_get_episodes(session: Session, series_id: int, season_num: int, ep_num: i
 
 def lookup_and_monitor(session: Session,
                        ent_id: int,
-                       model: Type) -> bool:
+                       model: Type,
+                       action: str = None) -> bool:
     if model is Movie:
         m = session.query(Movie).get(ent_id)
         success = mark_movie_monitored(
@@ -135,7 +136,8 @@ def lookup_and_monitor(session: Session,
     session.add(sf)
     return True
 
-def trigger_search(session: Session, ent_id: int, model: Type) -> bool:
+
+def trigger_search(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
     if model is Movie:
         m = session.query(Movie).get(ent_id)
         success = trigger_radarr_search(m.radarrid, m.title)
@@ -156,13 +158,15 @@ def trigger_search(session: Session, ent_id: int, model: Type) -> bool:
         is_4k=series.is_4k
     )
 
-def mark_done(session: Session, ent_id: int, model: Type) -> bool:
+
+def mark_done(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
     rec = session.query(model).get(ent_id)
     rec.status = 'DONE'
     session.add(rec)
     return True
 
-def enqueue_monitor(session: Session, ent_id: int, model: Type) -> bool:
+
+def enqueue_monitor(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
     """
     Create a SubFlow with status IN_QUEUE and action playback
     

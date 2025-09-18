@@ -798,14 +798,41 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
         
         # Check if movie already has a real file
         from services.queue_monitor import check_movie_has_file
+        # Prefer checking Radarr by its internal id (radarrid). If missing, try to enrich by TMDB
+        radarr_id = getattr(movie, 'radarrid', None)
         tmdb_id = getattr(movie, 'tmdbid', None) or getattr(movie, 'tmdb_id', None)
-        if tmdb_id and check_movie_has_file(tmdb_id, is_4k=is_4k):
-            logger.info(f"Skipping placeholder for {movie.title} (real file exists)", extra={'emoji_type': 'skip'})
-            return True
+
+        # If we have a Radarr id, ask Radarr directly
+        if radarr_id:
+            try:
+                if check_movie_has_file(radarr_id, is_4k=is_4k):
+                    logger.info(f"Skipping placeholder for {movie.title} (real file exists in Radarr)", extra={'emoji_type': 'skip'})
+                    return True
+            except Exception:
+                # If the check errors, fall back to continuing the flow (we'll create a placeholder)
+                logger.debug("Radarr file check failed, will continue with placeholder creation", extra={'emoji_type': 'debug'})
+
+        # If no radarr id, try to enrich from Radarr using the TMDB id to discover the Radarr record
+        if not radarr_id and tmdb_id:
+            try:
+                movie_data = enrich_movie_from_radarr(tmdb_id=tmdb_id, is_4k=is_4k)
+                if movie_data and movie_data.get('id'):
+                    # Persist discovered radarr id for future checks
+                    movie.radarrid = movie_data.get('id')
+                    session.add(movie)
+                    session.commit()
+
+                    # If Radarr already reports a file, skip placeholder
+                    mf = movie_data.get('movieFile') or {}
+                    if movie_data.get('hasFile') or mf:
+                        logger.info(f"Skipping placeholder for {movie.title} (real file found via Radarr lookup)", extra={'emoji_type': 'skip'})
+                        return True
+            except Exception:
+                logger.debug("Radarr enrichment failed or returned no data", extra={'emoji_type': 'debug'})
         
         # Select appropriate library folder based on 4K status
         movie_library = settings.MOVIE_LIBRARY_FOLDER_4K if is_4k else settings.MOVIE_LIBRARY_FOLDER
-        
+    
         # Create placeholder file
         dummy_path = place_dummy_file(
             "movie", 
@@ -814,7 +841,8 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             tmdb_id,
             movie_library
         )
-        
+    
+    
         if dummy_path:
             movie.dummypath = dummy_path
             session.add(movie)
@@ -826,28 +854,27 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             return False
     
     elif model is Episode:
-        
         sf_eps = session.query(SubFlow).filter(
             SubFlow.steps == "delayed_placeholders",
             SubFlow.episode_id != None,
             SubFlow.episode_id.in_([ent_id])
         ).all()
-        
+
         # Get the episode from the database
         ep = session.query(Episode).get(ent_id)
         if not ep:
             logger.error(f"Episode with id {ent_id} not found", extra={'emoji_type': 'error'})
             return False
-        
+
         # Check if the episode has is_4k attribute
         if hasattr(ep, 'is_4k') and ep.is_4k:
             is_4k = True
-            
+
         seas = session.query(Season).get(ep.season_id)
         if not seas:
             logger.error(f"Season for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
-        
+
         series = session.query(Series).get(seas.series_id)
         if not series:
             logger.error(f"Series for episode {ent_id} not found", extra={'emoji_type': 'error'})
@@ -862,7 +889,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
 
         # Select appropriate library folder based on 4K status
         tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
-        
+
         placeholder_count = 0
         for episode in sf_eps:
             ep = session.query(Episode).get(episode.episode_id)
@@ -872,45 +899,80 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 episode_num = ep.episode_number
                 episode_title = ep.title
                 ep_tvdb_id = getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None)
-                
+
                 if not (season_num and episode_num):
                     logger.error(f"Missing season or episode number for {ep.title}", extra={'emoji_type': 'error'})
 
                 # Check if episode already has a real file
                 from services.queue_monitor import check_episode_has_file
+
+                # Ensure series has a Sonarr id when possible; try a Sonarr lookup by TVDB if missing
+                try:
+                    series_sonarrid = getattr(series, 'sonarrid', None)
+                    if not series_sonarrid and getattr(series, 'tvdbid', None):
+                        config = get_arr_config('tv', is_4k)
+                        if config:
+                            headers = {'X-Api-Key': config['api_key']}
+                            lookup = requests.get(
+                                f"{config['url']}/series/lookup",
+                                params={'term': f"tvdb:{int(series.tvdbid)}"},
+                                headers=headers,
+                                timeout=10
+                            )
+                            if lookup.ok:
+                                results = lookup.json()
+                                if isinstance(results, list) and results:
+                                    found = results[0]
+                                    if found.get('id'):
+                                        series.sonarrid = found.get('id')
+                                        session.add(series)
+                                        session.commit()
+                except Exception:
+                    logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
+
                 if ep_tvdb_id and check_episode_has_file(ep_tvdb_id, season_num, episode_num, is_4k):
-                    logger.info(f"Skipping placeholder for {series.title} S{season_num}E{episode_num} (real file exists)", 
-                                extra={'emoji_type': 'skip'})
-                
+                    logger.info(
+                        f"Skipping placeholder for {series.title} S{season_num}E{episode_num} (real file exists)",
+                        extra={'emoji_type': 'skip'}
+                    )
+                    # mark this subflow entry done and continue
+                    episode.status = "DONE"
+                    session.add(episode)
+                    session.commit()
+                    continue
+
                 # Create placeholder file
                 dummy_path = place_dummy_file(
-                    "tv", 
-                    series.title, 
-                    series.year, 
+                    "tv",
+                    series.title,
+                    series.year,
                     ep_tvdb_id,
                     tv_library,
                     season_number=season_num,
                     episode_range=(episode_num, episode_num),
                     episode_title=episode_title
                 )
-                
+
                 if dummy_path:
                     ep.dummypath = dummy_path
                     session.add(ep)
                     placeholder_count += 1
+
             episode.status = "DONE"
             session.add(episode)
             session.commit()
-            
+
         if placeholder_count > 0:
             session.commit()
-            logger.info(f"Created {placeholder_count} placeholder files for '{series.title}'", 
-                      extra={'emoji_type': 'success'})
+            logger.info(
+                f"Created {placeholder_count} placeholder files for '{series.title}'",
+                extra={'emoji_type': 'success'}
+            )
             return True
         else:
             logger.info(f"No placeholders needed for '{series.title}'", extra={'emoji_type': 'info'})
             return True
-    
+
     else:
         logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
         return False
