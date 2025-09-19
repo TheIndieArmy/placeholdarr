@@ -135,3 +135,71 @@ def get_movie_by_id(movie_id, session=None):
     movie_repo = MovieRepository(session)
     movie_repo.get_by_id(movie_id)
     return movie_repo
+
+def resolve_final_folder(media_type, title=None, year=None, media_id=None, season_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None, payload=None):
+    """
+    Centralized function to resolve the final folder path for dummy file operations.
+    Priority:
+    1. If ENV is set, use it as base and append *arrs folder name (from payload).
+    2. If ENV is blank, use *arrs root and folder name (from payload).
+    Always append season folder name for TV if available.
+    """
+    import os
+    # Extract folder name and season folder name from payload
+    arr_folder_name = None
+    arr_season_folder = None
+    arr_root = None
+    # --- Always use basename of folder_path for movies if provided ---
+    if media_type == "movie" and folder_path:
+        arr_folder_name = os.path.basename(folder_path)
+        arr_root = os.path.dirname(folder_path)
+    elif payload:
+        # Get full folder path from payload
+        arr_full_path = payload.get('folderPath') or payload.get('path') or folder_path
+        if arr_full_path:
+            arr_folder_name = os.path.basename(arr_full_path)
+            arr_root = os.path.dirname(arr_full_path)
+        arr_season_folder = payload.get('seasonFolder') or payload.get('season_folder') or season_folder_name
+    # Determine base path
+    if media_type == "movie":
+        env_base = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
+    else:
+        env_base = getattr(settings, "TV_LIBRARY_FOLDER", None)
+    base_folder = None
+    if env_base and str(env_base).strip():
+        # ENV is set: use ENV as base, append *arrs folder name
+        if arr_folder_name:
+            base_folder = os.path.join(env_base, arr_folder_name)
+        else:
+            # Fallback: build from title/year/id
+            folder_name = sanitize_filename(title) if title else ("Unknown Movie" if media_type == "movie" else "Unknown Series")
+            if year:
+                folder_name += f" ({year})"
+            if media_id and str(media_id).lower() != 'none':
+                folder_name += f" {{tmdb-{media_id}}}" if media_type == "movie" else f" {{tvdb-{media_id}}}"
+            base_folder = os.path.join(env_base, folder_name)
+    elif arr_root and arr_folder_name:
+        # ENV is blank: use *arrs root and folder name
+        base_folder = os.path.join(arr_root, arr_folder_name)
+    else:
+        # Fallback: build from title/year/id
+        folder_name = sanitize_filename(title) if title else ("Unknown Movie" if media_type == "movie" else "Unknown Series")
+        if year:
+            folder_name += f" ({year})"
+        if media_id and str(media_id).lower() != 'none':
+            folder_name += f" {{tmdb-{media_id}}}" if media_type == "movie" else f" {{tvdb-{media_id}}}"
+        base_folder = folder_path or os.path.join(env_base or "", folder_name)
+    # Season folder resolution (for TV)
+    if media_type != "movie":
+        season_folder = arr_season_folder
+        if not season_folder and relative_path:
+            parts = os.path.normpath(relative_path).split(os.sep)
+            for part in parts:
+                if part.lower().startswith("season"):
+                    season_folder = part
+                    break
+        elif not season_folder and season_number is not None:
+            season_folder = f"Season {season_number:02d}"
+        if season_folder:
+            return os.path.join(base_folder, season_folder)
+    return base_folder

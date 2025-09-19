@@ -206,7 +206,8 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
-        job_scheduled = handle_seriesadd_scheduler.enqueue(series.id)
+        # Pass the model instance so the scheduler can infer model type and create subflows
+        job_scheduled = handle_seriesadd_scheduler.enqueue(series)
     finally:
         try:
             session.close()
@@ -442,7 +443,7 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             if not series:
                 logger.info(f"Series {title} not found in database for deletion", extra={'emoji_type': 'warning'}) 
                 return JSONResponse({"status": "success", "message": "Series not tracked, no cleanup needed"})
-            if repo.get_by_tvdbid(tvdb_id):
+            if repo.get_by_tvdbid(tvdb_id, is_4k):
                 job_scheduled = handle_seriesdelete_scheduler.enqueue(series)
                 if job_scheduled:
                     logger.info(f"Enqueued 'handle_seriesdelete' action for TVDB ID {series.tvdbid}")

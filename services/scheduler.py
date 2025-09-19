@@ -32,13 +32,13 @@ class ActionScheduler:
         self.action = action
         self.model = None
         self.max_retries = max_retries
-        logger.debug(f"Scheduler settings: poll_interval={poll_interval}s, max_retries={max_retries}, max_workers={max_workers}", extra={'emoji_type': 'debug'})
+        logger.verbose(f"Scheduler settings: poll_interval={poll_interval}s, max_retries={max_retries}, max_workers={max_workers}", extra={'emoji_type': 'debug'})
         
         executors = {'default': ThreadPoolExecutor(max_workers), 'plex': ThreadPoolExecutor(1), 'jellyfin': ThreadPoolExecutor(1)}
         job_defaults = {'max_instances': 1, 'coalesce': True}
         self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
         
-        logger.debug(f"Adding polling job with {poll_interval}s interval", extra={'emoji_type': 'debug'})
+        logger.verbose(f"Adding polling job with {poll_interval}s interval", extra={'emoji_type': 'debug'})
         self.scheduler.add_job(
             self.poll_and_enqueue,
             'interval',
@@ -49,7 +49,7 @@ class ActionScheduler:
         # Daily retry of failed subflows
         if settings.SCHEDULED_TIME_FAILED:
             hh, mm = map(int, settings.SCHEDULED_TIME_FAILED.split(':'))
-            logger.info(f"Scheduling daily retry at {hh:02d}:{mm:02d} for failed subflows", extra={'emoji_type': 'clock'})
+            logger.verbose(f"Scheduling daily retry at {hh:02d}:{mm:02d} for failed subflows", extra={'emoji_type': 'clock'})
             self.scheduler.add_job(
                 self.retry_failed_subflows,
                 'cron',
@@ -60,7 +60,7 @@ class ActionScheduler:
         else:
             logger.debug("No scheduled retry time configured", extra={'emoji_type': 'debug'})
         
-        logger.info(f"Scheduler for '{action}' initialized successfully", extra={'emoji_type': 'success'})
+        logger.verbose(f"Scheduler for '{action}' initialized successfully", extra={'emoji_type': 'success'})
 
     def start(self):
         logger.info(f"Starting scheduler for action '{self.action}'", extra={'emoji_type': 'start'})
@@ -74,9 +74,10 @@ class ActionScheduler:
         logger.verbose(f"Polling for subflows - action: {self.action}", extra={'emoji_type': 'search'})
         session = get_session()
         try:
+            # Process a batch of SubFlows per poll to increase throughput.
+            batch_size = getattr(settings, 'SCHEDULER_BATCH_SIZE', 8)
             with session.begin():
-                # Find a PENDING or FAILED subflow for this action/model (exclude QUEUED since it's already scheduled)
-                sf = (
+                sfs = (
                     session.query(SubFlow)
                     .with_for_update(skip_locked=True)
                     .filter(
@@ -87,32 +88,40 @@ class ActionScheduler:
                         SubFlow.action == self.action,
                     )
                     .order_by(SubFlow.id)
-                    .first()
+                    .limit(batch_size)
+                    .all()
                 )
-                if not sf:
+
+                if not sfs:
                     logger.verbose(f"No pending/failed subflows found for action '{self.action}'", extra={'emoji_type': 'debug'})
                     return
-                    
-                logger.info(f"Found subflow {sf.id} to process (status: {sf.status}, retry: {sf.retry_count})", extra={'emoji_type': 'processing'})
-                
-                # Get the next step to run
-                steps = sf.steps.split(',')
-                if sf.step_index >= len(steps):
-                    sf.status = 'DONE'
+
+                logger.verbose(f"Found {len(sfs)} subflow(s) to process for action '{self.action}'", extra={'emoji_type': 'processing'})
+
+                # Prepare scheduling plan: mark as QUEUED within the transaction, capture next step info
+                schedule_plan = []
+                for sf in sfs:
+                    steps = sf.steps.split(',')
+                    if sf.step_index >= len(steps):
+                        sf.status = 'DONE'
+                        session.add(sf)
+                        logger.verbose(f"SubFlow {sf.id} marked as complete - all steps finished", extra={'emoji_type': 'success'})
+                        continue
+
+                    next_func_name = steps[sf.step_index]
+                    logger.verbose(f"Next step for subflow {sf.id}: {next_func_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
+                    sf.status = 'QUEUED'
                     session.add(sf)
-                    logger.info(f"SubFlow {sf.id} marked as complete - all steps finished", extra={'emoji_type': 'success'})
-                    return
-                    
-                next_func_name = steps[sf.step_index]
-                logger.debug(f"Next step for subflow {sf.id}: {next_func_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
-                
-                sf.status = 'QUEUED'
-                session.add(sf)
-                
-            # Schedule the next step outside transaction
-            logger.debug(f"Scheduling subflow {sf.id} step: {next_func_name}", extra={'emoji_type': 'schedule'})
-            self._schedule_subflow(sf.id, self._get_flow_function(next_func_name), sf.episode_id)
-            
+                    schedule_plan.append((sf.id, next_func_name, sf.episode_id))
+
+            # Schedule each planned subflow outside the transaction
+            for sf_id, next_func_name, episode_id in schedule_plan:
+                logger.verbose(f"Scheduling subflow {sf_id} step: {next_func_name}", extra={'emoji_type': 'schedule'})
+                try:
+                    self._schedule_subflow(sf_id, self._get_flow_function(next_func_name), episode_id)
+                except Exception as e:
+                    logger.error(f"Failed to schedule subflow {sf_id} step {next_func_name}: {e}", extra={'emoji_type': 'error'})
+
         except Exception as e:
             logger.error(f"poll_and_enqueue error for action '{self.action}': {e}", extra={'emoji_type': 'error'})
         finally:
@@ -130,12 +139,12 @@ class ActionScheduler:
                 SubFlow.retry_count >= self.max_retries
             ).all()
             
-            logger.info(f"Found {len(failed)} failed subflows to retry for action '{self.action}'", extra={'emoji_type': 'processing'})
+            logger.verbose(f"Found {len(failed)} failed subflows to retry for action '{self.action}'", extra={'emoji_type': 'processing'})
             
             retry_count = 0
             for sf in failed:
                 try:
-                    logger.debug(f"Retrying subflow {sf.id} (was failed with {sf.retry_count} retries)", extra={'emoji_type': 'retry'})
+                    logger.verbose(f"Retrying subflow {sf.id} (was failed with {sf.retry_count} retries)", extra={'emoji_type': 'retry'})
                     sf.status = 'QUEUED'
                     sf.retry_count = 0
                     session.add(sf)
@@ -146,7 +155,7 @@ class ActionScheduler:
                         current_step = steps[sf.step_index]
                         self._schedule_subflow(sf.id, self._get_flow_function(current_step), sf.episode_id)
                         retry_count += 1
-                        logger.debug(f"Rescheduled subflow {sf.id} step: {current_step}", extra={'emoji_type': 'schedule'})
+                        logger.verbose(f"Rescheduled subflow {sf.id} step: {current_step}", extra={'emoji_type': 'schedule'})
                     else:
                         logger.warning(f"Subflow {sf.id} has invalid step_index {sf.step_index} >= {len(steps)}", extra={'emoji_type': 'warning'})
                         
@@ -154,7 +163,7 @@ class ActionScheduler:
                     logger.error(f"Failed to retry subflow {sf.id}: {step_error}", extra={'emoji_type': 'error'})
                     
             session.commit()
-            logger.info(f"Successfully retried {retry_count} failed subflows for action '{self.action}'", extra={'emoji_type': 'success'})
+            logger.verbose(f"Successfully retried {retry_count} failed subflows for action '{self.action}'", extra={'emoji_type': 'success'})
             
         except Exception as e:
             logger.error(f"retry_failed_subflows error for action '{self.action}': {e}", extra={'emoji_type': 'error'})
@@ -175,7 +184,7 @@ class ActionScheduler:
                 return
                 
             if sf.status != 'FAILED':
-                logger.debug(f"SubFlow {sf_id} status is {sf.status}, not resetting", extra={'emoji_type': 'debug'})
+                logger.verbose(f"SubFlow {sf_id} status is {sf.status}, not resetting", extra={'emoji_type': 'debug'})
                 return
                 
             # Reset retry count and status to allow retry
@@ -187,7 +196,7 @@ class ActionScheduler:
             session.add(sf)
             session.commit()
             
-            logger.info(f"Reset SubFlow {sf_id}: retry_count {old_retry_count}→0, status FAILED→PENDING", extra={'emoji_type': 'success'})
+            logger.verbose(f"Reset SubFlow {sf_id}: retry_count {old_retry_count}→0, status FAILED→PENDING", extra={'emoji_type': 'success'})
             
         except Exception as e:
             logger.error(f"Failed to reset SubFlow {sf_id}: {e}", extra={'emoji_type': 'error'})
@@ -204,7 +213,7 @@ class ActionScheduler:
         Returns:
             int: The ID of the enqueued object, or None on failure
         """
-        logger.info(f"Enqueuing object for processing - action: {self.action}", extra={'emoji_type': 'processing'})
+        logger.verbose(f"Enqueuing object for processing - action: {self.action}", extra={'emoji_type': 'processing'})
         session = get_session()
         
         if isinstance(obj, (Movie, Series, Episode)):
@@ -225,7 +234,7 @@ class ActionScheduler:
             if ent.status != 'PENDING':
                 # Check if this is a reprocessing request (entity is DONE but we want to restart)
                 if ent.status == 'DONE':
-                    logger.info(f"{self.model.__name__} {obj_id} has status 'DONE' - resetting to PENDING for reprocessing", extra={'emoji_type': 'refresh'})
+                    logger.verbose(f"{self.model.__name__} {obj_id} has status 'DONE' - resetting to PENDING for reprocessing", extra={'emoji_type': 'refresh'})
                     ent.status = 'PENDING'
                     ent.current_step_name = None  # Reset the step to start from beginning
                     session.add(ent)
@@ -250,9 +259,9 @@ class ActionScheduler:
                         existing_subflows = []
                         
                     if existing_subflows:
-                        logger.info(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {obj_id}, cancelling for reprocessing", extra={'emoji_type': 'refresh'})
+                        logger.verbose(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {obj_id}, cancelling for reprocessing", extra={'emoji_type': 'refresh'})
                         for old_sf in existing_subflows:
-                            logger.debug(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
+                            logger.verbose(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
                             old_sf.status = 'CANCELLED'
                             old_sf.error_message = f"Cancelled for reprocessing by action: {self.action}"
                             session.add(old_sf)
@@ -267,13 +276,13 @@ class ActionScheduler:
                                 
                                 for job_id in jobs_to_remove:
                                     self.scheduler.remove_job(job_id)
-                                    logger.debug(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
+                                    logger.verbose(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
                                     
                             except Exception as e:
                                 logger.warning(f"Failed to cancel job for SubFlow {old_sf.id}: {e}", extra={'emoji_type': 'warning'})
                         
                         session.commit()
-                        logger.info(f"Successfully reset {self.model.__name__} {obj_id} for reprocessing", extra={'emoji_type': 'success'})
+                        logger.verbose(f"Successfully reset {self.model.__name__} {obj_id} for reprocessing", extra={'emoji_type': 'success'})
                 else:
                     logger.warning(f"{self.model.__name__} {obj_id} has status '{ent.status}' (expected PENDING)", extra={'emoji_type': 'warning'})
                     return None
@@ -287,7 +296,7 @@ class ActionScheduler:
             self._create_subflows(obj_id, initial_entry)
             
             session.commit()
-            logger.info(f"Successfully enqueued {self.model.__name__} {obj_id} for processing", extra={'emoji_type': 'success'})
+            logger.verbose(f"Successfully enqueued {self.model.__name__} {obj_id} for processing", extra={'emoji_type': 'success'})
             return obj_id
             
         except Exception as e:
@@ -302,12 +311,12 @@ class ActionScheduler:
         ent_id: int,
         entry: Union[Callable, List[Callable], Dict[str, List[Callable]]],
     ):
-        logger.debug(f"Creating subflows for {self.model.__name__ if self.model else 'unknown'} {ent_id}", extra={'emoji_type': 'processing'})
+        logger.verbose(f"Creating subflows for {self.model.__name__ if self.model else 'unknown'} {ent_id}", extra={'emoji_type': 'processing'})
         session = get_session()
         try:
             # Initial explosion for Series: entry is first step, not a dict
             if not isinstance(entry, dict):
-                logger.debug(f"Processing single entry/list for {self.model.__name__}", extra={'emoji_type': 'debug'})
+                logger.verbose(f"Processing single entry/list for {self.model.__name__}", extra={'emoji_type': 'debug'})
                 
                 if self.model is Series:
                     eps = session.query(Episode.id).join(Season).filter(
@@ -315,16 +324,16 @@ class ActionScheduler:
                         Episode.status == 'PENDING'
                     ).all()
                     
-                    logger.info(f"Found {len(eps)} pending episodes for series {ent_id}", extra={'emoji_type': 'tv'})
+                    logger.verbose(f"Found {len(eps)} pending episodes for series {ent_id}", extra={'emoji_type': 'tv'})
                     
                     if eps:
                         for (eid,) in eps:
-                            logger.debug(f"Creating subflow for episode {eid}", extra={'emoji_type': 'debug'})
+                            logger.verbose(f"Creating subflow for episode {eid}", extra={'emoji_type': 'debug'})
                             self._make_or_schedule(
                                 session, ent_id, branch=str(eid), entry=entry, context=eid
                             )
                     else:
-                        logger.warning(f"No pending episodes found for series_id: {ent_id}", extra={'emoji_type': 'warning'})
+                        logger.verbose(f"No pending episodes found for series_id: {ent_id}", extra={'emoji_type': 'warning'})
                         return
                         
                 elif self.model is Episode:
@@ -333,33 +342,33 @@ class ActionScheduler:
                     if not episode:
                         logger.error(f"Invalid episode_id: {ent_id}", extra={'emoji_type': 'error'})
                         return
-                    logger.debug(f"Creating subflow for single episode {ent_id}", extra={'emoji_type': 'tv'})
+                    logger.verbose(f"Creating subflow for single episode {ent_id}", extra={'emoji_type': 'tv'})
                     self._make_or_schedule(
                         session, ent_id, branch=str(ent_id), entry=entry, context=ent_id
                     )
                     
                 elif self.model is Movie:
-                    logger.debug(f"Creating subflow for movie {ent_id}", extra={'emoji_type': 'movie'})
+                    logger.verbose(f"Creating subflow for movie {ent_id}", extra={'emoji_type': 'movie'})
                     self._make_or_schedule(
                         session, ent_id, branch="main", entry=entry, context=None
                     )
 
             # Handle dict branches at any step
             else:
-                logger.debug(f"Processing dict entry with {len(entry)} branches", extra={'emoji_type': 'debug'})
+                logger.verbose(f"Processing dict entry with {len(entry)} branches", extra={'emoji_type': 'debug'})
                 for branch_key, funcs in entry.items():
-                    logger.debug(f"Processing branch '{branch_key}' with {len(funcs) if isinstance(funcs, list) else 1} functions", extra={'emoji_type': 'branch'})
+                    logger.verbose(f"Processing branch '{branch_key}' with {len(funcs) if isinstance(funcs, list) else 1} functions", extra={'emoji_type': 'branch'})
                     
                     # Determine contexts based on model type
                     if self.model is Series:
                         contexts = [e.id for e in session.query(Episode.id).join(Season).filter(Season.series_id == ent_id)]
-                        logger.debug(f"Series branch: found {len(contexts)} episode contexts", extra={'emoji_type': 'tv'})
+                        logger.verbose(f"Series branch: found {len(contexts)} episode contexts", extra={'emoji_type': 'tv'})
                     elif self.model is Episode:
                         contexts = [ent_id]
-                        logger.debug(f"Episode branch: using single context {ent_id}", extra={'emoji_type': 'tv'})
+                        logger.verbose(f"Episode branch: using single context {ent_id}", extra={'emoji_type': 'tv'})
                     elif self.model is Movie:
                         contexts = [None]
-                        logger.debug(f"Movie branch: using None context", extra={'emoji_type': 'movie'})
+                        logger.verbose(f"Movie branch: using None context", extra={'emoji_type': 'movie'})
     
                     for ctx in contexts:
                         self._make_or_schedule(
@@ -380,9 +389,9 @@ class ActionScheduler:
         entry: Union[Callable, List[Callable]],
         context: Union[int, None],
     ):
-        logger.debug(f"Making/scheduling subflow for {self.model.__name__} {ent_id}, branch: {branch}, context: {context}", extra={'emoji_type': 'debug'})
-        
-        # Check for existing SubFlows for this entity and cancel them (including completed ones for fresh processing)
+        logger.verbose(f"Making/scheduling subflow for {self.model.__name__} {ent_id}, branch: {branch}, context: {context}", extra={'emoji_type': 'debug'})
+         
+         # Check for existing SubFlows for this entity and cancel them (including completed ones for fresh processing)
         if self.model is Movie:
             existing_subflows = session.query(SubFlow).filter(
                 SubFlow.movie_id == ent_id,
@@ -423,9 +432,9 @@ class ActionScheduler:
             existing_subflows = []
             
         if existing_subflows:
-            logger.info(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {ent_id} to cancel for fresh processing", extra={'emoji_type': 'warning'})
+            logger.verbose(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {ent_id} to cancel for fresh processing", extra={'emoji_type': 'warning'})
             for old_sf in existing_subflows:
-                logger.debug(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
+                logger.verbose(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
                 old_sf.status = 'CANCELLED'
                 old_sf.error_message = f"Cancelled for fresh processing by action: {self.action}"
                 session.add(old_sf)
@@ -441,18 +450,18 @@ class ActionScheduler:
                     
                     for job_id in jobs_to_remove:
                         self.scheduler.remove_job(job_id)
-                        logger.debug(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
+                        logger.verbose(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
                         
                 except Exception as e:
                     logger.warning(f"Failed to cancel job for SubFlow {old_sf.id}: {e}", extra={'emoji_type': 'warning'})
             
             session.commit()
-            logger.info(f"Successfully cancelled {len(existing_subflows)} conflicting subflows", extra={'emoji_type': 'success'})
+            logger.verbose(f"Successfully cancelled {len(existing_subflows)} conflicting subflows", extra={'emoji_type': 'success'})
         
         # steps string
         steps = (entry.__name__ if callable(entry) else
                 ','.join(f.__name__ for f in entry))
-        logger.debug(f"Subflow steps: {steps}", extra={'emoji_type': 'step'})
+        logger.verbose(f"Subflow steps: {steps}", extra={'emoji_type': 'step'})
         
         # lookup by identity - exclude cancelled and completed SubFlows for fresh processing
         filter_kwargs = {'branch': branch, 'steps': steps, 'action': self.action}
@@ -462,13 +471,13 @@ class ActionScheduler:
             filter_kwargs['series_id'] = ent_id
             filter_kwargs['episode_id'] = context
             
-        logger.debug(f"Looking for existing SubFlow with: {filter_kwargs}", extra={'emoji_type': 'debug'})
+        logger.verbose(f"Looking for existing SubFlow with: {filter_kwargs}", extra={'emoji_type': 'debug'})
         sf = session.query(SubFlow).filter_by(**filter_kwargs).filter(
             SubFlow.status.in_(['PENDING', 'QUEUED'])  # Only reuse pending/queued SubFlows, not completed ones
         ).first()
         
         if not sf:
-            logger.debug(f"No existing SubFlow found, creating new one for {self.model.__name__} {ent_id}", extra={'emoji_type': 'new'})
+            logger.verbose(f"No existing SubFlow found, creating new one for {self.model.__name__} {ent_id}", extra={'emoji_type': 'new'})
             sf = SubFlow(
                 movie_id=ent_id if self.model is Movie else None,
                 series_id=ent_id if self.model is Series else None,
@@ -481,13 +490,13 @@ class ActionScheduler:
             )
             session.add(sf)
             session.commit()
-            logger.info(f"Created SubFlow {sf.id} for {self.model.__name__} {ent_id}", extra={'emoji_type': 'success'})
+            logger.verbose(f"Created SubFlow {sf.id} for {self.model.__name__} {ent_id}", extra={'emoji_type': 'success'})
         else:
-            logger.debug(f"SubFlow already exists: {sf.id} (status: {sf.status})", extra={'emoji_type': 'info'})
-            
+            logger.verbose(f"SubFlow already exists: {sf.id} (status: {sf.status})", extra={'emoji_type': 'info'})
+             
         # schedule first function
         func = entry if callable(entry) else entry[0]
-        logger.debug(f"Scheduling first function: {func.__name__} for SubFlow {sf.id}", extra={'emoji_type': 'schedule'})
+        logger.verbose(f"Scheduling first function: {func.__name__} for SubFlow {sf.id}", extra={'emoji_type': 'schedule'})
         self._schedule_subflow(sf.id, func, context)
 
     def _schedule_subflow(
@@ -509,14 +518,14 @@ class ActionScheduler:
             executor = 'plex'
             # Check if Plex is enabled
             if not settings.plex_enabled:
-                logger.info(f"Cancelling Plex subflow {sf_id} function '{func.__name__}' - Plex is disabled", extra={'emoji_type': 'skip'})
+                logger.verbose(f"Cancelling Plex subflow {sf_id} function '{func.__name__}' - Plex is disabled", extra={'emoji_type': 'skip'})
                 self._cancel_subflow(sf_id, "Plex is disabled")
                 return
         elif 'jellyfin' in lname:
             executor = 'jellyfin'
             # Check if Jellyfin is enabled
             if not settings.jellyfin_enabled:
-                logger.info(f"Cancelling Jellyfin subflow {sf_id} function '{func.__name__}' - Jellyfin is disabled", extra={'emoji_type': 'skip'})
+                logger.verbose(f"Cancelling Jellyfin subflow {sf_id} function '{func.__name__}' - Jellyfin is disabled", extra={'emoji_type': 'skip'})
                 self._cancel_subflow(sf_id, "Jellyfin is disabled")
                 return
         else:
@@ -593,23 +602,24 @@ class ActionScheduler:
                 
                 # Determine model type for dynamic actions like playback
                 current_model = self.model
-                if current_model is None:
-                    # For dynamic actions, determine model type from SubFlow data
-                    if sf.movie_id is not None:
-                        current_model = Movie
-                    elif sf.episode_id is not None:
-                        current_model = Episode  
-                    elif sf.series_id is not None:
-                        current_model = Series
-                    else:
-                        logger.error(f"SubFlow {sf_id} has no entity ID set", extra={'emoji_type': 'error'})
+                # Prefer deriving model type from SubFlow's entity IDs so per-episode subflows run with Episode model.
+                if sf.movie_id is not None:
+                    current_model = Movie
+                elif sf.episode_id is not None:
+                    current_model = Episode
+                elif sf.series_id is not None:
+                    current_model = Series
+                else:
+                    # Fall back to scheduler's configured model
+                    current_model = self.model
+                    if current_model is None:
+                        logger.error(f"SubFlow {sf_id} has no entity ID set and scheduler has no default model", extra={'emoji_type': 'error'})
                         return
-                    logger.debug(f"Determined model type for SubFlow {sf_id}: {current_model.__name__}", extra={'emoji_type': 'debug'})
+                logger.verbose(f"Determined model type for SubFlow {sf_id}: {current_model.__name__}", extra={'emoji_type': 'debug'})
                 
                 for attempt in range(self.max_retries):
                     try:
                         arg = context if context is not None else sf.movie_id
-                        # Verbose instead of noisy debug for per-call details
                         logger.verbose(f"Calling {step_name} with arg={arg}, model={current_model}, action={self.action}", extra={'emoji_type': 'debug'})
                         
                         flow_func = self._get_flow_function(step_name)
@@ -617,7 +627,7 @@ class ActionScheduler:
                         success = bool(result)
 
                         if success:
-                            logger.info(f"Step '{step_name}' succeeded for subflow {sf_id} on attempt {attempt + 1}", extra={'emoji_type': 'success'})
+                            logger.verbose(f"Step '{step_name}' succeeded for subflow {sf_id} on attempt {attempt + 1}", extra={'emoji_type': 'success'})
                             break
                         else:
                             # Non-exceptional failure: count as a retry so we don't loop forever
@@ -633,7 +643,7 @@ class ActionScheduler:
                         logger.verbose(f"Full traceback for subflow {sf_id} attempt {attempt + 1}:\n{tb}", extra={'emoji_type': 'debug'})
                         
                         if attempt < self.max_retries - 1:
-                            logger.debug(f"Will retry step '{step_name}' for subflow {sf_id}", extra={'emoji_type': 'retry'})
+                            logger.verbose(f"Will retry step '{step_name}' for subflow {sf_id}", extra={'emoji_type': 'retry'})
                         else:
                             logger.error(f"All {self.max_retries} attempts failed for step '{step_name}' subflow {sf_id}", extra={'emoji_type': 'error'})
             else:
@@ -653,13 +663,13 @@ class ActionScheduler:
                 if sf.step_index + 1 < len(steps):
                     sf.step_index += 1
                     next_name = steps[sf.step_index]
-                    logger.info(f"SubFlow {sf_id} advancing to next step: {next_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
+                    logger.verbose(f"SubFlow {sf_id} advancing to next step: {next_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
                     # Update status but don't mark as DONE yet since there are more steps
                     session.add(sf)
                     session.commit()
                     self._schedule_subflow(sf_id, self._get_flow_function(next_name), context)
                 else:
-                    logger.info(f"SubFlow {sf_id} completed all steps, marking as DONE and checking for remaining subflows", extra={'emoji_type': 'success'})
+                    logger.verbose(f"SubFlow {sf_id} completed all steps, marking as DONE and checking for remaining subflows", extra={'emoji_type': 'success'})
                     
                     # Mark this SubFlow as DONE first, then check for remaining
                     sf.status = 'DONE'
@@ -768,14 +778,14 @@ class ActionScheduler:
                         if entity:
                             # Get the step name that was just completed
                             completed_step_name = step_name  # This is the step that just finished
-                            logger.debug(f"Updating {check_model.__name__} {advance_id} current_step_name from '{entity.current_step_name}' to '{completed_step_name}'", extra={'emoji_type': 'debug'})
+                            logger.verbose(f"Updating {check_model.__name__} {advance_id} current_step_name from '{entity.current_step_name}' to '{completed_step_name}'", extra={'emoji_type': 'debug'})
                             entity.current_step_name = completed_step_name
                             session.add(entity)
                             session.commit()
                         
                         self._advance_entity(advance_id, check_model)
                     elif still_pending:
-                        logger.debug(f"Still have pending subflows for {check_model.__name__ if check_model else 'unknown'} action {self.action}, not advancing yet", extra={'emoji_type': 'info'})
+                        logger.verbose(f"Still have pending subflows for {check_model.__name__ if check_model else 'unknown'} action {self.action}, not advancing yet", extra={'emoji_type': 'info'})
                     else:
                         logger.warning(f"Could not determine advance_id for {check_model.__name__ if check_model else 'unknown'}", extra={'emoji_type': 'warning'})
 
@@ -792,7 +802,7 @@ class ActionScheduler:
                         f.write(f"Context: {context}\n")
                         f.write(f"Error: {error}\n\n")
                         f.write(traceback.format_exc())
-                    logger.debug(f"Error details written to {log_dir}/error_{step_name}.log", extra={'emoji_type': 'debug'})
+                    logger.verbose(f"Error details written to {log_dir}/error_{step_name}.log", extra={'emoji_type': 'debug'})
                 except Exception as log_error:
                     logger.error(f"Failed to write error log: {log_error}", extra={'emoji_type': 'error'})
                 
@@ -801,7 +811,7 @@ class ActionScheduler:
                 session.commit()
                 
                 # Schedule a retry after 10 seconds to reset retry_count and try again
-                logger.info(f"Scheduling retry for failed SubFlow {sf_id} in 10 seconds", extra={'emoji_type': 'retry'})
+                logger.verbose(f"Scheduling retry for failed SubFlow {sf_id} in 10 seconds", extra={'emoji_type': 'retry'})
                 run_at = datetime.now() + timedelta(seconds=10)
                 self.scheduler.add_job(
                     func=self._reset_failed_subflow,
@@ -814,12 +824,12 @@ class ActionScheduler:
             
         except Exception as outer_error:
             logger.error(f"Critical error in _run_subflow for {sf_id}: {outer_error}", extra={'emoji_type': 'error'})
-            logger.debug(f"Critical error traceback:\n{traceback.format_exc()}", extra={'emoji_type': 'debug'})
+            logger.verbose(f"Critical error traceback:\n{traceback.format_exc()}", extra={'emoji_type': 'debug'})
         finally:
             session.close()
 
     def _advance_entity(self, ent_id: int, model_type=None):
-        logger.info(f"Advancing entity {ent_id} to next flow stage", extra={'emoji_type': 'processing'})
+        logger.verbose(f"Advancing entity {ent_id} to next flow stage", extra={'emoji_type': 'processing'})
         session = get_session()
         try:
             # Use provided model type or fall back to scheduler's model
@@ -839,7 +849,7 @@ class ActionScheduler:
             
             if entry:
                 new_step_name = flow_manager.get_entry_id(self.action, entry)
-                logger.info(f"Advancing {entity_model.__name__} {ent_id} from '{ent.current_step_name}' to '{new_step_name}'", extra={'emoji_type': 'step'})
+                logger.verbose(f"Advancing {entity_model.__name__} {ent_id} from '{ent.current_step_name}' to '{new_step_name}'", extra={'emoji_type': 'step'})
                 
                 ent.current_step_name = new_step_name
                 ent.status = 'QUEUED'                    
@@ -896,7 +906,7 @@ class ActionScheduler:
                 logger.warning(f"Manual advancement check not implemented for {self.model.__name__}", extra={'emoji_type': 'warning'})
                 return
             
-            logger.info(f"Found {len(active_subflows)} active SubFlows for {self.model.__name__} {ent_id}", extra={'emoji_type': 'info'})
+            logger.verbose(f"Found {len(active_subflows)} active SubFlows for {self.model.__name__} {ent_id}", extra={'emoji_type': 'info'})
             
             # Check if any are still pending
             pending = [sf for sf in active_subflows if sf.status in ['PENDING', 'QUEUED', 'FAILED']]
@@ -905,9 +915,10 @@ class ActionScheduler:
                 logger.info(f"No pending SubFlows found, advancing {self.model.__name__} {ent_id}", extra={'emoji_type': 'success'})
                 self._advance_entity(ent_id)
             else:
-                logger.info(f"Still have {len(pending)} pending SubFlows, not advancing yet", extra={'emoji_type': 'info'})
+                logger.verbose(f"Still have {len(pending)} pending SubFlows, not advancing yet", extra={'emoji_type': 'info'})
                 for sf in pending:
-                    logger.debug(f"  Pending SubFlow {sf.id}: {sf.status} - {sf.steps}", extra={'emoji_type': 'debug'})
+                    logger.verbose(f"  Pending SubFlow {sf.id}: {sf.status} - {sf.steps}", extra={'emoji_type': 'debug'})
+
         except Exception as e:
             logger.error(f"Error checking entity advancement: {e}", extra={'emoji_type': 'error'})
         finally:
