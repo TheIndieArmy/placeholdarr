@@ -923,23 +923,13 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             return False
     
     elif model is Episode:
-        sf_eps = session.query(SubFlow).filter(
-            SubFlow.steps == "delayed_placeholders",
-            SubFlow.episode_id != None,
-            SubFlow.episode_id.in_([ent_id])
-        ).all()
-
-        # Get the episode from the database
-        ep = session.query(Episode).get(ent_id)
-        if not ep:
+        # Look up the current episode, season, and series to determine the series_id
+        current_ep = session.query(Episode).get(ent_id)
+        if not current_ep:
             logger.error(f"Episode with id {ent_id} not found", extra={'emoji_type': 'error'})
             return False
 
-        # Check if the episode has is_4k attribute
-        if hasattr(ep, 'is_4k') and ep.is_4k:
-            is_4k = True
-
-        seas = session.query(Season).get(ep.season_id)
+        seas = session.query(Season).get(current_ep.season_id)
         if not seas:
             logger.error(f"Season for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
@@ -949,7 +939,24 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             logger.error(f"Series for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
 
-        # Delay before processing
+        # Query all SubFlow rows for this series that are waiting on delayed_placeholders
+        sf_eps = session.query(SubFlow).filter(
+            SubFlow.steps == "delayed_placeholders",
+            SubFlow.series_id == series.id,
+            SubFlow.status != "DONE"
+        ).order_by(SubFlow.id).all()
+
+        # Determine 4K status from the current episode/series
+        is_4k = False
+        try:
+            if hasattr(current_ep, 'is_4k') and current_ep.is_4k:
+                is_4k = True
+            elif hasattr(series, 'is_4k') and series.is_4k:
+                is_4k = True
+        except Exception:
+            is_4k = False
+
+        # Delay briefly before processing the batch
         logger.debug(
             f"Delaying {delay_seconds}s before processing placeholders for series '{series.title}'",
             extra={'emoji_type': 'debug'}
@@ -960,78 +967,98 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
         tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
 
         placeholder_count = 0
-        for episode in sf_eps:
-            ep = session.query(Episode).get(episode.episode_id)
-            if not ep.dummypath and not ep.filepath:
-                logger.debug(f"Processing Episode {ep.episode_number} - {ep.title}", extra={'emoji_type': 'debug'})
-                season_num = seas.season_number
-                episode_num = ep.episode_number
-                episode_title = ep.title
-                ep_tvdb_id = getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None)
 
-                if not (season_num and episode_num):
-                    logger.error(f"Missing season or episode number for {ep.title}", extra={'emoji_type': 'error'})
+        # Normalize tvdb for the series and current episode
+        normalized_series_tvdb = None
+        try:
+            normalized_series_tvdb = getattr(series, 'tvdbid', None) or getattr(series, 'tvdb_id', None)
+        except Exception:
+            normalized_series_tvdb = None
 
-                # Check if episode already has a real file
-                from services.queue_monitor import check_episode_has_file
+        # Iterate all pending subflows for this series and create placeholders
+        for subflow in sf_eps:
+            # Load the episode row referenced by the subflow
+            if not subflow.episode_id:
+                # If this SubFlow isn't an episode-level entry, skip
+                continue
 
-                # Ensure series has a Sonarr id when possible; try a Sonarr lookup by TVDB if missing
-                try:
-                    series_sonarrid = getattr(series, 'sonarrid', None)
-                    if not series_sonarrid and getattr(series, 'tvdbid', None):
-                        config = get_arr_config('tv', is_4k)
-                        if config:
-                            headers = {'X-Api-Key': config['api_key']}
-                            lookup = requests.get(
-                                f"{config['url']}/series/lookup",
-                                params={'term': f"tvdb:{int(series.tvdbid)}"},
-                                headers=headers,
-                                timeout=10
-                            )
-                            if lookup.ok:
-                                results = lookup.json()
-                                if isinstance(results, list) and results:
-                                    found = results[0]
-                                    if found.get('id'):
-                                        series.sonarrid = found.get('id')
-                                        session.add(series)
-                                        session.commit()
-                except Exception:
-                    logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
+            ep = session.query(Episode).get(subflow.episode_id)
+            if not ep:
+                # Mark the subflow DONE to avoid reprocessing orphan entries
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+                continue
 
-                # Normalize tvdb id lookup (support both tvdbid and tvdb_id attribute names)
-                normalized_tvdb = None
-                try:
-                    normalized_tvdb = getattr(ep, 'tvdbid', None) or getattr(series, 'tvdbid', None) or getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None)
-                except Exception:
-                    normalized_tvdb = ep_tvdb_id
+            # Skip if real file exists or placeholder already set
+            if getattr(ep, 'filepath', None) or getattr(ep, 'dummypath', None):
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+                continue
 
+            # Ensure season info available
+            season_rec = session.query(Season).get(ep.season_id) if ep.season_id else None
+            if not season_rec:
+                logger.error(f"Missing season for episode id {ep.id}", extra={'emoji_type': 'error'})
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+                continue
+
+            season_num = season_rec.season_number
+            episode_num = ep.episode_number
+            episode_title = ep.title
+
+            # Normalize tvdb id for checks/enrichment
+            normalized_tvdb = None
+            try:
+                normalized_tvdb = getattr(ep, 'tvdbid', None) or getattr(series, 'tvdbid', None) or getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None) or normalized_series_tvdb
+            except Exception:
+                normalized_tvdb = normalized_series_tvdb
+
+            # Quick check: if episode already has a real file via queue monitor, skip
+            from services.queue_monitor import check_episode_has_file
+            try:
                 if normalized_tvdb and check_episode_has_file(normalized_tvdb, season_num, episode_num, is_4k):
                     logger.info(
                         f"Skipping placeholder for {series.title} S{season_num}E{episode_num} (real file exists)",
                         extra={'emoji_type': 'skip'}
                     )
-                    # mark this subflow entry done and continue
-                    episode.status = "DONE"
-                    session.add(episode)
+                    subflow.status = "DONE"
+                    session.add(subflow)
                     session.commit()
                     continue
+            except Exception:
+                logger.debug("Episode file check failed, will continue with placeholder creation", extra={'emoji_type': 'debug'})
 
-                # If Sonarr info is missing, attempt enrichment to populate sonarrid/tvdbid
-                try:
-                    series_sonarrid = getattr(series, 'sonarrid', None)
-                    if not series_sonarrid and normalized_tvdb:
-                        # Attempt to enrich series data from Sonarr
-                        series_data = enrich_series_from_sonarr(tvdb_id=normalized_tvdb, is_4k=is_4k)
-                        if series_data and series_data.get('id'):
-                            series.sonarrid = series_data.get('id')
-                            # persist the discovered sonarr id for future checks
-                            session.add(series)
-                            session.commit()
-                except Exception:
-                    logger.debug("Series enrichment from Sonarr failed or returned no data", extra={'emoji_type': 'debug'})
+            # Attempt Sonarr enrichment once for the series if needed
+            try:
+                series_sonarrid = getattr(series, 'sonarrid', None)
+                if not series_sonarrid and normalized_series_tvdb:
+                    config = get_arr_config('tv', is_4k)
+                    if config:
+                        headers = {'X-Api-Key': config['api_key']}
+                        lookup = requests.get(
+                            f"{config['url']}/series/lookup",
+                            params={'term': f"tvdb:{int(normalized_series_tvdb)}"},
+                            headers=headers,
+                            timeout=10
+                        )
+                        if lookup.ok:
+                            results = lookup.json()
+                            if isinstance(results, list) and results:
+                                found = results[0]
+                                if found.get('id'):
+                                    series.sonarrid = found.get('id')
+                                    session.add(series)
+                                    session.commit()
+            except Exception:
+                logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
 
-                # Create placeholder file
+            # Create the placeholder file for this episode
+            dummy_path = None
+            try:
                 dummy_path = place_dummy_file(
                     "tv",
                     series.title,
@@ -1042,26 +1069,31 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     episode_range=(episode_num, episode_num),
                     episode_title=episode_title
                 )
+            except Exception as e:
+                logger.error(f"Error creating dummy for {series.title} S{season_num}E{episode_num}: {e}", extra={'emoji_type': 'error'})
 
-                if dummy_path:
-                    ep.dummypath = dummy_path
-                    session.add(ep)
-                    placeholder_count += 1
+            if dummy_path:
+                ep.dummypath = dummy_path
+                session.add(ep)
+                # Commit immediately so external scanners and other workers see file presence
+                session.commit()
+                placeholder_count += 1
+                logger.debug(f"Persisted placeholder for {series.title} S{season_num}E{episode_num}", extra={'emoji_type': 'debug'})
 
-            episode.status = "DONE"
-            session.add(episode)
+            # Mark this subflow entry DONE and commit so it's not reprocessed
+            subflow.status = "DONE"
+            session.add(subflow)
             session.commit()
 
         if placeholder_count > 0:
-            session.commit()
             logger.info(
                 f"Created {placeholder_count} placeholder files for '{series.title}'",
                 extra={'emoji_type': 'success'}
             )
-            return True
         else:
             logger.info(f"No placeholders needed for '{series.title}'", extra={'emoji_type': 'info'})
-            return True
+
+        return True
 
     else:
         logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
