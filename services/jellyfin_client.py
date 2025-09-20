@@ -1252,15 +1252,6 @@ def update_jellyfin_title_status(
         orig = strip_status_markers(movie.jellyfin_title)
         new_name = f"[Request] {orig}" if movie.placeholder_status == "Request" else f"{orig} - [{movie.placeholder_status}]" if movie.placeholder_status else orig
         new_ovr = _prepend_status_to_summary(movie.jellyfin_overview, movie.placeholder_status)
-        
-        # Update the database record immediately
-        movie.jellyfin_title = new_name
-        movie.jellyfin_overview = new_ovr
-        dbsession.add(movie)
-        dbsession.commit()
-        logger.info(f"Updated database record for movie {ent_id}: '{new_name}'", extra={'emoji_type': 'success'})
-        
-        # Always prepare for Jellyfin API update (dummy files also need title updates)
         targets.append((jellyfin_item_id, new_name, new_ovr))
         logger.debug(f"Preparing movie title update: '{new_name}'", extra={'emoji_type': 'debug'})
     else:
