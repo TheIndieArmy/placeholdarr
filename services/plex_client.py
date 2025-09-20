@@ -541,30 +541,59 @@ def verify_arr_scan_plex(dbsession: Session, ent_id: int, model: Type, action) -
     # MOVIE CASE
     if model is Movie:
         m = dbsession.query(Movie).get(ent_id)
-        if not m or not m.filepath:
+        if not m or not getattr(m, 'filepath', None):
             return False
-            
-        # Try to find the movie by TMDB ID
-        movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
+
+        # Normalize TMDB id across possible attribute names
+        tmdb_id = getattr(m, 'tmdbid', None) or getattr(m, 'tmdb_id', None)
+
+        # Try primary helper that handles GUIDs, paths, and title fallbacks
         movie = None
-        
-        for plexMovie in movie_section.all():
-            # Try to match by TMDB ID in GUID
-            for guid in plexMovie.guids:
-                if f'tmdb://{m.tmdbid}' in guid.id:
-                    movie = plexMovie
-                    break
-                    
-            # Try to match by filepath
-            if not movie and hasattr(plexMovie, 'locations'):
-                for location in plexMovie.locations:
-                    if location == m.filepath:
-                        movie = plexMovie
+        try:
+            if tmdb_id:
+                movie = find_movie_by_id(tmdb_id, title=m.title, year=m.year)
+        except Exception:
+            movie = None
+
+        # Fallbacks: try matching by filepath locations or title if helper failed
+        if not movie:
+            try:
+                movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
+            except Exception as ex:
+                logger.error(f"❌ Cannot access movie section {settings.PLEX_MOVIE_SECTION_ID}: {ex}", extra={'emoji_type': 'error'})
+                return False
+
+            # 1) Try to match by exact filepath
+            if getattr(m, 'filepath', None):
+                for plexMovie in movie_section.all():
+                    try:
+                        if hasattr(plexMovie, 'locations') and plexMovie.locations:
+                            # Locations can be a list of paths; compare normalized paths
+                            for loc in plexMovie.locations:
+                                if loc == m.filepath:
+                                    movie = plexMovie
+                                    break
+                        # Also try matching folder path containing tmdb tag when available
+                        if not movie and tmdb_id and hasattr(plexMovie, 'locations') and plexMovie.locations:
+                            for loc in plexMovie.locations:
+                                if f"tmdb-{tmdb_id}" in loc.lower():
+                                    movie = plexMovie
+                                    break
+                    except Exception:
+                        continue
+                    if movie:
                         break
-                        
-            if movie:
-                break
-                
+
+            # 2) Last resort: title+year matching via section.get
+            if not movie:
+                try:
+                    clean_title = m.title
+                    if isinstance(clean_title, str) and '(' in clean_title and ')' in clean_title:
+                        clean_title = clean_title.split('(')[0].strip()
+                    movie = movie_section.get(clean_title)
+                except Exception:
+                    movie = None
+
         if movie:
             # Create dict representation for save function
             match_dict = {
@@ -574,7 +603,7 @@ def verify_arr_scan_plex(dbsession: Session, ent_id: int, model: Type, action) -
             }
             save_plex_arr_id(dbsession, Movie, m.id, match_dict)
             return True
-            
+
         return False
 
     # EPISODE CASE
@@ -743,100 +772,155 @@ def verify_dummy_scan_plex(dbsession: Session, ent_id: int, model: Type, action)
     ep = dbsession.query(Episode).get(ent_id)
     if not ep or not ep.dummypath:
         return False
-        
-    seas = dbsession.query(Season).get(ep.season_id)
-    series = dbsession.query(Series).get(seas.series_id)
-    
-    # 1) Find series by TVDB ID
-    tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
+
+    # Use Episode convenience properties where possible
+    target_season_number = getattr(ep, 'season_number', None)
+    target_series_id = getattr(ep, 'series_id', None)
+
+    # Resolve Series and Season via DB if needed
+    seas = None
+    series = None
+    try:
+        if not target_series_id:
+            seas = dbsession.query(Season).get(ep.season_id)
+            series = dbsession.query(Series).get(seas.series_id) if seas else None
+            target_series_id = series.id if series else None
+            target_season_number = seas.season_number if seas else target_season_number
+        else:
+            # If we have series_id from hybrid property, fetch records for completeness
+            series = dbsession.query(Series).get(target_series_id)
+            seas = dbsession.query(Season).get(ep.season_id) if ep.season_id else None
+    except Exception:
+        seas = dbsession.query(Season).get(ep.season_id) if ep.season_id else None
+        series = dbsession.query(Series).get(seas.series_id) if seas and seas.series_id else None
+
+    if not series:
+        logger.warning(f"⚠️ Could not resolve Series for episode id {ent_id}", extra={'emoji_type': 'warning'})
+        return False
+
+    # 1) Find series in Plex by TVDB id using helper (more robust than scanning all shows)
     plex_series = None
-    
-    for s in tv_section.all():
-        for guid in s.guids:
-            if f'tvdb://{series.tvdbid}' in guid.id:
-                plex_series = s
-                break
-        if plex_series:
-            break
-            
+    try:
+        plex_series = find_show_by_id(series.tvdbid, title=series.title)
+    except Exception as e:
+        logger.debug(f"find_show_by_id failed: {e}", extra={'emoji_type': 'debug'})
+        plex_series = None
+
     if not plex_series:
         logger.warning(f"⚠️ Series with TVDB ID {series.tvdbid} not found in Plex", extra={'emoji_type': 'warning'})
         return False
         
-    # Save series ID
-    series_match = {
-        'Id': plex_series.ratingKey,
-        'Name': plex_series.title,
-        'Overview': plex_series.summary if hasattr(plex_series, 'summary') else ''
-    }
-    save_plex_dummy_id(dbsession, Series, series.id, series_match)
-    
-    # 2) Find season
+    # Save series dummy id/title
+    try:
+        series_match = {
+            'Id': plex_series.ratingKey,
+            'Name': plex_series.title,
+            'Overview': plex_series.summary if hasattr(plex_series, 'summary') else ''
+        }
+        save_plex_dummy_id(dbsession, Series, series.id, series_match)
+    except Exception as e:
+        logger.debug(f"Failed to save series plex dummy id: {e}", extra={'emoji_type': 'debug'})
+
+    # 2) Find matching season within the Plex series
     plex_season = None
-    for s in plex_series.seasons():
-        if s.index == seas.season_number:
-            plex_season = s
-            break
-            
+    try:
+        for s in plex_series.seasons():
+            if target_season_number is not None and s.index == int(target_season_number):
+                plex_season = s
+                break
+    except Exception as e:
+        logger.error(f"Error enumerating seasons for Plex series: {e}", extra={'emoji_type': 'error'})
+        return False
+
     if not plex_season:
-        logger.warning(f"⚠️ Season {seas.season_number} not found for series {plex_series.title}", extra={'emoji_type': 'warning'})
+        logger.warning(f"⚠️ Season {target_season_number} not found for series {plex_series.title}", extra={'emoji_type': 'warning'})
         return False
         
-    # Save season ID
-    season_match = {
-        'Id': plex_season.ratingKey,
-        'Name': plex_season.title,
-        'Overview': plex_season.summary if hasattr(plex_season, 'summary') else ''
-    }
-    save_plex_dummy_id(dbsession, Season, seas.id, season_match)
-    
-    # 3) Process queued episode SubFlows for this series
-    ep_ids = [e.id for e in dbsession.query(Episode).join(Season).filter(Season.series_id == series.id)]
+    # Save season dummy id/title
+    try:
+        season_match = {
+            'Id': plex_season.ratingKey,
+            'Name': plex_season.title,
+            'Overview': plex_season.summary if hasattr(plex_season, 'summary') else ''
+        }
+        save_plex_dummy_id(dbsession, Season, seas.id, season_match)
+    except Exception as e:
+        logger.debug(f"Failed to save season plex dummy id: {e}", extra={'emoji_type': 'debug'})
+
+    # 3) Gather all Episode SubFlows queued for this series
+    try:
+        ep_ids = [e.id for e in dbsession.query(Episode).join(Season).filter(Season.series_id == series.id)]
+    except Exception:
+        ep_ids = [e.id for e in dbsession.query(Episode).filter(Episode.season_id == ep.season_id).all()]
+
     queued = dbsession.query(SubFlow).filter(
         SubFlow.status == 'QUEUED',
         SubFlow.action == action,
         SubFlow.episode_id.in_(ep_ids)
     ).all()
-    
+
     if not queued:
+        logger.debug(f"No queued SubFlows found for series id {series.id} and action {action}", extra={'emoji_type': 'debug'})
         return False
         
     matched = False
-    
-    # 4) Match each queued episode
+
+    # 4) Match each queued episode by season/episode number and dummypath
     for sf in queued:
         steps = sf.steps.split(',')
         if sf.step_index < len(steps) and steps[sf.step_index] != 'verify_dummy_scan_plex':
             continue
-            
+
         ep2 = dbsession.query(Episode).get(sf.episode_id)
-        if not ep2 or ep2.season_number != seas.season_number:
+        if not ep2:
             continue
-            
+
+        # Ensure same season
+        if getattr(ep2, 'season_number', None) != target_season_number:
+            continue
+
         plex_episode = None
-        for e in plex_season.episodes():
-            if e.index == ep2.episode_number:
-                # Check dummypath match if possible
-                if hasattr(e, 'locations') and e.locations and e.locations[0] == ep2.dummypath:
+        try:
+            for e in plex_season.episodes():
+                if e.index == ep2.episode_number:
+                    # Check dummypath match if available
+                    if hasattr(e, 'locations') and e.locations and ep2.dummypath and e.locations[0] == ep2.dummypath:
+                        plex_episode = e
+                        break
+                    # Otherwise match by episode number
                     plex_episode = e
-                    break
-                # Otherwise just match by number
-                plex_episode = e
-                
+        except Exception as e:
+            logger.error(f"Error iterating plex episodes for season: {e}", extra={'emoji_type': 'error'})
+            continue
+
         if plex_episode:
-            episode_match = {
-                'Id': plex_episode.ratingKey,
-                'Name': plex_episode.title,
-                'Overview': plex_episode.summary if hasattr(plex_episode, 'summary') else ''
-            }
-            save_plex_dummy_id(dbsession, Episode, ep2.id, episode_match)
-            sf.status = 'DONE'
-            dbsession.add(sf)
-            if ep2.id == ent_id:
-                matched = True
-    
+            try:
+                episode_match = {
+                    'Id': plex_episode.ratingKey,
+                    'Name': plex_episode.title,
+                    'Overview': plex_episode.summary if hasattr(plex_episode, 'summary') else ''
+                }
+                save_plex_dummy_id(dbsession, Episode, ep2.id, episode_match)
+                # Advance this SubFlow to the next step if it has more steps,
+                # otherwise mark it as DONE. This ensures follow-up steps like
+                # update_placeholder_status are executed.
+                steps = sf.steps.split(',') if sf.steps else []
+                if sf.step_index + 1 < len(steps):
+                    sf.step_index += 1
+                    sf.status = 'QUEUED'
+                else:
+                    sf.status = 'DONE'
+                dbsession.add(sf)
+                if ep2.id == ent_id:
+                    matched = True
+            except Exception as e:
+                logger.error(f"Failed to save plex episode match for ep {ep2.id}: {e}", extra={'emoji_type': 'error'})
+
     if not matched:
         logger.warning(f"⚠️ No matching Plex episode found for {ep.dummypath}", extra={'emoji_type': 'warning'})
+        # commit subflow status updates even if not matched to avoid indefinite retries
+        dbsession.commit()
+        return False
         
     dbsession.commit()
     return matched

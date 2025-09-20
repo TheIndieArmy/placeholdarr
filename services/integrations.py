@@ -4,7 +4,7 @@ from core.config import settings
 from core.logger import logger
 from services.postgres.models import Episode, Movie, Season, Series, SubFlow
 from services.utils import (
-    sanitize_filename, strip_status_markers, get_series_folder,
+    resolve_final_folder, sanitize_filename, strip_status_markers, get_series_folder,
     get_arr_config
 )
 from services.plex_client import plex
@@ -40,8 +40,6 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         if not base_path:
             base_path = settings.MOVIE_LIBRARY_FOLDER if media_type == "movie" else settings.TV_LIBRARY_FOLDER
 
-        from services.utils import get_folder_path
-
         # Clean title
         clean_title = sanitize_filename(title)
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
@@ -67,32 +65,37 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                     else:
                         raise
 
+        # Resolve final folder using canonical resolver (prefer ARR-provided folder paths)
         if media_type == 'tv' and season_number is not None:
-            season_folder = get_folder_path(
+            final_folder = resolve_final_folder(
                 media_type='tv',
-                base_path=base_path,
                 title=title,
                 year=year,
                 media_id=media_id,
-                season=season_number
+                season_number=season_number
             )
-            os.makedirs(season_folder, exist_ok=True)
+
+            if not final_folder:
+                logger.error(f"No valid folder path for dummy file creation for {title} S{season_number}", extra={'emoji_type': 'error'})
+                return None
+
+            os.makedirs(final_folder, exist_ok=True)
             # Ensure folder has open permissions (match legacy behavior)
             try:
                 # chmod the season folder and its parent series folder to be permissive
-                os.chmod(season_folder, 0o777)
-                parent = os.path.dirname(season_folder)
+                os.chmod(final_folder, 0o777)
+                parent = os.path.dirname(final_folder)
                 if parent:
                     os.chmod(parent, 0o777)
             except Exception as e:
-                logger.verbose(f"Failed to chmod season folder {season_folder}: {e}", extra={'emoji_type': 'debug'})
+                logger.verbose(f"Failed to chmod season folder {final_folder}: {e}", extra={'emoji_type': 'debug'})
 
             if episode_range:
                 start_ep, end_ep = episode_range
                 for ep_num in range(int(start_ep), int(end_ep) + 1):
                     ep_title = episode_title or f"Episode {ep_num}"
                     file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
-                    file_path = os.path.join(season_folder, sanitize_filename(file_name))
+                    file_path = os.path.join(final_folder, sanitize_filename(file_name))
 
                     if os.path.exists(file_path):
                         os.remove(file_path)
@@ -104,25 +107,29 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
 
                 ep_title = episode_title or f"Episode {start_ep}"
                 file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
-                return os.path.join(season_folder, sanitize_filename(file_name))
+                return os.path.join(final_folder, sanitize_filename(file_name))
 
         else:
-            movie_folder = get_folder_path(
+            final_folder = resolve_final_folder(
                 media_type='movie',
-                base_path=base_path,
                 title=title,
                 year=year,
                 media_id=media_id
             )
-            os.makedirs(movie_folder, exist_ok=True)
+
+            if not final_folder:
+                logger.error(f"No valid folder path for dummy file creation for movie {title}", extra={'emoji_type': 'error'})
+                return None
+
+            os.makedirs(final_folder, exist_ok=True)
             # Ensure movie folder has open permissions (match legacy behavior)
             try:
-                os.chmod(movie_folder, 0o777)
+                os.chmod(final_folder, 0o777)
             except Exception as e:
-                logger.verbose(f"Failed to chmod movie folder {movie_folder}: {e}", extra={'emoji_type': 'debug'})
+                logger.verbose(f"Failed to chmod movie folder {final_folder}: {e}", extra={'emoji_type': 'debug'})
 
             file_name = f"{clean_title}{year_str} (dummy).mp4"
-            file_path = os.path.join(movie_folder, sanitize_filename(file_name))
+            file_path = os.path.join(final_folder, sanitize_filename(file_name))
 
             if os.path.exists(file_path):
                 os.remove(file_path)
