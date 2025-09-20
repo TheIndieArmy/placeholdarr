@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
 
 class Movie(Base):
@@ -105,8 +106,6 @@ class Series(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
-    # Boolean to track if placeholder file physically exists
-    placeholder_exists = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='series')
@@ -121,7 +120,8 @@ class Season(Base):
     __tablename__ = "season"
     id = Column(Integer, primary_key=True, autoincrement=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=False)
-    season_number = Column(Integer, nullable=False, index=True, unique=True)
+    # season_number must NOT be unique across the whole table — uniqueness applies per series
+    season_number = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
@@ -141,8 +141,6 @@ class Season(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
-    # Boolean to track if placeholder file physically exists
-    placeholder_exists = Column(Boolean, default=False)
     is_deleted = Column(Boolean, default=False)
 
     subflows = relationship('SubFlow', back_populates='season')
@@ -159,7 +157,8 @@ class Episode(Base):
     __tablename__ = "episode"
     id = Column(Integer, primary_key=True, autoincrement=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=False)
-    episode_number = Column(Integer, nullable=False, index=True, unique=True)
+    # episode_number must NOT be unique across the whole table — uniqueness applies per season
+    episode_number = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
@@ -196,6 +195,30 @@ class Episode(Base):
 
     subflows = relationship('SubFlow', back_populates='episode')
     season = relationship('Season', back_populates='episode')
+
+    @hybrid_property
+    def season_number(self):
+        """Convenience property returning the season number from the related Season row."""
+        try:
+            return self.season.season_number if self.season else None
+        except Exception:
+            return None
+
+    @hybrid_property
+    def series_title(self):
+        """Convenience property returning the Series title via Season -> Series."""
+        try:
+            return self.season.series.title if self.season and self.season.series else None
+        except Exception:
+            return None
+
+    @hybrid_property
+    def series_id(self):
+        """Convenience property returning the Series.id via Season -> Series."""
+        try:
+            return self.season.series.id if self.season and self.season.series else None
+        except Exception:
+            return None
 
     def __repr__(self):
         return (

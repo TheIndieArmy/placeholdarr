@@ -44,25 +44,135 @@ def init_db(engine=None):
 
 
 def _migrate_columns(engine, inspector):
-    """Add missing columns to existing tables"""
+    """Dynamically add missing columns for tables declared in SQLAlchemy models (add-only).
+
+    Behavior:
+    - Imports model metadata (already done in init_db) and compares each model table's
+      declared columns against the actual DB columns returned by the inspector.
+    - For any missing column, issues a safe `ALTER TABLE ADD COLUMN` statement and
+      records the addition in the `auto_migrations` audit table.
+    - Add-only: this function will not modify or drop existing columns or change types.
+    """
     from sqlalchemy import text
-    
-    # Check if placeholder_exists column exists in movie table
-    if 'movie' in inspector.get_table_names():
-        movie_columns = [col['name'] for col in inspector.get_columns('movie')]
-        if 'placeholder_exists' not in movie_columns:
-            logger.info("Adding placeholder_exists column to movie table", extra={'emoji_type': 'info'})
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE movie ADD COLUMN placeholder_exists BOOLEAN DEFAULT FALSE"))
-                conn.commit()
-                logger.info("Successfully added placeholder_exists column", extra={'emoji_type': 'success'})
-    
-    # Add more column migrations here as needed
-    # Example:
-    # if 'series' in inspector.get_table_names():
-    #     series_columns = [col['name'] for col in inspector.get_columns('series')]
-    #     if 'new_column' not in series_columns:
-    #         logger.info("Adding new_column to series table", extra={'emoji_type': 'info'})
-    #         with engine.connect() as conn:
-    #             conn.execute(text("ALTER TABLE series ADD COLUMN new_column VARCHAR(255)"))
-    #             conn.commit()
+    from datetime import datetime
+
+    # Ensure we have up-to-date lists
+    model_tables = list(Base.metadata.tables.keys())
+    db_tables = inspector.get_table_names()
+
+    logger.info(f"Starting dynamic schema migration: scanning {len(model_tables)} model tables", extra={'emoji_type': 'info'})
+
+    # Create a small audit table to record auto-applied migrations (if not present)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS auto_migrations (
+                    id SERIAL PRIMARY KEY,
+                    table_name VARCHAR(255) NOT NULL,
+                    column_name VARCHAR(255) NOT NULL,
+                    added_at TIMESTAMP NOT NULL DEFAULT now(),
+                    source VARCHAR(50) NOT NULL DEFAULT 'startup'
+                )
+            """))
+            conn.commit()
+    except Exception as ex:
+        logger.warning(f"Could not ensure auto_migrations table exists: {ex}", extra={'emoji_type': 'warning'})
+
+    # Iterate model tables and add any missing columns (add-only)
+    for tbl in model_tables:
+        if tbl not in db_tables:
+            # Table doesn't exist in DB - create_all() should have handled creation
+            continue
+
+        try:
+            existing_cols = [c['name'] for c in inspector.get_columns(tbl)]
+        except Exception:
+            existing_cols = []
+
+        for col in Base.metadata.tables[tbl].columns:
+            if col.name in existing_cols:
+                continue
+
+            # Determine a safe SQL type mapping based on the sqlalchemy type name
+            tname = type(col.type).__name__.lower()
+            sql_type = 'TEXT'
+
+            if 'boolean' in tname:
+                sql_type = 'BOOLEAN'
+            elif 'integer' in tname or 'int' in tname:
+                sql_type = 'INTEGER'
+            elif 'bigint' in tname:
+                sql_type = 'BIGINT'
+            elif 'numeric' in tname or 'decimal' in tname:
+                sql_type = 'NUMERIC'
+            elif 'float' in tname or 'real' in tname:
+                sql_type = 'REAL'
+            elif 'datetime' in tname or 'timestamp' in tname:
+                sql_type = 'TIMESTAMP'
+            elif 'json' in tname:
+                # Prefer JSONB in Postgres
+                sql_type = 'JSONB'
+            elif 'text' in tname:
+                sql_type = 'TEXT'
+            elif 'varchar' in tname or 'string' in tname or 'char' in tname:
+                length = getattr(col.type, 'length', None)
+                sql_type = f"VARCHAR({length})" if length else 'VARCHAR(255)'
+            else:
+                # Fallback
+                sql_type = 'TEXT'
+
+            # Build ALTER statement (add as nullable to be safe)
+            alter_sql = f'ALTER TABLE "{tbl}" ADD COLUMN "{col.name}" {sql_type}'
+
+            # Execute and log
+            try:
+                with engine.connect() as conn:
+                    logger.info(f"Adding column {tbl}.{col.name} {sql_type}", extra={'emoji_type': 'info'})
+                    conn.execute(text(alter_sql))
+                    # record audit
+                    try:
+                        conn.execute(text("INSERT INTO auto_migrations (table_name, column_name) VALUES (:t, :c)"), {"t": tbl, "c": col.name})
+                    except Exception:
+                        # Non-fatal - continue
+                        pass
+                    conn.commit()
+                    logger.info(f"Successfully added column {tbl}.{col.name}", extra={'emoji_type': 'success'})
+            except Exception as ex:
+                logger.error(f"Failed to add column {tbl}.{col.name}: {ex}", extra={'emoji_type': 'error'})
+
+        # Detect and remove legacy global-unique indexes that conflict with newer model semantics.
+        # Historically the code incorrectly created unique indexes on season_number and episode_number
+        # across the whole table. That prevents inserting multiple episodes with episode_number=1
+        # (for different seasons). We will drop those unique indexes if present.
+        try:
+            idxs = inspector.get_indexes(tbl)
+        except Exception:
+            idxs = []
+
+        problematic = [
+            # (table, column_name)
+            ('season', 'season_number'),
+            ('episode', 'episode_number'),
+        ]
+        for (tname, colname) in problematic:
+            if tname != tbl:
+                continue
+            for idx in idxs:
+                # Some inspectors return 'unique' key, some may omit it
+                is_unique = idx.get('unique', False)
+                cols = idx.get('column_names') or idx.get('column_names', [])
+                # Normalize column names list
+                if isinstance(cols, list) and cols == [colname] and is_unique:
+                    idx_name = idx.get('name')
+                    if idx_name:
+                        drop_sql = f'DROP INDEX IF EXISTS "{idx_name}"'
+                        try:
+                            with engine.connect() as conn:
+                                logger.info(f"Dropping legacy unique index {idx_name} on {tname}({colname})", extra={'emoji_type': 'info'})
+                                conn.execute(text(drop_sql))
+                                conn.commit()
+                                logger.info(f"Dropped index {idx_name}", extra={'emoji_type': 'success'})
+                        except Exception as ex:
+                            logger.error(f"Failed to drop index {idx_name}: {ex}", extra={'emoji_type': 'error'})
+                    else:
+                        logger.debug(f"Found problematic unique index on {tname}.{colname} but no name returned by inspector", extra={'emoji_type': 'debug'})

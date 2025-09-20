@@ -33,11 +33,16 @@ def handle_webhook(data: dict, source_port: int = None):
     # Log incoming webhook but keep it brief
     logger.debug(f"{source} payload: {data}", extra={'emoji_type': 'debug'})
     
-    # Get file path for quality detection
+    # Get file path for quality detection. Only call Jellyfin lookup when ItemId is present.
     file_path = (data.get('media', {}).get('file_info', {}).get('path') or 
                  data.get('movie', {}).get('folderPath') or 
-                 data.get('file', '') or
-                 get_jellyfin_file_path(data.get("ItemId"), data.get("UserId")))
+                 data.get('file', ''))
+    if not file_path and data.get("ItemId"):
+        try:
+            file_path = get_jellyfin_file_path(data.get("ItemId"), data.get("UserId"))
+        except Exception:
+            # jellyfin lookup errors are non-fatal for quality detection
+            file_path = ''
     
     is_4k = is_4k_request(file_path, source_port)
     # Quality determination is helpful when debugging but noisy in normal logs
@@ -175,20 +180,40 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             episodes = []
     session = get_session()
     repo = SeriesRepository(session)
-    series = repo.get_by_tvdbid(tvdb_id, is_4k)
-    if not series:
-        m = repo.add(
-            title=series_title, year=series_year,
-            tmdbid=tvdb_id, dummypath="",
-            sonarrpath=series_path, sonarrid=series_id, status="PENDING"
-        )
-        logger.info(f"Series added: {m}", extra={'emoji_type': 'success'})
-    else:
-        logger.info("Series already present", extra={'emoji_type':'warning'})
-        repo.is_deleted(series, False)
-    repo.add_missing_seasons_and_episodes(series, episodes)
-    logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
-    job_scheduled = handle_seriesadd_scheduler.enqueue(series.id)
+    try:
+        series = repo.get_by_tvdbid(tvdb_id, is_4k)
+        if not series:
+            # Create the Series record using tvdbid (Sonarr provides tvdbId)
+            try:
+                series = repo.add(
+                    title=series_title,
+                    year=series_year or 0,
+                    tvdbid=tvdb_id,
+                    is_4k=is_4k,
+                    dummypath="",
+                    sonarrpath=series_path,
+                    sonarrid=series_id,
+                    status="PENDING"
+                )
+                logger.info(f"Series added: {series}", extra={'emoji_type': 'success'})
+            except ValueError as ve:
+                logger.error(f"Series creation failed: {ve}", extra={'emoji_type': 'error'})
+                return JSONResponse({"status": "error", "message": str(ve)}, status_code=400)
+        else:
+            logger.info("Series already present", extra={'emoji_type':'warning'})
+            repo.is_deleted(series, False)
+
+        # Ensure we pass the Series instance (newly created or existing) to season/episode logic
+        repo.add_missing_seasons_and_episodes(series, episodes)
+        logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
+        # Pass the model instance so the scheduler can infer model type and create subflows
+        job_scheduled = handle_seriesadd_scheduler.enqueue(series)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+    
     if job_scheduled:
         logger.info(f"Enqueued 'handle_movieadd' action for TVDB ID {tvdb_id}")
     else:
@@ -418,7 +443,7 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             if not series:
                 logger.info(f"Series {title} not found in database for deletion", extra={'emoji_type': 'warning'}) 
                 return JSONResponse({"status": "success", "message": "Series not tracked, no cleanup needed"})
-            if repo.get_by_tvdbid(tvdb_id):
+            if repo.get_by_tvdbid(tvdb_id, is_4k):
                 job_scheduled = handle_seriesdelete_scheduler.enqueue(series)
                 if job_scheduled:
                     logger.info(f"Enqueued 'handle_seriesdelete' action for TVDB ID {series.tvdbid}")

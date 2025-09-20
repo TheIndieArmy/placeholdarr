@@ -4,7 +4,7 @@ from core.config import settings
 from core.logger import logger
 from services.postgres.models import Episode, Movie, Season, Series, SubFlow
 from services.utils import (
-    sanitize_filename, strip_status_markers, get_series_folder,
+    resolve_final_folder, sanitize_filename, strip_status_markers, get_series_folder,
     get_arr_config
 )
 from services.plex_client import plex
@@ -40,8 +40,6 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         if not base_path:
             base_path = settings.MOVIE_LIBRARY_FOLDER if media_type == "movie" else settings.TV_LIBRARY_FOLDER
 
-        from services.utils import get_folder_path
-
         # Clean title
         clean_title = sanitize_filename(title)
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
@@ -67,23 +65,37 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                     else:
                         raise
 
+        # Resolve final folder using canonical resolver (prefer ARR-provided folder paths)
         if media_type == 'tv' and season_number is not None:
-            season_folder = get_folder_path(
+            final_folder = resolve_final_folder(
                 media_type='tv',
-                base_path=base_path,
                 title=title,
                 year=year,
                 media_id=media_id,
-                season=season_number
+                season_number=season_number
             )
-            os.makedirs(season_folder, exist_ok=True)
+
+            if not final_folder:
+                logger.error(f"No valid folder path for dummy file creation for {title} S{season_number}", extra={'emoji_type': 'error'})
+                return None
+
+            os.makedirs(final_folder, exist_ok=True)
+            # Ensure folder has open permissions (match legacy behavior)
+            try:
+                # chmod the season folder and its parent series folder to be permissive
+                os.chmod(final_folder, 0o777)
+                parent = os.path.dirname(final_folder)
+                if parent:
+                    os.chmod(parent, 0o777)
+            except Exception as e:
+                logger.verbose(f"Failed to chmod season folder {final_folder}: {e}", extra={'emoji_type': 'debug'})
 
             if episode_range:
                 start_ep, end_ep = episode_range
                 for ep_num in range(int(start_ep), int(end_ep) + 1):
                     ep_title = episode_title or f"Episode {ep_num}"
                     file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
-                    file_path = os.path.join(season_folder, sanitize_filename(file_name))
+                    file_path = os.path.join(final_folder, sanitize_filename(file_name))
 
                     if os.path.exists(file_path):
                         os.remove(file_path)
@@ -95,19 +107,29 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
 
                 ep_title = episode_title or f"Episode {start_ep}"
                 file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
-                return os.path.join(season_folder, sanitize_filename(file_name))
+                return os.path.join(final_folder, sanitize_filename(file_name))
 
         else:
-            movie_folder = get_folder_path(
+            final_folder = resolve_final_folder(
                 media_type='movie',
-                base_path=base_path,
                 title=title,
                 year=year,
                 media_id=media_id
             )
-            os.makedirs(movie_folder, exist_ok=True)
+
+            if not final_folder:
+                logger.error(f"No valid folder path for dummy file creation for movie {title}", extra={'emoji_type': 'error'})
+                return None
+
+            os.makedirs(final_folder, exist_ok=True)
+            # Ensure movie folder has open permissions (match legacy behavior)
+            try:
+                os.chmod(final_folder, 0o777)
+            except Exception as e:
+                logger.verbose(f"Failed to chmod movie folder {final_folder}: {e}", extra={'emoji_type': 'debug'})
+
             file_name = f"{clean_title}{year_str} (dummy).mp4"
-            file_path = os.path.join(movie_folder, sanitize_filename(file_name))
+            file_path = os.path.join(final_folder, sanitize_filename(file_name))
 
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -469,85 +491,60 @@ def delete_dummy_file(
     model: Type,
     action: str
 ):
-    """Delete dummy file for a specific media item"""
+    """Adapter for SubFlow worker signature.
+
+    Derive the human-readable fields (title/year/id/library/season/episode)
+    from the DB row and delegate the actual filesystem and DB updates to
+    delete_dummy_files(..., session=session).
+    """
     try:
+        # Movie -> delegate to folder-based delete (passes tmdb via tvdb_id param)
         if model is Movie:
-            # For movies, delete the dummy file
             movie = session.query(Movie).get(ent_id)
             if not movie:
                 logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
                 return False
-            dummy_file_path = movie.dummypath
-            if dummy_file_path and os.path.exists(dummy_file_path):
-                os.remove(dummy_file_path)
-                logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
-            elif dummy_file_path:
-                logger.info(f"Dummy file already removed (likely by *arr): {dummy_file_path}", extra={'emoji_type': 'info'})
-            else:
-                logger.debug(f"No dummy file path set for movie: {movie.title}", extra={'emoji_type': 'debug'})
-            
-            # Always mark movie as deleted and clear dummy references, regardless of file existence
-            movie.is_deleted = True
-            movie.jellyfin_dummy_id = None
-            movie.placeholder_exists = False  # Keep dummypath for scan purposes
-            session.commit()
-            logger.debug(f"Movie marked as deleted: {movie.title}", extra={'emoji_type': 'debug'})
-            
-            return True
-            
 
-        
+            tmdb_id = getattr(movie, 'tmdbid', None) or getattr(movie, 'tmdb_id', None)
+            is_4k = bool(getattr(movie, 'is_4k', False))
+            movie_library = settings.MOVIE_LIBRARY_FOLDER_4K if is_4k else settings.MOVIE_LIBRARY_FOLDER
+
+            # Delegate to the single source-of-truth for deletion. Pass the active
+            # DB session so delete_dummy_files can perform DB updates atomically
+            return delete_dummy_files(
+                media_type='movie',
+                title=movie.title,
+                year=movie.year,
+                tvdb_id=tmdb_id,
+                library_path=movie_library,
+                session=session
+            )
+
+        # Episode -> delegate to folder-based delete (pass tvdb + season/episode)
         elif model is Episode:
-            # For episodes, delete the dummy file
             episode = session.query(Episode).get(ent_id)
             if not episode:
                 logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
                 return False
-            dummy_file_path = episode.dummypath
-            if dummy_file_path and os.path.exists(dummy_file_path):
-                os.remove(dummy_file_path)
-                logger.info(f"Deleted dummy file: {dummy_file_path}", extra={'emoji_type': 'delete'})
-                parent_dir = os.path.dirname(dummy_file_path)
-                if os.path.exists(parent_dir) and not os.listdir(parent_dir):
-                    os.rmdir(parent_dir)
-                    logger.info(f"Removed empty parent directory: {parent_dir}", extra={'emoji_type': 'delete'})
-            elif dummy_file_path:
-                logger.info(f"Dummy file already removed (likely by *arr): {dummy_file_path}", extra={'emoji_type': 'info'})
-                parent_dir = os.path.dirname(dummy_file_path)
-            else:
-                logger.debug(f"No dummy file path set for episode: {episode.title}", extra={'emoji_type': 'debug'})
-                parent_dir = None
-            
-            # Always mark episode as deleted and clear dummy references
-            episode.is_deleted = True
-            episode.jellyfin_dummy_id = None
-            episode.placeholder_exists = False  # Keep dummypath for scan purposes
-            session.commit()
-            logger.debug(f"Episode marked as deleted: {episode.title}", extra={'emoji_type': 'debug'})
-            
-            # Check if we should clean up parent directories and mark season/series as deleted
-            if parent_dir and dummy_file_path:
-                season = episode.season
-                if season:
-                    season.is_deleted = True
-                    season.jellyfin_dummy_id = None
-                    season.placeholder_exists = False  # Keep dummypath for scan purposes
-                    session.commit()
-                    logger.debug(f"Season marked as deleted: {season.title}", extra={'emoji_type': 'debug'})
-                    
-                parent_dir = os.path.dirname(parent_dir) if parent_dir else None
-                if parent_dir and os.path.exists(parent_dir) and not os.listdir(parent_dir):   
-                    os.rmdir(parent_dir)
-                    logger.debug(f"Parent directory marked as deleted: {parent_dir}", extra={'emoji_type': 'debug'})
-                    series = season.series if season else None
-                    if series:
-                        series.is_deleted = True
-                        series.jellyfin_dummy_id = None
-                        series.placeholder_exists = False  # Keep dummypath for scan purposes
-                        session.commit()
-                        logger.debug(f"Series marked as deleted: {series.title}", extra={'emoji_type': 'debug'})
-            return True
-        
+
+            season = session.query(Season).get(episode.season_id) if episode.season_id else None
+            series = session.query(Series).get(season.series_id) if season and season.series_id else None
+
+            is_4k = bool(getattr(episode, 'is_4k', False) or (series and getattr(series, 'is_4k', False)))
+            tvdb = getattr(series, 'tvdbid', None) or getattr(episode, 'tvdb_id', None)
+            tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
+
+            return delete_dummy_files(
+                media_type='tv',
+                title=(series.title if series else ''),
+                year=(series.year if series else None),
+                tvdb_id=tvdb,
+                library_path=tv_library,
+                season_number=(season.season_number if season else None),
+                episode_number=episode.episode_number if episode else None,
+                session=session
+            )
+
         else:
             logger.error(f'Unsupported model type for delete_dummy_file: {model}', extra={'emoji_type': 'error'})
             return False
@@ -591,43 +588,50 @@ def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, acti
         logger.error(f"Error updating placeholder status for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
         return False
 
-def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None):
-    """Delete placeholder files once real files are downloaded"""
+def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, session: Session = None):
+    """Delete placeholder files once real files are downloaded.
+
+    Accepts an explicit SQLAlchemy `session` via kwarg `session` when
+    invoked as a worker step. For backwards compatibility callers that don't
+    pass `session` will only have filesystem changes applied.
+    """
+    import os
+
     try:
         # Build the folder pattern
         folder_name = sanitize_filename(title)
         if year:
             folder_name += f" ({year})"
-        
+
         # Add appropriate ID tag
         if media_type == 'tv':
             folder_name += f" {{tvdb-{tvdb_id}}} (dummy)"
         else:  # movie
             folder_name += f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
-            
-        dummy_folder = os.path.join(library_path, folder_name)
+
+        dummy_folder = os.path.join(library_path, folder_name) if library_path else None
         logger.debug(f"Looking for dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
-        
+
         # Check if the folder exists
-        if not os.path.exists(dummy_folder):
+        if not dummy_folder or not os.path.exists(dummy_folder):
             logger.debug(f"Dummy folder not found: {dummy_folder}", extra={'emoji_type': 'debug'})
-            return
-        
+            return True
+
         # TV show - delete specific episode file
         if media_type == 'tv' and season_number is not None and episode_number is not None:
             season_dir = os.path.join(dummy_folder, f"Season {int(season_number):02d}")
-            
+
             # Check if season folder exists
             if os.path.exists(season_dir):
                 # Log what we're looking for
                 logger.debug(f"Looking for episode files in {season_dir} matching pattern s{season_number:02d}e{episode_number:02d}", 
                            extra={'emoji_type': 'debug'})
-                
+
                 # Look for files matching the episode pattern
                 files_found = False
                 for file in os.listdir(season_dir):
                     logger.debug(f"Checking file: {file}", extra={'emoji_type': 'debug'})
-                    
+
                     # Use more pattern variations to match all possible formats
                     patterns = [
                         f"s{int(season_number):02d}e{int(episode_number):02d}",  # "s01e01" format
@@ -635,34 +639,106 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
                         f" - s{int(season_number):02d}e{int(episode_number):02d}",  # " - s01e01"
                         f" - S{int(season_number):02d}E{int(episode_number):02d}"   # " - S01E01"
                     ]
-                    
+
                     # Check if any pattern matches
                     if any(pattern in file for pattern in patterns):
                         file_path = os.path.join(season_dir, file)
                         logger.debug(f"Match found! Deleting: {file_path}", extra={'emoji_type': 'debug'})
-                        
+
                         try:
                             os.remove(file_path)
                             logger.info(f"Deleted placeholder file: {file_path}", extra={'emoji_type': 'delete'})
                             files_found = True
                         except Exception as e:
                             logger.error(f"Failed to delete file {file_path}: {e}", extra={'emoji_type': 'error'})
-                
+
                 if not files_found:
                     logger.debug(f"No matching episode files found in {season_dir}", extra={'emoji_type': 'debug'})
-            else:
-                logger.debug(f"Season directory not found: {season_dir}", extra={'emoji_type': 'debug'})
-        
+                else:
+                    # If season directory is empty after removals, try to remove it
+                    try:
+                        if os.path.exists(season_dir) and not os.listdir(season_dir):
+                            os.rmdir(season_dir)
+                            logger.info(f"Deleted empty season folder: {season_dir}", extra={'emoji_type': 'delete'})
+                    except Exception as e:
+                        logger.debug(f"Failed to remove season folder: {e}", extra={'emoji_type': 'debug'})
+
+                # DB updates if a session was explicitly provided by caller
+                db_sess = session
+
+                if db_sess:
+                    try:
+                        # Try to find Series -> Season -> Episode and mark deleted
+                        series = db_sess.query(Series).filter_by(tvdbid=str(tvdb_id)).first() if tvdb_id else None
+                        if series:
+                            season = db_sess.query(Season).filter_by(series_id=series.id, season_number=int(season_number)).first()
+                            if season:
+                                ep = db_sess.query(Episode).filter_by(season_id=season.id, episode_number=int(episode_number)).first()
+                                if ep:
+                                    ep.is_deleted = True
+                                    ep.jellyfin_dummy_id = None
+                                    ep.placeholder_exists = False
+                                    db_sess.add(ep)
+                                    db_sess.commit()
+                                    logger.debug(f"Marked DB Episode deleted: {ep.title}", extra={'emoji_type': 'debug'})
+                    except Exception as e:
+                        logger.error(f"Failed to mark DB episode deleted: {e}", extra={'emoji_type': 'error'})
+
         # Movies or entire TV series - delete the whole folder
         else:
             # Only try to remove if it's not a TV show with season/episode specified
-            if media_type == 'movie' or (season_number is None and episode_number is None):
-                if os.path.exists(dummy_folder):
-                    shutil.rmtree(dummy_folder)
-                    logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
-        
+            try:
+                shutil.rmtree(dummy_folder)
+                logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+            except Exception as e:
+                logger.error(f"Failed to delete placeholder folder {dummy_folder}: {e}", extra={'emoji_type': 'error'})
+
+            # DB updates if session passed explicitly by caller (worker)
+            db_sess = session
+
+            if db_sess:
+                try:
+                    if media_type == 'movie':
+                        # Movie: use tmdb id
+                        movie = None
+                        try:
+                            movie = db_sess.query(Movie).filter_by(tmdbid=int(tvdb_id)).first() if tvdb_id is not None else None
+                        except Exception:
+                            movie = db_sess.query(Movie).filter_by(tmdbid=tvdb_id).first() if tvdb_id is not None else None
+                        if movie:
+                            movie.is_deleted = True
+                            movie.jellyfin_dummy_id = None
+                            movie.placeholder_exists = False
+                            db_sess.add(movie)
+                            db_sess.commit()
+                            logger.debug(f"Marked DB Movie deleted: {movie.title}", extra={'emoji_type': 'debug'})
+
+                    elif media_type == 'tv':
+                        series = db_sess.query(Series).filter_by(tvdbid=str(tvdb_id)).first() if tvdb_id else None
+                        if series:
+                            series.is_deleted = True
+                            series.jellyfin_dummy_id = None
+                            series.placeholder_exists = False
+                            db_sess.add(series)
+                            seasons = db_sess.query(Season).filter_by(series_id=series.id).all()
+                            for s in seasons:
+                                s.is_deleted = True
+                                s.jellyfin_dummy_id = None
+                                s.placeholder_exists = False
+                                db_sess.add(s)
+                                eps = db_sess.query(Episode).filter_by(season_id=s.id).all()
+                                for ep in eps:
+                                    ep.is_deleted = True
+                                    ep.jellyfin_dummy_id = None
+                                    ep.placeholder_exists = False
+                                    db_sess.add(ep)
+                            db_sess.commit()
+                            logger.debug(f"Marked DB Series, seasons, and episodes deleted for: {series.title}", extra={'emoji_type': 'debug'})
+                except Exception as e:
+                    logger.error(f"Failed to mark DB records deleted: {e}", extra={'emoji_type': 'error'})
+
         return True
-            
+
     except Exception as e:
         logger.error(f"Error deleting placeholder: {e}", extra={'emoji_type': 'error'})
         return False
@@ -854,23 +930,13 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             return False
     
     elif model is Episode:
-        sf_eps = session.query(SubFlow).filter(
-            SubFlow.steps == "delayed_placeholders",
-            SubFlow.episode_id != None,
-            SubFlow.episode_id.in_([ent_id])
-        ).all()
-
-        # Get the episode from the database
-        ep = session.query(Episode).get(ent_id)
-        if not ep:
+        # Look up the current episode, season, and series to determine the series_id
+        current_ep = session.query(Episode).get(ent_id)
+        if not current_ep:
             logger.error(f"Episode with id {ent_id} not found", extra={'emoji_type': 'error'})
             return False
 
-        # Check if the episode has is_4k attribute
-        if hasattr(ep, 'is_4k') and ep.is_4k:
-            is_4k = True
-
-        seas = session.query(Season).get(ep.season_id)
+        seas = session.query(Season).get(current_ep.season_id)
         if not seas:
             logger.error(f"Season for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
@@ -880,7 +946,24 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             logger.error(f"Series for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
 
-        # Delay before processing
+        # Query all SubFlow rows for this series that are waiting on delayed_placeholders
+        sf_eps = session.query(SubFlow).filter(
+            SubFlow.steps == "delayed_placeholders",
+            SubFlow.series_id == series.id,
+            SubFlow.status != "DONE"
+        ).order_by(SubFlow.id).all()
+
+        # Determine 4K status from the current episode/series
+        is_4k = False
+        try:
+            if hasattr(current_ep, 'is_4k') and current_ep.is_4k:
+                is_4k = True
+            elif hasattr(series, 'is_4k') and series.is_4k:
+                is_4k = True
+        except Exception:
+            is_4k = False
+
+        # Delay briefly before processing the batch
         logger.debug(
             f"Delaying {delay_seconds}s before processing placeholders for series '{series.title}'",
             extra={'emoji_type': 'debug'}
@@ -891,87 +974,133 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
         tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
 
         placeholder_count = 0
-        for episode in sf_eps:
-            ep = session.query(Episode).get(episode.episode_id)
-            if not ep.dummypath and not ep.filepath:
-                logger.debug(f"Processing Episode {ep.episode_number} - {ep.title}", extra={'emoji_type': 'debug'})
-                season_num = seas.season_number
-                episode_num = ep.episode_number
-                episode_title = ep.title
-                ep_tvdb_id = getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None)
 
-                if not (season_num and episode_num):
-                    logger.error(f"Missing season or episode number for {ep.title}", extra={'emoji_type': 'error'})
+        # Normalize tvdb for the series and current episode
+        normalized_series_tvdb = None
+        try:
+            normalized_series_tvdb = getattr(series, 'tvdbid', None) or getattr(series, 'tvdb_id', None)
+        except Exception:
+            normalized_series_tvdb = None
 
-                # Check if episode already has a real file
-                from services.queue_monitor import check_episode_has_file
+        # Iterate all pending subflows for this series and create placeholders
+        for subflow in sf_eps:
+            # Load the episode row referenced by the subflow
+            if not subflow.episode_id:
+                # If this SubFlow isn't an episode-level entry, skip
+                continue
 
-                # Ensure series has a Sonarr id when possible; try a Sonarr lookup by TVDB if missing
-                try:
-                    series_sonarrid = getattr(series, 'sonarrid', None)
-                    if not series_sonarrid and getattr(series, 'tvdbid', None):
-                        config = get_arr_config('tv', is_4k)
-                        if config:
-                            headers = {'X-Api-Key': config['api_key']}
-                            lookup = requests.get(
-                                f"{config['url']}/series/lookup",
-                                params={'term': f"tvdb:{int(series.tvdbid)}"},
-                                headers=headers,
-                                timeout=10
-                            )
-                            if lookup.ok:
-                                results = lookup.json()
-                                if isinstance(results, list) and results:
-                                    found = results[0]
-                                    if found.get('id'):
-                                        series.sonarrid = found.get('id')
-                                        session.add(series)
-                                        session.commit()
-                except Exception:
-                    logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
+            ep = session.query(Episode).get(subflow.episode_id)
+            if not ep:
+                # Mark the subflow DONE to avoid reprocessing orphan entries
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+                continue
 
-                if ep_tvdb_id and check_episode_has_file(ep_tvdb_id, season_num, episode_num, is_4k):
+            # Skip if real file exists or placeholder already set
+            if getattr(ep, 'filepath', None) or getattr(ep, 'dummypath', None):
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+                continue
+
+            # Ensure season info available
+            season_rec = session.query(Season).get(ep.season_id) if ep.season_id else None
+            if not season_rec:
+                logger.error(f"Missing season for episode id {ep.id}", extra={'emoji_type': 'error'})
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+                continue
+
+            season_num = season_rec.season_number
+            episode_num = ep.episode_number
+            episode_title = ep.title
+
+            # Normalize tvdb id for checks/enrichment
+            normalized_tvdb = None
+            try:
+                normalized_tvdb = getattr(ep, 'tvdbid', None) or getattr(series, 'tvdbid', None) or getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None) or normalized_series_tvdb
+            except Exception:
+                normalized_tvdb = normalized_series_tvdb
+
+            # Quick check: if episode already has a real file via queue monitor, skip
+            from services.queue_monitor import check_episode_has_file
+            try:
+                if normalized_tvdb and check_episode_has_file(normalized_tvdb, season_num, episode_num, is_4k):
                     logger.info(
                         f"Skipping placeholder for {series.title} S{season_num}E{episode_num} (real file exists)",
                         extra={'emoji_type': 'skip'}
                     )
-                    # mark this subflow entry done and continue
-                    episode.status = "DONE"
-                    session.add(episode)
+                    subflow.status = "DONE"
+                    session.add(subflow)
                     session.commit()
                     continue
+            except Exception:
+                logger.debug("Episode file check failed, will continue with placeholder creation", extra={'emoji_type': 'debug'})
 
-                # Create placeholder file
+            # Attempt Sonarr enrichment once for the series if needed
+            try:
+                series_sonarrid = getattr(series, 'sonarrid', None)
+                if not series_sonarrid and normalized_series_tvdb:
+                    config = get_arr_config('tv', is_4k)
+                    if config:
+                        headers = {'X-Api-Key': config['api_key']}
+                        lookup = requests.get(
+                            f"{config['url']}/series/lookup",
+                            params={'term': f"tvdb:{int(normalized_series_tvdb)}"},
+                            headers=headers,
+                            timeout=10
+                        )
+                        if lookup.ok:
+                            results = lookup.json()
+                            if isinstance(results, list) and results:
+                                found = results[0]
+                                if found.get('id'):
+                                    series.sonarrid = found.get('id')
+                                    session.add(series)
+                                    session.commit()
+            except Exception:
+                logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
+
+            # Create the placeholder file for this episode
+            dummy_path = None
+            try:
                 dummy_path = place_dummy_file(
                     "tv",
                     series.title,
                     series.year,
-                    ep_tvdb_id,
+                    normalized_tvdb,
                     tv_library,
                     season_number=season_num,
                     episode_range=(episode_num, episode_num),
                     episode_title=episode_title
                 )
+            except Exception as e:
+                logger.error(f"Error creating dummy for {series.title} S{season_num}E{episode_num}: {e}", extra={'emoji_type': 'error'})
 
-                if dummy_path:
-                    ep.dummypath = dummy_path
-                    session.add(ep)
-                    placeholder_count += 1
+            if dummy_path:
+                ep.dummypath = dummy_path
+                session.add(ep)
+                # Commit immediately so external scanners and other workers see file presence
+                session.commit()
+                placeholder_count += 1
+                logger.debug(f"Persisted placeholder for {series.title} S{season_num}E{episode_num}", extra={'emoji_type': 'debug'})
 
-            episode.status = "DONE"
-            session.add(episode)
+            # Mark this subflow entry DONE and commit so it's not reprocessed
+            subflow.status = "DONE"
+            session.add(subflow)
             session.commit()
 
         if placeholder_count > 0:
-            session.commit()
             logger.info(
                 f"Created {placeholder_count} placeholder files for '{series.title}'",
                 extra={'emoji_type': 'success'}
             )
-            return True
         else:
             logger.info(f"No placeholders needed for '{series.title}'", extra={'emoji_type': 'info'})
-            return True
+
+        return True
 
     else:
         logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
@@ -1185,6 +1314,108 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
                 logger.debug(f"Enrichment for movie {m.tmdbid} found no changes", extra={'emoji_type': 'debug'})
 
             return movie_data
+        finally:
+            session.close()
+
+    except Exception as e:
+        logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
+        return None
+
+def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
+    """
+    Fetch authoritative series data from Sonarr and update local DB record.
+    Prefers Sonarr internal ID; falls back to lookup by TVDB when needed.
+    Returns the Sonarr series JSON on success, or None on failure.
+    """
+    try:
+        from services.postgres.db import get_session
+        from services.postgres.models import Series as SeriesModel
+        config = get_arr_config('tv', is_4k)
+        if not config:
+            logger.error("Sonarr config missing for enrichment", extra={'emoji_type': 'error'})
+            return None
+
+        headers = {'X-Api-Key': config['api_key']}
+        base_url = config['url']
+        series_data = None
+
+        # Try direct fetch by Sonarr internal id first
+        if sonarr_id:
+            try:
+                r = requests.get(f"{base_url}/series/{sonarr_id}", headers=headers, timeout=10)
+                if r.status_code == 200:
+                    series_data = r.json()
+                else:
+                    logger.debug(f"Sonarr series fetch by id {sonarr_id} returned {r.status_code}")
+            except Exception as e:
+                logger.error(f"Sonarr direct fetch failed: {e}", extra={'emoji_type': 'error'})
+
+        # Fallback: lookup by TVDB
+        if series_data is None and tvdb_id:
+            try:
+                r = requests.get(f"{base_url}/series/lookup", params={'term': f"tvdb:{int(tvdb_id)}"}, headers=headers, timeout=10)
+                r.raise_for_status()
+                results = r.json()
+                if isinstance(results, list) and results:
+                    found = results[0]
+                    # If lookup returned sonarr id, try to fetch full series by id for complete fields
+                    _id = found.get('id')
+                    if _id:
+                        try:
+                            r2 = requests.get(f"{base_url}/series/{_id}", headers=headers, timeout=10)
+                            if r2.status_code == 200:
+                                series_data = r2.json()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"Sonarr lookup by tvdb failed: {e}", extra={'emoji_type': 'error'})
+
+        if not series_data:
+            logger.debug("No Sonarr series data found during enrichment", extra={'emoji_type': 'debug'})
+            return None
+
+        # Map fields into DB
+        session = get_session()
+        try:
+            s = None
+            if tvdb_id is not None:
+                try:
+                    s = session.query(SeriesModel).filter_by(tvdbid=int(tvdb_id)).first()
+                except Exception:
+                    s = session.query(SeriesModel).filter_by(tvdbid=str(tvdb_id)).first()
+            if not s and series_data.get('id'):
+                s = session.query(SeriesModel).filter_by(sonarrid=series_data.get('id')).first()
+
+            if not s:
+                logger.warning(f"Enrichment: local Series not found for tvdb={tvdb_id} sonarr={sonarr_id}", extra={'emoji_type': 'warning'})
+                return series_data
+
+            changed = False
+            # Sonarr fields
+            path = series_data.get('path') or series_data.get('folderPath') or series_data.get('folder')
+            has_files = bool(series_data.get('hasFile', False) or series_data.get('seasons'))
+            monitored = bool(series_data.get('monitored', False))
+            if series_data.get('id') and s.sonarrid != series_data.get('id'):
+                s.sonarrid = series_data.get('id')
+                changed = True
+            if path and s.sonarrpath != path:
+                s.sonarrpath = path
+                changed = True
+            if s.sonarr_monitored != monitored:
+                s.sonarr_monitored = monitored
+                changed = True
+            if s.has_files != has_files:
+                s.has_files = has_files
+                changed = True
+
+            if changed:
+                session.add(s)
+                session.commit()
+                logger.info(f"Enriched series {s.tvdbid} from Sonarr", extra={'emoji_type': 'update'})
+            else:
+                logger.debug(f"Enrichment for series {s.tvdbid} found no changes", extra={'emoji_type': 'debug'})
+
+            return series_data
         finally:
             session.close()
 
