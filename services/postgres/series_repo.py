@@ -218,14 +218,20 @@ class SeriesRepository:
                     # keep tvdbid as None when missing instead of coercing to 0
                     'tvdbid': ep.get('tvdbid', None)
                 }
+                # Ensure transient/process fields (status/action) are provided as defaults
+                # to avoid them being used in the lookup filter and causing duplicate rows.
+                ep_defaults_with_process = dict(episode_defaults)
+                ep_defaults_with_process.update({
+                    'status': 'PENDING',
+                    'action': 'handle_seriesadd'
+                })
+
                 ep_instance, ep_created = self.get_or_create(
                     Episode,
                     self.session,
-                    defaults=episode_defaults,
+                    defaults=ep_defaults_with_process,
                     season_id=season.id,
-                    episode_number=ep_num,
-                    status='PENDING',
-                    action='handle_seriesadd',
+                    episode_number=ep_num
                 )
                 if ep_created:
                     logger.info(f"Added Episode S{season_num}E{ep_num} and queued for processing")

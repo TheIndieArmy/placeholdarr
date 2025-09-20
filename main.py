@@ -159,4 +159,18 @@ if __name__ == '__main__':
             logger.error(f"Failed to clear port {port}. Please use a different port.", extra={'emoji_type': 'error'})
             sys.exit(1)
 
-    uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower())
+    # uvicorn expects standard log levels; map custom values (e.g. VERBOSE) to a safe default
+    raw_level = getattr(settings, 'LOG_LEVEL', 'info')
+    try:
+        uvicorn_level = str(raw_level).lower()
+    except Exception:
+        uvicorn_level = 'info'
+
+    # Treat non-standard/extra verbose level as info to avoid KeyError in uvicorn
+    if uvicorn_level not in ('critical', 'error', 'warning', 'info', 'debug', 'trace'):
+        if uvicorn_level == 'verbose':
+            uvicorn_level = 'info'
+        else:
+            uvicorn_level = 'info'
+
+    uvicorn.run(app, host=host, port=port, log_level=uvicorn_level)

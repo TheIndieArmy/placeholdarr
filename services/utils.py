@@ -4,6 +4,9 @@ from pathlib import Path
 from core.config import settings
 from services.postgres.db import get_session
 from services.postgres.movie_repo import MovieRepository
+import xml.sax.saxutils as saxutils
+import tempfile
+import time
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', name).strip()
@@ -203,3 +206,176 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
         if season_folder:
             return os.path.join(base_folder, season_folder)
     return base_folder
+
+def _status_title_suffix(status: str) -> str:
+    """Return bracketed status suffix; empty string if none."""
+    if not status:
+        return ""
+    return f" [{status}]"
+
+def _status_plot_prefix(status: str) -> str:
+    """Return bracketed status prefix for plot/overview."""
+    if not status:
+        return ""
+    return f"[{status}] "
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Truncate text at a word boundary to max_chars, return possibly-trimmed string."""
+    if not text or max_chars is None or max_chars <= 0:
+        return text
+    if len(text) <= max_chars:
+        return text
+    # Trim and avoid breaking words
+    cut = text[:max_chars]
+    # Backtrack to whitespace if possible
+    idx = cut.rfind(' ')
+    if idx > int(max_chars * 0.6):
+        cut = cut[:idx]
+    return cut.rstrip() + '...'
+
+def _escape(text: str) -> str:
+    if text is None:
+        return ''
+    return saxutils.escape(text)
+
+def render_movie_nfo(movie: dict, status: str = None) -> str:
+    """Render a basic movie.nfo XML given a movie dict.
+
+    Expected keys in movie dict: title, year, tmdbid, imdbid, radarr_overview
+    """
+    max_chars = getattr(settings, 'NFO_OVERVIEW_MAX_CHARS', 5000)
+    include_ids = getattr(settings, 'NFO_INCLUDE_UNIQUEIDS', True)
+
+    title = movie.get('title') or ''
+    year = movie.get('year') or ''
+    overview = movie.get('radarr_overview') or ''
+
+    title_with_status = f"{title}{_status_title_suffix(status)}"
+    plot = _status_plot_prefix(status) + _truncate_text(overview, max_chars)
+
+    xml = ["<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<movie>"]
+    xml.append(f"  <title>{_escape(title_with_status)}</title>")
+    if title and title != title_with_status:
+        xml.append(f"  <originaltitle>{_escape(title)}</originaltitle>")
+    if year:
+        xml.append(f"  <year>{_escape(str(year))}</year>")
+    if plot:
+        xml.append(f"  <plot>{_escape(plot)}</plot>")
+    if include_ids:
+        if movie.get('tmdbid'):
+            xml.append(f"  <uniqueid type=\"tmdb\">{_escape(str(movie.get('tmdbid')))}</uniqueid>")
+        if movie.get('imdbid'):
+            xml.append(f"  <uniqueid type=\"imdb\">{_escape(str(movie.get('imdbid')))}</uniqueid>")
+    xml.append("</movie>")
+    return '\n'.join(xml) + '\n'
+
+def render_series_nfo(series: dict, status: str = None) -> str:
+    """Render a tvshow nfo. Expected keys: title, year, tvdbid, sonarr_series_overview"""
+    max_chars = getattr(settings, 'NFO_OVERVIEW_MAX_CHARS', 5000)
+    include_ids = getattr(settings, 'NFO_INCLUDE_UNIQUEIDS', True)
+
+    title = series.get('title') or ''
+    year = series.get('year') or ''
+    overview = series.get('sonarr_series_overview') or ''
+
+    plot = _status_plot_prefix(status) + _truncate_text(overview, max_chars)
+    xml = ["<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<tvshow>"]
+    xml.append(f"  <title>{_escape(title)}</title>")
+    if year:
+        xml.append(f"  <year>{_escape(str(year))}</year>")
+    if plot:
+        xml.append(f"  <plot>{_escape(plot)}</plot>")
+    if include_ids and series.get('tvdbid'):
+        xml.append(f"  <uniqueid type=\"thetvdb\">{_escape(str(series.get('tvdbid')))}</uniqueid>")
+    xml.append("</tvshow>")
+    return '\n'.join(xml) + '\n'
+
+def render_episode_nfo(episode: dict, status: str = None) -> str:
+    """Render an episode .nfo. Expected keys: title, season, episode, aired, sonarr_episode_overview"""
+    max_chars = getattr(settings, 'NFO_OVERVIEW_MAX_CHARS', 5000)
+    include_ids = getattr(settings, 'NFO_INCLUDE_UNIQUEIDS', True)
+
+    title = episode.get('title') or ''
+    season = episode.get('season')
+    epnum = episode.get('episode')
+    aired = episode.get('aired')
+    overview = episode.get('sonarr_episode_overview') or ''
+
+    title_with_status = f"{title}{_status_title_suffix(status)}"
+    plot = _status_plot_prefix(status) + _truncate_text(overview, max_chars)
+
+    xml = ["<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<episodedetails>"]
+    xml.append(f"  <title>{_escape(title_with_status)}</title>")
+    if season is not None:
+        xml.append(f"  <season>{_escape(str(season))}</season>")
+    if epnum is not None:
+        xml.append(f"  <episode>{_escape(str(epnum))}</episode>")
+    if aired:
+        xml.append(f"  <aired>{_escape(str(aired))}</aired>")
+    if plot:
+        xml.append(f"  <plot>{_escape(plot)}</plot>")
+    if include_ids and episode.get('tvdb'):
+        xml.append(f"  <uniqueid type=\"thetvdb\">{_escape(str(episode.get('tvdb')))}</uniqueid>")
+    xml.append("</episodedetails>")
+    return '\n'.join(xml) + '\n'
+
+def write_nfo(nfo_path: str, xml_text: str) -> bool:
+    """Atomically write xml_text to nfo_path using a temp file and os.replace.
+    Also set file permissions to be open (rw-rw-rw-) so media servers can read/write as needed.
+    """
+    try:
+        dirpath = os.path.dirname(nfo_path)
+        if dirpath and not os.path.exists(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
+
+        # Write to temp file in same directory for atomic replace
+        fd, tmp = tempfile.mkstemp(prefix='.tmp_nfo_', dir=dirpath or '.')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                fh.write(xml_text)
+            # Ensure file timestamp changes slightly to help scanners
+            os.replace(tmp, nfo_path)
+            # Set permissive file permissions so NFOs are readable/writable by media server users
+            try:
+                os.chmod(nfo_path, 0o666)
+            except Exception:
+                # Non-fatal: permission change failure should not prevent success
+                pass
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+        # small sleep optionally to avoid tight write loops
+        time.sleep(0.01)
+        return True
+    except Exception as e:
+        # Log is not available in this module; raise for caller to handle or return False
+        return False
+
+def write_nfo_for_placeholder(placeholder_path: str, meta: dict, media_type: str = 'tv', status: str = None) -> bool:
+    """Given the placeholder file path, produce the matching .nfo and write it.
+
+    placeholder_path: full path to the .mp4 placeholder file
+    meta: dict of metadata consumed by render_*_nfo
+    media_type: 'movie' or 'tv'
+    status: optional status string to include
+    """
+    if not getattr(settings, 'PLACEHOLDARR_WRITE_NFO', True):
+        return False
+
+    base = os.path.splitext(placeholder_path)[0]
+    nfo_path = f"{base}.nfo"
+
+    try:
+        if media_type == 'movie':
+            xml = render_movie_nfo(meta, status=status)
+        else:
+            # For episodes, caller may supply either episode-level meta or series+episode
+            xml = render_episode_nfo(meta, status=status)
+        ok = write_nfo(nfo_path, xml)
+        return ok
+    except Exception:
+        return False

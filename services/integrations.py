@@ -5,7 +5,7 @@ from core.logger import logger
 from services.postgres.models import Episode, Movie, Season, Series, SubFlow
 from services.utils import (
     resolve_final_folder, sanitize_filename, strip_status_markers, get_series_folder,
-    get_arr_config
+    get_arr_config, write_nfo_for_placeholder, render_episode_nfo
 )
 from services.plex_client import plex
 from services.utils import get_movie_by_id
@@ -924,6 +924,39 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             session.add(movie)
             session.commit()
             logger.info(f"Created placeholder file for '{movie.title}'", extra={'emoji_type': 'success'})
+            # Attempt to write an .nfo next to the placeholder using authoritative DB fields
+            try:
+                try:
+                    # Refresh the ORM object to make sure we have committed values
+                    session.refresh(movie)
+                except Exception:
+                    # Fallback to re-querying if refresh is not possible
+                    movie = session.query(Movie).get(movie.id)
+
+                overview = getattr(movie, 'radarr_overview', None)
+                tmdbid = getattr(movie, 'tmdbid', None)
+                imdbid = getattr(movie, 'imdbid', None) if hasattr(movie, 'imdbid') else None
+
+                meta = {
+                    'title': movie.title,
+                    'year': movie.year,
+                    'tmdbid': tmdbid,
+                    'imdbid': imdbid,
+                    'radarr_overview': overview
+                }
+
+                logger.debug(
+                    f"Rendering movie NFO: title={movie.title!r} tmdb={tmdbid} imdb={imdbid} overview_len={len(overview) if overview else 0}",
+                    extra={'emoji_type': 'debug'}
+                )
+
+                ok = write_nfo_for_placeholder(dummy_path, meta, media_type='movie', status='Request')
+                if ok:
+                    logger.debug(f"Wrote movie NFO for {dummy_path}", extra={'emoji_type': 'create'})
+                else:
+                    logger.debug(f"Failed to write movie NFO for {dummy_path}", extra={'emoji_type': 'warning'})
+            except Exception as e:
+                logger.debug(f"Exception writing movie NFO: {e}", extra={'emoji_type': 'debug'})
             return True
         else:
             logger.error(f"Failed to create placeholder file for movie '{movie.title}'", extra={'emoji_type': 'error'})
@@ -1063,6 +1096,27 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             except Exception:
                 logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
 
+            # Ensure Sonarr enrichment has been performed so episode-level overviews are available.
+            # We only run enrichment when we don't already have an episode overview for this episode
+            # and we have a normalized TVDB id to look up.
+            try:
+                ep_has_overview = getattr(ep, 'sonarr_episode_overview', None)
+                if not ep_has_overview and normalized_tvdb:
+                    logger.debug(f"Fetching Sonarr enrichment for TVDB {normalized_tvdb} to populate episode overview", extra={'emoji_type': 'debug'})
+                    try:
+                        # Call the existing enrichment routine which will persist episode overviews
+                        enrich_series_from_sonarr(tvdb_id=int(normalized_tvdb) if normalized_tvdb else None, sonarr_id=getattr(series, 'sonarrid', None), is_4k=is_4k)
+                    except Exception as e:
+                        logger.debug(f"Sonarr enrichment call failed: {e}", extra={'emoji_type': 'debug'})
+
+                    # Refresh the episode row so any persisted sonarr_episode_overview is available
+                    try:
+                        session.refresh(ep)
+                    except Exception:
+                        ep = session.query(Episode).get(ep.id)
+            except Exception:
+                logger.debug("Failed while attempting to enrich/refresh episode overview from Sonarr", extra={'emoji_type': 'debug'})
+
             # Create the placeholder file for this episode
             dummy_path = None
             try:
@@ -1086,6 +1140,58 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 session.commit()
                 placeholder_count += 1
                 logger.debug(f"Persisted placeholder for {series.title} S{season_num}E{episode_num}", extra={'emoji_type': 'debug'})
+
+                # Write episode-level NFO next to placeholder using authoritative DB values
+                try:
+                    try:
+                        session.refresh(ep)
+                    except Exception:
+                        ep = session.query(Episode).get(ep.id)
+
+                    # Re-load season and series to ensure we have latest overviews
+                    season_row = session.query(Season).get(ep.season_id) if ep.season_id else None
+                    series_row = session.query(Series).get(season_row.series_id) if season_row and season_row.series_id else None
+
+                    ep_overview = getattr(ep, 'sonarr_episode_overview', None)
+                    series_tvdb = getattr(series_row, 'tvdbid', None) if series_row else None
+
+                    # DEBUG: log exact overview value and length to diagnose missing overview in NFO
+                    try:
+                        logger.debug(f"Episode overview (repr) for ep.id={ep.id}: {ep_overview!r} (len={len(ep_overview) if ep_overview else 0})", extra={'emoji_type': 'debug'})
+                    except Exception:
+                        logger.debug(f"Episode overview logging failed for ep.id={ep.id}", extra={'emoji_type': 'debug'})
+
+                    ep_meta = {
+                        'title': ep.title,
+                        'season': season_num,
+                        'episode': episode_num,
+                        'aired': getattr(ep, 'air_date', None),
+                        'sonarr_episode_overview': ep_overview,
+                        'tvdb': series_tvdb
+                    }
+
+                    logger.debug(
+                        f"Rendering episode NFO: title={ep.title!r} S{season_num}E{episode_num} tvdb={series_tvdb} overview_len={len(ep_overview) if ep_overview else 0}",
+                        extra={'emoji_type': 'debug'}
+                    )
+
+                    # DEBUG: render the XML here and log it so we can see whether the overview is present
+                    try:
+                        try:
+                            rendered_xml = render_episode_nfo(ep_meta, status='Request')
+                            logger.debug(f"Rendered episode XML for ep.id={ep.id} (len={len(rendered_xml)}): {rendered_xml[:500]!r}", extra={'emoji_type': 'debug'})
+                        except Exception as e:
+                            logger.debug(f"Failed to render episode XML for debug: {e}", extra={'emoji_type': 'debug'})
+                    except Exception:
+                        pass
+
+                    ok = write_nfo_for_placeholder(dummy_path, ep_meta, media_type='tv', status='Request')
+                    if ok:
+                        logger.debug(f"Wrote episode NFO for {dummy_path}", extra={'emoji_type': 'create'})
+                    else:
+                        logger.debug(f"Failed to write episode NFO for {dummy_path}", extra={'emoji_type': 'warning'})
+                except Exception as e:
+                    logger.debug(f"Exception writing episode NFO: {e}", extra={'emoji_type': 'debug'})
 
             # Mark this subflow entry DONE and commit so it's not reprocessed
             subflow.status = "DONE"
