@@ -21,7 +21,7 @@ from services.scheduler import (
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
-from services.integrations import enrich_movie_from_radarr
+from services.integrations import enrich_movie_from_radarr, enrich_series_from_sonarr, enrich_from_arr, start_enrichment_thread
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -50,6 +50,34 @@ def handle_webhook(data: dict, source_port: int = None):
     
     event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
+    
+    # Opportunistically enrich DB from ARR when a series/movie object is present
+    # (skip on the explicit add events since their handlers also start enrichment)
+    try:
+        if 'series' in data and event_type not in ('seriesadd',):
+            payload_series = data.get('series', {}) or {}
+            tvdb = payload_series.get('tvdbId')
+            sonarr_payload_id = payload_series.get('id')
+            # Spawn a single enrichment thread that will normalize payload and call ARR-specific logic
+            try:
+                threading.Thread(target=start_enrichment_thread, args=(data, is_4k), daemon=True).start()
+                logger.debug("Started background ARR enrichment dispatcher thread", extra={'emoji_type': 'debug'})
+            except Exception as e:
+                logger.error(f"Failed to start ARR enrichment dispatcher thread: {e}", extra={'emoji_type': 'error'})
+
+        if 'movie' in data and event_type not in ('movieadd', 'movieadded'):
+            payload_movie = data.get('movie', {}) or {}
+            tmdb = payload_movie.get('tmdbId') or payload_movie.get('tmdbid')
+            radarr_payload_id = payload_movie.get('id')
+            # Spawn a single enrichment thread that will normalize payload and call ARR-specific logic
+            try:
+                threading.Thread(target=start_enrichment_thread, args=(data, is_4k), daemon=True).start()
+                logger.debug("Started background ARR enrichment dispatcher thread", extra={'emoji_type': 'debug'})
+            except Exception as e:
+                logger.error(f"Failed to start ARR enrichment dispatcher thread: {e}", extra={'emoji_type': 'error'})
+    except Exception:
+        # Non-fatal if enrichment launching fails
+        logger.debug("ARR enrichment dispatch failed in webhook handler", extra={'emoji_type': 'debug'})
     
     # Handle import events directly for cleanup
     if event_type in ['download', 'moviefileimported', 'episodefileimported']:
@@ -204,8 +232,17 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             repo.is_deleted(series, False)
 
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
+        # Persist season/episode rows
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
+        
+        # Start background enrichment from Sonarr so DB captures authoritative fields (overviews, paths, etc.)
+        try:
+            threading.Thread(target=start_enrichment_thread, args=({'series': {'tvdbId': tvdb_id, 'id': series_id}}, is_4k), daemon=True).start()
+            logger.debug(f"Enrichment started for Series TVDB {tvdb_id} sonarr {getattr(series, 'sonarrid', None) or series_id}", extra={'emoji_type': 'debug'})
+        except Exception as e:
+            logger.error(f"Failed to start series enrichment thread: {e}", extra={'emoji_type': 'error'})
+
         # Pass the model instance so the scheduler can infer model type and create subflows
         job_scheduled = handle_seriesadd_scheduler.enqueue(series)
     finally:

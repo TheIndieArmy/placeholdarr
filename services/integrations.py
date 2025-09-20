@@ -1280,6 +1280,9 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
             monitored = bool(movie_data.get('monitored', False))
             release_status = movie_data.get('status')
 
+            # also capture overview/plot from Radarr for NFO generation
+            overview = movie_data.get('overview') or movie_data.get('plot') or movie_data.get('description') or None
+
             # Update DB fields conservatively
             changed = False
             if file_path and m.moviefile_path != file_path:
@@ -1299,6 +1302,11 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
                 changed = True
             if release_status and m.radarr_release_status != release_status:
                 m.radarr_release_status = release_status
+                changed = True
+
+            # persist overview if present
+            if overview and getattr(m, 'radarr_overview', None) != overview:
+                m.radarr_overview = overview
                 changed = True
 
             # also update radarrid if missing
@@ -1321,6 +1329,7 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
         logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
         return None
 
+
 def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
     """
     Fetch authoritative series data from Sonarr and update local DB record.
@@ -1329,7 +1338,7 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
     """
     try:
         from services.postgres.db import get_session
-        from services.postgres.models import Series as SeriesModel
+        from services.postgres.models import Series as SeriesModel, Season as SeasonModel, Episode as EpisodeModel
         config = get_arr_config('tv', is_4k)
         if not config:
             logger.error("Sonarr config missing for enrichment", extra={'emoji_type': 'error'})
@@ -1408,12 +1417,60 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                 s.has_files = has_files
                 changed = True
 
+            # capture series-level overview if present
+            series_overview = series_data.get('overview') or series_data.get('description') or None
+            if series_overview and getattr(s, 'sonarr_series_overview', None) != series_overview:
+                s.sonarr_series_overview = series_overview
+                changed = True
+
+            # capture season-level overview if present in series_data['seasons']
+            seasons_info = series_data.get('seasons') or []
+            for sd in seasons_info:
+                try:
+                    sn = sd.get('seasonNumber')
+                    so = sd.get('overview') or sd.get('description') or None
+                    if sn is not None and so:
+                        season_row = session.query(SeasonModel).filter_by(series_id=s.id, season_number=int(sn)).first()
+                        if season_row and getattr(season_row, 'sonarr_season_overview', None) != so:
+                            season_row.sonarr_season_overview = so
+                            session.add(season_row)
+                            # don't mark changed here for series-level commit; we'll commit after episode updates
+                except Exception:
+                    pass
+
             if changed:
                 session.add(s)
                 session.commit()
                 logger.info(f"Enriched series {s.tvdbid} from Sonarr", extra={'emoji_type': 'update'})
             else:
                 logger.debug(f"Enrichment for series {s.tvdbid} found no changes", extra={'emoji_type': 'debug'})
+
+            # Attempt to fetch episode-level overviews and persist them
+            try:
+                eps_resp = requests.get(f"{base_url}/episode", params={'seriesId': series_data.get('id')}, headers=headers, timeout=10)
+                if eps_resp.ok:
+                    eps = eps_resp.json()
+                    for ep in eps:
+                        try:
+                            season_num = ep.get('seasonNumber')
+                            ep_num = ep.get('episodeNumber')
+                            ep_overview = ep.get('overview') or ep.get('description') or None
+                            if not ep_overview:
+                                continue
+                            # find season/episode rows
+                            season_row = session.query(SeasonModel).filter_by(series_id=s.id, season_number=int(season_num)).first()
+                            if not season_row:
+                                continue
+                            episode_row = session.query(EpisodeModel).filter_by(season_id=season_row.id, episode_number=int(ep_num)).first()
+                            if episode_row and getattr(episode_row, 'sonarr_episode_overview', None) != ep_overview:
+                                episode_row.sonarr_episode_overview = ep_overview
+                                session.add(episode_row)
+                        except Exception:
+                            continue
+                    # commit any episode/season overview changes
+                    session.commit()
+            except Exception:
+                logger.debug("Failed to fetch/persist Sonarr episode overviews", extra={'emoji_type': 'debug'})
 
             return series_data
         finally:
@@ -1422,3 +1479,60 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
         return None
+
+def enrich_from_arr(payload: dict = None, media_type: str = None, tvdb_id: int = None, tmdb_id: int = None, arr_id: int = None, is_4k: bool = False):
+    """
+    Generic dispatcher that inspects provided payload or explicit ids and calls the
+    appropriate ARR-specific enrichment function. Returns a normalized dict with
+    canonical fields so callers can treat Radarr and Sonarr the same.
+    """
+    try:
+        # Determine media type
+        mt = media_type
+        if not mt and isinstance(payload, dict):
+            if 'series' in payload:
+                mt = 'tv'
+            elif 'movie' in payload:
+                mt = 'movie'
+
+        # Use explicit ids if provided, otherwise extract from payload
+        if not tvdb_id and isinstance(payload, dict):
+            tvdb_id = payload.get('series', {}).get('tvdbId') if payload.get('series') else None
+        if not tmdb_id and isinstance(payload, dict):
+            tmdb_id = payload.get('movie', {}).get('tmdbId') if payload.get('movie') else None
+        if not arr_id and isinstance(payload, dict):
+            arr_id = (payload.get('series') or {}).get('id') or (payload.get('movie') or {}).get('id')
+
+        if mt == 'tv':
+            resp = enrich_series_from_sonarr(tvdb_id=tvdb_id, sonarr_id=arr_id, is_4k=is_4k)
+            # Normalize result
+            if resp is None:
+                return {'type': 'tv', 'tvdb': tvdb_id, 'sonarr_id': arr_id, 'overview': None, 'changed': False}
+            overview = resp.get('overview') or resp.get('description')
+            return {'type': 'tv', 'tvdb': tvdb_id, 'sonarr_id': resp.get('id') or arr_id, 'overview': overview, 'changed': True}
+
+        elif mt == 'movie':
+            resp = enrich_movie_from_radarr(tmdb_id=tmdb_id, radarr_id=arr_id, is_4k=is_4k)
+            if resp is None:
+                return {'type': 'movie', 'tmdb': tmdb_id, 'radarr_id': arr_id, 'overview': None, 'changed': False}
+            overview = resp.get('overview') or resp.get('plot') or resp.get('description')
+            return {'type': 'movie', 'tmdb': tmdb_id, 'radarr_id': resp.get('id') or arr_id, 'overview': overview, 'changed': True}
+
+        else:
+            logger.debug("enrich_from_arr could not determine media type", extra={'emoji_type': 'debug'})
+            return None
+
+    except Exception as e:
+        logger.error(f"enrich_from_arr dispatcher error: {e}", extra={'emoji_type': 'error'})
+        return None
+
+
+def start_enrichment_thread(payload: dict, is_4k: bool = False):
+    """
+    Convenience wrapper intended to be used as a background thread target.
+    Accepts a webhook-like payload dict and calls enrich_from_arr.
+    """
+    try:
+        enrich_from_arr(payload=payload, is_4k=is_4k)
+    except Exception as e:
+        logger.error(f"Background enrichment thread failed: {e}", extra={'emoji_type': 'error'})
