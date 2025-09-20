@@ -16,6 +16,8 @@ class Movie(Base):
     radarrpath = Column(String, nullable=True)
     # Exact path to the actual movie file when Radarr has imported one (movieFile.path)
     moviefile_path = Column(String, nullable=True)
+    # ARR-provided synopsis/overview for NFO/metadata generation
+    radarr_overview = Column(String, nullable=True)
     # Size in bytes reported for the movie file (if available)
     moviefile_size = Column(BigInteger, nullable=True)
     # boolean indicating Radarr reports a movie file exists for this movie
@@ -87,6 +89,8 @@ class Series(Base):
     is_4k  = Column(Boolean, default=False)
     dummypath = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
+    # ARR-provided synopsis/overview for series-level metadata
+    sonarr_series_overview = Column(String, nullable=True)
     # Aggregate flags for files under this series
     has_files = Column(Boolean, default=False)
     seriesfile_count = Column(BigInteger, nullable=True)
@@ -126,6 +130,8 @@ class Season(Base):
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
+    # ARR-provided synopsis/overview for series-level metadata
+    sonarr_season_overview = Column(String, nullable=True)
     # Aggregate per-season file info
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)
@@ -166,6 +172,8 @@ class Episode(Base):
     # Exact path to the episode file when Sonarr has it
     episodefile_path = Column(String, nullable=True)
     episodefile_size = Column(BigInteger, nullable=True)
+    # Episode-level overview (if provided by Sonarr)
+    sonarr_episode_overview = Column(String, nullable=True)
     # boolean indicating Sonarr reports a file exists for this episode
     has_file = Column(Boolean, default=False)
     sonarr_quality = Column(String, nullable=True)
