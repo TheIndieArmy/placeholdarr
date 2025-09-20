@@ -1402,9 +1402,26 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
             changed = False
             # Sonarr fields
             path = series_data.get('path') or series_data.get('folderPath') or series_data.get('folder')
-            has_files = bool(series_data.get('hasFile', False) or series_data.get('seasons'))
+            # Determine whether Sonarr reports any files for this series.
+            # Sonarr's `hasFile` is authoritative; otherwise inspect per-season flags
+            has_files = bool(series_data.get('hasFile', False))
+            seasons_info = series_data.get('seasons') or []
+            if not has_files and seasons_info:
+                # Inspect seasons for indicators of files: Sonarr may include per-season 'hasFile' or 'statistics'.
+                for sd in seasons_info:
+                    try:
+                        if sd.get('hasFile'):
+                            has_files = True
+                            break
+                        stats = sd.get('statistics') or {}
+                        if int(stats.get('episodeFileCount', 0)) > 0:
+                            has_files = True
+                            break
+                    except Exception:
+                        continue
+
             monitored = bool(series_data.get('monitored', False))
-            if series_data.get('id') and s.sonarrid != series_data.get('id'):
+            if s.sonarrid != series_data.get('id'):
                 s.sonarrid = series_data.get('id')
                 changed = True
             if path and s.sonarrpath != path:
@@ -1416,6 +1433,7 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
             if s.has_files != has_files:
                 s.has_files = has_files
                 changed = True
+                logger.debug(f"Set series.has_files={has_files} for series {s.tvdbid} based on Sonarr data", extra={'emoji_type': 'debug'})
 
             # capture series-level overview if present
             series_overview = series_data.get('overview') or series_data.get('description') or None
@@ -1424,7 +1442,6 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                 changed = True
 
             # capture season-level overview if present in series_data['seasons']
-            seasons_info = series_data.get('seasons') or []
             for sd in seasons_info:
                 try:
                     sn = sd.get('seasonNumber')
