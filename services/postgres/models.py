@@ -1,8 +1,9 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
+from datetime import datetime
 
 class Movie(Base):
     __tablename__ = "movie"
@@ -79,6 +80,22 @@ class SubFlow(Base):
     series = relationship('Series', back_populates='subflows')
     season = relationship('Season', back_populates='subflows')
     episode = relationship('Episode', back_populates='subflows')
+
+# New Job table: simple durable queue for batch/import jobs
+class Job(Base):
+    __tablename__ = 'job'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_type = Column(String, nullable=False)               # e.g. 'import_list', 'process_series_add', 'file_import'
+    payload = Column(JSON, nullable=True)                   # arbitrary JSON payload for the worker
+    status = Column(String, default='PENDING')              # PENDING / CLAIMED / DONE / FAILED
+    run_after = Column(DateTime, nullable=True)             # optional delay for scheduling
+    attempts = Column(Integer, default=0)
+    group_id = Column(String, nullable=True)                # optional grouping id for coalescing
+    created_at = Column(DateTime, default=datetime.utcnow)
+    error_message = Column(String, nullable=True)
+
+    def __repr__(self):
+        return f"<Job(id={self.id}, type={self.job_type!r}, status={self.status})>"
 
 class Series(Base):
     __tablename__ = "series"

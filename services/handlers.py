@@ -1,4 +1,4 @@
-import os, re, threading, time, shutil, requests
+import os, re, threading, time, shutil, requests, json
 from fastapi.responses import JSONResponse
 from core.config import settings
 from core.logger import logger
@@ -22,6 +22,9 @@ from services.scheduler import (
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
 from services.integrations import enrich_movie_from_radarr, enrich_series_from_sonarr, enrich_from_arr, start_enrichment_thread
+from datetime import datetime, timedelta
+from services.postgres.models import Job
+from services.jobs import run_worker_loop
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -244,7 +247,9 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             logger.error(f"Failed to start series enrichment thread: {e}", extra={'emoji_type': 'error'})
 
         # Pass the model instance so the scheduler can infer model type and create subflows
-        job_scheduled = handle_seriesadd_scheduler.enqueue(series)
+        # Enqueue to batch job queue instead of scheduling immediately; debounce multiple events
+        job_id = enqueue_import_list_job(tvdb_id, is_4k)
+        job_scheduled = bool(job_id)
     finally:
         try:
             session.close()
@@ -252,9 +257,9 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             pass
     
     if job_scheduled:
-        logger.info(f"Enqueued 'handle_movieadd' action for TVDB ID {tvdb_id}")
+        logger.info(f"Enqueued import_list job {job_id} for TVDB ID {tvdb_id}")
     else:
-        logger.warning(f"Failed to enqueue 'handle_movieadd' action for TVDB ID {tvdb_id}")
+        logger.warning(f"Failed to enqueue import_list job for TVDB ID {tvdb_id}")
     
     return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
 
@@ -562,3 +567,61 @@ def handle_playback(data: dict):
         session.close()
 
     return JSONResponse({"status": "scheduled", "message": f"{media_type} playback enqueued"})
+
+# Background job worker starter guard
+_worker_thread_started = False
+_worker_thread_lock = threading.Lock()
+
+
+def _start_worker_once():
+    global _worker_thread_started
+    with _worker_thread_lock:
+        if not _worker_thread_started:
+            try:
+                t = threading.Thread(target=run_worker_loop, args=(), daemon=True)
+                t.start()
+                _worker_thread_started = True
+                logger.debug("Started background job worker thread", extra={'emoji_type': 'debug'})
+            except Exception as e:
+                logger.error(f"Failed to start job worker thread: {e}", extra={'emoji_type': 'error'})
+
+
+def enqueue_import_list_job(tvdb_id, is_4k=False):
+    """Coalesce series TVDB ids into a single debounced import_list Job.
+    Returns the job id if scheduled, or None on failure.
+    """
+    session = get_session()
+    try:
+        group = f"import_list-4k" if is_4k else "import_list"
+        debounce = getattr(settings, 'JOB_DEBOUNCE_SECONDS', 3)
+        run_after = datetime.utcnow() + timedelta(seconds=debounce)
+
+        # Try to find an existing pending job for this group
+        existing = session.query(Job).filter_by(job_type='import_list', group_id=group, status='PENDING').order_by(Job.id.desc()).first()
+        if existing:
+            payload = existing.payload or {}
+            series_list = payload.get('series_tvdb', [])
+            if str(tvdb_id) not in list(map(str, series_list)):
+                series_list.append(tvdb_id)
+                payload['series_tvdb'] = series_list
+                existing.payload = payload
+            existing.run_after = run_after
+            session.add(existing)
+            session.commit()
+            job_id = existing.id
+        else:
+            payload = {'series_tvdb': [tvdb_id]}
+            job = Job(job_type='import_list', payload=payload, status='PENDING', run_after=run_after, group_id=group)
+            session.add(job)
+            session.commit()
+            job_id = job.id
+
+        # Ensure worker is running to pick up jobs
+        _start_worker_once()
+        return job_id
+    except Exception as e:
+        logger.error(f"Failed to enqueue import_list job: {e}", extra={'emoji_type': 'error'})
+        session.rollback()
+        return None
+    finally:
+        session.close()

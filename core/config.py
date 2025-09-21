@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").split('#')[0].strip().lower() == "true"
     ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
 
+    # Job queue / batching
+    BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
+    JOB_DEBOUNCE_SECONDS: int = int(os.getenv("JOB_DEBOUNCE_SECONDS", "3"))
+
     # Add a method to clean string values
     @validator('*', pre=True)
     def clean_string_values(cls, v):
