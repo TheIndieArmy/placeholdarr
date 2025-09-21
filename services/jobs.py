@@ -3,40 +3,50 @@ import time
 import logging
 from datetime import datetime, timedelta
 from services.postgres.db import get_session
-from services.postgres.models import Job, Series, SubFlow
+from services.postgres.models import Job, Series, SubFlow, Episode
 from core.config import settings
 from core.logger import logger
-from sqlalchemy import text
+from sqlalchemy import text, or_
 from services.flow_manager import flow_manager
 from services.plex_client import refresh_plex_dummy
 from services.jellyfin_client import refresh_jellyfin_dummy
 
 # Simple job worker that claims Job rows and splits batch payloads into Series SubFlows
-# This is intentionally minimal; it uses SELECT FOR UPDATE SKIP LOCKED to claim jobs
+# This is intentionally minimal; it uses an atomic UPDATE ... RETURNING to claim jobs
 
 def claim_next_job(session):
-    """Claim the next available job using SELECT FOR UPDATE SKIP LOCKED.
-    Returns the Job row or None if none available."""
-    job = None
+    """Atomically claim the next available PENDING job and return the Job row, or None.
+
+    Uses an UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1) subquery with RETURNING
+    so only one worker can claim a given job even under concurrency.
+    """
     try:
-        job = session.execute(text("""
-            SELECT id FROM job
-            WHERE status = 'PENDING' AND (run_after IS NULL OR run_after <= now())
-            ORDER BY id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        """)).fetchone()
+        # Atomically select-and-update one pending job
+        stmt = text("""
+            WITH candidate AS (
+                SELECT id FROM job
+                WHERE status = 'PENDING' AND (run_after IS NULL OR run_after <= now())
+                ORDER BY id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE job
+            SET status = 'CLAIMED', attempts = COALESCE(attempts,0) + 1, updated_at = now()
+            FROM candidate
+            WHERE job.id = candidate.id
+            RETURNING job.id
+        """)
+        res = session.execute(stmt).fetchone()
+        if not res:
+            return None
+        job_id = res[0]
+        job = session.query(Job).get(job_id)
         if not job:
             return None
-        job_id = job[0]
-        j = session.query(Job).get(job_id)
-        if not j:
-            return None
-        j.status = 'CLAIMED'
-        j.attempts = (j.attempts or 0) + 1
-        session.add(j)
+        # Keep as CLAIMED for clarity; worker will process and mark DONE/FAILED
+        session.add(job)
         session.commit()
-        return j
+        return job
     except Exception as e:
         logger.error(f"claim_next_job error: {e}", extra={'emoji_type': 'error'})
         session.rollback()
@@ -45,13 +55,15 @@ def claim_next_job(session):
 
 def process_import_list_job(session, job: Job):
     """Process a job of type 'import_list'. Payload is expected to be a dict with 'series_tvdb' list.
-    Creates one Series-level SubFlow per tvdb and optionally triggers combined refresh.
+    Creates one Series-level SubFlow per tvdb and schedules a combined_refresh job that includes
+    expected_counts per-series computed from DB (episodes needing placeholders).
     """
     try:
         payload = job.payload or {}
         series_list = payload.get('series_tvdb', [])
         created_subflows = []
         created_series = []
+        expected_counts = {}
 
         for tvdb in series_list:
             # Find series by tvdb
@@ -66,8 +78,23 @@ def process_import_list_job(session, job: Job):
 
             created_series.append(s.id)
 
+            # Compute expected episode count for this series:
+            # Count episodes that likely need placeholders (no file & not deleted)
+            try:
+                from services.postgres.models import Season
+                cnt = (
+                    session.query(Episode)
+                    .join(Season, Episode.season_id == Season.id)
+                    .filter(Season.series_id == s.id)
+                    .filter(Episode.is_deleted == False)
+                    .filter(or_(Episode.episodefile_path == None, Episode.has_file == False))
+                ).count()
+            except Exception:
+                cnt = 0
+
+            expected_counts[str(s.id)] = cnt
+
             # Create a Series-level SubFlow if not exists
-            # Use simple idempotent check
             steps_entry = flow_manager.get_initial('handle_seriesadd')
             steps = (steps_entry.__name__ if callable(steps_entry) else ','.join(f.__name__ for f in steps_entry))
             filter_kwargs = {'series_id': s.id, 'branch': 'all', 'steps': steps, 'action': 'handle_seriesadd'}
@@ -94,9 +121,10 @@ def process_import_list_job(session, job: Job):
         if created_subflows and getattr(settings, 'BATCH_SERIES_SUBFLOWS', True):
             logger.info(f"Created {len(created_subflows)} series subflows; scheduling combined refresh job", extra={'emoji_type': 'refresh'})
             # Schedule a follow-up combined_refresh job that waits for per-episode creation to finish
-            from datetime import datetime, timedelta
             combined_payload = {'series_ids': created_series, 'created_subflows': created_subflows}
             combined_job = Job(job_type='combined_refresh', payload=combined_payload, status='PENDING', run_after=datetime.utcnow() + timedelta(seconds=5))
+            # persist expected_counts map on job for deterministic waiting
+            combined_job.expected_counts = expected_counts
             session.add(combined_job)
             session.commit()
             logger.info(f"Scheduled combined_refresh job {combined_job.id} for {len(created_series)} series", extra={'emoji_type': 'refresh'})
@@ -117,8 +145,8 @@ def process_import_list_job(session, job: Job):
 
 
 def process_combined_refresh_job(session, job: Job):
-    """Wait until per-episode creation subflows for the provided series IDs are no longer PENDING,
-    then invoke bulk refresh functions for Plex and Jellyfin.
+    """Wait until per-episode creation subflows for the provided series IDs reach the expected_counts,
+    then invoke bulk refresh functions for Plex and Jellyfin. Uses expected_counts stored on job when available.
     """
     try:
         payload = job.payload or {}
@@ -130,26 +158,58 @@ def process_combined_refresh_job(session, job: Job):
             session.commit()
             return True
 
-        # Wait until there are no SubFlows for these series stuck in PENDING (initial creation)
-        timeout = getattr(settings, 'JOB_COMBINED_REFRESH_TIMEOUT', 60)
-        waited = 0
-        poll = 1
-        while waited < timeout:
-            pending = (
-                session.query(SubFlow)
-                .join(Series, SubFlow.series_id == Series.id)
-                .filter(Series.id.in_(series_ids), SubFlow.action == 'handle_seriesadd', SubFlow.status == 'PENDING')
-                .count()
-            )
-            if pending == 0:
-                break
-            logger.verbose(f"combined_refresh job {job.id}: waiting for {pending} pending subflows to finish (waited {waited}s)", extra={'emoji_type': 'wait'})
-            session.expunge_all()
-            time.sleep(poll)
-            waited += poll
+        # Pull expected_counts from job column or payload
+        expected_counts = job.expected_counts or payload.get('expected_counts') or {}
 
-        if waited >= timeout:
-            logger.warning(f"combined_refresh job {job.id} timed out waiting for creation subflows (waited {waited}s)", extra={'emoji_type': 'warning'})
+        timeout = getattr(settings, 'JOB_COMBINED_REFRESH_TIMEOUT', 60)
+        poll = getattr(settings, 'JOB_COMBINED_REFRESH_POLL_INTERVAL', 1)
+        waited = 0
+
+        # For each series, wait until number of episode SubFlows created >= expected_count and no PENDING creation subflows
+        pending_series = set(series_ids)
+        while waited < timeout and pending_series:
+            for sid in list(pending_series):
+                expected = int(expected_counts.get(str(sid), 0)) if expected_counts else None
+
+                # Count episode SubFlows for this series (those with episode_id set)
+                created_eps = (
+                    session.query(SubFlow)
+                    .filter(SubFlow.series_id == sid)
+                    .filter(SubFlow.episode_id != None)
+                    .filter(SubFlow.action == 'handle_seriesadd')
+                    .count()
+                )
+
+                # Count any still-PENDING creation subflows for this series
+                pending_creations = (
+                    session.query(SubFlow)
+                    .filter(SubFlow.series_id == sid)
+                    .filter(SubFlow.action == 'handle_seriesadd')
+                    .filter(SubFlow.status == 'PENDING')
+                    .count()
+                )
+
+                ready = False
+                if expected is None:
+                    # No expected provided: consider ready when no PENDING creation subflows remain
+                    ready = (pending_creations == 0)
+                else:
+                    # Consider ready when created_eps >= expected and no PENDING creation subflows
+                    ready = (created_eps >= expected and pending_creations == 0)
+
+                if ready:
+                    pending_series.remove(sid)
+                    logger.info(f"Series {sid} ready for combined refresh (created_eps={created_eps}, expected={expected})", extra={'emoji_type': 'info'})
+                else:
+                    logger.verbose(f"Series {sid} not ready yet (created_eps={created_eps}, expected={expected}, pending={pending_creations})", extra={'emoji_type': 'wait'})
+
+            if pending_series:
+                session.expunge_all()
+                time.sleep(poll)
+                waited += poll
+
+        if waited >= timeout and pending_series:
+            logger.warning(f"combined_refresh job {job.id} timed out waiting for series: {pending_series} (waited {waited}s)", extra={'emoji_type': 'warning'})
 
         # Call bulk refresh functions to refresh all queued SubFlows for the 'handle_seriesadd' action
         logger.info(f"combined_refresh job {job.id}: invoking bulk Plex refresh", extra={'emoji_type': 'refresh'})

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON, Index, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -90,9 +90,21 @@ class Job(Base):
     status = Column(String, default='PENDING')              # PENDING / CLAIMED / DONE / FAILED
     run_after = Column(DateTime, nullable=True)             # optional delay for scheduling
     attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=5)
     group_id = Column(String, nullable=True)                # optional grouping id for coalescing
+    expected_counts = Column(JSON, nullable=True)          # optional per-series expected counts {series_id: count}
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     error_message = Column(String, nullable=True)
+
+    __table_args__ = (
+        # index to speed up claiming
+        Index('ix_job_status_run_after', 'status', 'run_after'),
+        # index for lookup/dedupe by group
+        Index('ix_job_groupid', 'group_id'),
+        # Partial unique index to prevent multiple active combined_refresh jobs with same group_id
+        Index('ux_job_combined_refresh_groupid', 'group_id', unique=True, postgresql_where=text("job_type='combined_refresh' AND status IN ('PENDING','CLAIMED','WORKING')")),
+    )
 
     def __repr__(self):
         return f"<Job(id={self.id}, type={self.job_type!r}, status={self.status})>"
