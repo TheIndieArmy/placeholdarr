@@ -216,19 +216,50 @@ class SeriesRepository:
                     'title': ep.get('title', f"Ep {ep_num}"),
                     'year': series.year,
                     # keep tvdbid as None when missing instead of coercing to 0
-                    'tvdbid': ep.get('tvdbid', None)
+                    'tvdbid': ep.get('tvdbid', None),
+                    'status': 'PENDING',
+                    'action': 'handle_seriesadd',
                 }
-                ep_instance, ep_created = self.get_or_create(
-                    Episode,
-                    self.session,
-                    defaults=episode_defaults,
+                # Check if episode already exists (by season_id and episode_number only)
+                existing_episode = self.session.query(Episode).filter_by(
                     season_id=season.id,
-                    episode_number=ep_num,
-                    status='PENDING',
-                    action='handle_seriesadd',
-                )
+                    episode_number=ep_num
+                ).first()
+                
+                if existing_episode:
+                    logger.info(f"Found existing Episode S{season_num}E{ep_num}: {existing_episode.id} ({existing_episode.status})")
+                    ep_instance, ep_created = existing_episode, False
+                    
+                    # Reset episode to PENDING for reprocessing if it was DONE/FAILED
+                    if existing_episode.status in ['DONE', 'FAILED']:
+                        existing_episode.status = 'PENDING'
+                        existing_episode.action = 'handle_seriesadd'
+                        self.session.add(existing_episode)
+                        logger.info(f"Reset Episode S{season_num}E{ep_num} status to PENDING for reprocessing")
+                else:
+                    logger.info(f"Creating new Episode S{season_num}E{ep_num}")
+                    # Create new episode with all the defaults
+                    ep_instance = Episode(
+                        season_id=season.id,
+                        episode_number=ep_num,
+                        title=ep.get('title', f"Ep {ep_num}"),
+                        year=series.year,
+                        tvdbid=ep.get('tvdbid', None),
+                        status='PENDING',
+                        action='handle_seriesadd',
+                    )
+                    self.session.add(ep_instance)
+                    self.session.commit()
+                    ep_created = True
                 if ep_created:
                     logger.info(f"Added Episode S{season_num}E{ep_num} and queued for processing")
+                else:
+                    # Episode exists, but reset status to PENDING for reprocessing if needed
+                    if ep_instance.status in ['DONE', 'FAILED']:
+                        ep_instance.status = 'PENDING'
+                        ep_instance.action = 'handle_seriesadd'
+                        self.session.add(ep_instance)
+                        logger.info(f"Reset Episode S{season_num}E{ep_num} status to PENDING for reprocessing")
 
     def get_ep_by_series(self, series, season_num, episode_num):
         """

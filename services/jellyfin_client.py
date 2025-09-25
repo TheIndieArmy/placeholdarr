@@ -8,8 +8,13 @@ from core.config import settings
 from core.logger import logger
 from services.utils import strip_status_markers
 from services.postgres.models import Movie, Series, Season, Episode, SubFlow
+from services.nfo_manager import (
+    create_movie_nfo, create_series_nfo, create_season_nfo, create_episode_nfo,
+    write_nfo_file, update_nfo_status, delete_nfo_file, get_nfo_path
+)
 from urllib.parse import quote_plus
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_
 import inspect
 
 # Initialize a shared session with default headers
@@ -190,6 +195,204 @@ def retry_call(
     return last_result
 
 
+def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
+    """
+    Create NFO file alongside placeholder for Jellyfin metadata.
+    This function is called by the scheduler as a step in the flow.
+    
+    For episodes, it ensures the complete hierarchy (series -> season -> episode) 
+    NFO files are created if they don't exist.
+
+    Args:
+        dbsession: SQLAlchemy session.
+        ent_id: Entity ID (movie_id, series_id, season_id, or episode_id).
+        model: Model type (Movie, Series, Season, or Episode).
+        action: Action name from SubFlow.
+
+    Returns:
+        True if NFO creation succeeded, False otherwise.
+    """
+    if not settings.jellyfin_enabled:
+        logger.info("Jellyfin is disabled, skipping NFO creation", extra={'emoji_type': 'skip'})
+        return True
+
+    logger.info(f"Creating NFO for {model.__name__} {ent_id}, action '{action}'", extra={'emoji_type': 'file'})
+    
+    try:
+        entity = dbsession.query(model).get(ent_id)
+        if not entity:
+            logger.error(f"{model.__name__} {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+        
+        request_status = "Request"  # Default status prefix
+        
+        if model == Movie:
+            # Handle movie NFO creation
+            placeholder_path = getattr(entity, 'dummypath', None)
+            if not placeholder_path:
+                logger.error(f"No placeholder path found for Movie {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            nfo_content = create_movie_nfo(entity, request_status)
+            if not nfo_content:
+                logger.error(f"Failed to generate movie NFO content for {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            nfo_path = get_nfo_path(placeholder_path)
+            if not nfo_path:
+                logger.error(f"Could not determine NFO path for {placeholder_path}", extra={'emoji_type': 'error'})
+                return False
+            
+            success = write_nfo_file(nfo_content, nfo_path)
+            if success:
+                entity.nfo_path = nfo_path
+                dbsession.add(entity)
+                dbsession.commit()
+                logger.info(f"Successfully created movie NFO: {nfo_path}", extra={'emoji_type': 'success'})
+            
+            return success
+            
+        elif model == Episode:
+            # Handle episode NFO creation - create complete hierarchy
+            episode = entity
+            
+            # Get season and series
+            season = dbsession.query(Season).get(episode.season_id)
+            if not season:
+                logger.error(f"Season {episode.season_id} not found for episode {ent_id}", extra={'emoji_type': 'error'})
+                return False
+                
+            series = dbsession.query(Series).get(season.series_id)
+            if not series:
+                logger.error(f"Series {season.series_id} not found for season {episode.season_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            logger.info(f"Creating NFO hierarchy for episode {episode.episode_number} of '{series.title}' S{season.season_number}", extra={'emoji_type': 'tv'})
+            
+            # Ensure we have the dummy paths
+            episode_placeholder_path = getattr(episode, 'dummypath', None)
+            if not episode_placeholder_path:
+                logger.error(f"No placeholder path found for Episode {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            # Create series NFO if it doesn't exist
+            if not series.nfo_path or not os.path.exists(series.nfo_path):
+                logger.info(f"Creating series NFO for '{series.title}'", extra={'emoji_type': 'file'})
+                series_nfo_content = create_series_nfo(series, request_status)
+                if series_nfo_content:
+                    # Determine series folder from episode path
+                    series_folder = os.path.dirname(os.path.dirname(episode_placeholder_path))  # Go up 2 levels from episode
+                    series_nfo_path = os.path.join(series_folder, "tvshow.nfo")
+                    
+                    if write_nfo_file(series_nfo_content, series_nfo_path):
+                        series.nfo_path = series_nfo_path
+                        dbsession.add(series)
+                        logger.info(f"Created series NFO: {series_nfo_path}", extra={'emoji_type': 'success'})
+                    else:
+                        logger.error(f"Failed to write series NFO to {series_nfo_path}", extra={'emoji_type': 'error'})
+                else:
+                    logger.error(f"Failed to generate series NFO content", extra={'emoji_type': 'error'})
+            
+            # Create season NFO if it doesn't exist
+            if not season.nfo_path or not os.path.exists(season.nfo_path):
+                logger.info(f"Creating season NFO for S{season.season_number}", extra={'emoji_type': 'file'})
+                season_nfo_content = create_season_nfo(season, request_status)
+                if season_nfo_content:
+                    # Determine season folder from episode path
+                    season_folder = os.path.dirname(episode_placeholder_path)  # Go up 1 level from episode
+                    season_nfo_path = os.path.join(season_folder, "season.nfo")
+                    
+                    if write_nfo_file(season_nfo_content, season_nfo_path):
+                        season.nfo_path = season_nfo_path
+                        dbsession.add(season)
+                        logger.info(f"Created season NFO: {season_nfo_path}", extra={'emoji_type': 'success'})
+                    else:
+                        logger.error(f"Failed to write season NFO to {season_nfo_path}", extra={'emoji_type': 'error'})
+                else:
+                    logger.error(f"Failed to generate season NFO content", extra={'emoji_type': 'error'})
+            
+            # Create episode NFO
+            logger.info(f"Creating episode NFO for S{season.season_number}E{episode.episode_number}", extra={'emoji_type': 'file'})
+            episode_nfo_content = create_episode_nfo(episode, request_status)
+            if not episode_nfo_content:
+                logger.error(f"Failed to generate episode NFO content", extra={'emoji_type': 'error'})
+                return False
+            
+            episode_nfo_path = get_nfo_path(episode_placeholder_path)
+            if not episode_nfo_path:
+                logger.error(f"Could not determine episode NFO path for {episode_placeholder_path}", extra={'emoji_type': 'error'})
+                return False
+            
+            success = write_nfo_file(episode_nfo_content, episode_nfo_path)
+            if success:
+                episode.nfo_path = episode_nfo_path
+                dbsession.add(episode)
+                dbsession.commit()
+                logger.info(f"Successfully created episode NFO: {episode_nfo_path}", extra={'emoji_type': 'success'})
+            
+            return success
+            
+        elif model == Series:
+            # Handle series NFO creation
+            placeholder_path = getattr(entity, 'dummypath', None)
+            if not placeholder_path:
+                logger.error(f"No placeholder path found for Series {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            nfo_content = create_series_nfo(entity, request_status)
+            if not nfo_content:
+                logger.error(f"Failed to generate series NFO content for {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            # Series NFO goes in the series folder as tvshow.nfo
+            series_folder = os.path.dirname(placeholder_path) if os.path.isfile(placeholder_path) else placeholder_path
+            nfo_path = os.path.join(series_folder, "tvshow.nfo")
+            
+            success = write_nfo_file(nfo_content, nfo_path)
+            if success:
+                entity.nfo_path = nfo_path
+                dbsession.add(entity)
+                dbsession.commit()
+                logger.info(f"Successfully created series NFO: {nfo_path}", extra={'emoji_type': 'success'})
+            
+            return success
+            
+        elif model == Season:
+            # Handle season NFO creation
+            season = entity
+            placeholder_path = getattr(season, 'dummypath', None)
+            if not placeholder_path:
+                logger.error(f"No placeholder path found for Season {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            nfo_content = create_season_nfo(season, request_status)
+            if not nfo_content:
+                logger.error(f"Failed to generate season NFO content for {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            
+            # Season NFO goes in the season folder as season.nfo
+            season_folder = os.path.dirname(placeholder_path) if os.path.isfile(placeholder_path) else placeholder_path
+            nfo_path = os.path.join(season_folder, "season.nfo")
+            
+            success = write_nfo_file(nfo_content, nfo_path)
+            if success:
+                entity.nfo_path = nfo_path
+                dbsession.add(entity)
+                dbsession.commit()
+                logger.info(f"Successfully created season NFO: {nfo_path}", extra={'emoji_type': 'success'})
+            
+            return success
+            
+        else:
+            logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
+            return False
+        
+    except Exception as e:
+        logger.error(f"Failed to create NFO for {model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
+        dbsession.rollback()
+        return False
+
+
 def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
     """
     Refresh Jellyfin with dummy file for a specific entity.
@@ -243,7 +446,58 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
             dbsession.commit()
         # Continue to trigger scan regardless of file existence
     else:
-        # For non-delete actions, update placeholder_exists status
+        # For non-delete actions, create dummy file if missing
+        if not file_exists:
+            logger.warning(f"Dummy file missing, attempting to create: {dummy_path}", extra={'emoji_type': 'warning'})
+            try:
+                # Import here to avoid circular imports
+                from services.integrations import place_dummy_file
+                from services.postgres.models import Movie, Episode, Season, Series
+                
+                created_path = None
+                if model == Movie:
+                    movie = entity
+                    # Determine library based on 4K status
+                    library_path = settings.MOVIE_LIBRARY_FOLDER_4K if getattr(movie, 'is_4k', False) else settings.MOVIE_LIBRARY_FOLDER
+                    created_path = place_dummy_file(
+                        "movie", 
+                        movie.title, 
+                        movie.year, 
+                        getattr(movie, 'tmdbid', None),
+                        library_path
+                    )
+                elif model == Episode:
+                    episode = entity
+                    season = dbsession.query(Season).get(episode.season_id)
+                    series = dbsession.query(Series).get(season.series_id)
+                    # Determine library based on 4K status
+                    library_path = settings.TV_LIBRARY_FOLDER_4K if getattr(series, 'is_4k', False) else settings.TV_LIBRARY_FOLDER
+                    created_path = place_dummy_file(
+                        "tv",
+                        series.title,
+                        series.year,
+                        getattr(series, 'tvdbid', None),
+                        library_path,
+                        season_number=season.season_number,
+                        episode_range=(episode.episode_number, episode.episode_number),
+                        episode_title=episode.title
+                    )
+                
+                if created_path:
+                    logger.info(f"Successfully created missing dummy file: {created_path}", extra={'emoji_type': 'success'})
+                    # Update the entity's dummypath if needed
+                    if entity.dummypath != created_path:
+                        entity.dummypath = created_path
+                        dbsession.add(entity)
+                        dbsession.commit()
+                    file_exists = True
+                else:
+                    logger.error(f"Failed to create dummy file for {model.__name__} ID {ent_id}", extra={'emoji_type': 'error'})
+                    
+            except Exception as e:
+                logger.error(f"Error creating dummy file: {e}", extra={'emoji_type': 'error'})
+        
+        # Update placeholder_exists status
         if hasattr(entity, 'placeholder_exists'):
             entity.placeholder_exists = file_exists
             dbsession.add(entity)
@@ -262,10 +516,75 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
 
     logger.info(f"Determined update type as '{update_type}' based on action '{action}'", extra={'emoji_type': 'update'})
 
+    # Prepare paths to refresh (dummy file + NFO file if it exists)
+    paths_to_refresh = [dummy_path]
+    
+    # Add NFO path if it exists
+    nfo_path = getattr(entity, 'nfo_path', None)
+    if nfo_path and os.path.exists(nfo_path):
+        paths_to_refresh.append(nfo_path)
+        logger.info(f"Including NFO file in refresh: {nfo_path}", extra={'emoji_type': 'file'})
+
     # Perform the refresh
     try:
-        refresh_jellyfin_item([dummy_path], update_type)
-        logger.info(f"Successfully called refresh_jellyfin_item with path '{dummy_path}' and update type '{update_type}'", extra={'emoji_type': 'success'})
+        refresh_jellyfin_item(paths_to_refresh, update_type)
+        path_list = ', '.join(paths_to_refresh)
+        logger.info(f"Successfully called refresh_jellyfin_item with paths '{path_list}' and update type '{update_type}'", extra={'emoji_type': 'success'})
+        
+        # For delete actions, check if parent directories are empty and trigger additional scans
+        if 'delete' in action_lower:
+            try:
+                from services.postgres.models import Episode, Season, Series
+                
+                if model == Episode:
+                    # Check if season/series folders are empty after episode deletion
+                    episode = entity
+                    season = dbsession.query(Season).get(episode.season_id)
+                    series = dbsession.query(Series).get(season.series_id)
+                    
+                    if episode.dummypath:
+                        season_dir = os.path.dirname(episode.dummypath)
+                        series_dir = os.path.dirname(season_dir)
+                        
+                        # Check if season folder is empty
+                        if os.path.exists(season_dir):
+                            try:
+                                season_contents = os.listdir(season_dir)
+                                if not season_contents:
+                                    logger.info(f"🔍 Season folder is empty after episode deletion, triggering season cleanup: {season_dir}", extra={'emoji_type': 'scan'})
+                                    refresh_jellyfin_item([season_dir], 'Deleted')
+                                    
+                                    # Check if series folder is empty
+                                    if os.path.exists(series_dir):
+                                        try:
+                                            series_contents = os.listdir(series_dir)
+                                            if not series_contents:
+                                                logger.info(f"🔍 Series folder is empty after season cleanup, triggering series cleanup: {series_dir}", extra={'emoji_type': 'scan'})
+                                                parent_dir = os.path.dirname(series_dir)
+                                                refresh_jellyfin_item([parent_dir], 'Deleted')
+                                        except Exception as e:
+                                            logger.debug(f"Could not check series directory {series_dir}: {e}", extra={'emoji_type': 'debug'})
+                            except Exception as e:
+                                logger.debug(f"Could not check season directory {season_dir}: {e}", extra={'emoji_type': 'debug'})
+                                
+                elif model == Movie:
+                    # Check if movie folder is empty after movie deletion
+                    movie = entity
+                    if movie.dummypath:
+                        movie_dir = os.path.dirname(movie.dummypath) if os.path.isfile(movie.dummypath) else movie.dummypath
+                        if os.path.exists(movie_dir):
+                            try:
+                                movie_contents = os.listdir(movie_dir)
+                                if not movie_contents:
+                                    logger.info(f"🔍 Movie folder is empty after deletion, triggering cleanup: {movie_dir}", extra={'emoji_type': 'scan'})
+                                    parent_dir = os.path.dirname(movie_dir)
+                                    refresh_jellyfin_item([parent_dir], 'Deleted')
+                            except Exception as e:
+                                logger.debug(f"Could not check movie directory {movie_dir}: {e}", extra={'emoji_type': 'debug'})
+                                
+            except Exception as e:
+                logger.debug(f"Error during empty folder scan check: {e}", extra={'emoji_type': 'debug'})
+        
         return True
     except Exception as e:
         logger.error(f"refresh_jellyfin_item failed: {e}", extra={'emoji_type': 'error'})
@@ -678,20 +997,21 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
                 return False
             if res.status_code == 404:
                 return True
-            it = res.json().get('Items', [])
+            response_items = res.json().get('Items', [])
             return [
-                it for it in (items or [])
+                item for item in (response_items or [])
                 if (
-                    int(it.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and it.get('Path',{}) == m.radarrpath
+                    int(item.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and item.get('Path','') == m.radarrpath
                 )
-                and (not m.year or int(it.get("ProductionYear", -1)) == m.year)
+                and (not m.year or int(item.get("ProductionYear", -1)) == m.year)
             ]
-        items = retry_call(
+        response = retry_call(
             func=lambda: session.get(url, timeout=5),
             on_error=lambda ex: logger.error(f"Movie search error: {ex}"),
             retry_interval=3, retry_timeout=30,
-            success_condition=lambda res: bool(filter_movies(res))
-        ) or []
+            success_condition=lambda res: res.status_code in (200, 204, 404)
+        )
+        items = filter_movies(response) if response else []
         for it in items:
             if it.get('ProviderIds', {}).get('Tmdb') != m.tmdbid and it.get('Path',{}) != m.radarrpath:
                 continue
@@ -709,8 +1029,8 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
     logger.info(f"Processing episode {ent_id} for series '{series.title}' S{ep.season_number}E{ep.episode_number}", extra={'emoji_type': 'tv'})
 
     # 1) Series ID with folder-based dedupe
-    if series.jellyfin_series_id:
-        jf_series_id = series.jellyfin_series_id
+    if series.jellyfin_id:
+        jf_series_id = series.jellyfin_id
         logger.debug(f"Using existing series ID: {jf_series_id}", extra={'emoji_type': 'debug'})
     else:
         logger.info(f"Searching for series '{series.title}' in Jellyfin", extra={'emoji_type': 'search'})
@@ -721,9 +1041,10 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
         )
         folder = None
         try:
-            base = settings.TV_LIBRARY_PATH.rstrip(os.sep) + os.sep
+            import os as os_module  # Explicit import to avoid scoping issues
+            base = settings.TV_LIBRARY_FOLDER.rstrip(os_module.sep) + os_module.sep
             rel = ep.sonarrpath.replace(base, '')
-            folder = rel.split(os.sep)[0]
+            folder = rel.split(os_module.sep)[0]
             logger.debug(f"Extracted folder '{folder}' from path: {ep.sonarrpath}", extra={'emoji_type': 'debug'})
         except Exception as e:
             logger.error(f"Error locating Series folder path: {e}", extra={'emoji_type': 'error'})
@@ -732,7 +1053,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
             return [
                 s for s in (items or [])
                 if s.get("ProviderIds", {}).get("Tvdb")
-                and s["ProviderIds"]["Tvdb"] == series.tvdbid
+                and str(s["ProviderIds"]["Tvdb"]) == str(series.tvdbid)
                 and s.get('Path') == folder
             ]
         items = retry_call(
@@ -748,7 +1069,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
         if folder:
             match = next(
                 (it for it in items
-                if it.get('ProviderIds', {}).get('Tvdb') == series.tvdbid
+                if it.get('ProviderIds', {}).get('Tvdb') == str(series.tvdbid)
                 and it.get('Path') == folder),
                 None
             )
@@ -784,7 +1105,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
 
     logger.debug(f"Found {len(seasons)} seasons for series", extra={'emoji_type': 'debug'})
 
-    season_map = {s['IndexNumber']: s for s in seasons}
+    season_map = {s['IndexNumber']: s for s in seasons if 'IndexNumber' in s}
     for num, it in season_map.items():
         logger.debug(f"Processing season {num} mapping to database", extra={'emoji_type': 'processing'})
         db_seas = (
@@ -792,7 +1113,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
             .filter_by(series_id=series.id, season_number=num)
             .first()
         )
-        if db_seas and not db_seas.jellyfin_season_id:
+        if db_seas and not db_seas.jellyfin_id:
             logger.info(f"Saving Jellyfin season ID for season {num}", extra={'emoji_type': 'success'})
             save_jellyfin_arr_id(dbsession, Season, db_seas.id, it)
 
@@ -979,9 +1300,9 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                 return False
             if res.status_code == 404:
                 return True
-            it = res.json().get('Items', [])
+            response_items = res.json().get('Items', [])
             return [
-                item for item in (it or [])
+                item for item in (response_items or [])
                 if (
                     int(item.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and item.get('Path',{}) == m.dummypath
                 )
@@ -1023,9 +1344,9 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
     # user = get_admin_user()
 
     # 1) Series ID with folder-based dedupe
-    if series.jellyfin_series_id:
-        logger.debug(f"Using existing Jellyfin series ID: {series.jellyfin_series_id}", extra={'emoji_type': 'success'})
-        jf_series_id = series.jellyfin_series_id
+    if series.jellyfin_id:
+        logger.debug(f"Using existing Jellyfin series ID: {series.jellyfin_id}", extra={'emoji_type': 'success'})
+        jf_series_id = series.jellyfin_id
     else:
         logger.debug(f"Searching for series '{series.title}' in Jellyfin", extra={'emoji_type': 'search'})
         clean_title = re.sub(r"\s*\(\d{4}\)$", "", series.title)
@@ -1036,9 +1357,11 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
         logger.debug(f"Series search URL: {url}", extra={'emoji_type': 'debug'})
         folder = None
         try:
-            base = settings.TV_LIBRARY_PATH.rstrip(os.sep) + os.sep
+            import os as os_module  # Explicit import to avoid scoping issues
+            base = settings.TV_LIBRARY_FOLDER.rstrip(os_module.sep) + os_module.sep
             rel = ep.dummypath.replace(base, '')
-            folder = rel.split(os.sep)[0]
+            folder_name = rel.split(os_module.sep)[0]
+            folder = base + folder_name  # Full path to the series folder
             logger.debug(f"Extracted folder '{folder}' from episode path", extra={'emoji_type': 'debug'})
         except Exception as e:
             logger.error(f"Error locating Series dummy path: {e}", extra={'emoji_type': 'error'})
@@ -1047,7 +1370,7 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
             return [
                 s for s in (items or [])
                 if s.get("ProviderIds", {}).get("Tvdb")
-                and s["ProviderIds"]["Tvdb"] == series.tvdbid
+                and str(s["ProviderIds"]["Tvdb"]) == str(series.tvdbid)
                 and s.get('Path') == folder
             ]
         items = retry_call(
@@ -1062,7 +1385,7 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
         if folder:
             match = next(
                 (it for it in items
-                if it.get('ProviderIds', {}).get('Tvdb') == series.tvdbid
+                if it.get('ProviderIds', {}).get('Tvdb') == str(series.tvdbid)
                 and it.get('Path') == folder),
                 None
             )
@@ -1100,7 +1423,7 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
 
     logger.debug(f"Found {len(seasons)} seasons for series", extra={'emoji_type': 'debug'})
     
-    season_map = {s['IndexNumber']: s for s in seasons}
+    season_map = {s['IndexNumber']: s for s in seasons if 'IndexNumber' in s}
     for num, it in season_map.items():
         logger.debug(f"Processing season {num} mapping to database", extra={'emoji_type': 'processing'})
         db_seas = (
@@ -1108,14 +1431,14 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
             .filter_by(series_id=series.id, season_number=num)
             .first()
         )
-        if db_seas and not db_seas.jellyfin_season_id:
+        if db_seas and not db_seas.jellyfin_id:
             logger.info(f"Saving Jellyfin season ID for season {num}", extra={'emoji_type': 'success'})
             save_jellyfin_dummy_id(dbsession, Season, db_seas.id, it)
 
     # 3) Process queued episode SubFlows for this series
     ep_ids = [e.id for e in dbsession.query(Episode).join(Season).filter(Season.series_id == series.id)]
     queued = dbsession.query(SubFlow).filter(
-        SubFlow.status == 'QUEUED',
+        SubFlow.status.in_(['QUEUED', 'FAILED']),
         SubFlow.action == action,
         SubFlow.episode_id.in_(ep_ids)
     ).all()
@@ -1146,10 +1469,10 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
     ) or []
     for sf in queued:
         steps = sf.steps.split(',')
-        if sf.step_index < len(steps) and steps[sf.step_index] != 'verify_scan_jellyfin': ## change the step index to -1
+        if sf.step_index < len(steps) and steps[sf.step_index] != 'verify_dummy_scan_jellyfin': ## change the step index to -1
             continue
         ep2 = dbsession.query(Episode).get(sf.episode_id)
-        if ep2.season_number != season.season_number:
+        if ep2.season_number != seas.season_number:
             continue
 
         for it in eps:
@@ -1181,13 +1504,526 @@ def get_admin_user():
         return False
 
 
+def update_jellyfin_nfo_status(
+    dbsession: Session,
+    ent_id: int,
+    model: Type,
+    action: str = "status_update",
+    new_status: str = "Request"
+) -> bool:
+    """
+    Update status in NFO file and trigger Jellyfin refresh.
+    This replaces the old API-based title update approach.
+
+    Args:
+        dbsession: SQLAlchemy session.
+        ent_id: Entity ID.
+        model: Model type (Movie, Series, Season, or Episode).
+        action: Action name from SubFlow.
+        new_status: New status to set in NFO (e.g., "Downloaded", "Request")
+
+    Returns:
+        True if NFO update and refresh succeeded, False otherwise.
+    """
+    if not settings.jellyfin_enabled:
+        logger.info("Jellyfin is disabled, skipping NFO status update", extra={'emoji_type': 'skip'})
+        return True
+
+    logger.info(f"Updating NFO status for {model.__name__} {ent_id} to '{new_status}'", extra={'emoji_type': 'status'})
+    
+    try:
+        entity = dbsession.query(model).get(ent_id)
+        if not entity:
+            logger.warning(f"{model.__name__} {ent_id} not found", extra={'emoji_type': 'warning'})
+            return False
+        
+        # If entity is marked as deleted, skip updating NFO status
+        if hasattr(entity, 'is_deleted') and entity.is_deleted:
+            logger.info(f"{model.__name__} {ent_id} is deleted, skipping NFO status update", extra={'emoji_type': 'skip'})
+            return True
+        
+        # Get NFO file path
+        nfo_path = getattr(entity, 'nfo_path', None)
+        if not nfo_path:
+            logger.warning(f"No NFO path found for {model.__name__} {ent_id}", extra={'emoji_type': 'warning'})
+            return False
+        
+        # Update NFO file status
+        success = update_nfo_status(nfo_path, new_status)
+        if not success:
+            return False
+        
+        # Trigger Jellyfin refresh for the NFO file and placeholder
+        dummy_path = getattr(entity, 'dummypath', None)
+        if dummy_path:
+            paths_to_refresh = [nfo_path]
+            if os.path.exists(dummy_path):
+                paths_to_refresh.append(dummy_path)
+            
+            try:
+                refresh_jellyfin_item(paths_to_refresh, 'Modified')
+                path_list = ', '.join(paths_to_refresh)
+                logger.info(f"Successfully triggered Jellyfin refresh for updated NFO: {path_list}", extra={'emoji_type': 'success'})
+            except Exception as e:
+                logger.warning(f"NFO updated but Jellyfin refresh failed: {e}", extra={'emoji_type': 'warning'})
+                # Still return True since NFO was updated successfully
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to update NFO status for {model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
+        return False
+
+
+def final_cleanup_orphaned_nfo_files(dbsession, episode, deleted_files):
+    """
+    Final cleanup check for orphaned season.nfo and tvshow.nfo files.
+    This runs as a fallback to catch files missed due to race conditions.
+    
+    Args:
+        dbsession: Database session
+        episode: The episode entity that was just processed
+        deleted_files: List of files already deleted (for logging)
+    """
+    try:
+        from services.postgres.models import Episode, Season, Series
+        
+        if not episode.dummypath:
+            return
+            
+        season = dbsession.query(Season).get(episode.season_id) if episode.season_id else None
+        series = dbsession.query(Series).get(season.series_id) if season else None
+        
+        if not (season and series):
+            return
+            
+        logger.debug(f"🧹 FINAL CLEANUP: Checking for orphaned NFO files after episode {episode.id} deletion", extra={'emoji_type': 'debug'})
+        
+        # Check for orphaned season.nfo
+        season_folder = os.path.dirname(episode.dummypath)
+        season_nfo_path = os.path.join(season_folder, "season.nfo")
+        
+        if os.path.exists(season_nfo_path):
+            # Double-check if this season really has no more active episodes
+            active_episodes_in_season = dbsession.query(Episode).filter(
+                Episode.season_id == season.id,
+                Episode.is_deleted == False
+            ).count()
+            
+            if active_episodes_in_season == 0:
+                logger.info(f"🧹 FINAL CLEANUP: Found orphaned season.nfo with 0 active episodes, deleting", extra={'emoji_type': 'delete'})
+                if delete_nfo_file(season_nfo_path):
+                    deleted_files.append(f"orphaned season NFO: season.nfo")
+        
+        # Check for orphaned tvshow.nfo
+        series_folder = os.path.dirname(season_folder)
+        tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
+        
+        if os.path.exists(tvshow_nfo_path):
+            # Double-check if this series really has no more active episodes
+            active_episodes_in_series = dbsession.query(Episode).join(Season).filter(
+                Season.series_id == series.id,
+                Episode.is_deleted == False
+            ).count()
+            
+            if active_episodes_in_series == 0:
+                logger.info(f"🧹 FINAL CLEANUP: Found orphaned tvshow.nfo with 0 active episodes, deleting", extra={'emoji_type': 'delete'})
+                if delete_nfo_file(tvshow_nfo_path):
+                    deleted_files.append(f"orphaned series NFO: tvshow.nfo")
+                    
+                    # Clean up empty directories
+                    cleanup_empty_series_structure(series_folder, deleted_files)
+        
+        if any("orphaned" in f for f in deleted_files):
+            logger.info(f"🧹 FINAL CLEANUP: Removed orphaned NFO files that were missed due to race conditions", extra={'emoji_type': 'success'})
+            
+    except Exception as e:
+        logger.debug(f"Error during final NFO cleanup: {e}", extra={'emoji_type': 'debug'})
+
+def cleanup_empty_series_structure(series_folder, deleted_files):
+    """
+    Clean up empty season and series directories and trigger Jellyfin refresh.
+    
+    Args:
+        series_folder: Path to the series folder
+        deleted_files: List of deleted files for logging context
+    """
+    try:
+        if not series_folder or not os.path.exists(series_folder):
+            return
+        
+        directories_cleaned = []
+        logger.info(f"🧹 SERIES CLEANUP: Checking series structure for empty directories: {series_folder}", extra={'emoji_type': 'delete'})
+        
+        # Check for empty season directories first
+        try:
+            series_contents = os.listdir(series_folder)
+            season_dirs = [d for d in series_contents if os.path.isdir(os.path.join(series_folder, d)) and d.startswith('Season')]
+            
+            for season_dir_name in season_dirs:
+                season_path = os.path.join(series_folder, season_dir_name)
+                try:
+                    season_contents = os.listdir(season_path)
+                    if not season_contents:
+                        os.rmdir(season_path)
+                        directories_cleaned.append(f"empty season folder: {season_dir_name}")
+                        logger.info(f"🗑️ Deleted empty season directory: {season_path}", extra={'emoji_type': 'delete'})
+                except Exception as e:
+                    logger.debug(f"Failed to remove season directory {season_path}: {e}", extra={'emoji_type': 'debug'})
+            
+            # Check if series directory is now empty
+            updated_series_contents = os.listdir(series_folder)
+            if not updated_series_contents:
+                parent_dir = os.path.dirname(series_folder)
+                os.rmdir(series_folder)
+                directories_cleaned.append(f"empty series folder: {os.path.basename(series_folder)}")
+                logger.info(f"🗑️ Deleted empty series directory: {series_folder}", extra={'emoji_type': 'delete'})
+                
+                # Trigger Jellyfin refresh for parent directory to reflect series deletion
+                try:
+                    refresh_jellyfin_item([parent_dir], 'Deleted')
+                    logger.info(f"🔄 Triggered Jellyfin refresh after complete series cleanup: {parent_dir}", extra={'emoji_type': 'refresh'})
+                except Exception as refresh_e:
+                    logger.warning(f"Failed to refresh Jellyfin after series cleanup: {refresh_e}", extra={'emoji_type': 'warning'})
+            else:
+                logger.debug(f"Series directory not empty after season cleanup: {updated_series_contents}", extra={'emoji_type': 'debug'})
+                
+        except Exception as e:
+            logger.debug(f"Failed to cleanup series structure {series_folder}: {e}", extra={'emoji_type': 'debug'})
+        
+        # Log cleanup summary
+        if directories_cleaned:
+            logger.info(f"🧹 SERIES CLEANUP SUMMARY: Removed {len(directories_cleaned)} empty directories: {', '.join(directories_cleaned)}", extra={'emoji_type': 'delete'})
+        else:
+            logger.debug(f"🧹 SERIES CLEANUP: No empty directories found to clean up in {series_folder}", extra={'emoji_type': 'debug'})
+            
+    except Exception as e:
+        logger.debug(f"Error during series structure cleanup: {e}", extra={'emoji_type': 'debug'})
+
+
+def cleanup_empty_directories(entity, model, deleted_files):
+    """
+    Clean up empty season and series directories after NFO deletion.
+    
+    Args:
+        entity: The database entity (Episode, Movie, Series)
+        model: The model type 
+        deleted_files: List of deleted files for logging context
+    """
+    if not deleted_files:
+        return  # No NFO files were deleted, no cleanup needed
+    
+    try:
+        import os
+        import shutil
+        from services.postgres.models import Episode, Season, Series
+        
+        logger.info(f"🧹 DIRECTORY CLEANUP: Starting empty directory cleanup after NFO deletion", extra={'emoji_type': 'delete'})
+        
+        directories_cleaned = []
+        
+        if model.__name__ == 'Episode':
+            # For episodes, check if season folder is empty, then series folder
+            episode = entity
+            if hasattr(episode, 'dummypath') and episode.dummypath:
+                # Get season directory from episode path
+                season_dir = os.path.dirname(episode.dummypath)
+                if os.path.exists(season_dir):
+                    # Check if season directory is empty
+                    try:
+                        season_contents = os.listdir(season_dir)
+                        if not season_contents:
+                            os.rmdir(season_dir)
+                            directories_cleaned.append(f"empty season folder: {os.path.basename(season_dir)}")
+                            logger.info(f"🗑️ Deleted empty season directory: {season_dir}", extra={'emoji_type': 'delete'})
+                            
+                            # Now check if series directory is empty
+                            series_dir = os.path.dirname(season_dir)
+                            if os.path.exists(series_dir):
+                                try:
+                                    series_contents = os.listdir(series_dir)
+                                    if not series_contents:
+                                        os.rmdir(series_dir)
+                                        directories_cleaned.append(f"empty series folder: {os.path.basename(series_dir)}")
+                                        logger.info(f"🗑️ Deleted empty series directory: {series_dir}", extra={'emoji_type': 'delete'})
+                                        
+
+                                    else:
+                                        logger.debug(f"Series directory not empty after season cleanup: {series_contents}", extra={'emoji_type': 'debug'})
+                                except Exception as e:
+                                    logger.debug(f"Failed to remove series directory {series_dir}: {e}", extra={'emoji_type': 'debug'})
+                        else:
+                            logger.debug(f"Season directory not empty: {season_contents}", extra={'emoji_type': 'debug'})
+                    except Exception as e:
+                        logger.debug(f"Failed to check/remove season directory {season_dir}: {e}", extra={'emoji_type': 'debug'})
+        
+        elif model.__name__ == 'Series':
+            # For series deletion, clean up all season directories and then series directory
+            series = entity
+            if hasattr(series, 'dummypath') and series.dummypath and os.path.exists(series.dummypath):
+                # Get all season directories in the series folder
+                try:
+                    series_contents = os.listdir(series.dummypath)
+                    season_dirs = [d for d in series_contents if os.path.isdir(os.path.join(series.dummypath, d)) and d.startswith('Season')]
+                    
+                    # Remove empty season directories
+                    for season_dir_name in season_dirs:
+                        season_path = os.path.join(series.dummypath, season_dir_name)
+                        try:
+                            season_contents = os.listdir(season_path)
+                            if not season_contents:
+                                os.rmdir(season_path)
+                                directories_cleaned.append(f"empty season folder: {season_dir_name}")
+                                logger.info(f"🗑️ Deleted empty season directory: {season_path}", extra={'emoji_type': 'delete'})
+                        except Exception as e:
+                            logger.debug(f"Failed to remove season directory {season_path}: {e}", extra={'emoji_type': 'debug'})
+                    
+                    # Now check if series directory is empty
+                    updated_series_contents = os.listdir(series.dummypath)
+                    if not updated_series_contents:
+                        parent_dir = os.path.dirname(series.dummypath)
+                        os.rmdir(series.dummypath)
+                        directories_cleaned.append(f"empty series folder: {os.path.basename(series.dummypath)}")
+                        logger.info(f"🗑️ Deleted empty series directory: {series.dummypath}", extra={'emoji_type': 'delete'})
+                        
+
+                    else:
+                        logger.debug(f"Series directory not empty: {updated_series_contents}", extra={'emoji_type': 'debug'})
+                except Exception as e:
+                    logger.debug(f"Failed to cleanup series directory {series.dummypath}: {e}", extra={'emoji_type': 'debug'})
+        
+        elif model.__name__ == 'Movie':
+            # For movies, check if movie directory is empty after NFO deletion
+            movie = entity
+            if hasattr(movie, 'dummypath') and movie.dummypath:
+                movie_dir = os.path.dirname(movie.dummypath) if os.path.isfile(movie.dummypath) else movie.dummypath
+                if os.path.exists(movie_dir):
+                    try:
+                        movie_contents = os.listdir(movie_dir)
+                        if not movie_contents:
+                            parent_dir = os.path.dirname(movie_dir)
+                            os.rmdir(movie_dir)
+                            directories_cleaned.append(f"empty movie folder: {os.path.basename(movie_dir)}")
+                            logger.info(f"🗑️ Deleted empty movie directory: {movie_dir}", extra={'emoji_type': 'delete'})
+                            
+
+                        else:
+                            logger.debug(f"Movie directory not empty: {movie_contents}", extra={'emoji_type': 'debug'})
+                    except Exception as e:
+                        logger.debug(f"Failed to check/remove movie directory {movie_dir}: {e}", extra={'emoji_type': 'debug'})
+        
+        # Log cleanup summary
+        if directories_cleaned:
+            logger.info(f"🧹 DIRECTORY CLEANUP SUMMARY: Removed {len(directories_cleaned)} empty directories: {', '.join(directories_cleaned)}", extra={'emoji_type': 'delete'})
+        else:
+            logger.debug(f"🧹 DIRECTORY CLEANUP: No empty directories found to clean up", extra={'emoji_type': 'debug'})
+            
+    except Exception as e:
+        logger.debug(f"Error during directory cleanup: {e}", extra={'emoji_type': 'debug'})
+
+
+def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
+    """
+    Delete NFO files and clean up leftover metadata for a specific entity.
+    This function is called by the scheduler as part of delete flows.
+    
+    For Episodes: Deletes episode.nfo, season.nfo if no episodes remain, tvshow.nfo if series is empty
+    For Movies: Deletes movie.nfo
+    For Series: Deletes all NFO files in the series hierarchy
+
+    Args:
+        dbsession: SQLAlchemy session.
+        ent_id: Entity ID.
+        model: Model type (Movie, Series, Season, or Episode).
+        action: Action name from SubFlow.
+
+    Returns:
+        True if NFO deletion succeeded and verification passed, False otherwise.
+    """
+    if not settings.jellyfin_enabled:
+        logger.info("Jellyfin is disabled, skipping NFO deletion", extra={'emoji_type': 'skip'})
+        return True
+
+    logger.info(f"🗑️ NFO DELETION: Starting NFO cleanup for {model.__name__} {ent_id}, action '{action}'", extra={'emoji_type': 'delete'})
+    
+    try:
+        entity = dbsession.query(model).get(ent_id)
+        if not entity:
+            logger.warning(f"{model.__name__} {ent_id} not found", extra={'emoji_type': 'warning'})
+            return True  # Consider it success if entity doesn't exist
+        
+        deleted_files = []
+        verification_failed = []
+        
+        if model.__name__ == 'Episode':
+            # Handle episode NFO deletion with cleanup
+            episode = entity
+            season = dbsession.query(Season).get(episode.season_id) if episode.season_id else None
+            series = dbsession.query(Series).get(season.series_id) if season and season.series_id else None
+            
+            # Delete episode NFO file
+            episode_nfo_path = getattr(episode, 'nfo_path', None)
+            if episode_nfo_path and os.path.exists(episode_nfo_path):
+                if delete_nfo_file(episode_nfo_path):
+                    deleted_files.append(f"episode NFO: {os.path.basename(episode_nfo_path)}")
+                    episode.nfo_path = None
+                    dbsession.add(episode)
+                else:
+                    verification_failed.append(f"episode NFO: {episode_nfo_path}")
+            
+            # Check if we should delete season.nfo (if no other episodes remain)
+            # Use SELECT FOR UPDATE to prevent race conditions with concurrent episode deletions
+            if season and series:
+                # Lock the season row to prevent concurrent checks
+                locked_season = dbsession.query(Season).filter(Season.id == season.id).with_for_update().first()
+                
+                # For series delete operations, check episodes not being deleted in this batch
+                if action == 'handle_seriesdelete':
+                    # Count episodes that aren't being processed for deletion (different action or not PENDING/QUEUED for seriesdelete)
+                    remaining_episodes = dbsession.query(Episode).filter(
+                        Episode.season_id == season.id,
+                        Episode.id != episode.id,
+                        Episode.is_deleted == False,
+                        or_(
+                            Episode.action != 'handle_seriesdelete',
+                            and_(Episode.action == 'handle_seriesdelete', Episode.status.in_(['DONE', 'CANCELLED', 'FAILED']))
+                        )
+                    ).count()
+                else:
+                    # For individual episode deletions, use original logic
+                    remaining_episodes = dbsession.query(Episode).filter(
+                        Episode.season_id == season.id,
+                        Episode.id != episode.id,
+                        Episode.is_deleted == False  # Only count non-deleted episodes
+                    ).count()
+                
+                logger.debug(f"Season {season.id}: {remaining_episodes} episodes remaining after episode {episode.id} deletion (action: {action})", extra={'emoji_type': 'debug'})
+                
+                if remaining_episodes == 0:
+                    # Get season folder path from episode path
+                    if episode.dummypath:
+                        season_folder = os.path.dirname(episode.dummypath)
+                        season_nfo_path = os.path.join(season_folder, "season.nfo")
+                        if os.path.exists(season_nfo_path):
+                            if delete_nfo_file(season_nfo_path):
+                                deleted_files.append(f"season NFO: season.nfo")
+                                logger.info(f"🗑️ Last episode in season - deleted season.nfo for season {season.id}", extra={'emoji_type': 'delete'})
+                            else:
+                                verification_failed.append(f"season NFO: {season_nfo_path}")
+                
+                # Check if we should delete tvshow.nfo (if no seasons with episodes remain)
+                # Lock the series row to prevent concurrent checks
+                locked_series = dbsession.query(Series).filter(Series.id == series.id).with_for_update().first()
+                
+                # For series delete operations, check episodes not being deleted in this batch
+                if action == 'handle_seriesdelete':
+                    # Count seasons that have episodes not being processed for deletion
+                    remaining_seasons_with_episodes = dbsession.query(Season).join(Episode).filter(
+                        Season.series_id == series.id,
+                        Episode.id != episode.id,
+                        Episode.is_deleted == False,
+                        or_(
+                            Episode.action != 'handle_seriesdelete',
+                            and_(Episode.action == 'handle_seriesdelete', Episode.status.in_(['DONE', 'CANCELLED', 'FAILED']))
+                        )
+                    ).distinct().count()
+                else:
+                    # For individual episode deletions, use original logic
+                    remaining_seasons_with_episodes = dbsession.query(Season).join(Episode).filter(
+                        Season.series_id == series.id,
+                        Episode.id != episode.id,
+                        Episode.is_deleted == False  # Only count non-deleted episodes
+                    ).count()
+                
+                logger.debug(f"Series {series.id}: {remaining_seasons_with_episodes} seasons with episodes remaining after episode {episode.id} deletion (action: {action})", extra={'emoji_type': 'debug'})
+                
+                if remaining_seasons_with_episodes == 0:
+                    # Get series folder path from episode path  
+                    if episode.dummypath:
+                        series_folder = os.path.dirname(os.path.dirname(episode.dummypath))
+                        tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
+                        if os.path.exists(tvshow_nfo_path):
+                            if delete_nfo_file(tvshow_nfo_path):
+                                deleted_files.append(f"series NFO: tvshow.nfo")
+                                logger.info(f"🗑️ Last episode in series - deleted tvshow.nfo for series {series.id}", extra={'emoji_type': 'delete'})
+                            else:
+                                verification_failed.append(f"series NFO: {tvshow_nfo_path}")
+                        
+                        # Clean up empty series folder structure
+                        cleanup_empty_series_structure(series_folder, deleted_files)
+                                
+        elif model.__name__ == 'Movie':
+            # Delete movie NFO file
+            movie_nfo_path = getattr(entity, 'nfo_path', None)
+            if movie_nfo_path and os.path.exists(movie_nfo_path):
+                if delete_nfo_file(movie_nfo_path):
+                    deleted_files.append(f"movie NFO: {os.path.basename(movie_nfo_path)}")
+                    entity.nfo_path = None
+                    dbsession.add(entity)
+                else:
+                    verification_failed.append(f"movie NFO: {movie_nfo_path}")
+                    
+        elif model.__name__ == 'Series':
+            # Delete all NFO files in series hierarchy
+            series = entity
+            seasons = dbsession.query(Season).filter_by(series_id=series.id).all()
+            
+            for season in seasons:
+                episodes = dbsession.query(Episode).filter_by(season_id=season.id).all()
+                for episode in episodes:
+                    episode_nfo_path = getattr(episode, 'nfo_path', None)
+                    if episode_nfo_path and os.path.exists(episode_nfo_path):
+                        if delete_nfo_file(episode_nfo_path):
+                            deleted_files.append(f"episode NFO: {os.path.basename(episode_nfo_path)}")
+                            episode.nfo_path = None
+                            dbsession.add(episode)
+                        else:
+                            verification_failed.append(f"episode NFO: {episode_nfo_path}")
+            
+            # Delete series NFO files (tvshow.nfo) if series has a dummy path
+            if series.dummypath and os.path.exists(series.dummypath):
+                tvshow_nfo_path = os.path.join(series.dummypath, "tvshow.nfo")
+                if os.path.exists(tvshow_nfo_path):
+                    if delete_nfo_file(tvshow_nfo_path):
+                        deleted_files.append(f"series NFO: tvshow.nfo")
+                    else:
+                        verification_failed.append(f"series NFO: {tvshow_nfo_path}")
+        
+        # Commit database changes
+        if deleted_files:
+            dbsession.commit()
+            logger.info(f"🗑️ NFO DELETION SUMMARY: Removed {len(deleted_files)} NFO files: {', '.join(deleted_files)}", extra={'emoji_type': 'delete'})
+        
+        # Clean up empty directories after NFO deletion
+        cleanup_empty_directories(entity, model, deleted_files)
+        
+        # Final cleanup check for leftover NFO files (race condition fallback)
+        if model.__name__ == 'Episode' and deleted_files:
+            # After deleting episode NFO, do a final check for orphaned season/series NFO files
+            final_cleanup_orphaned_nfo_files(dbsession, entity, deleted_files)
+        
+        # Verification check
+        if verification_failed:
+            logger.error(f"❌ NFO DELETION FAILED: {len(verification_failed)} files could not be deleted: {', '.join(verification_failed)}", extra={'emoji_type': 'error'})
+            return False
+        
+        # Success - all NFO files deleted and verified
+        logger.info(f"✅ NFO DELETION COMPLETE: Successfully cleaned up all NFO files for {model.__name__} {ent_id}", extra={'emoji_type': 'success'})
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ NFO DELETION ERROR: Failed to delete NFO for {model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
+        dbsession.rollback()
+        return False
+
+
 def update_jellyfin_title_status(
     dbsession: Session,
     ent_id: int,
     model: Type,
     action: str = "status_update",
     retry_interval: int = 30,
-    retry_timeout: int = 600
+    retry_timeout: int = 120  # Reduced from 600 to 120 seconds (2 minutes)
 ) -> bool:
     """
     Update title & overview in Jellyfin for a Movie or Episode hierarchy.
@@ -1295,7 +2131,7 @@ def update_jellyfin_title_status(
     logger.info(f"Updating {len(targets)} Jellyfin items", extra={'emoji_type': 'update'})
     for item_id, name, overview in targets:
         dto = {"Name": name, "Overview": overview}
-        url = build_jellyfin_url(f"Items/{item_id}/Fields")
+        url = build_jellyfin_url(f"Items/{item_id}/Fields?userId={get_admin_user()}")
 
         def do_patch():
             resp = session.patch(url, json=dto, timeout=5)
@@ -1304,18 +2140,20 @@ def update_jellyfin_title_status(
         def on_err(ex: Exception):
             logger.error(f"Failed to update item {item_id}: {ex}", extra={'emoji_type': 'error'})
 
-        success = retry_call(
+        status_code = retry_call(
             func=do_patch,
             on_error=on_err,
             retry_interval=retry_interval,
             retry_timeout=retry_timeout,
             success_condition=lambda code: code == 204
         )
-        if success:
+        
+        # Check if the actual success condition was met
+        if status_code == 204:
             updated_any = True
             logger.info(f"Successfully updated Jellyfin item {item_id}", extra={'emoji_type': 'success'})
         else:
-            logger.warning(f"Failed to update Jellyfin item {item_id}", extra={'emoji_type': 'warning'})
+            logger.warning(f"Failed to update Jellyfin item {item_id} - got status code {status_code}", extra={'emoji_type': 'warning'})
 
     logger.info(f"Jellyfin title status update completed, success: {updated_any}", extra={'emoji_type': 'success' if updated_any else 'warning'})
     return updated_any

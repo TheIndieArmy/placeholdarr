@@ -1,13 +1,34 @@
-from services.integrations import update_placeholder_status, delayed_placeholders
+from services.integrations import update_placeholder_status, delayed_placeholders, enrich_series_from_sonarr, enrich_series_metadata, enrich_all_episodes_metadata
 from services.plex_client import update_plex_title_status, refresh_plex_dummy, verify_dummy_scan_plex, retry_failed_plex_title_updates
-from services.jellyfin_client import update_jellyfin_title_status, refresh_jellyfin_dummy, verify_dummy_scan_jellyfin, retry_failed_jellyfin_title_updates
+from services.jellyfin_client import (
+    update_jellyfin_nfo_status, update_jellyfin_title_status, 
+    refresh_jellyfin_dummy, verify_dummy_scan_jellyfin, 
+    retry_failed_jellyfin_title_updates, create_jellyfin_nfo
+)
+from core import logger
+from services.postgres.models import Series
 
 def steps():
     return [
         delayed_placeholders,
+        enrich_series_metadata,
+        enrich_all_episodes_metadata,
         {
-            'jellyfin': [refresh_jellyfin_dummy, verify_dummy_scan_jellyfin, update_placeholder_status, update_jellyfin_title_status, verify_dummy_scan_jellyfin, retry_failed_jellyfin_title_updates],
-            'plex': [refresh_plex_dummy, verify_dummy_scan_plex, update_placeholder_status, update_plex_title_status, verify_dummy_scan_plex, retry_failed_plex_title_updates]
+            'jellyfin': [
+                create_jellyfin_nfo,
+                refresh_jellyfin_dummy,
+                verify_dummy_scan_jellyfin, 
+                update_placeholder_status, 
+                verify_dummy_scan_jellyfin
+            ],
+            'plex': [
+                refresh_plex_dummy, 
+                verify_dummy_scan_plex, 
+                update_placeholder_status, 
+                update_plex_title_status, 
+                verify_dummy_scan_plex, 
+                retry_failed_plex_title_updates
+            ]
         }
     ]
 

@@ -534,6 +534,7 @@ def delete_dummy_file(
             tvdb = getattr(series, 'tvdbid', None) or getattr(episode, 'tvdb_id', None)
             tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
 
+            # Delete individual episode dummy file, keep dummypath in DB (like movies)
             return delete_dummy_files(
                 media_type='tv',
                 title=(series.title if series else ''),
@@ -605,17 +606,29 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
 
         # Add appropriate ID tag
         if media_type == 'tv':
-            folder_name += f" {{tvdb-{tvdb_id}}} (dummy)"
+            # Try both naming patterns: with and without (dummy) suffix
+            folder_name_with_dummy = folder_name + f" {{tvdb-{tvdb_id}}} (dummy)"
+            folder_name_without_dummy = folder_name + f" {{tvdb-{tvdb_id}}}"
+            
+            # Check which folder actually exists
+            potential_folders = [
+                os.path.join(library_path, folder_name_with_dummy),
+                os.path.join(library_path, folder_name_without_dummy)
+            ]
+            
+            dummy_folder = None
+            for folder in potential_folders:
+                if folder and os.path.exists(folder):
+                    dummy_folder = folder
+                    break
+                    
+            if not dummy_folder:
+                logger.debug(f"TV dummy folder not found in any expected location: {potential_folders}", extra={'emoji_type': 'debug'})
+                return True
         else:  # movie
-            folder_name += f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
-
-        dummy_folder = os.path.join(library_path, folder_name) if library_path else None
-        logger.debug(f"Looking for dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
-
-        # Check if the folder exists
-        if not dummy_folder or not os.path.exists(dummy_folder):
-            logger.debug(f"Dummy folder not found: {dummy_folder}", extra={'emoji_type': 'debug'})
-            return True
+            folder_name += f" {{tmdb-{tvdb_id}}}"
+            dummy_folder = os.path.join(library_path, folder_name) if library_path else None
+        logger.debug(f"Using dummy folder: {dummy_folder}", extra={'emoji_type': 'debug'})
 
         # TV show - delete specific episode file
         if media_type == 'tv' and season_number is not None and episode_number is not None:
@@ -640,8 +653,8 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
                         f" - S{int(season_number):02d}E{int(episode_number):02d}"   # " - S01E01"
                     ]
 
-                    # Check if any pattern matches
-                    if any(pattern in file for pattern in patterns):
+                    # Check if any pattern matches and it's a video file
+                    if any(pattern in file for pattern in patterns) and file.endswith(('.mp4', '.mkv', '.avi')):
                         file_path = os.path.join(season_dir, file)
                         logger.debug(f"Match found! Deleting: {file_path}", extra={'emoji_type': 'debug'})
 
@@ -652,46 +665,158 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
                         except Exception as e:
                             logger.error(f"Failed to delete file {file_path}: {e}", extra={'emoji_type': 'error'})
 
+                
+                # Handle case when no episode files found but season folder exists
                 if not files_found:
                     logger.debug(f"No matching episode files found in {season_dir}", extra={'emoji_type': 'debug'})
-                else:
+                    
+                    # Check if there are any episode files left in the entire series folder
+                    # If not, clean up the whole series folder including NFO files
+                    try:
+                        all_episode_files = []
+                        for root, dirs, files in os.walk(dummy_folder):
+                            for file in files:
+                                if file.endswith(('.mp4', '.mkv', '.avi')):  # Episode file extensions
+                                    all_episode_files.append(file)
+                        
+                        if not all_episode_files:  # No episode files left in the entire series
+                            logger.info(f"🧹 COMPLETE CLEANUP: No episode files left in series, removing everything", extra={'emoji_type': 'delete'})
+                            # Remove the entire series folder including NFO files
+                            import shutil
+                            try:
+                                shutil.rmtree(dummy_folder)
+                                logger.info(f"🗑️ Deleted entire series folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+                            except OSError as rm_error:
+                                # If rmtree fails, try manual cleanup
+                                logger.warning(f"shutil.rmtree failed, attempting manual cleanup: {rm_error}", extra={'emoji_type': 'warning'})
+                                try:
+                                    # Remove all files first
+                                    for root, dirs, files in os.walk(dummy_folder, topdown=False):
+                                        for file in files:
+                                            os.remove(os.path.join(root, file))
+                                            logger.debug(f"Manually removed file: {file}", extra={'emoji_type': 'debug'})
+                                        for dir in dirs:
+                                            os.rmdir(os.path.join(root, dir))
+                                            logger.debug(f"Manually removed directory: {dir}", extra={'emoji_type': 'debug'})
+                                    # Finally remove the root folder
+                                    os.rmdir(dummy_folder)
+                                    logger.info(f"🗑️ Manual cleanup successful: {dummy_folder}", extra={'emoji_type': 'delete'})
+                                except Exception as manual_error:
+                                    logger.error(f"Manual cleanup also failed: {manual_error}", extra={'emoji_type': 'error'})
+                        else:
+                            logger.debug(f"Still have {len(all_episode_files)} episode files in series folder", extra={'emoji_type': 'debug'})
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to check/remove series folder: {e}", extra={'emoji_type': 'error'})
+                if files_found:
                     # If season directory is empty after removals, try to remove it
                     try:
                         if os.path.exists(season_dir) and not os.listdir(season_dir):
                             os.rmdir(season_dir)
                             logger.info(f"Deleted empty season folder: {season_dir}", extra={'emoji_type': 'delete'})
+                            
+                            # Check if series folder is now empty and remove it too
+                            try:
+                                if os.path.exists(dummy_folder):
+                                    remaining_contents = os.listdir(dummy_folder)
+                                    # If only NFO files remain, delete them and the folder
+                                    if remaining_contents and all(f.endswith('.nfo') for f in remaining_contents):
+                                        logger.info(f"Only NFO files remain in series folder, cleaning up completely", extra={'emoji_type': 'delete'})
+                                        for nfo_file in remaining_contents:
+                                            nfo_path = os.path.join(dummy_folder, nfo_file)
+                                            try:
+                                                os.remove(nfo_path)
+                                                logger.info(f"Deleted series NFO file: {nfo_path}", extra={'emoji_type': 'delete'})
+                                            except Exception as e:
+                                                logger.debug(f"Failed to delete NFO file {nfo_path}: {e}", extra={'emoji_type': 'debug'})
+                                    
+                                    # Now check if folder is empty and remove it
+                                    if not os.listdir(dummy_folder):
+                                        os.rmdir(dummy_folder)
+                                        logger.info(f"Deleted empty series folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+                            except Exception as e:
+                                logger.debug(f"Failed to remove series folder: {e}", extra={'emoji_type': 'debug'})
+                                
                     except Exception as e:
                         logger.debug(f"Failed to remove season folder: {e}", extra={'emoji_type': 'debug'})
+            else:
+                # Season directory doesn't exist - check if series folder only has NFO files
+                logger.debug(f"Season directory doesn't exist: {season_dir}", extra={'emoji_type': 'debug'})
+                try:
+                    if os.path.exists(dummy_folder):
+                        remaining_contents = os.listdir(dummy_folder)
+                        logger.debug(f"Series folder contents: {remaining_contents}", extra={'emoji_type': 'debug'})
+                        
+                        if not remaining_contents:
+                            # Empty folder - remove it
+                            os.rmdir(dummy_folder)
+                            logger.info(f"Deleted empty series folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+                        else:
+                            # Check for any remaining episode files
+                            remaining_episodes = []
+                            for root, dirs, files in os.walk(dummy_folder):
+                                for file in files:
+                                    if file.endswith(('.mp4', '.mkv', '.avi')):
+                                        remaining_episodes.append(file)
+                            
+                            if not remaining_episodes:
+                                logger.debug(f"No episode files found, but other files remain: {remaining_contents}", extra={'emoji_type': 'debug'})
+                            else:
+                                logger.debug(f"Series folder contains {len(remaining_episodes)} episode files, keeping it", extra={'emoji_type': 'debug'})
+                except Exception as e:
+                    logger.debug(f"Failed to check series folder cleanup: {e}", extra={'emoji_type': 'debug'})
 
-                # DB updates if a session was explicitly provided by caller
-                db_sess = session
-
-                if db_sess:
-                    try:
-                        # Try to find Series -> Season -> Episode and mark deleted
-                        series = db_sess.query(Series).filter_by(tvdbid=str(tvdb_id)).first() if tvdb_id else None
-                        if series:
-                            season = db_sess.query(Season).filter_by(series_id=series.id, season_number=int(season_number)).first()
-                            if season:
-                                ep = db_sess.query(Episode).filter_by(season_id=season.id, episode_number=int(episode_number)).first()
-                                if ep:
-                                    ep.is_deleted = True
-                                    ep.jellyfin_dummy_id = None
-                                    ep.placeholder_exists = False
-                                    db_sess.add(ep)
-                                    db_sess.commit()
-                                    logger.debug(f"Marked DB Episode deleted: {ep.title}", extra={'emoji_type': 'debug'})
-                    except Exception as e:
-                        logger.error(f"Failed to mark DB episode deleted: {e}", extra={'emoji_type': 'error'})
+                # **KEY FIX**: Don't update database for episodes - keep dummypath like movies!
+                # DB updates removed to match movie behavior - preserve dummypath as historical record
+                logger.debug(f"Episode file cleanup complete - preserving dummypath in database like movies", extra={'emoji_type': 'debug'})
 
         # Movies or entire TV series - delete the whole folder
         else:
-            # Only try to remove if it's not a TV show with season/episode specified
-            try:
-                shutil.rmtree(dummy_folder)
-                logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
-            except Exception as e:
-                logger.error(f"Failed to delete placeholder folder {dummy_folder}: {e}", extra={'emoji_type': 'error'})
+            # For movies, find and delete the .mp4 file inside the folder, then remove empty folder
+            if media_type == 'movie':
+                try:
+                    if dummy_folder and os.path.exists(dummy_folder):
+                        # Find the movie file inside the folder
+                        movie_files = []
+                        for file in os.listdir(dummy_folder):
+                            if file.endswith(('.mp4', '.mkv', '.avi', '.mov')):
+                                movie_files.append(file)
+                        
+                        if movie_files:
+                            for movie_file in movie_files:
+                                file_path = os.path.join(dummy_folder, movie_file)
+                                try:
+                                    os.remove(file_path)
+                                    logger.info(f"Deleted movie placeholder file: {file_path}", extra={'emoji_type': 'delete'})
+                                except Exception as e:
+                                    logger.error(f"Failed to delete movie file {file_path}: {e}", extra={'emoji_type': 'error'})
+                        
+                        # After deleting movie files, check if folder is empty or only has non-essential files
+                        try:
+                            remaining_files = os.listdir(dummy_folder)
+                            # Only keep folder if it has important files (not just .nfo, .jpg, etc.)
+                            important_files = [f for f in remaining_files if not f.endswith(('.nfo', '.jpg', '.png', '.txt', '.srt'))]
+                            
+                            if not important_files:  # Only metadata files left or empty
+                                import shutil
+                                shutil.rmtree(dummy_folder)
+                                logger.info(f"Deleted empty movie folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+                            else:
+                                logger.debug(f"Movie folder still contains important files: {important_files}", extra={'emoji_type': 'debug'})
+                        except Exception as e:
+                            logger.debug(f"Could not clean up movie folder {dummy_folder}: {e}", extra={'emoji_type': 'debug'})
+                    else:
+                        logger.debug(f"Movie folder doesn't exist: {dummy_folder}", extra={'emoji_type': 'debug'})
+                except Exception as e:
+                    logger.error(f"Failed to delete movie placeholder {dummy_folder}: {e}", extra={'emoji_type': 'error'})
+            else:
+                # TV series - delete the whole folder
+                try:
+                    import shutil
+                    shutil.rmtree(dummy_folder)
+                    logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+                except Exception as e:
+                    logger.error(f"Failed to delete placeholder folder {dummy_folder}: {e}", extra={'emoji_type': 'error'})
 
             # DB updates if session passed explicitly by caller (worker)
             db_sess = session
@@ -834,9 +959,9 @@ def check_all_arr_webhooks():
 def save_jellyfin_id(session, model, ent_id, jf_id):
     obj = session.query(model).get(ent_id)
     field = {
-      Series: 'jellyfin_series_id',
-      Season: 'jellyfin_season_id',
-      Episode: 'jellyfin_episode_id'
+      Series: 'jellyfin_id',
+      Season: 'jellyfin_id',
+      Episode: 'jellyfin_id'
     }[model]
     if getattr(obj, field) != jf_id:
         setattr(obj, field, jf_id)
@@ -921,6 +1046,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
     
         if dummy_path:
             movie.dummypath = dummy_path
+            movie.placeholder_exists = True  # Mark that placeholder file exists
             session.add(movie)
             session.commit()
             logger.info(f"Created placeholder file for '{movie.title}'", extra={'emoji_type': 'success'})
@@ -929,6 +1055,59 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             logger.error(f"Failed to create placeholder file for movie '{movie.title}'", extra={'emoji_type': 'error'})
             return False
     
+    elif model is Series:
+        # Series case - process all episodes in the series
+        series = session.query(Series).get(ent_id)
+        if not series:
+            logger.error(f"Series with id {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+
+        # Query all SubFlow rows for this series that are waiting on delayed_placeholders
+        sf_eps = session.query(SubFlow).filter(
+            SubFlow.steps == "delayed_placeholders",
+            SubFlow.series_id == series.id,
+            SubFlow.status != "DONE"
+        ).order_by(SubFlow.id).all()
+
+        # If no SubFlows, this means we're being called directly on a series
+        # Find all episodes and process them
+        if not sf_eps:
+            episodes = session.query(Episode).join(Season).filter(
+                Season.series_id == series.id,
+                Episode.status == 'PENDING'
+            ).all()
+            
+            if not episodes:
+                logger.info(f"No pending episodes found for series '{series.title}'", extra={'emoji_type': 'info'})
+                return True
+            
+            # For each episode, call delayed_placeholders recursively
+            for episode in episodes:
+                success = delayed_placeholders(session, episode.id, Episode, action)
+                if not success:
+                    logger.warning(f"Failed to create placeholder for episode {episode.id}", extra={'emoji_type': 'warning'})
+        else:
+            # Process existing SubFlows
+            for subflow in sf_eps:
+                if subflow.episode_id:
+                    success = delayed_placeholders(session, subflow.episode_id, Episode, action)
+                    if not success:
+                        logger.warning(f"Failed to create placeholder for episode {subflow.episode_id}", extra={'emoji_type': 'warning'})
+
+        # Set series dummy path based on episodes if not already set
+        if not series.dummypath:
+            episode = session.query(Episode).join(Season).filter(Season.series_id == series.id).first()
+            if episode and episode.dummypath:
+                # Extract series path from episode path
+                series_path = '/'.join(episode.dummypath.split('/')[:-2])  # Remove 'Season XX/episode.mp4'
+                series.dummypath = series_path
+                session.add(series)
+                session.commit()
+                logger.debug(f"Set series dummy path to: {series_path}", extra={'emoji_type': 'debug'})
+
+        logger.info(f"Completed placeholder processing for series '{series.title}'", extra={'emoji_type': 'success'})
+        return True
+
     elif model is Episode:
         # Look up the current episode, season, and series to determine the series_id
         current_ep = session.query(Episode).get(ent_id)
@@ -953,6 +1132,46 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             SubFlow.status != "DONE"
         ).order_by(SubFlow.id).all()
 
+        # If no pending SubFlows but episodes have dummypath without actual files, 
+        # find episodes that need placeholder files recreated
+        if not sf_eps:
+            episodes_needing_files = []
+            all_episodes = session.query(Episode).join(Season).filter(Season.series_id == series.id).all()
+            
+            for ep in all_episodes:
+                has_real_file = getattr(ep, 'filepath', None)
+                has_dummy_path = getattr(ep, 'dummypath', None)
+                dummy_file_exists = has_dummy_path and os.path.exists(has_dummy_path) if has_dummy_path else False
+                
+                # Episode needs a placeholder if: no real file AND (no dummypath OR dummypath file missing)
+                if not has_real_file and (not has_dummy_path or not dummy_file_exists):
+                    episodes_needing_files.append(ep)
+            
+            # If episodes need placeholder files, create SubFlows for them
+            if episodes_needing_files:
+                logger.info(f"Found {len(episodes_needing_files)} episodes needing placeholder files for series '{series.title}'", extra={'emoji_type': 'info'})
+                
+                for ep in episodes_needing_files:
+                    # Create a new SubFlow for this episode
+                    new_subflow = SubFlow(
+                        episode_id=ep.id,
+                        series_id=series.id,
+                        steps="delayed_placeholders",
+                        status="PENDING",
+                        branch="main",
+                        action="handle_seriesadd"
+                    )
+                    session.add(new_subflow)
+                    
+                session.commit()
+                
+                # Re-query SubFlows now that we've created new ones
+                sf_eps = session.query(SubFlow).filter(
+                    SubFlow.steps == "delayed_placeholders",
+                    SubFlow.series_id == series.id,
+                    SubFlow.status != "DONE"
+                ).order_by(SubFlow.id).all()
+
         # Determine 4K status from the current episode/series
         is_4k = False
         try:
@@ -974,6 +1193,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
         tv_library = settings.TV_LIBRARY_FOLDER_4K if is_4k else settings.TV_LIBRARY_FOLDER
 
         placeholder_count = 0
+        failed_count = 0
 
         # Normalize tvdb for the series and current episode
         normalized_series_tvdb = None
@@ -997,8 +1217,12 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 session.commit()
                 continue
 
-            # Skip if real file exists or placeholder already set
-            if getattr(ep, 'filepath', None) or getattr(ep, 'dummypath', None):
+            # Skip if real file exists or placeholder already set AND file actually exists
+            has_real_file = getattr(ep, 'filepath', None)
+            has_dummy_path = getattr(ep, 'dummypath', None)
+            dummy_file_exists = has_dummy_path and os.path.exists(has_dummy_path) if has_dummy_path else False
+            
+            if has_real_file or dummy_file_exists:
                 subflow.status = "DONE"
                 session.add(subflow)
                 session.commit()
@@ -1081,25 +1305,41 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
 
             if dummy_path:
                 ep.dummypath = dummy_path
+                ep.placeholder_exists = True  # Mark that placeholder file exists
                 session.add(ep)
                 # Commit immediately so external scanners and other workers see file presence
                 session.commit()
                 placeholder_count += 1
                 logger.debug(f"Persisted placeholder for {series.title} S{season_num}E{episode_num}", extra={'emoji_type': 'debug'})
-
-            # Mark this subflow entry DONE and commit so it's not reprocessed
-            subflow.status = "DONE"
-            session.add(subflow)
-            session.commit()
+                
+                # Only mark this subflow entry DONE if the dummy file was successfully created
+                subflow.status = "DONE"
+                session.add(subflow)
+                session.commit()
+            else:
+                failed_count += 1
+                logger.error(f"Failed to create dummy file for {series.title} S{season_num}E{episode_num} - keeping SubFlow as PENDING for scheduler retry", extra={'emoji_type': 'error'})
+                # Don't mark SubFlow as DONE - let scheduler retry it later
+                
+                # If this is the current episode that triggered the workflow, fail immediately
+                if ep.id == current_ep.id:
+                    logger.error(f"Current episode {current_ep.id} failed to create dummy file - failing workflow immediately", extra={'emoji_type': 'error'})
+                    return False
 
         if placeholder_count > 0:
             logger.info(
                 f"Created {placeholder_count} placeholder files for '{series.title}'",
                 extra={'emoji_type': 'success'}
             )
-        else:
+        
+        if failed_count > 0:
+            logger.warning(
+                f"Failed to create {failed_count} placeholder files for '{series.title}' - these episodes will be retried by scheduler",
+                extra={'emoji_type': 'warning'}
+            )
+        elif placeholder_count == 0:
             logger.info(f"No placeholders needed for '{series.title}'", extra={'emoji_type': 'info'})
-
+        
         return True
 
     else:
@@ -1306,6 +1546,111 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
                 m.radarrid = movie_data.get('id')
                 changed = True
 
+            # Update NFO metadata fields from Radarr data
+            overview = movie_data.get('overview')
+            if overview and m.plot != overview:
+                m.plot = overview
+                changed = True
+            
+            # Update other metadata fields if available
+            original_title = movie_data.get('originalTitle')
+            if original_title and m.originaltitle != original_title:
+                m.originaltitle = original_title
+                changed = True
+            
+            sort_title = movie_data.get('sortTitle')
+            if sort_title and m.sorttitle != sort_title:
+                m.sorttitle = sort_title
+                changed = True
+            
+            runtime = movie_data.get('runtime')
+            if runtime and m.runtime != runtime:
+                m.runtime = runtime
+                changed = True
+            
+            # Handle ratings
+            ratings = movie_data.get('ratings', [])
+            if ratings and isinstance(ratings, list):
+                # Use first rating (usually IMDb)
+                rating_value = ratings[0].get('value') if ratings else None
+                if rating_value and m.rating != rating_value:
+                    m.rating = rating_value
+                    changed = True
+            
+            # Handle studio/distributor
+            studio = movie_data.get('studio')
+            if studio and m.studio != studio:
+                m.studio = studio
+                changed = True
+            
+            # Handle genres (convert list to comma-separated string)
+            genres = movie_data.get('genres', [])
+            if genres and isinstance(genres, list):
+                genre_str = ', '.join(genres)
+                if m.genres != genre_str:
+                    m.genres = genre_str
+                    changed = True
+            
+            # Handle year (from release date)
+            digital_release = movie_data.get('digitalRelease')
+            physical_release = movie_data.get('physicalRelease')
+            in_cinemas = movie_data.get('inCinemas')
+            # Use the earliest available date for year
+            release_date = None
+            for date_field in [digital_release, physical_release, in_cinemas]:
+                if date_field:
+                    try:
+                        year = int(date_field.split('-')[0])
+                        if not release_date or year < release_date:
+                            release_date = year
+                    except (ValueError, IndexError):
+                        pass
+            if release_date and m.year != release_date:
+                m.year = release_date
+                changed = True
+            
+            # Handle IMDb ID from external IDs
+            imdb_id = movie_data.get('imdbId')
+            if not imdb_id:
+                # Try to get from external IDs if available
+                external_ids = movie_data.get('externalIds', {})
+                if isinstance(external_ids, dict):
+                    imdb_id = external_ids.get('imdb')
+            if imdb_id and m.imdb_id != imdb_id:
+                m.imdb_id = imdb_id
+                changed = True
+            
+            # Handle director (from credits)
+            credits = movie_data.get('credits', {})
+            if isinstance(credits, dict):
+                crew = credits.get('crew', [])
+                for person in crew:
+                    if isinstance(person, dict) and person.get('job') == 'Director':
+                        director_name = person.get('name')
+                        if director_name and m.director != director_name:
+                            m.director = director_name
+                            changed = True
+                        break
+            
+            # Handle images
+            images = movie_data.get('images', [])
+            if images and isinstance(images, list):
+                for image in images:
+                    if isinstance(image, dict):
+                        cover_type = image.get('coverType')
+                        url = image.get('url') or image.get('remoteUrl')
+                        if url:
+                            # Convert relative URLs to full URLs
+                            if url.startswith('/'):
+                                url = base_url.replace('/api/v3', '') + url
+                            
+                            if cover_type == 'poster' and m.poster_url != url:
+                                m.poster_url = url
+                                changed = True
+                            elif cover_type == 'fanart' and m.fanart_url != url:
+                                m.fanart_url = url
+                                changed = True
+
             if changed:
                 session.add(m)
                 session.commit()
@@ -1408,6 +1753,91 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                 s.has_files = has_files
                 changed = True
 
+            # Update NFO metadata fields from Sonarr data
+            overview = series_data.get('overview')
+            if overview and s.plot != overview:
+                s.plot = overview
+                changed = True
+            
+            # Update other metadata fields if available
+            sort_title = series_data.get('sortTitle')
+            if sort_title and s.sorttitle != sort_title:
+                s.sorttitle = sort_title
+                changed = True
+            
+            # Set original title (usually same as title for TV series)
+            original_title = series_data.get('originalTitle') or series_data.get('title')
+            if original_title and s.originaltitle != original_title:
+                s.originaltitle = original_title
+                changed = True
+            
+            # Handle network/studio
+            network = series_data.get('network')
+            if network and s.studio != network:
+                s.studio = network
+                changed = True
+            
+            # Handle genres (convert list to comma-separated string)
+            genres = series_data.get('genres', [])
+            if genres and isinstance(genres, list):
+                genre_str = ', '.join(genres)
+                if s.genres != genre_str:
+                    s.genres = genre_str
+                    changed = True
+            
+            # Handle year (from first aired date)
+            first_aired = series_data.get('firstAired')
+            if first_aired:
+                try:
+                    # Extract year from date string (format: YYYY-MM-DD)
+                    year = int(first_aired.split('-')[0])
+                    if s.year != year:
+                        s.year = year
+                        changed = True
+                except (ValueError, IndexError):
+                    pass
+            
+            # Handle premiered date (first aired)
+            if first_aired:
+                try:
+                    from datetime import datetime
+                    premiered_date = datetime.strptime(first_aired, '%Y-%m-%d').date()
+                    if s.premiered != premiered_date:
+                        s.premiered = premiered_date
+                        changed = True
+                except (ValueError, TypeError):
+                    pass
+            
+            # Handle IMDb ID from external IDs
+            imdb_id = series_data.get('imdbId')
+            if not imdb_id:
+                # Try to get from external IDs if available
+                external_ids = series_data.get('externalIds', {})
+                if isinstance(external_ids, dict):
+                    imdb_id = external_ids.get('imdb')
+            if imdb_id and s.imdb_id != imdb_id:
+                s.imdb_id = imdb_id
+                changed = True
+            
+            # Handle images
+            images = series_data.get('images', [])
+            if images and isinstance(images, list):
+                for image in images:
+                    if isinstance(image, dict):
+                        cover_type = image.get('coverType')
+                        url = image.get('url') or image.get('remoteUrl')
+                        if url:
+                            # Convert relative URLs to full URLs
+                            if url.startswith('/'):
+                                url = base_url.replace('/api/v3', '') + url
+                            
+                            if cover_type == 'poster' and s.poster_url != url:
+                                s.poster_url = url
+                                changed = True
+                            elif cover_type == 'fanart' and s.fanart_url != url:
+                                s.fanart_url = url
+                                changed = True
+
             if changed:
                 session.add(s)
                 session.commit()
@@ -1422,3 +1852,313 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
     except Exception as e:
         logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
         return None
+
+def enrich_movie_metadata(session, ent_id, model, action):
+    """Enrich movie with metadata from Radarr before creating NFO"""
+    if model != Movie:
+        logger.info(f"Skipping enrichment for non-Movie entity: {model.__name__}", extra={'emoji_type': 'skip'})
+        return True
+    
+    try:
+        movie = session.query(Movie).get(ent_id)
+        if not movie:
+            logger.error(f"Movie {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            return False
+        
+        logger.info(f"Enriching movie metadata from Radarr: {movie.title}", extra={'emoji_type': 'update'})
+        
+        # Call enrichment with movie's TMDB ID and 4K status
+        radarr_data = enrich_movie_from_radarr(
+            tmdb_id=movie.tmdbid,
+            radarr_id=movie.radarrid,
+            is_4k=movie.is_4k
+        )
+        
+        if radarr_data:
+            logger.info(f"Successfully enriched movie {movie.title} with Radarr metadata", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning(f"Failed to enrich movie {movie.title} - continuing anyway", extra={'emoji_type': 'warning'})
+            # Don't fail the entire flow if enrichment fails
+            return True
+            
+    except Exception as e:
+        logger.error(f"Error during movie enrichment: {e}", extra={'emoji_type': 'error'})
+        # Don't fail the entire flow if enrichment fails
+        return True
+
+def enrich_series_metadata(session, ent_id, model, action):
+    """Enrich series with metadata from Sonarr before creating NFO"""
+    if model != Series:
+        logger.info(f"Skipping enrichment for non-Series entity: {model.__name__}", extra={'emoji_type': 'skip'})
+        return True
+    
+    try:
+        series = session.query(Series).get(ent_id)
+        if not series:
+            logger.error(f"Series {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            return False
+        
+        logger.info(f"Enriching series metadata from Sonarr: {series.title}", extra={'emoji_type': 'update'})
+        
+        # Call enrichment with series' TVDB ID and 4K status
+        sonarr_data = enrich_series_from_sonarr(
+            tvdb_id=series.tvdbid,
+            sonarr_id=series.sonarrid,
+            is_4k=series.is_4k
+        )
+        
+        if sonarr_data:
+            logger.info(f"Successfully enriched series {series.title} with Sonarr metadata", extra={'emoji_type': 'success'})
+            return True
+        else:
+            logger.warning(f"Failed to enrich series {series.title} - continuing anyway", extra={'emoji_type': 'warning'})
+            # Don't fail the entire flow if enrichment fails
+            return True
+            
+    except Exception as e:
+        logger.error(f"Error during series enrichment: {e}", extra={'emoji_type': 'error'})
+        # Don't fail the entire flow if enrichment fails
+        return True
+
+def enrich_season_metadata(session, ent_id, model, action):
+    """Enrich season with metadata from Sonarr before creating NFO"""
+    if model.__name__ != 'Season':
+        logger.info(f"Skipping enrichment for non-Season entity: {model.__name__}", extra={'emoji_type': 'skip'})
+        return True
+    
+    try:
+        from services.postgres.models import Season
+        season = session.query(Season).get(ent_id)
+        if not season:
+            logger.error(f"Season {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            return False
+        
+        logger.info(f"Enriching season metadata from Sonarr: {season.title} S{season.season_number}", extra={'emoji_type': 'update'})
+        
+        # Get the parent series
+        series = season.series
+        if not series:
+            logger.warning(f"No parent series found for season {season.id}", extra={'emoji_type': 'warning'})
+            return True
+        
+        # Call series enrichment to get complete data including seasons
+        sonarr_data = enrich_series_from_sonarr(
+            tvdb_id=series.tvdbid,
+            sonarr_id=series.sonarrid,
+            is_4k=series.is_4k
+        )
+        
+        if sonarr_data and 'seasons' in sonarr_data:
+            # Find matching season in Sonarr data
+            seasons_data = sonarr_data.get('seasons', [])
+            matching_season = None
+            for season_data in seasons_data:
+                if season_data.get('seasonNumber') == season.season_number:
+                    matching_season = season_data
+                    break
+            
+            if matching_season:
+                changed = False
+                
+                # Update season-specific metadata
+                if matching_season.get('monitored') is not None:
+                    monitored = bool(matching_season.get('monitored'))
+                    if season.sonarr_monitored != monitored:
+                        season.sonarr_monitored = monitored
+                        changed = True
+                
+                # Season typically doesn't have separate TVDB/IMDb IDs in Sonarr
+                # but some do, so let's check
+                season_tvdb_id = matching_season.get('tvdbId')
+                if season_tvdb_id and season.tvdbid != season_tvdb_id:
+                    season.tvdbid = season_tvdb_id
+                    changed = True
+                
+                # Season images
+                images = matching_season.get('images', [])
+                if images:
+                    for image in images:
+                        if isinstance(image, dict):
+                            cover_type = image.get('coverType')
+                            url = image.get('url') or image.get('remoteUrl')
+                            if url:
+                                config = get_arr_config('tv', series.is_4k)
+                                if config and url.startswith('/'):
+                                    url = config['url'].replace('/api/v3', '') + url
+                                
+                                if cover_type == 'poster' and season.poster_url != url:
+                                    season.poster_url = url
+                                    changed = True
+                                elif cover_type == 'fanart' and season.fanart_url != url:
+                                    season.fanart_url = url
+                                    changed = True
+                
+                if changed:
+                    session.add(season)
+                    session.commit()
+                    logger.info(f"Successfully enriched season {season.title} S{season.season_number}", extra={'emoji_type': 'success'})
+                else:
+                    logger.debug(f"No changes needed for season {season.title} S{season.season_number}", extra={'emoji_type': 'debug'})
+            else:
+                logger.warning(f"Season {season.season_number} not found in Sonarr data", extra={'emoji_type': 'warning'})
+        
+        return True
+            
+    except Exception as e:
+        logger.error(f"Error during season enrichment: {e}", extra={'emoji_type': 'error'})
+        # Don't fail the entire flow if enrichment fails
+        return True
+
+def enrich_episode_metadata(session, ent_id, model, action):
+    """Enrich episode with metadata from Sonarr before creating NFO"""
+    if model.__name__ != 'Episode':
+        logger.info(f"Skipping enrichment for non-Episode entity: {model.__name__}", extra={'emoji_type': 'skip'})
+        return True
+    
+    try:
+        from services.postgres.models import Episode
+        episode = session.query(Episode).get(ent_id)
+        if not episode:
+            logger.error(f"Episode {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            return False
+        
+        logger.info(f"Enriching episode metadata from Sonarr: {episode.title} S{episode.season_number}E{episode.episode_number}", extra={'emoji_type': 'update'})
+        
+        # Get the parent series through season
+        series = episode.season.series if episode.season else None
+        if not series:
+            logger.warning(f"No parent series found for episode {episode.id}", extra={'emoji_type': 'warning'})
+            return True
+        
+        # Get episode data from Sonarr
+        config = get_arr_config('tv', series.is_4k)
+        if not config:
+            logger.warning(f"No Sonarr config for episode enrichment", extra={'emoji_type': 'warning'})
+            return True
+        
+        headers = {'X-Api-Key': config['api_key']}
+        base_url = config['url']
+        
+        try:
+            # Get episodes for the series
+            r = requests.get(f"{base_url}/episode", params={'seriesId': series.sonarrid}, headers=headers, timeout=10)
+            if r.status_code == 200:
+                episodes_data = r.json()
+                
+                # Find matching episode
+                matching_episode = None
+                for ep_data in episodes_data:
+                    if (ep_data.get('seasonNumber') == episode.season.season_number and 
+                        ep_data.get('episodeNumber') == episode.episode_number):
+                        matching_episode = ep_data
+                        break
+                
+                if matching_episode:
+                    changed = False
+                    
+                    # Update episode metadata
+                    overview = matching_episode.get('overview')
+                    if overview and episode.plot != overview:
+                        episode.plot = overview
+                        changed = True
+                    
+                    runtime = matching_episode.get('runtime')
+                    if runtime and episode.runtime != runtime:
+                        episode.runtime = runtime
+                        changed = True
+                    
+                    # Episode TVDB ID
+                    tvdb_id = matching_episode.get('tvDbEpisodeId')
+                    if tvdb_id and episode.tvdbid != tvdb_id:
+                        episode.tvdbid = tvdb_id
+                        changed = True
+                    
+                    # Air date
+                    air_date = matching_episode.get('airDate')
+                    if air_date:
+                        try:
+                            from datetime import datetime
+                            parsed_date = datetime.strptime(air_date, '%Y-%m-%d').date()
+                            if episode.air_date != parsed_date:
+                                episode.air_date = parsed_date
+                                changed = True
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Episode thumbnail
+                    images = matching_episode.get('images', [])
+                    for image in images:
+                        if isinstance(image, dict) and image.get('coverType') == 'screenshot':
+                            url = image.get('url') or image.get('remoteUrl')
+                            if url:
+                                if url.startswith('/'):
+                                    url = base_url.replace('/api/v3', '') + url
+                                if episode.thumb_url != url:
+                                    episode.thumb_url = url
+                                    changed = True
+                            break
+                    
+                    if changed:
+                        session.add(episode)
+                        session.commit()
+                        logger.info(f"Successfully enriched episode {episode.title}", extra={'emoji_type': 'success'})
+                    else:
+                        logger.debug(f"No changes needed for episode {episode.title}", extra={'emoji_type': 'debug'})
+                else:
+                    logger.warning(f"Episode S{episode.season.season_number}E{episode.episode_number} not found in Sonarr", extra={'emoji_type': 'warning'})
+            else:
+                logger.warning(f"Failed to get episodes from Sonarr: {r.status_code}", extra={'emoji_type': 'warning'})
+        
+        except Exception as e:
+            logger.error(f"Error fetching episode data from Sonarr: {e}", extra={'emoji_type': 'error'})
+        
+        return True
+            
+    except Exception as e:
+        logger.error(f"Error during episode enrichment: {e}", extra={'emoji_type': 'error'})
+        # Don't fail the entire flow if enrichment fails
+        return True
+
+def enrich_all_episodes_metadata(session, ent_id, model, action):
+    """Enrich all episodes of a series with metadata from Sonarr"""
+    if model != Series:
+        logger.info(f"Skipping episode enrichment for non-Series entity: {model.__name__}", extra={'emoji_type': 'skip'})
+        return True
+    
+    try:
+        series = session.query(Series).get(ent_id)
+        if not series:
+            logger.error(f"Series {ent_id} not found for episode enrichment", extra={'emoji_type': 'error'})
+            return False
+        
+        logger.info(f"Enriching all episodes metadata for series: {series.title}", extra={'emoji_type': 'update'})
+        
+        # Get all episodes for this series
+        from services.postgres.models import Episode, Season
+        episodes = session.query(Episode).join(Season).filter(
+            Season.series_id == series.id
+        ).all()
+        
+        if not episodes:
+            logger.info(f"No episodes found for series {series.title}", extra={'emoji_type': 'info'})
+            return True
+        
+        enriched_count = 0
+        for episode in episodes:
+            try:
+                # Call the episode enrichment function
+                success = enrich_episode_metadata(session, episode.id, Episode, action)
+                if success:
+                    enriched_count += 1
+            except Exception as e:
+                logger.error(f"Failed to enrich episode {episode.id}: {e}", extra={'emoji_type': 'error'})
+                continue
+        
+        logger.info(f"Successfully enriched {enriched_count}/{len(episodes)} episodes for series {series.title}", extra={'emoji_type': 'success'})
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error during series episode enrichment: {e}", extra={'emoji_type': 'error'})
+        # Don't fail the entire flow if enrichment fails
+        return True

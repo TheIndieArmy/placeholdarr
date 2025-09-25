@@ -76,4 +76,3 @@ file_handler = logging.FileHandler('media_handler.log')
 file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 logger.addHandler(console_handler)
-logger.addHandler(file_handler)

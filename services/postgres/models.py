@@ -1,12 +1,14 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.sql import func
 from services.postgres.db import Base
 
 class Movie(Base):
     __tablename__ = "movie"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    created_time = Column(DateTime, server_default=func.now(), nullable=False)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     tmdbid = Column(Integer, unique=True, nullable=False)
@@ -49,6 +51,21 @@ class Movie(Base):
     radarr_progress = Column(Integer, nullable=True, default=0)
     radarr_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
+    
+    # NFO-related fields for complete metadata
+    originaltitle = Column(String, nullable=True)
+    sorttitle = Column(String, nullable=True)
+    plot = Column(String, nullable=True)  # Overview/description
+    tagline = Column(String, nullable=True)
+    runtime = Column(Integer, nullable=True)  # Runtime in minutes
+    rating = Column(String, nullable=True)  # MPAA rating
+    imdb_id = Column(String, nullable=True)
+    genres = Column(String, nullable=True)  # Comma-separated genres
+    director = Column(String, nullable=True)
+    studio = Column(String, nullable=True)
+    poster_url = Column(String, nullable=True)
+    fanart_url = Column(String, nullable=True)
+    nfo_path = Column(String, nullable=True)  # Path to the NFO file
 
     subflows = relationship('SubFlow', back_populates='movie')
 
@@ -61,6 +78,7 @@ class Movie(Base):
 class SubFlow(Base):
     __tablename__ = 'subflow'
     id = Column(Integer, primary_key=True, autoincrement=True)
+    created_time = Column(DateTime, server_default=func.now(), nullable=False)
     movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
@@ -81,6 +99,7 @@ class SubFlow(Base):
 class Series(Base):
     __tablename__ = "series"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    created_time = Column(DateTime, server_default=func.now(), nullable=False)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     tvdbid = Column(Integer, unique=True, nullable=False)
@@ -107,6 +126,20 @@ class Series(Base):
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
+    
+    # NFO-related fields for complete metadata
+    originaltitle = Column(String, nullable=True)
+    sorttitle = Column(String, nullable=True)
+    plot = Column(String, nullable=True)  # Overview/description
+    rating = Column(String, nullable=True)  # Content rating
+    premiered = Column(Date, nullable=True)  # First aired date
+    ended = Column(Date, nullable=True)  # Series end date
+    genres = Column(String, nullable=True)  # Comma-separated genres
+    studio = Column(String, nullable=True)  # Network/studio
+    imdb_id = Column(String, nullable=True)  # IMDb identifier
+    poster_url = Column(String, nullable=True)
+    fanart_url = Column(String, nullable=True)
+    nfo_path = Column(String, nullable=True)  # Path to the NFO file
 
     subflows = relationship('SubFlow', back_populates='series')
     season = relationship('Season', back_populates='series')
@@ -119,6 +152,7 @@ class Series(Base):
 class Season(Base):
     __tablename__ = "season"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    created_time = Column(DateTime, server_default=func.now(), nullable=False)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=False)
     # season_number must NOT be unique across the whole table — uniqueness applies per series
     season_number = Column(Integer, nullable=False, index=True)
@@ -142,6 +176,14 @@ class Season(Base):
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
+    
+    # NFO-related fields for complete metadata  
+    tvdbid = Column(Integer, nullable=True)  # TVDB season ID
+    plot = Column(String, nullable=True)  # Overview/description
+    imdb_id = Column(String, nullable=True)  # IMDb identifier
+    poster_url = Column(String, nullable=True)
+    fanart_url = Column(String, nullable=True)
+    nfo_path = Column(String, nullable=True)  # Path to the NFO file
 
     subflows = relationship('SubFlow', back_populates='season')
     series = relationship('Series', back_populates='season')
@@ -149,13 +191,13 @@ class Season(Base):
 
     def __repr__(self):
         return (
-            f"<Season(id={self.id}, title={self.title!r}, year={self.year})>"
-            f"tvdbid={self.tvdbid})>"
-
+            f"<Season(id={self.id}, title={self.title!r}, year={self.year}, "
+            f"season_number={self.season_number})>"
         )
 class Episode(Base):
     __tablename__ = "episode"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    created_time = Column(DateTime, server_default=func.now(), nullable=False)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=False)
     # episode_number must NOT be unique across the whole table — uniqueness applies per season
     episode_number = Column(Integer, nullable=False, index=True)
@@ -192,6 +234,17 @@ class Episode(Base):
     sonarr_status = Column(String, nullable=True)
     air_date = Column(Date, nullable=True)
     is_deleted = Column(Boolean, default=False)
+    
+    # NFO-related fields for complete metadata
+    tvdbid = Column(Integer, nullable=True)  # TVDB episode ID
+    plot = Column(String, nullable=True)  # Overview/description
+    runtime = Column(Integer, nullable=True)  # Runtime in minutes
+    rating = Column(String, nullable=True)  # Content rating
+    directors = Column(String, nullable=True)  # Comma-separated directors
+    writers = Column(String, nullable=True)   # Comma-separated writers
+    imdb_id = Column(String, nullable=True)  # IMDb identifier
+    thumb_url = Column(String, nullable=True)  # Episode thumbnail
+    nfo_path = Column(String, nullable=True)  # Path to the NFO file
 
     subflows = relationship('SubFlow', back_populates='episode')
     season = relationship('Season', back_populates='episode')
@@ -223,5 +276,5 @@ class Episode(Base):
     def __repr__(self):
         return (
            f"<Episode(id={self.id}, title={self.title!r}, year={self.year}, "
-            f"tvdbid={self.tvdbid})>"
+            f"episode_number={self.episode_number})>"
         )

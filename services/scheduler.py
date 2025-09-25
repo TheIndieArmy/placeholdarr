@@ -6,11 +6,12 @@ from typing import Callable, Dict, List, Union, Type
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 from sqlalchemy import or_, and_
-from services.postgres.db import get_session
+from services.postgres.db import get_session, db_session_scope, db_operation_with_retry, db_batch_scope
 from services.postgres.models import Movie, Series, Season, Episode, SubFlow
 from services.flow_manager import flow_manager
 from core.config import settings
 from importlib import import_module
+from sqlalchemy.exc import SQLAlchemyError
 from core.logger import logger
 
 # Legacy logger setup for backwards compatibility
@@ -72,11 +73,11 @@ class ActionScheduler:
 
     def poll_and_enqueue(self):
         logger.verbose(f"Polling for subflows - action: {self.action}", extra={'emoji_type': 'search'})
-        session = get_session()
-        try:
-            # Process a batch of SubFlows per poll to increase throughput.
-            batch_size = getattr(settings, 'SCHEDULER_BATCH_SIZE', 8)
-            with session.begin():
+        
+        def get_pending_subflows():
+            with db_session_scope() as session:
+                # Process a batch of SubFlows per poll to increase throughput.
+                batch_size = getattr(settings, 'SCHEDULER_BATCH_SIZE', 8)
                 sfs = (
                     session.query(SubFlow)
                     .with_for_update(skip_locked=True)
@@ -94,7 +95,7 @@ class ActionScheduler:
 
                 if not sfs:
                     logger.verbose(f"No pending/failed subflows found for action '{self.action}'", extra={'emoji_type': 'debug'})
-                    return
+                    return []
 
                 logger.verbose(f"Found {len(sfs)} subflow(s) to process for action '{self.action}'", extra={'emoji_type': 'processing'})
 
@@ -104,15 +105,28 @@ class ActionScheduler:
                     steps = sf.steps.split(',')
                     if sf.step_index >= len(steps):
                         sf.status = 'DONE'
-                        session.add(sf)
                         logger.verbose(f"SubFlow {sf.id} marked as complete - all steps finished", extra={'emoji_type': 'success'})
                         continue
 
                     next_func_name = steps[sf.step_index]
                     logger.verbose(f"Next step for subflow {sf.id}: {next_func_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
                     sf.status = 'QUEUED'
-                    session.add(sf)
                     schedule_plan.append((sf.id, next_func_name, sf.episode_id))
+
+                # Bulk update status to QUEUED in single commit
+                session.bulk_update_mappings(
+                    SubFlow,
+                    [{"id": sf.id, "status": "QUEUED"} for sf in sfs if sf.step_index < len(sf.steps.split(','))]
+                )
+                
+                return schedule_plan
+
+        try:
+            # Get subflows to process with database retry
+            schedule_plan = db_operation_with_retry(get_pending_subflows)
+            
+            if not schedule_plan:
+                return
 
             # Schedule each planned subflow outside the transaction
             for sf_id, next_func_name, episode_id in schedule_plan:
@@ -124,8 +138,6 @@ class ActionScheduler:
 
         except Exception as e:
             logger.error(f"poll_and_enqueue error for action '{self.action}': {e}", extra={'emoji_type': 'error'})
-        finally:
-            session.close()
 
     def retry_failed_subflows(self):
         """
@@ -209,102 +221,119 @@ class ActionScheduler:
         Enqueue an object for processing.
         
         Args:
-            obj (obj Model): The object model of the object to process
+            obj (obj Model or int): The object model to process, or its ID
         Returns:
             int: The ID of the enqueued object, or None on failure
         """
         logger.verbose(f"Enqueuing object for processing - action: {self.action}", extra={'emoji_type': 'processing'})
-        session = get_session()
         
+        # Handle both model objects and integer IDs
         if isinstance(obj, (Movie, Series, Episode)):
             self.model = obj.__class__
-            logger.debug(f"Object type: {self.model.__name__}, ID: {obj.id}", extra={'emoji_type': 'debug'})
+            obj_id = obj.id
+            logger.debug(f"Object type: {self.model.__name__}, ID: {obj_id}", extra={'emoji_type': 'debug'})
+        elif isinstance(obj, int):
+            # Try to determine model type from action if not already set
+            if not self.model:
+                if 'movie' in self.action.lower():
+                    self.model = Movie
+                elif 'series' in self.action.lower():
+                    self.model = Series
+                elif 'episode' in self.action.lower():
+                    self.model = Episode
+                else:
+                    logger.error(f"Cannot determine model type from action '{self.action}' for ID {obj}", extra={'emoji_type': 'error'})
+                    return None
+            obj_id = obj
+            logger.debug(f"ID provided: {obj_id}, inferred model type: {self.model.__name__}", extra={'emoji_type': 'debug'})
         else:
-            logger.error(f"Invalid model type for object {obj} - expected Movie, Series, or Episode", extra={'emoji_type': 'error'})
+            logger.error(f"Invalid object type {type(obj)} for object {obj} - expected Movie, Series, Episode, or int ID", extra={'emoji_type': 'error'})
             return None
-            
-        obj_id = obj.id if isinstance(obj, (Movie, Series, Episode)) else obj
+        
+        def process_enqueue():
+            with db_session_scope() as session:
+                ent = session.query(self.model).get(obj_id)
+                if not ent:
+                    logger.warning(f"No {self.model.__name__} found with ID {obj_id}", extra={'emoji_type': 'warning'})
+                    return None
+                    
+                if ent.status != 'PENDING':
+                    # Check if this is a reprocessing request (entity is DONE/QUEUED but we want to restart)
+                    if ent.status in ['DONE', 'QUEUED']:
+                        logger.verbose(f"{self.model.__name__} {obj_id} has status '{ent.status}' - resetting to PENDING for new action '{self.action}'", extra={'emoji_type': 'refresh'})
+                        ent.status = 'PENDING'
+                        ent.current_step_name = None  # Reset the step to start from beginning
+                        
+                        # Cancel any existing SubFlows for this entity (delete should cancel add immediately)
+                        
+                        if self.model is Movie:
+                            existing_subflows = session.query(SubFlow).filter(
+                                SubFlow.movie_id == obj_id,
+                                SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])  # Include DONE to reset completed flows
+                            ).all()
+                        elif self.model is Series:
+                            existing_subflows = session.query(SubFlow).filter(
+                                SubFlow.series_id == obj_id,
+                                SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])
+                            ).all()
+                        elif self.model is Episode:
+                            existing_subflows = session.query(SubFlow).filter(
+                                SubFlow.episode_id == obj_id,
+                                SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])
+                            ).all()
+                        else:
+                            existing_subflows = []
+                        
+                        # Cancel all existing SubFlows (delete should immediately cancel add)
+                        if existing_subflows:
+                            logger.verbose(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {obj_id}, cancelling for reprocessing", extra={'emoji_type': 'refresh'})
+                            for old_sf in existing_subflows:
+                                logger.verbose(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
+                                old_sf.status = 'CANCELLED'
+                                old_sf.error_message = f"Cancelled for reprocessing by action: {self.action}"
+                                
+                                # Try to cancel scheduled jobs
+                                job_id_pattern = f"{old_sf.action}_{old_sf.id}_"
+                                try:
+                                    jobs_to_remove = []
+                                    for job in self.scheduler.get_jobs():
+                                        if job.id and job.id.startswith(job_id_pattern):
+                                            jobs_to_remove.append(job.id)
+                                    
+                                    for job_id in jobs_to_remove:
+                                        self.scheduler.remove_job(job_id)
+                                        logger.verbose(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
+                                        
+                                except Exception as e:
+                                    logger.warning(f"Failed to cancel job for SubFlow {old_sf.id}: {e}", extra={'emoji_type': 'warning'})
+                            
+                            logger.verbose(f"Successfully reset {self.model.__name__} {obj_id} for reprocessing", extra={'emoji_type': 'success'})
+                    else:
+                        logger.warning(f"{self.model.__name__} {obj_id} has status '{ent.status}' (expected PENDING)", extra={'emoji_type': 'warning'})
+                        return None
+                    
+                logger.debug(f"Found PENDING {self.model.__name__} {obj_id} - creating subflows", extra={'emoji_type': 'success'})
+                
+                # Call _create_subflows with the initial flow entry
+                initial_entry = flow_manager.get_initial(self.action)
+                entry_description = (
+                    initial_entry.__name__ if callable(initial_entry)
+                    else f"list[{len(initial_entry)}]" if isinstance(initial_entry, list)
+                    else f"dict[{len(initial_entry)}]" if isinstance(initial_entry, dict)
+                    else str(type(initial_entry))
+                )
+                logger.debug(f"Initial flow entry: {entry_description}", extra={'emoji_type': 'debug'})
+                
+                self._create_subflows(obj_id, initial_entry)
+                
+                logger.verbose(f"Successfully enqueued {self.model.__name__} {obj_id} for processing", extra={'emoji_type': 'success'})
+                return obj_id
         
         try:
-            ent = session.query(self.model).get(obj_id)
-            if not ent:
-                logger.warning(f"No {self.model.__name__} found with ID {obj_id}", extra={'emoji_type': 'warning'})
-                return None
-                
-            if ent.status != 'PENDING':
-                # Check if this is a reprocessing request (entity is DONE but we want to restart)
-                if ent.status == 'DONE':
-                    logger.verbose(f"{self.model.__name__} {obj_id} has status 'DONE' - resetting to PENDING for reprocessing", extra={'emoji_type': 'refresh'})
-                    ent.status = 'PENDING'
-                    ent.current_step_name = None  # Reset the step to start from beginning
-                    session.add(ent)
-                    
-                    # Cancel any existing SubFlows for this entity (including same action)
-                    if self.model is Movie:
-                        existing_subflows = session.query(SubFlow).filter(
-                            SubFlow.movie_id == obj_id,
-                            SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])  # Include DONE to reset completed flows
-                        ).all()
-                    elif self.model is Series:
-                        existing_subflows = session.query(SubFlow).filter(
-                            SubFlow.series_id == obj_id,
-                            SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])
-                        ).all()
-                    elif self.model is Episode:
-                        existing_subflows = session.query(SubFlow).filter(
-                            SubFlow.episode_id == obj_id,
-                            SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])
-                        ).all()
-                    else:
-                        existing_subflows = []
-                        
-                    if existing_subflows:
-                        logger.verbose(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {obj_id}, cancelling for reprocessing", extra={'emoji_type': 'refresh'})
-                        for old_sf in existing_subflows:
-                            logger.verbose(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
-                            old_sf.status = 'CANCELLED'
-                            old_sf.error_message = f"Cancelled for reprocessing by action: {self.action}"
-                            session.add(old_sf)
-                            
-                            # Try to cancel scheduled jobs
-                            job_id_pattern = f"{old_sf.action}_{old_sf.id}_"
-                            try:
-                                jobs_to_remove = []
-                                for job in self.scheduler.get_jobs():
-                                    if job.id and job.id.startswith(job_id_pattern):
-                                        jobs_to_remove.append(job.id)
-                                
-                                for job_id in jobs_to_remove:
-                                    self.scheduler.remove_job(job_id)
-                                    logger.verbose(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
-                                    
-                            except Exception as e:
-                                logger.warning(f"Failed to cancel job for SubFlow {old_sf.id}: {e}", extra={'emoji_type': 'warning'})
-                        
-                        session.commit()
-                        logger.verbose(f"Successfully reset {self.model.__name__} {obj_id} for reprocessing", extra={'emoji_type': 'success'})
-                else:
-                    logger.warning(f"{self.model.__name__} {obj_id} has status '{ent.status}' (expected PENDING)", extra={'emoji_type': 'warning'})
-                    return None
-                
-            logger.debug(f"Found PENDING {self.model.__name__} {obj_id} - creating subflows", extra={'emoji_type': 'success'})
-            
-            # Call _create_subflows with the initial flow entry
-            initial_entry = flow_manager.get_initial(self.action)
-            logger.debug(f"Initial flow entry type: {type(initial_entry)}", extra={'emoji_type': 'debug'})
-            
-            self._create_subflows(obj_id, initial_entry)
-            
-            session.commit()
-            logger.verbose(f"Successfully enqueued {self.model.__name__} {obj_id} for processing", extra={'emoji_type': 'success'})
-            return obj_id
-            
+            return db_operation_with_retry(process_enqueue)
         except Exception as e:
             logger.error(f"enqueue error for {self.model.__name__ if self.model else 'unknown'} {obj_id}: {e}", extra={'emoji_type': 'error'})
-            session.rollback()
             return None
-        finally:
-            session.close()
 
     def _create_subflows(
         self,
@@ -319,21 +348,134 @@ class ActionScheduler:
                 logger.verbose(f"Processing single entry/list for {self.model.__name__}", extra={'emoji_type': 'debug'})
                 
                 if self.model is Series:
+                    # For Series workflows, ensure episodes are in PENDING status to match flow criteria
+                    episodes_to_reset = (
+                            session.query(Episode)
+                            .join(Season)
+                            .filter(
+                                Season.series_id == ent_id,
+                                or_(Episode.status.in_(["DONE", "QUEUED"]), Episode.action != self.action)
+                            )
+                            .all()
+                        )
+                    
+                    # Debug: Log all episodes for this series
+                    all_episodes = session.query(Episode).join(Season).filter(Season.series_id == ent_id).all()
+                    logger.verbose(f"🐛 DEBUG: Series {ent_id} has {len(all_episodes)} total episodes", extra={'emoji_type': 'debug'})
+                    for ep in all_episodes:
+                        logger.verbose(f"🐛 DEBUG: Episode {ep.id} - status: {ep.status}, action: {ep.action}", extra={'emoji_type': 'debug'})
+                    
+                    if episodes_to_reset:
+                        logger.verbose(f"➡️ Resetting {len(episodes_to_reset)} episodes to PENDING for {self.action} series {ent_id}", extra={'emoji_type': 'refresh'})
+
+                        reset_session = get_session()
+                        try:
+                            logger.verbose("🐛 DEBUG: Starting episode reset transaction", extra={'emoji_type': 'debug'})
+
+                            # Re-query and update inside reset_session
+                            updated_ids = []
+                            for ep in episodes_to_reset:
+                                logger.verbose(f"🐛 DEBUG: Preparing to reset episode {ep.id} ({ep.status}, {ep.action})", extra={'emoji_type': 'debug'})
+                                reset_ep = reset_session.query(Episode).get(ep.id)
+                                if not reset_ep:
+                                    logger.error(f"🐛 DEBUG: Could not find episode {ep.id} in reset session", extra={'emoji_type': 'error'})
+                                    continue
+                                # Only change if different to ensure an UPDATE
+                                if reset_ep.status != 'PENDING' or reset_ep.action != self.action:
+                                    reset_ep.status = 'PENDING'
+                                    reset_ep.action = self.action
+                                    reset_session.add(reset_ep)
+                                    updated_ids.append(reset_ep.id)
+                                else:
+                                    logger.verbose(f"🐛 DEBUG: Episode {ep.id} already PENDING with same action, skipping", extra={'emoji_type': 'debug'})
+
+                            logger.verbose(f"🐛 DEBUG: session.dirty={len(reset_session.dirty)}, session.new={len(reset_session.new)}", extra={'emoji_type': 'debug'})
+
+                            # Force flush to catch DB level errors early
+                            try:
+                                reset_session.flush()
+                                logger.verbose("🐛 DEBUG: flush() succeeded", extra={'emoji_type': 'debug'})
+                            except SQLAlchemyError:
+                                logger.error("🐛 ERROR: flush() failed during episode reset", exc_info=True, extra={'emoji_type': 'error'})
+                                reset_session.rollback()
+                                raise
+
+                            # Commit and log
+                            try:
+                                reset_session.commit()
+                                logger.verbose("🐛 DEBUG: reset_session.commit() SUCCESS", extra={'emoji_type': 'success'})
+                            except SQLAlchemyError:
+                                logger.error("🐛 ERROR: commit() failed during episode reset", exc_info=True, extra={'emoji_type': 'error'})
+                                reset_session.rollback()
+                                raise
+
+                            # Verification: open a fresh session and verify the rows were updated
+                            verify_session = get_session()
+                            try:
+                                if updated_ids:
+                                    q = verify_session.query(Episode.id, Episode.status, Episode.action).filter(Episode.id.in_(updated_ids)).all()
+                                    logger.verbose(f"🐛 DEBUG: Verification select returned {len(q)} rows: {q}", extra={'emoji_type': 'debug'})
+                                else:
+                                    logger.verbose("🐛 DEBUG: No IDs needed update (nothing to verify)", extra={'emoji_type': 'debug'})
+                            finally:
+                                verify_session.close()
+
+                        except Exception as reset_error:
+                            logger.error(f"Failed to reset episodes (outer): {reset_error}", exc_info=True, extra={'emoji_type': 'error'})
+                            try:
+                                reset_session.rollback()
+                            except Exception:
+                                logger.error("rollback() failed on reset_session", exc_info=True, extra={'emoji_type': 'error'})
+                            raise
+                        finally:
+                            reset_session.close()
+
+                        # Ensure main session sees changes (or use fresh session later)
+                        session.expire_all()
+                        logger.verbose("🐛 DEBUG: Main session expired_all() after episode reset", extra={'emoji_type': 'debug'})
+                    else:
+                        logger.verbose(f"🐛 DEBUG: No episodes to reset for series {ent_id} (looking for DONE/QUEUED status)", extra={'emoji_type': 'debug'})
+                    
+                    logger.verbose(f"🚨 CHECKPOINT: About to get episode criteria for {self.action}", extra={'emoji_type': 'debug'})
+                    
+                    logger.verbose(f"Getting episode criteria for {self.action}", extra={'emoji_type': 'debug'})
+                    episode_criteria = self._get_flow_episode_criteria()
+                    logger.verbose(f"Episode criteria for {self.action}: {episode_criteria}", extra={'emoji_type': 'debug'})
+                    
                     eps = session.query(Episode.id).join(Season).filter(
                         Season.series_id == ent_id,
-                        Episode.status == 'PENDING'
+                        episode_criteria
                     ).all()
+                    logger.verbose(f"Found {len(eps)} episodes matching flow criteria for {self.action} series {ent_id}", extra={'emoji_type': 'tv'})
                     
-                    logger.verbose(f"Found {len(eps)} pending episodes for series {ent_id}", extra={'emoji_type': 'tv'})
+                    # Debug: Show which episodes matched the criteria
+                    if eps:
+                        episode_ids = [eid[0] for eid in eps]
+                        logger.verbose(f"🐛 DEBUG: Episode IDs that matched criteria: {episode_ids}", extra={'emoji_type': 'debug'})
+                        
+                        # Show the current status of these episodes
+                        matched_episodes = session.query(Episode).filter(Episode.id.in_(episode_ids)).all()
+                        for ep in matched_episodes:
+                            logger.verbose(f"🐛 DEBUG: Matched Episode {ep.id} - status: {ep.status}, action: {ep.action}, placeholder_exists: {ep.placeholder_exists}", extra={'emoji_type': 'debug'})
+                    else:
+                        logger.verbose(f"🐛 DEBUG: No episodes matched the criteria, checking all series episodes again...", extra={'emoji_type': 'debug'})
+                        all_eps_post_reset = session.query(Episode).join(Season).filter(Season.series_id == ent_id).all()
+                        for ep in all_eps_post_reset:
+                            logger.verbose(f"🐛 DEBUG: Post-reset Episode {ep.id} - status: {ep.status}, action: {ep.action}, placeholder_exists: {ep.placeholder_exists}", extra={'emoji_type': 'debug'})
                     
                     if eps:
+                        logger.verbose(f"Episode IDs to process: {[eid[0] for eid in eps]}", extra={'emoji_type': 'debug'})
                         for (eid,) in eps:
                             logger.verbose(f"Creating subflow for episode {eid}", extra={'emoji_type': 'debug'})
-                            self._make_or_schedule(
-                                session, ent_id, branch=str(eid), entry=entry, context=eid
-                            )
+                            try:
+                                self._make_or_schedule(
+                                    session, eid, branch=str(eid), entry=entry, context=eid, target_model=Episode
+                                )
+                                logger.verbose(f"Successfully processed episode {eid}", extra={'emoji_type': 'success'})
+                            except Exception as e:
+                                logger.error(f"Failed to create subflow for episode {eid}: {e}", extra={'emoji_type': 'error'})
                     else:
-                        logger.verbose(f"No pending episodes found for series_id: {ent_id}", extra={'emoji_type': 'warning'})
+                        logger.verbose(f"No episodes found for {self.action} series_id: {ent_id}", extra={'emoji_type': 'warning'})
                         return
                         
                 elif self.model is Episode:
@@ -344,13 +486,13 @@ class ActionScheduler:
                         return
                     logger.verbose(f"Creating subflow for single episode {ent_id}", extra={'emoji_type': 'tv'})
                     self._make_or_schedule(
-                        session, ent_id, branch=str(ent_id), entry=entry, context=ent_id
+                        session, ent_id, branch=str(ent_id), entry=entry, context=ent_id, target_model=Episode
                     )
                     
                 elif self.model is Movie:
                     logger.verbose(f"Creating subflow for movie {ent_id}", extra={'emoji_type': 'movie'})
                     self._make_or_schedule(
-                        session, ent_id, branch="main", entry=entry, context=None
+                        session, ent_id, branch="main", entry=entry, context=None, target_model=Movie
                     )
 
             # Handle dict branches at any step
@@ -361,8 +503,12 @@ class ActionScheduler:
                     
                     # Determine contexts based on model type
                     if self.model is Series:
-                        contexts = [e.id for e in session.query(Episode.id).join(Season).filter(Season.series_id == ent_id)]
-                        logger.verbose(f"Series branch: found {len(contexts)} episode contexts", extra={'emoji_type': 'tv'})
+                        episode_criteria = self._get_flow_episode_criteria()
+                        contexts = [e.id for e in session.query(Episode.id).join(Season).filter(
+                            Season.series_id == ent_id,
+                            episode_criteria
+                        )]
+                        logger.verbose(f"Series branch: found {len(contexts)} episode contexts for {self.action}", extra={'emoji_type': 'tv'})
                     elif self.model is Episode:
                         contexts = [ent_id]
                         logger.verbose(f"Episode branch: using single context {ent_id}", extra={'emoji_type': 'tv'})
@@ -371,12 +517,19 @@ class ActionScheduler:
                         logger.verbose(f"Movie branch: using None context", extra={'emoji_type': 'movie'})
     
                     for ctx in contexts:
+                        # For Series workflows with episode contexts, use Episode as target model
+                        if self.model is Series and ctx is not None:
+                            target_model = Episode
+                        else:
+                            target_model = self.model
+                            
                         self._make_or_schedule(
                             session=session,
                             ent_id=ent_id,
                             branch=branch_key,
                             entry=funcs,
-                            context=ctx
+                            context=ctx,
+                            target_model=target_model
                         )
         finally:
             session.close()
@@ -388,52 +541,113 @@ class ActionScheduler:
         branch: Union[str, int],
         entry: Union[Callable, List[Callable]],
         context: Union[int, None],
+        target_model=None,  # Add parameter to explicitly specify the target model
     ):
-        logger.verbose(f"Making/scheduling subflow for {self.model.__name__} {ent_id}, branch: {branch}, context: {context}", extra={'emoji_type': 'debug'})
+        # Determine the correct model and entity ID for this specific subflow
+        if target_model is None:
+            target_model = self.model
+            target_ent_id = ent_id
+        else:
+            # Use the provided target_model and ent_id as the target entity ID
+            target_ent_id = ent_id
+            
+        logger.verbose(f"Making/scheduling subflow for {target_model.__name__} {target_ent_id}, branch: {branch}, context: {context}", extra={'emoji_type': 'debug'})
          
          # Check for existing SubFlows for this entity and cancel them (including completed ones for fresh processing)
-        if self.model is Movie:
+        # Implement action priority: seriesadd > seriesdelete to prevent cancellation conflicts
+        
+        def should_cancel_subflow(existing_action, current_action):
+            """Determine if an existing SubFlow should be cancelled by the current action.
+            
+            Rules:
+            - Delete should immediately cancel add (delete is newer, add is older)
+            - Same action can cancel DONE/FAILED for fresh processing
+            - Different actions always cancel each other
+            """
+            return True  # All existing SubFlows can be cancelled by new actions
+        
+        # First, validate that the entity actually exists before creating SubFlows
+        if target_model is Movie:
+            entity = session.query(target_model).get(target_ent_id)
+            if not entity:
+                logger.error(f"Cannot create SubFlow: {target_model.__name__} with ID {target_ent_id} does not exist", extra={'emoji_type': 'error'})
+                return
+            
             existing_subflows = session.query(SubFlow).filter(
-                SubFlow.movie_id == ent_id,
-                or_(
-                    SubFlow.action != self.action,  # Different action
-                    and_(
-                        SubFlow.action == self.action,
-                        SubFlow.status.in_(['DONE', 'FAILED'])  # Same action but completed/failed - cancel for fresh processing
-                    )
-                ),
+                SubFlow.movie_id == target_ent_id,
                 SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE', 'FAILED'])
             ).all()
-        elif self.model is Series:
+        elif target_model is Series:
+            entity = session.query(target_model).get(target_ent_id)
+            if not entity:
+                logger.error(f"Cannot create SubFlow: {target_model.__name__} with ID {target_ent_id} does not exist", extra={'emoji_type': 'error'})
+                return
+                
             existing_subflows = session.query(SubFlow).filter(
-                SubFlow.series_id == ent_id,
-                or_(
-                    SubFlow.action != self.action,  # Different action
-                    and_(
-                        SubFlow.action == self.action,
-                        SubFlow.status.in_(['DONE', 'FAILED'])  # Same action but completed/failed - cancel for fresh processing
-                    )
-                ),
+                SubFlow.series_id == target_ent_id,
                 SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE', 'FAILED'])
             ).all()
-        elif self.model is Episode:
+        elif target_model is Episode:
+            entity = session.query(target_model).get(target_ent_id)
+            if not entity:
+                logger.error(f"Cannot create SubFlow: {target_model.__name__} with ID {target_ent_id} does not exist", extra={'emoji_type': 'error'})
+                return
+                
             existing_subflows = session.query(SubFlow).filter(
-                SubFlow.episode_id == ent_id,
-                or_(
-                    SubFlow.action != self.action,  # Different action
-                    and_(
-                        SubFlow.action == self.action,
-                        SubFlow.status.in_(['DONE', 'FAILED'])  # Same action but completed/failed - cancel for fresh processing
-                    )
-                ),
+                SubFlow.episode_id == target_ent_id,
                 SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE', 'FAILED'])
             ).all()
         else:
             existing_subflows = []
             
-        if existing_subflows:
-            logger.verbose(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {ent_id} to cancel for fresh processing", extra={'emoji_type': 'warning'})
-            for old_sf in existing_subflows:
+        # Check for existing PENDING/QUEUED SubFlows of the same action (prevent duplicates)
+        # For Series workflows with episodes, check per-episode to avoid false duplicates
+        if self.model is Series and context is not None:
+            # For series workflows, check for duplicates based on specific episode context
+            existing_pending_same_action = [sf for sf in existing_subflows 
+                                           if sf.action == self.action and sf.status in ['PENDING', 'QUEUED'] 
+                                           and sf.episode_id == context]
+        else:
+            # For non-series workflows or series-level workflows, check normally
+            existing_pending_same_action = [sf for sf in existing_subflows 
+                                           if sf.action == self.action and sf.status in ['PENDING', 'QUEUED']]
+        
+        if existing_pending_same_action:
+            # Better logging message based on context
+            if self.model is Series and context is not None:
+                target_description = f"Episode {context} (Series {ent_id})"
+            else:
+                target_description = f"{target_model.__name__} {target_ent_id}"
+                
+            logger.warning(f"Duplicate request detected: Found {len(existing_pending_same_action)} existing PENDING/QUEUED SubFlows for action {self.action} on {target_description}", extra={'emoji_type': 'warning'})
+            for existing_sf in existing_pending_same_action:
+                logger.verbose(f"Existing SubFlow {existing_sf.id}: status={existing_sf.status}, created={existing_sf.created_time}", extra={'emoji_type': 'info'})
+            
+            logger.info(f"Skipping SubFlow creation - already have PENDING/QUEUED SubFlows for same action", extra={'emoji_type': 'skip'})
+            return  # Don't create duplicate SubFlows
+        
+        # Filter subflows that should actually be cancelled
+        subflows_to_cancel = []
+        for old_sf in existing_subflows:
+            # Smart cancellation logic:
+            # 1. Never cancel the same action unless it's explicitly failed or stuck
+            # 2. Only cancel different actions (e.g., seriesdelete cancels seriesadd)
+            # 3. Allow DONE SubFlows to remain unless forcing fresh processing
+            
+            if old_sf.action != self.action:
+                # Different actions cancel each other (e.g., delete cancels add)
+                if old_sf.status in ['PENDING', 'QUEUED']:
+                    subflows_to_cancel.append(old_sf)
+                    logger.verbose(f"Will cancel different action: {old_sf.action} -> {self.action}", extra={'emoji_type': 'warning'})
+            elif old_sf.action == self.action and old_sf.status == 'FAILED':
+                # Only cancel failed SubFlows of the same action for retry
+                subflows_to_cancel.append(old_sf)
+                logger.verbose(f"Will cancel failed SubFlow for retry: {old_sf.id}", extra={'emoji_type': 'warning'})
+            # Note: Do NOT cancel DONE or PENDING/QUEUED SubFlows of the same action
+            
+        if subflows_to_cancel:
+            logger.verbose(f"Found {len(subflows_to_cancel)} existing subflows for {target_model.__name__} {target_ent_id} to cancel for fresh processing", extra={'emoji_type': 'warning'})
+            for old_sf in subflows_to_cancel:
                 logger.verbose(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
                 old_sf.status = 'CANCELLED'
                 old_sf.error_message = f"Cancelled for fresh processing by action: {self.action}"
@@ -465,9 +679,30 @@ class ActionScheduler:
         
         # lookup by identity - exclude cancelled and completed SubFlows for fresh processing
         filter_kwargs = {'branch': branch, 'steps': steps, 'action': self.action}
-        if self.model is Movie:
-            filter_kwargs['movie_id'] = ent_id
+        
+        # Determine correct IDs based on model type
+        series_id_for_subflow = None
+        episode_id_for_subflow = None
+        movie_id_for_subflow = None
+        
+        if target_model is Movie:
+            movie_id_for_subflow = target_ent_id
+            filter_kwargs['movie_id'] = target_ent_id
+        elif target_model is Series:
+            series_id_for_subflow = target_ent_id
+            filter_kwargs['series_id'] = target_ent_id
+            filter_kwargs['episode_id'] = context
+            episode_id_for_subflow = context
+        elif target_model.__name__ == 'Episode':
+            # For episodes, we need to get the series_id from the episode's season
+            episode_id_for_subflow = target_ent_id
+            episode = session.query(target_model).get(target_ent_id)
+            if episode and episode.season:
+                series_id_for_subflow = episode.season.series_id
+            filter_kwargs['series_id'] = series_id_for_subflow
+            filter_kwargs['episode_id'] = target_ent_id
         else:
+            # Fallback for other models
             filter_kwargs['series_id'] = ent_id
             filter_kwargs['episode_id'] = context
             
@@ -477,11 +712,11 @@ class ActionScheduler:
         ).first()
         
         if not sf:
-            logger.verbose(f"No existing SubFlow found, creating new one for {self.model.__name__} {ent_id}", extra={'emoji_type': 'new'})
+            logger.verbose(f"No existing SubFlow found, creating new one for {target_model.__name__} {target_ent_id}", extra={'emoji_type': 'new'})
             sf = SubFlow(
-                movie_id=ent_id if self.model is Movie else None,
-                series_id=ent_id if self.model is Series else None,
-                episode_id=context,
+                movie_id=movie_id_for_subflow,
+                series_id=series_id_for_subflow,
+                episode_id=episode_id_for_subflow,
                 action=self.action,
                 branch=branch,
                 steps=steps,
@@ -490,7 +725,7 @@ class ActionScheduler:
             )
             session.add(sf)
             session.commit()
-            logger.verbose(f"Created SubFlow {sf.id} for {self.model.__name__} {ent_id}", extra={'emoji_type': 'success'})
+            logger.verbose(f"Created SubFlow {sf.id} for {target_model.__name__} {target_ent_id}", extra={'emoji_type': 'success'})
         else:
             logger.verbose(f"SubFlow already exists: {sf.id} (status: {sf.status})", extra={'emoji_type': 'info'})
              
@@ -551,6 +786,64 @@ class ActionScheduler:
             logger.verbose(f"Successfully scheduled job {job_id} for subflow {sf_id}", extra={'emoji_type': 'success'})
         except Exception as e:
             logger.error(f"Failed to schedule subflow {sf_id} function '{func.__name__}': {e}", extra={'emoji_type': 'error'})
+
+    def _get_flow_episode_criteria(self):
+        """
+        Determine episode selection criteria based on the flow definition.
+        This inspects the actual flow functions to understand what episodes they work with.
+        """
+        try:
+            # Get the flow definition for this action
+            initial_entry = flow_manager.get_initial(self.action)
+            if not initial_entry:
+                logger.verbose(f"No flow definition found for action '{self.action}', using default criteria", extra={'emoji_type': 'debug'})
+                return Episode.status == 'PENDING'
+            
+            # Analyze the flow functions to determine what episodes they operate on
+            flow_functions = []
+            if callable(initial_entry):
+                flow_functions = [initial_entry]
+            elif isinstance(initial_entry, list):
+                flow_functions = initial_entry
+            elif isinstance(initial_entry, dict):
+                # For dict entries, get all functions from all branches
+                for branch_funcs in initial_entry.values():
+                    if callable(branch_funcs):
+                        flow_functions.append(branch_funcs)
+                    elif isinstance(branch_funcs, list):
+                        flow_functions.extend(branch_funcs)
+            
+            # Analyze function names and types to determine appropriate criteria
+            func_names = [f.__name__ for f in flow_functions if callable(f)]
+            logger.verbose(f"Analyzing flow functions for {self.action}: {func_names}", extra={'emoji_type': 'debug'})
+            
+            # If any function deals with deletion, include non-deleted episodes that have placeholders
+            if any('delete' in name.lower() for name in func_names):
+                logger.verbose(f"Delete operation detected in {self.action}, selecting non-deleted episodes with existing placeholders", extra={'emoji_type': 'debug'})
+                # For deletion, we want episodes that either:
+                # 1. Have placeholder_exists = True (tracked placeholders)
+                # 2. Have status != 'DONE' (might have placeholders not yet tracked)
+                # 3. Are not marked as deleted
+                return and_(
+                    Episode.is_deleted == False,
+                    or_(
+                        Episode.placeholder_exists == True,
+                        Episode.status != 'DONE'
+                    )
+                )
+            
+            # If any function deals with file operations, include episodes with files
+            if any(term in name.lower() for name in func_names for term in ['file', 'dummy', 'placeholder']):
+                logger.verbose(f"File operation detected in {self.action}, selecting episodes with placeholders or pending status", extra={'emoji_type': 'debug'})
+                return or_(Episode.status == 'PENDING', Episode.placeholder_exists == True)
+            
+            # Default: pending episodes
+            logger.verbose(f"Using default criteria for {self.action}: PENDING episodes", extra={'emoji_type': 'debug'})
+            return Episode.status == 'PENDING'
+            
+        except Exception as e:
+            logger.warning(f"Error analyzing flow criteria for {self.action}: {e}", extra={'emoji_type': 'warning'})
+            return Episode.status == 'PENDING'
 
     def _cancel_subflow(self, sf_id: int, reason: str):
         """Cancel a subflow by marking it as CANCELLED in the database"""

@@ -1,22 +1,129 @@
 from core.logger import logger
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, event
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import SQLAlchemyError, DisconnectionError
+from sqlalchemy.pool import QueuePool
 from core.config import settings
+import time
+import threading
 
 Base = declarative_base()
 
+# Global engine with optimized configuration
+_engine = None
+_engine_lock = threading.Lock()
+
 def get_engine():
-    url = (
-        f"postgresql://{settings.DB_USER}:{settings.DB_PASS}"
-        f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
-    )
-    engine = create_engine(url, echo=False, future=True)
-    return engine
+    global _engine
+    if _engine is None:
+        with _engine_lock:
+            if _engine is None:  # Double-check locking
+                url = (
+                    f"postgresql://{settings.DB_USER}:{settings.DB_PASS}"
+                    f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+                )
+                _engine = create_engine(
+                    url, 
+                    echo=False, 
+                    future=True,
+                    # Optimized connection pool settings
+                    poolclass=QueuePool,
+                    pool_size=10,              # Number of connections to maintain
+                    max_overflow=20,           # Additional connections beyond pool_size
+                    pool_pre_ping=True,        # Verify connections before use
+                    pool_recycle=3600,         # Recycle connections every hour
+                    connect_args={
+                        "connect_timeout": 10,  # 10 second connection timeout
+                        "application_name": "placeholdarr_scheduler"
+                    }
+                )
+                
+                # Add connection event listener for PostgreSQL optimization
+                @event.listens_for(_engine, "connect")
+                def set_postgresql_pragma(dbapi_connection, connection_record):
+                    try:
+                        with dbapi_connection.cursor() as cursor:
+                            # Optimize PostgreSQL settings (only runtime-configurable parameters)
+                            cursor.execute("SET statement_timeout = '300s'")     # 5 minute statement timeout
+                            cursor.execute("SET lock_timeout = '60s'")           # 1 minute lock timeout
+                            cursor.execute("SET idle_in_transaction_session_timeout = '600s'")  # 10 minute idle timeout
+                            cursor.execute("SET tcp_keepalives_idle = '600'")     # TCP keepalive (10 minutes)
+                            cursor.execute("SET tcp_keepalives_interval = '30'")  # TCP keepalive interval
+                            cursor.execute("SET tcp_keepalives_count = '3'")      # TCP keepalive count
+                            # Note: Removed wal_buffers and synchronous_commit as they require server restart/config
+                    except Exception as e:
+                        logger.warning(f"Failed to set PostgreSQL optimizations: {e}")
+                
+                logger.info(f"Created optimized database engine for: {_engine.url}", extra={'emoji_type': 'database'})
+    
+    return _engine
 
 def get_session(engine=None):
+    """Get a database session with optimized settings"""
     engine = engine or get_engine()
-    Session = sessionmaker(bind=engine, future=True)
+    Session = sessionmaker(
+        bind=engine, 
+        future=True,
+        autoflush=False,        # Don't auto-flush on queries
+        expire_on_commit=False  # Keep objects usable after commit
+    )
     return Session()
+
+def db_operation_with_retry(operation, max_retries=3, delay=0.1):
+    """Execute database operation with retry logic for connection issues"""
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except (SQLAlchemyError, DisconnectionError) as e:
+            if attempt == max_retries - 1:
+                logger.error(f"DB operation failed after {max_retries} attempts: {e}", extra={'emoji_type': 'error'})
+                raise
+            
+            logger.warning(f"DB operation failed (attempt {attempt + 1}/{max_retries}): {e}", extra={'emoji_type': 'warning'})
+            time.sleep(delay * (2 ** attempt))  # Exponential backoff
+
+from contextlib import contextmanager
+
+@contextmanager
+def db_session_scope():
+    """Provide a transactional scope around database operations with proper cleanup"""
+    session = get_session()
+    try:
+        yield session
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Database transaction failed, rolled back: {e}", extra={'emoji_type': 'error'})
+        raise
+    finally:
+        session.close()
+
+@contextmanager 
+def db_batch_scope(batch_size=100):
+    """Provide a scope for batch operations with periodic commits"""
+    session = get_session()
+    try:
+        operation_count = 0
+        
+        def maybe_commit():
+            nonlocal operation_count
+            operation_count += 1
+            if operation_count >= batch_size:
+                session.commit()
+                operation_count = 0
+        
+        yield session, maybe_commit
+        
+        # Final commit for remaining operations
+        if operation_count > 0:
+            session.commit()
+            
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Batch database operation failed, rolled back: {e}", extra={'emoji_type': 'error'})
+        raise
+    finally:
+        session.close()
 
 def init_db(engine=None):
     engine = engine or get_engine()

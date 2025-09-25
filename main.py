@@ -10,7 +10,7 @@ from services.migration import run_migration
 from core.config import settings
 from services.postgres.utils import check_db
 from services.postgres.db import get_engine, init_db, get_session
-from services.postgres.models import Movie
+from services.postgres.models import Movie, Series, Episode, SubFlow
 from services.scheduler import *
 from services.sync.sync_movies import schedule_all_syncs
 
@@ -65,12 +65,30 @@ async def lifespan(app: FastAPI):
 
         session = get_session()
         try:
-            session.query(Movie).filter(Movie.status == 'QUEUED').update(
+            # Reset QUEUED entities to PENDING for all entity types
+            movie_reset = session.query(Movie).filter(Movie.status == 'QUEUED').update(
                 {Movie.status: 'PENDING'},
                 synchronize_session=False
             )
+            
+            series_reset = session.query(Series).filter(Series.status == 'QUEUED').update(
+                {Series.status: 'PENDING'},
+                synchronize_session=False
+            )
+            
+            episode_reset = session.query(Episode).filter(Episode.status == 'QUEUED').update(
+                {Episode.status: 'PENDING'},
+                synchronize_session=False
+            )
+            
+            # Reset QUEUED SubFlows to PENDING
+            subflow_reset = session.query(SubFlow).filter(SubFlow.status == 'QUEUED').update(
+                {SubFlow.status: 'PENDING'},
+                synchronize_session=False
+            )
+            
             session.commit()
-            logger.info("Reset QUEUED movies to PENDING", extra={'emoji_type': 'info'})
+            logger.info(f"Reset to PENDING: {movie_reset} movies, {series_reset} series, {episode_reset} episodes, {subflow_reset} subflows", extra={'emoji_type': 'info'})
         finally:
             session.close()
 
