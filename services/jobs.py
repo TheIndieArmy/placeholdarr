@@ -1,6 +1,7 @@
 import json
 import time
 import logging
+import threading
 from datetime import datetime, timedelta
 from services.postgres.db import get_session
 from services.postgres.models import Job, Series, SubFlow, Episode
@@ -10,6 +11,9 @@ from sqlalchemy import text, or_
 from services.flow_manager import flow_manager
 from services.plex_client import refresh_plex_dummy
 from services.jellyfin_client import refresh_jellyfin_dummy
+from services.integrations import enrich_from_arr
+from services.enricher import enqueue_enrichment_job
+from core.config import settings
 
 # Simple job worker that claims Job rows and splits batch payloads into Series SubFlows
 # This is intentionally minimal; it uses an atomic UPDATE ... RETURNING to claim jobs
@@ -249,6 +253,74 @@ def work_once():
             process_import_list_job(session, job)
         elif job.job_type == 'combined_refresh':
             process_combined_refresh_job(session, job)
+        elif job.job_type == 'enrichment':
+            # Process an enrichment job: attempt to acquire a per-entity advisory lock
+            # so enrichment for the same series/movie serializes. If lock cannot be
+            # obtained immediately, requeue the job a short time later to avoid
+            # busy-waiting and to give other workers a chance.
+            try:
+                payload = job.payload or {}
+                is_4k = bool(payload.get('is_4k', False))
+
+                # Derive a numeric lock key from payload: prefer explicit arr id, then tvdb/tmdb, then job id
+                lock_key = None
+                try:
+                    arr_id = payload.get('series', {}) and (payload.get('series', {}).get('id') or payload.get('series', {}).get('sonarrId'))
+                except Exception:
+                    arr_id = None
+                try:
+                    if arr_id:
+                        lock_key = int(arr_id)
+                    elif payload.get('series', {}) and payload.get('series', {}).get('tvdbId'):
+                        lock_key = int(payload.get('series', {}).get('tvdbId'))
+                    elif payload.get('movie', {}) and payload.get('movie', {}).get('tmdbId'):
+                        lock_key = int(payload.get('movie', {}).get('tmdbId'))
+                    else:
+                        lock_key = int(job.id)
+                except Exception:
+                    lock_key = int(job.id)
+
+                # Try to acquire advisory lock non-blocking
+                got_lock = False
+                try:
+                    # pg_try_advisory_lock returns true if lock acquired
+                    stmt = text("SELECT pg_try_advisory_lock(:k)")
+                    res = session.execute(stmt, {'k': lock_key}).scalar()
+                    got_lock = bool(res)
+                except Exception as e:
+                    logger.debug(f"Advisory lock attempt failed: {e}", extra={'emoji_type': 'debug'})
+                    got_lock = False
+
+                if not got_lock:
+                    # Requeue a short time later to avoid contention
+                    retry_delay = int(getattr(settings, 'ENRICHMENT_LOCK_REQUEUE_SECONDS', 2) or 2)
+                    job.run_after = datetime.utcnow() + timedelta(seconds=retry_delay)
+                    session.add(job)
+                    session.commit()
+                    logger.info(f"Could not acquire lock for enrichment job {job.id}; requeued for +{retry_delay}s", extra={'emoji_type': 'wait'})
+                else:
+                    try:
+                        # We have the lock, run enrichment end-to-end
+                        enrich_from_arr(payload=payload, is_4k=is_4k)
+                        job.status = 'DONE'
+                        session.add(job)
+                        session.commit()
+                        logger.info(f"Enrichment job {job.id} completed", extra={'emoji_type': 'success'})
+                    finally:
+                        # Release the advisory lock explicitly
+                        try:
+                            stmt = text("SELECT pg_advisory_unlock(:k)")
+                            session.execute(stmt, {'k': lock_key})
+                            session.commit()
+                        except Exception:
+                            # If unlock fails, rely on connection close to release locks
+                            session.rollback()
+            except Exception as e:
+                logger.error(f"Enrichment job {job.id} failed: {e}", extra={'emoji_type': 'error'})
+                job.status = 'FAILED'
+                job.error_message = str(e)
+                session.add(job)
+                session.commit()
         else:
             logger.warning(f"Unknown job type: {job.job_type}. Marking as FAILED", extra={'emoji_type': 'warning'})
             job.status = 'FAILED'
@@ -273,3 +345,27 @@ def run_worker_loop(poll_interval=2):
         except Exception as e:
             logger.error(f"Job worker loop error: {e}", extra={'emoji_type': 'error'})
             time.sleep(poll_interval)
+
+
+# Background worker start guard and helper so other modules (handlers/enricher)
+# can ensure the job worker is running without duplicating logic.
+_worker_thread_started = False
+_worker_thread_lock = threading.Lock()
+
+
+def start_worker_once():
+    """Start the background job worker thread once (idempotent).
+
+    Safe to call from multiple places; only the first call will actually start
+    the thread.
+    """
+    global _worker_thread_started
+    with _worker_thread_lock:
+        if not _worker_thread_started:
+            try:
+                t = threading.Thread(target=run_worker_loop, args=(), daemon=True)
+                t.start()
+                _worker_thread_started = True
+                logger.debug("Started background job worker thread (central)", extra={'emoji_type': 'debug'})
+            except Exception as e:
+                logger.error(f"Failed to start job worker thread: {e}", extra={'emoji_type': 'error'})

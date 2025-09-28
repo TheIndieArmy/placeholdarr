@@ -1,4 +1,5 @@
 import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
+from datetime import datetime, date
 from typing import Type
 from core.config import settings
 from core.logger import logger
@@ -1314,6 +1315,14 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
             logger.error("Radarr config missing for enrichment", extra={'emoji_type': 'error'})
             return None
 
+        # Optional operator-configurable short delay to avoid races where Radarr
+        # hasn't yet recorded a just-added file. Default 0 (no delay) to match
+        # non-DB behavior. Operators can set ENRICHMENT_DELAY_SECONDS in settings.
+        delay_seconds = getattr(settings, 'ENRICHMENT_DELAY_SECONDS', 0)
+        if delay_seconds:
+            logger.debug(f"Delaying {delay_seconds}s before Radarr enrichment for tmdb={tmdb_id} radarr={radarr_id}", extra={'emoji_type': 'debug'})
+            time.sleep(delay_seconds)
+
         headers = {'X-Api-Key': config['api_key']}
         base_url = config['url']
         movie_data = None
@@ -1450,6 +1459,14 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
             logger.error("Sonarr config missing for enrichment", extra={'emoji_type': 'error'})
             return None
 
+        # Optional operator-configurable short delay to avoid races where Sonarr
+        # hasn't yet recorded a just-added file. Default 0 (no delay) to match
+        # non-DB behavior. Operators can set ENRICHMENT_DELAY_SECONDS in settings.
+        delay_seconds = getattr(settings, 'ENRICHMENT_DELAY_SECONDS', 0)
+        if delay_seconds:
+            logger.debug(f"Delaying {delay_seconds}s before Sonarr enrichment for tvdb={tvdb_id} sonarr={sonarr_id}", extra={'emoji_type': 'debug'})
+            time.sleep(delay_seconds)
+
         headers = {'X-Api-Key': config['api_key']}
         base_url = config['url']
         series_data = None
@@ -1462,6 +1479,9 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                     series_data = r.json()
                 else:
                     logger.debug(f"Sonarr series fetch by id {sonarr_id} returned {r.status_code}")
+                    # If Sonarr explicitly returned 404, record that so we can mark local series deleted later
+                    if r.status_code == 404:
+                        series_not_found = True
             except Exception as e:
                 logger.error(f"Sonarr direct fetch failed: {e}", extra={'emoji_type': 'error'})
 
@@ -1482,12 +1502,39 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                                 series_data = r2.json()
                         except Exception:
                             pass
+                else:
+                    # Lookup returned empty list -> the series is not present in Sonarr (for this TVDB)
+                    lookup_no_results = True
             except Exception as e:
                 logger.error(f"Sonarr lookup by tvdb failed: {e}", extra={'emoji_type': 'error'})
 
         if not series_data:
             logger.debug("No Sonarr series data found during enrichment", extra={'emoji_type': 'debug'})
-            return None
+            # If Sonarr explicitly returned 404 for the series id, or the lookup returned no results
+            # and we have a local Series that previously had a sonarrid, mark it deleted to keep DB consistent.
+            session = get_session()
+            try:
+                s = None
+                if tvdb_id is not None:
+                    try:
+                        s = session.query(SeriesModel).filter_by(tvdbid=int(tvdb_id)).first()
+                    except Exception:
+                        s = session.query(SeriesModel).filter_by(tvdbid=str(tvdb_id)).first()
+                # If we found a local Series and Sonarr confirmed it is missing, mark deleted
+                if s and (('series_not_found' in locals() and series_not_found) or ('lookup_no_results' in locals() and lookup_no_results)):
+                    try:
+                        if getattr(s, 'sonarrid', None):
+                            s.is_deleted = True
+                            s.has_files = False
+                            session.add(s)
+                            session.commit()
+                            logger.info(f"Marked Series TVDB {s.tvdbid} as deleted because Sonarr returned no record", extra={'emoji_type': 'delete'})
+                    except Exception:
+                        session.rollback()
+                # Close session and return since there's nothing to enrich
+                return None
+            finally:
+                session.close()
 
         # Map fields into DB
         session = get_session()
@@ -1533,6 +1580,8 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
             if path and s.sonarrpath != path:
                 s.sonarrpath = path
                 changed = True
+            # Sonarr is the source of truth for monitored/has_files flags.
+            # Update DB to match Sonarr's report (allow setting to False when Sonarr says no files).
             if s.sonarr_monitored != monitored:
                 s.sonarr_monitored = monitored
                 changed = True
@@ -1540,6 +1589,15 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                 s.has_files = has_files
                 changed = True
                 logger.debug(f"Set series.has_files={has_files} for series {s.tvdbid} based on Sonarr data", extra={'emoji_type': 'debug'})
+
+            # If this series was previously marked deleted but Sonarr returned a record, unmark it
+            try:
+                if getattr(s, 'is_deleted', False):
+                    s.is_deleted = False
+                    changed = True
+                    logger.info(f"Unmarked is_deleted for Series TVDB {s.tvdbid} because Sonarr returned a record", extra={'emoji_type': 'update'})
+            except Exception:
+                pass
 
             # capture series-level overview if present
             series_overview = series_data.get('overview') or series_data.get('description') or None
@@ -1569,6 +1627,30 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                 logger.debug(f"Enrichment for series {s.tvdbid} found no changes", extra={'emoji_type': 'debug'})
 
             # Attempt to fetch episode-level overviews and persist them
+            # Prefer the Sonarr series quality profile name when available. Fall back
+            # to deriving a representative series quality from episode file qualities
+            # only when the profile name cannot be obtained.
+            quality_list = []
+            profile_name = None
+            try:
+                # Sonarr exposes the series quality profile as an id on the series
+                qp_id = series_data.get('qualityProfileId') or (series_data.get('qualityProfile') or {}).get('id')
+                if qp_id:
+                    try:
+                        qp_resp = requests.get(f"{base_url}/qualityProfile/{qp_id}", headers=headers, timeout=10)
+                        if qp_resp.ok:
+                            qp = qp_resp.json()
+                            profile_name = qp.get('name') or None
+                            if profile_name and getattr(s, 'sonarr_quality', None) != profile_name:
+                                s.sonarr_quality = profile_name
+                                session.add(s)
+                                session.commit()
+                                logger.info(f"Set series.sonarr_quality={profile_name} from Sonarr quality profile for series {s.tvdbid}", extra={'emoji_type': 'update'})
+                    except Exception:
+                        # Non-fatal: if quality profile fetch fails, continue and fall back later
+                        profile_name = None
+            except Exception:
+                profile_name = None
             try:
                 eps_resp = requests.get(f"{base_url}/episode", params={'seriesId': series_data.get('id')}, headers=headers, timeout=10)
                 if eps_resp.ok:
@@ -1579,19 +1661,157 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                             ep_num = ep.get('episodeNumber')
                             ep_overview = ep.get('overview') or ep.get('description') or None
                             if not ep_overview:
-                                continue
+                                # even if overview missing, still consider persisting other fields like file info
+                                pass
                             # find season/episode rows
                             season_row = session.query(SeasonModel).filter_by(series_id=s.id, season_number=int(season_num)).first()
                             if not season_row:
                                 continue
                             episode_row = session.query(EpisodeModel).filter_by(season_id=season_row.id, episode_number=int(ep_num)).first()
-                            if episode_row and getattr(episode_row, 'sonarr_episode_overview', None) != ep_overview:
-                                episode_row.sonarr_episode_overview = ep_overview
-                                session.add(episode_row)
+                            if episode_row:
+                                # persist overview if provided (don't clear existing overview with None)
+                                if ep_overview and getattr(episode_row, 'sonarr_episode_overview', None) != ep_overview:
+                                    episode_row.sonarr_episode_overview = ep_overview
+                                    session.add(episode_row)
+
+                                # Also persist episodeFile details when Sonarr provides them
+                                try:
+                                    ef = ep.get('episodeFile') or {}
+                                    # Determine has_file from Sonarr's flags or presence of episodeFile
+                                    has_file = bool(ep.get('hasFile', False) or ef)
+
+                                    # Path - prefer absolute path, fall back to relativePath
+                                    ef_path = ef.get('path') or ef.get('relativePath') or None
+
+                                    # Size: Sonarr may use 'size' or 'sizeInBytes'
+                                    ef_size = ef.get('size') or ef.get('sizeInBytes')
+                                    try:
+                                        if ef_size is not None:
+                                            ef_size = int(ef_size)
+                                    except Exception:
+                                        ef_size = None
+
+                                    # Quality: nested object or simple value
+                                    ef_quality = None
+                                    q = ef.get('quality') or ep.get('quality') or {}
+                                    if isinstance(q, dict):
+                                        ef_quality = q.get('name') or (q.get('quality') or {}).get('name')
+                                    elif q:
+                                        ef_quality = str(q)
+
+                                    if ef_quality:
+                                        quality_list.append(ef_quality)
+
+                                    # Sonarr path - useful for Jellyfin matching (store absolute file path when available)
+                                    sonarrpath_val = ef_path or getattr(season_row, 'sonarrpath', None) or getattr(s, 'sonarrpath', None)
+
+                                    # Initialize updated flag for this episode row
+                                    updated = False
+
+                                    # Persist Sonarr episode id if present
+                                    try:
+                                        sonarr_episode_id = ep.get('id')
+                                        if sonarr_episode_id and getattr(episode_row, 'sonarrid', None) != sonarr_episode_id:
+                                            episode_row.sonarrid = sonarr_episode_id
+                                            updated = True
+                                    except Exception:
+                                        pass
+
+                                    # Persist sonarr_status if present on the episode object
+                                    try:
+                                        sonarr_episode_status = ep.get('status') or ep.get('episodeFile', {}).get('status') if ep else None
+                                        if sonarr_episode_status and getattr(episode_row, 'sonarr_status', None) != sonarr_episode_status:
+                                            episode_row.sonarr_status = sonarr_episode_status
+                                            updated = True
+                                    except Exception:
+                                        pass
+
+                                    # Persist air date if available (airDate or airDateUtc)
+                                    try:
+                                        air_date_val = ep.get('airDate') or ep.get('airDateUtc')
+                                        if air_date_val:
+                                            # Normalize to date if possible
+                                            try:
+                                                # Sonarr returns 'YYYY-MM-DD' or ISO datetime
+                                                d = None
+                                                if 'T' in air_date_val:
+                                                    d = datetime.fromisoformat(air_date_val.replace('Z', '+00:00')).date()
+                                                else:
+                                                    d = datetime.strptime(air_date_val, '%Y-%m-%d').date()
+                                                if d and getattr(episode_row, 'air_date', None) != d:
+                                                    episode_row.air_date = d
+                                                    updated = True
+                                            except Exception:
+                                                # ignore parse errors
+                                                pass
+                                    except Exception:
+                                        pass
+
+                                    # Update episode file metadata to match Sonarr (source of truth).
+                                    # Set has_file to Sonarr's value and set/clear file fields accordingly.
+                                    if getattr(episode_row, 'has_file', None) != has_file:
+                                        episode_row.has_file = has_file
+                                        updated = True
+
+                                    if has_file:
+                                        if ef_path and getattr(episode_row, 'episodefile_path', None) != ef_path:
+                                            episode_row.episodefile_path = ef_path
+                                            updated = True
+                                        if ef_size is not None and getattr(episode_row, 'episodefile_size', None) != ef_size:
+                                            episode_row.episodefile_size = ef_size
+                                            updated = True
+                                        if ef_quality and getattr(episode_row, 'sonarr_quality', None) != ef_quality:
+                                            episode_row.sonarr_quality = ef_quality
+                                            updated = True
+                                        if sonarrpath_val and getattr(episode_row, 'sonarrpath', None) != sonarrpath_val:
+                                            episode_row.sonarrpath = sonarrpath_val
+                                            updated = True
+                                    else:
+                                        # Sonarr reports no file for this episode: clear file-specific fields
+                                        if getattr(episode_row, 'episodefile_path', None) is not None:
+                                            episode_row.episodefile_path = None
+                                            updated = True
+                                        if getattr(episode_row, 'episodefile_size', None) is not None:
+                                            episode_row.episodefile_size = None
+                                            updated = True
+                                        if getattr(episode_row, 'sonarr_quality', None) is not None:
+                                            episode_row.sonarr_quality = None
+                                            updated = True
+                                        if getattr(episode_row, 'sonarrpath', None) is not None:
+                                            episode_row.sonarrpath = None
+                                            updated = True
+
+                                    if updated:
+                                        session.add(episode_row)
+                                        session.commit()
+                                        logger.debug(f"Enriched episode row id={episode_row.id}: sonarrid={getattr(episode_row,'sonarrid',None)} air_date={getattr(episode_row,'air_date',None)} sonarr_status={getattr(episode_row,'sonarr_status',None)}", extra={'emoji_type':'debug'})
+                                except Exception:
+                                    # Be resilient: don't fail enrichment if episodeFile parsing fails
+                                    logger.debug("Episode file parsing failed during enrichment", extra={'emoji_type':'debug'})
+                                    pass
                         except Exception:
                             continue
                     # commit any episode/season overview changes
                     session.commit()
+                    # NOTE: per-episode SubFlow creation was intentionally removed here
+                    # to keep SubFlow creation owned by the scheduler/webhook path.
+                    # Enrichment should only persist authoritative DB fields. The
+                    # scheduler will run the configured flow steps (which include
+                    # enrichment as a step) and handle placeholder creation.
+                    # Derive a representative series-level quality from episode qualities
+                    # only if we couldn't obtain a Sonarr quality profile name above.
+                    try:
+                        if quality_list and not profile_name:
+                            from collections import Counter
+                            most_common = Counter(quality_list).most_common(1)[0][0]
+                            if getattr(s, 'sonarr_quality', None) != most_common:
+                                s.sonarr_quality = most_common
+                                session.add(s)
+                                session.commit()
+                                logger.info(f"Set series.sonarr_quality={most_common} for series {s.tvdbid}", extra={'emoji_type': 'update'})
+                    except Exception:
+                        # non-fatal if computing series quality fails
+                        pass
             except Exception:
                 logger.debug("Failed to fetch/persist Sonarr episode overviews", extra={'emoji_type': 'debug'})
 
@@ -1659,3 +1879,47 @@ def start_enrichment_thread(payload: dict, is_4k: bool = False):
         enrich_from_arr(payload=payload, is_4k=is_4k)
     except Exception as e:
         logger.error(f"Background enrichment thread failed: {e}", extra={'emoji_type': 'error'})
+
+
+def flow_enrich_series(session, ent_id: int, model: Type, action: str) -> bool:
+    """Scheduler-compatible step to run Sonarr enrichment for a series.
+
+    This adapter matches the signature expected by ActionScheduler step functions
+    (session, ent_id, model, action). It looks up the series' TVDB id from the
+    DB and calls the existing enrichment routine. Return True on success.
+    """
+    try:
+        # Lazy import of models to avoid top-level circular imports
+        from services.postgres.models import Series as SeriesModel
+        series = session.query(SeriesModel).get(ent_id)
+        if not series:
+            logger.error(f"flow_enrich_series: Series id {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+
+        tvdb = getattr(series, 'tvdbid', None) or getattr(series, 'tvdb_id', None)
+        sonarr_id = getattr(series, 'sonarrid', None)
+        is_4k = bool(getattr(series, 'is_4k', False))
+        enrich_series_from_sonarr(tvdb_id=tvdb, sonarr_id=sonarr_id, is_4k=is_4k)
+        return True
+    except Exception as e:
+        logger.error(f"flow_enrich_series failed: {e}", extra={'emoji_type': 'error'})
+        return False
+
+
+def flow_enrich_movie(session, ent_id: int, model: Type, action: str) -> bool:
+    """Scheduler-compatible step to run Radarr enrichment for a movie."""
+    try:
+        from services.postgres.models import Movie as MovieModel
+        movie = session.query(MovieModel).get(ent_id)
+        if not movie:
+            logger.error(f"flow_enrich_movie: Movie id {ent_id} not found", extra={'emoji_type': 'error'})
+            return False
+
+        tmdb = getattr(movie, 'tmdbid', None)
+        radarr_id = getattr(movie, 'radarrid', None)
+        is_4k = bool(getattr(movie, 'is_4k', False))
+        enrich_movie_from_radarr(tmdb_id=tmdb, radarr_id=radarr_id, is_4k=is_4k)
+        return True
+    except Exception as e:
+        logger.error(f"flow_enrich_movie failed: {e}", extra={'emoji_type': 'error'})
+        return False

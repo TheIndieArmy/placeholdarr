@@ -85,6 +85,13 @@ async def lifespan(app: FastAPI):
         # --- Placeholder for future Sonarr sync entrypoint ---
         # from services.sync import sync_series
         # sync_series.schedule_all_syncs()
+        # Ensure job worker is running to process queued jobs (enrichment/imports)
+        try:
+            from services.jobs import start_worker_once
+            start_worker_once()
+            logger.info("Started centralized job worker", extra={'emoji_type': 'gear'})
+        except Exception as e:
+            logger.debug(f"Failed to start centralized job worker at startup: {e}", extra={'emoji_type': 'debug'})
         yield
     else:
         logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})

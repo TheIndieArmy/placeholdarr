@@ -24,7 +24,7 @@ from services.queue_monitor import handle_download_webhook
 from services.integrations import enrich_movie_from_radarr, enrich_series_from_sonarr, enrich_from_arr, start_enrichment_thread
 from datetime import datetime, timedelta
 from services.postgres.models import Job
-from services.jobs import run_worker_loop
+from services.jobs import start_worker_once
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -239,17 +239,15 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
         
-        # Start background enrichment from Sonarr so DB captures authoritative fields (overviews, paths, etc.)
+        # Create SubFlows for the series-add workflow (scheduler-owned execution)
         try:
-            threading.Thread(target=start_enrichment_thread, args=({'series': {'tvdbId': tvdb_id, 'id': series_id}}, is_4k), daemon=True).start()
-            logger.debug(f"Enrichment started for Series TVDB {tvdb_id} sonarr {getattr(series, 'sonarrid', None) or series_id}", extra={'emoji_type': 'debug'})
+            job_scheduled = handle_seriesadd_scheduler.enqueue(series)
+            if job_scheduled:
+                logger.info(f"Enqueued 'handle_seriesadd' action for TVDB ID {tvdb_id}", extra={'emoji_type': 'queue'})
+            else:
+                logger.warning(f"Failed to enqueue 'handle_seriesadd' action for TVDB ID {tvdb_id}", extra={'emoji_type': 'warning'})
         except Exception as e:
-            logger.error(f"Failed to start series enrichment thread: {e}", extra={'emoji_type': 'error'})
-
-        # Pass the model instance so the scheduler can infer model type and create subflows
-        # Enqueue to batch job queue instead of scheduling immediately; debounce multiple events
-        job_id = enqueue_import_list_job(tvdb_id, is_4k)
-        job_scheduled = bool(job_id)
+            logger.error(f"Failed to enqueue series flow: {e}", extra={'emoji_type': 'error'})
     finally:
         try:
             session.close()
@@ -257,9 +255,9 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             pass
     
     if job_scheduled:
-        logger.info(f"Enqueued import_list job {job_id} for TVDB ID {tvdb_id}")
+        logger.info(f"Enqueued 'handle_seriesadd' flow for TVDB ID {tvdb_id}")
     else:
-        logger.warning(f"Failed to enqueue import_list job for TVDB ID {tvdb_id}")
+        logger.warning(f"Failed to enqueue 'handle_seriesadd' flow for TVDB ID {tvdb_id}")
     
     return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
 
@@ -446,18 +444,15 @@ def handle_movieadd(data: dict, is_4k: bool = False):
             elif cleared_any:
                 logger.debug(f"Cleared stale placeholder metadata for movie {m.tmdbid}", extra={'emoji_type': 'debug'})
 
-        # Start enrichment in background to fetch authoritative data from Radarr
+        # Create SubFlows for the movie-add workflow (scheduler-owned execution)
         try:
-            threading.Thread(
-                target=enrich_movie_from_radarr,
-                args=(tmdb_id, radarr_id, is_4k),
-                daemon=True
-            ).start()
-            logger.debug(f"Enrichment started for TMDB {tmdb_id} radarr {radarr_id}", extra={'emoji_type': 'debug'})
+            job_scheduled = handle_movieadd_scheduler.enqueue(m)
+            if job_scheduled:
+                logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}", extra={'emoji_type': 'queue'})
+            else:
+                logger.warning(f"Failed to enqueue 'handle_movieadd' action for TMDB ID {m.tmdbid}", extra={'emoji_type': 'warning'})
         except Exception as e:
-            logger.error(f"Failed to start enrichment thread: {e}", extra={'emoji_type': 'error'})
-
-        job_scheduled = handle_movieadd_scheduler.enqueue(m)
+            logger.error(f"Failed to enqueue movie flow: {e}", extra={'emoji_type': 'error'})
         if job_scheduled:
             logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}")
         else:
@@ -568,22 +563,9 @@ def handle_playback(data: dict):
 
     return JSONResponse({"status": "scheduled", "message": f"{media_type} playback enqueued"})
 
-# Background job worker starter guard
-_worker_thread_started = False
-_worker_thread_lock = threading.Lock()
-
-
-def _start_worker_once():
-    global _worker_thread_started
-    with _worker_thread_lock:
-        if not _worker_thread_started:
-            try:
-                t = threading.Thread(target=run_worker_loop, args=(), daemon=True)
-                t.start()
-                _worker_thread_started = True
-                logger.debug("Started background job worker thread", extra={'emoji_type': 'debug'})
-            except Exception as e:
-                logger.error(f"Failed to start job worker thread: {e}", extra={'emoji_type': 'error'})
+# Use centralized worker start from services.jobs (start_worker_once). The handlers
+# no longer manage the worker lifetime directly; enqueue functions will ensure
+# the worker is started when jobs are created.
 
 
 def enqueue_import_list_job(tvdb_id, is_4k=False):
@@ -617,7 +599,7 @@ def enqueue_import_list_job(tvdb_id, is_4k=False):
             job_id = job.id
 
         # Ensure worker is running to pick up jobs
-        _start_worker_once()
+        start_worker_once()
         return job_id
     except Exception as e:
         logger.error(f"Failed to enqueue import_list job: {e}", extra={'emoji_type': 'error'})

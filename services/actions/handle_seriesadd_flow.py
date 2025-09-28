@@ -1,9 +1,10 @@
-from services.integrations import update_placeholder_status, delayed_placeholders
+from services.integrations import update_placeholder_status, delayed_placeholders, flow_enrich_series
 from services.plex_client import update_plex_title_status, refresh_plex_dummy, verify_dummy_scan_plex, retry_failed_plex_title_updates
 from services.jellyfin_client import update_jellyfin_title_status, refresh_jellyfin_dummy, verify_dummy_scan_jellyfin, retry_failed_jellyfin_title_updates
 
 def steps():
     return [
+        flow_enrich_series,
         delayed_placeholders,
         {
             'jellyfin': [refresh_jellyfin_dummy, verify_dummy_scan_jellyfin, update_placeholder_status, update_jellyfin_title_status, verify_dummy_scan_jellyfin, retry_failed_jellyfin_title_updates],
