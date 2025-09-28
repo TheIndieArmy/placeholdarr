@@ -12,7 +12,6 @@ from services.flow_manager import flow_manager
 from services.plex_client import refresh_plex_dummy
 from services.jellyfin_client import refresh_jellyfin_dummy
 from services.integrations import enrich_from_arr
-from services.enricher import enqueue_enrichment_job
 from core.config import settings
 
 # Simple job worker that claims Job rows and splits batch payloads into Series SubFlows

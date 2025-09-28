@@ -1870,16 +1870,9 @@ def enrich_from_arr(payload: dict = None, media_type: str = None, tvdb_id: int =
         return None
 
 
-def start_enrichment_thread(payload: dict, is_4k: bool = False):
-    """
-    Convenience wrapper intended to be used as a background thread target.
-    Accepts a webhook-like payload dict and calls enrich_from_arr.
-    """
-    try:
-        enrich_from_arr(payload=payload, is_4k=is_4k)
-    except Exception as e:
-        logger.error(f"Background enrichment thread failed: {e}", extra={'emoji_type': 'error'})
-
+# Legacy background enrichment helper removed. Enrichment should be scheduled
+# and executed by the ActionScheduler (use flow_enrich_series/flow_enrich_movie
+# or the job worker enqueue_enrichment_job for manual/test invocation).
 
 def flow_enrich_series(session, ent_id: int, model: Type, action: str) -> bool:
     """Scheduler-compatible step to run Sonarr enrichment for a series.

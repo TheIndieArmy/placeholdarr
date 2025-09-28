@@ -21,7 +21,7 @@ from services.scheduler import (
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
-from services.integrations import enrich_movie_from_radarr, enrich_series_from_sonarr, enrich_from_arr, start_enrichment_thread
+from services.integrations import enrich_movie_from_radarr, enrich_series_from_sonarr, enrich_from_arr
 from datetime import datetime, timedelta
 from services.postgres.models import Job
 from services.jobs import start_worker_once
@@ -56,31 +56,10 @@ def handle_webhook(data: dict, source_port: int = None):
     
     # Opportunistically enrich DB from ARR when a series/movie object is present
     # (skip on the explicit add events since their handlers also start enrichment)
-    try:
-        if 'series' in data and event_type not in ('seriesadd',):
-            payload_series = data.get('series', {}) or {}
-            tvdb = payload_series.get('tvdbId')
-            sonarr_payload_id = payload_series.get('id')
-            # Spawn a single enrichment thread that will normalize payload and call ARR-specific logic
-            try:
-                threading.Thread(target=start_enrichment_thread, args=(data, is_4k), daemon=True).start()
-                logger.debug("Started background ARR enrichment dispatcher thread", extra={'emoji_type': 'debug'})
-            except Exception as e:
-                logger.error(f"Failed to start ARR enrichment dispatcher thread: {e}", extra={'emoji_type': 'error'})
-
-        if 'movie' in data and event_type not in ('movieadd', 'movieadded'):
-            payload_movie = data.get('movie', {}) or {}
-            tmdb = payload_movie.get('tmdbId') or payload_movie.get('tmdbid')
-            radarr_payload_id = payload_movie.get('id')
-            # Spawn a single enrichment thread that will normalize payload and call ARR-specific logic
-            try:
-                threading.Thread(target=start_enrichment_thread, args=(data, is_4k), daemon=True).start()
-                logger.debug("Started background ARR enrichment dispatcher thread", extra={'emoji_type': 'debug'})
-            except Exception as e:
-                logger.error(f"Failed to start ARR enrichment dispatcher thread: {e}", extra={'emoji_type': 'error'})
-    except Exception:
-        # Non-fatal if enrichment launching fails
-        logger.debug("ARR enrichment dispatch failed in webhook handler", extra={'emoji_type': 'debug'})
+    # Opportunistic background enrichment threads were removed to centralize
+    # enrichment under the scheduler/subflow system. Enrichment will run as
+    # scheduler steps when flows require it. This avoids races, duplication,
+    # and uncontrolled background threads.
     
     # Handle import events directly for cleanup
     if event_type in ['download', 'moviefileimported', 'episodefileimported']:
