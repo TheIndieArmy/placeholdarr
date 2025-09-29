@@ -104,6 +104,8 @@ class Job(Base):
         Index('ix_job_groupid', 'group_id'),
         # Partial unique index to prevent multiple active combined_refresh jobs with same group_id
         Index('ux_job_combined_refresh_groupid', 'group_id', unique=True, postgresql_where=text("job_type='combined_refresh' AND status IN ('PENDING','CLAIMED','WORKING')")),
+        # Partial unique index to prevent multiple active enrichment jobs with same group_id
+        Index('ux_job_enrichment_groupid', 'group_id', unique=True, postgresql_where=text("job_type='enrichment' AND status IN ('PENDING','CLAIMED','WORKING')")),
     )
 
     def __repr__(self):
@@ -262,3 +264,66 @@ class Episode(Base):
            f"<Episode(id={self.id}, title={self.title!r}, year={self.year}, "
             f"tvdbid={self.tvdbid})>"
         )
+
+
+class Placeholder(Base):
+    """Central table representing a placeholder file and its lifecycle/presentation.
+
+    A single row represents the intended placeholder for either a Movie OR a
+    Series/Season/Episode combination. Only one of movie_id OR series/season/episode
+    should be populated for a given row.
+    """
+    __tablename__ = 'placeholder'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Content linkage (one-of semantics)
+    movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
+    series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
+    season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
+    episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)
+
+    # Filesystem path we intend to create/manage for this placeholder
+    path = Column(String, nullable=False)
+    # Whether the placeholder file currently exists on disk (best-effort)
+    exists = Column(Boolean, default=False)
+
+    # Internal lifecycle status (PENDING / CREATING / ACTIVE / DELETING / DELETED / ERROR)
+    lifecycle_status = Column(String, default='PENDING')
+
+    # Presentation fields (end-user facing)
+    display_status = Column(String, nullable=True)
+    display_progress = Column(Integer, nullable=True)
+    display_reason = Column(String, nullable=True)
+    format_hint = Column(String, nullable=True)
+
+    # Optional free-form metadata for integrations (NFO hints, source tags, etc.)
+    # NOTE: cannot name this attribute `metadata` because SQLAlchemy Declarative
+    # reserves the name. Use `extra` instead.
+    extra = Column(JSON, nullable=True)
+
+    created_by = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships to parent content rows. Use backrefs to make access convenient
+    movie = relationship('Movie', backref='placeholders')
+    series = relationship('Series', backref='placeholders')
+    season = relationship('Season', backref='placeholders')
+    episode = relationship('Episode', backref='placeholders')
+
+    __table_args__ = (
+        # Fast lookup by path
+        Index('ix_placeholder_path', 'path'),
+        # Ensure a single placeholder row per content tuple (movie|series+season+episode)
+        Index('ux_placeholder_content', 'movie_id', 'series_id', 'season_id', 'episode_id', unique=True),
+    )
+
+    def __repr__(self):
+        target = None
+        if self.movie_id:
+            target = f"movie_id={self.movie_id}"
+        elif self.episode_id:
+            target = f"series_id={self.series_id} season={self.season_id} ep={self.episode_id}"
+        elif self.series_id:
+            target = f"series_id={self.series_id}"
+        return f"<Placeholder(id={self.id}, {target}, path={self.path!r}, status={self.lifecycle_status!r})>"

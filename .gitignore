@@ -3,10 +3,14 @@
 .venv
 env/
 venv/
+.env copy
+
+
 
 # Project specific
 placeholdarr_original/
 reference/
+DESIGN_DECISIONS.md 
 
 # Python
 __pycache__/

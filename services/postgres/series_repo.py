@@ -182,7 +182,7 @@ class SeriesRepository:
             except Exception:
                 sn = 0
             by_season.setdefault(sn, []).append(ep)
-         
+        created_count = 0
         for season_num, eps in by_season.items():
             # 2) get or create the Season row
             # Use a friendly title for specials (season 0)
@@ -203,7 +203,7 @@ class SeriesRepository:
                 series_id=series.id,
                 season_number=season_num 
             )
-            
+
             # 3) within that season, upsert episodes
             for ep in eps:
                 # episode number may be missing or string - be defensive
@@ -235,6 +235,9 @@ class SeriesRepository:
                 )
                 if ep_created:
                     logger.info(f"Added Episode S{season_num}E{ep_num} and queued for processing")
+                    created_count += 1
+
+        return created_count
 
     def get_ep_by_series(self, series, season_num, episode_num):
         """

@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
 
+    # Whether specials (season 0) are included when creating placeholders and
+    # when seeding episodes from Sonarr. Operators can set this to 'true' in
+    # their .env to include specials in processing.
+    INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").strip().lower() == "true"
+
     # Postgres
     DB_HOST: str
     DB_PORT: int

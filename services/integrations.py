@@ -981,11 +981,22 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             return False
 
         # Query all SubFlow rows for this series that are waiting on delayed_placeholders
-        sf_eps = session.query(SubFlow).filter(
-            SubFlow.steps == "delayed_placeholders",
-            SubFlow.series_id == series.id,
-            SubFlow.status != "DONE"
-        ).order_by(SubFlow.id).all()
+        # NOTE: scheduler creates per-episode SubFlows with episode_id populated and
+        # series_id sometimes left NULL. Include both cases so episode-level subflows
+        # are processed by this batch placeholder creator.
+        episode_ids = [e.id for e in session.query(Episode.id).join(Season).filter(Season.series_id == series.id).all()]
+        sf_eps = (
+            session.query(SubFlow)
+            .filter(
+                SubFlow.steps == "delayed_placeholders",
+                SubFlow.status != "DONE"
+            )
+            .filter(
+                (SubFlow.series_id == series.id) | (SubFlow.episode_id.in_(episode_ids))
+            )
+            .order_by(SubFlow.id)
+            .all()
+        )
 
         # Determine 4K status from the current episode/series
         is_4k = False
@@ -1883,10 +1894,29 @@ def flow_enrich_series(session, ent_id: int, model: Type, action: str) -> bool:
     """
     try:
         # Lazy import of models to avoid top-level circular imports
-        from services.postgres.models import Series as SeriesModel
-        series = session.query(SeriesModel).get(ent_id)
+        from services.postgres.models import Series as SeriesModel, Episode as EpisodeModel, Season as SeasonModel
+
+        series = None
+
+        # If scheduler passed an Episode context (common when creating per-episode SubFlows),
+        # resolve the Episode -> Season -> Series chain to find the correct Series id.
+        if model is not None and getattr(model, '__name__', '').lower() == 'episode':
+            ep = session.query(EpisodeModel).get(ent_id)
+            if not ep:
+                logger.error(f"flow_enrich_series: Episode id {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
+            season = session.query(SeasonModel).get(ep.season_id) if getattr(ep, 'season_id', None) else None
+            series_id = season.series_id if season else None
+            if not series_id:
+                logger.error(f"flow_enrich_series: Could not resolve Series for Episode id {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            series = session.query(SeriesModel).get(series_id)
+        else:
+            # Default: ent_id is a Series id
+            series = session.query(SeriesModel).get(ent_id)
+
         if not series:
-            logger.error(f"flow_enrich_series: Series id {ent_id} not found", extra={'emoji_type': 'error'})
+            logger.error(f"flow_enrich_series: Series id {ent_id if series is None else series.id} not found", extra={'emoji_type': 'error'})
             return False
 
         tvdb = getattr(series, 'tvdbid', None) or getattr(series, 'tvdb_id', None)
