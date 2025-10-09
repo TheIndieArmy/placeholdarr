@@ -11,6 +11,9 @@ venv/
 placeholdarr_original/
 reference/
 DESIGN_DECISIONS.md 
+tools/
+scripts/
+services_old/
 
 # Python
 __pycache__/

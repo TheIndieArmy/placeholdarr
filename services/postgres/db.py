@@ -38,6 +38,20 @@ def init_db(engine=None):
     # Add missing columns to existing tables
     _migrate_columns(engine, inspector)
 
+    # Ensure critical partial unique indexes exist (add-only). These indexes
+    # are required for atomic ON CONFLICT upserts used by the enqueue logic.
+    try:
+        from sqlalchemy import text
+        idx_sql = text(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_enrichment_groupid "
+            "ON job(group_id) WHERE job_type='enrichment' AND status IN ('PENDING','CLAIMED','WORKING')"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_sql)
+    except Exception as ex:
+        logger.debug(f"Could not ensure ux_job_enrichment_groupid index exists: {ex}", extra={'emoji_type': 'debug'})
+
     inspector = inspect(engine)
     created_tables = inspector.get_table_names()
     logger.info(f"Tables AFTER create_all(): {created_tables}", extra={'emoji_type': 'info'})

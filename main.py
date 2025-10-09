@@ -12,7 +12,10 @@ from services.postgres.utils import check_db
 from services.postgres.db import get_engine, init_db, get_session
 from services.postgres.models import Movie
 from services.scheduler import *
-from services.sync.sync_movies import schedule_all_syncs
+from services.sync import schedule_all_syncs
+from services.jobs import start_worker_once
+from services.syncer import run_full_sync
+import threading
 
 # Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,19 +82,23 @@ async def lifespan(app: FastAPI):
                 sched.start()
                 logger.info(f"Started scheduler: {name}", extra={'emoji_type': 'gear'})
 
+        # Ensure the job worker is running so any jobs enqueued during startup
+        # (attach/enrichment/combined refresh) are processed immediately.
+        try:
+            start_worker_once()
+        except Exception:
+            logger.debug("Failed to start job worker during app startup", extra={'emoji_type': 'debug'})
+
         # --- Schedule all Radarr syncs (startup and cron) ---
         schedule_all_syncs()
+
+        # Startup syncs are scheduled via services.sync.schedule_all_syncs()
+    
+        # which is already invoked above. Avoid running duplicate full-syncs here.
 
         # --- Placeholder for future Sonarr sync entrypoint ---
         # from services.sync import sync_series
         # sync_series.schedule_all_syncs()
-        # Ensure job worker is running to process queued jobs (enrichment/imports)
-        try:
-            from services.jobs import start_worker_once
-            start_worker_once()
-            logger.info("Started centralized job worker", extra={'emoji_type': 'gear'})
-        except Exception as e:
-            logger.debug(f"Failed to start centralized job worker at startup: {e}", extra={'emoji_type': 'debug'})
         yield
     else:
         logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})
