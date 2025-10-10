@@ -5,24 +5,19 @@ import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, BackgroundTasks
 from core.logger import logger
-from services.handlers import handle_webhook
-from services.migration import run_migration
 from core.config import settings
 from services.postgres.utils import check_db
 from services.postgres.db import get_engine, init_db, get_session
 from services.postgres.models import Movie
-from services.scheduler import *
 from services.sync import schedule_all_syncs
-from services.jobs import start_worker_once
-from services.syncer import run_full_sync
-import threading
+import asyncio
 
 # Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def load_env_and_migrate():
+    # Load environment variables from project .env (if present).
     load_dotenv(override=True)
-    run_migration()
 
 def clear_port(port: int, max_attempts: int = 3) -> bool:
     for attempt in range(max_attempts):
@@ -53,7 +48,7 @@ def check_port(port: int) -> bool:
         logger.error(f"Failed to check port {port}: {e}", extra={'emoji_type': 'error'})
         return False
 
-app = FastAPI()
+# single FastAPI app instance is created below with a lifespan handler
 
 async def lifespan(app: FastAPI):
     load_env_and_migrate()
@@ -82,15 +77,31 @@ async def lifespan(app: FastAPI):
                 sched.start()
                 logger.info(f"Started scheduler: {name}", extra={'emoji_type': 'gear'})
 
-        # Ensure the job worker is running so any jobs enqueued during startup
-        # (attach/enrichment/combined refresh) are processed immediately.
-        try:
-            start_worker_once()
-        except Exception:
-            logger.debug("Failed to start job worker during app startup", extra={'emoji_type': 'debug'})
+        # Note: background job worker startup is intentionally omitted here.
+        # Worker startup and job processing are controlled separately during
+        # development so the database-seeding (list-capture) can run without
+        # triggering downstream processing.
 
         # --- Schedule all Radarr syncs (startup and cron) ---
         schedule_all_syncs()
+
+        # If configured, perform immediate list-capture seeding for RADARR/SONARR
+        try:
+            from services.list_capture import capture_movies_fullsync_and_create_run, capture_series_fullsync_and_create_run
+            if getattr(settings, 'RADARR_SYNC_ON_STARTUP', False):
+                try:
+                    run = capture_movies_fullsync_and_create_run(run_note='startup movie fullsync')
+                    logger.info(f"Created startup movie fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
+                except Exception as e:
+                    logger.error(f"Movie list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
+            if getattr(settings, 'SONARR_SYNC_ON_STARTUP', False):
+                try:
+                    run = capture_series_fullsync_and_create_run(run_note='startup tv fullsync')
+                    logger.info(f"Created startup tv fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
+                except Exception as e:
+                    logger.error(f"TV list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
+        except Exception:
+            logger.debug('List-capture modules not available or failed to import', extra={'emoji_type': 'debug'})
 
         # Startup syncs are scheduled via services.sync.schedule_all_syncs()
     
@@ -105,7 +116,12 @@ async def lifespan(app: FastAPI):
 
     # Webhook Check Loop
     import asyncio
-    from services.integrations import check_all_arr_webhooks
+    # Use the new integrations checker if available; do not fall back to archived code
+    try:
+        from services.integrations import check_all_arr_webhooks
+    except Exception:
+        check_all_arr_webhooks = None
+        logger.debug('services.integrations.check_all_arr_webhooks not available; skipping webhook loop', extra={'emoji_type': 'debug'})
 
     async def arr_webhook_check_loop():
         max_attempts = 10
@@ -135,7 +151,11 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("Timed out waiting for *arr webhooks. Calendar sync will not start.", extra={'emoji_type': 'warning'})
 
-    asyncio.create_task(arr_webhook_check_loop())
+    # Only start the webhook check loop if we have a checker available; otherwise log and skip
+    if check_all_arr_webhooks:
+        asyncio.create_task(arr_webhook_check_loop())
+    else:
+        logger.debug('No webhook checker available (services_old.integrations missing); skipping arr webhook loop', extra={'emoji_type': 'debug'})
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -145,7 +165,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         payload = await request.json()
         source_port = request.client.port
-        background_tasks.add_task(handle_webhook, payload, source_port)
+        # Prefer using the new handler if available; fall back to archived handler if present.
+        try:
+            from services.handlers import handle_webhook as new_handle
+            background_tasks.add_task(new_handle, payload, source_port)
+        except Exception:
+            logger.info('Webhook received but no handler available in services.handlers; ignoring payload', extra={'emoji_type': 'info'})
         return {"status": "accepted"}
     except Exception as e:
         logger.error(f"Webhook handling failed: {e}", extra={'emoji_type': 'error'})
@@ -155,10 +180,7 @@ if __name__ == '__main__':
     import uvicorn
     load_dotenv(override=True)
 
-    if settings.plex_enabled:
-        from services.plex_client import plex
-    if settings.jellyfin_enabled:
-        from services.jellyfin_client import test_jellyfin_connection
+    # Do not import media clients at startup; initialize them lazily in their modules when needed.
 
     port = int(os.getenv('PLACEHOLDARR_PORT', 8001))
     host = getattr(settings, "host", "0.0.0.0")

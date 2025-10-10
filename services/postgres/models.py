@@ -30,6 +30,10 @@ class Movie(Base):
     # Whether Radarr is monitoring this movie for downloads
     radarr_monitored = Column(Boolean, default=False)
     radarrid = Column(Integer, nullable=True)
+    # IMDB id reported by Radarr (e.g. 'tt1234567')
+    imdbid = Column(String, nullable=True)
+    # Remote poster URL reported by Radarr (useful for NFO/poster downloads)
+    remote_poster = Column(String, nullable=True)
     action = Column(String, nullable=True)
     status = Column(String, default='PENDING')
     current_step_name = Column(String, nullable=True)
@@ -159,6 +163,10 @@ class Series(Base):
     sonarr_quality = Column(String, nullable=True)
     sonarr_status = Column(String, nullable=True)
     sonarrid = Column(Integer, nullable=True)
+    # IMDB id reported by Sonarr (if present, e.g. 'tt1234567')
+    imdbid = Column(String, nullable=True)
+    # Remote poster URL reported by Sonarr (useful for NFO/poster downloads)
+    remote_poster = Column(String, nullable=True)
     # Whether Sonarr is monitoring this series
     sonarr_monitored = Column(Boolean, default=False)
     status = Column(String, default='PENDING')

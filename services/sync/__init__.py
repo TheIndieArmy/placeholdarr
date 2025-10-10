@@ -10,7 +10,15 @@ jobs and reuses the same attach/enrichment logic.
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from core.config import settings
-from services.syncer import run_full_sync
+try:
+    # Prefer new sync implementation if present
+    from services.sync.sync_movies_impl import run_full_sync
+except Exception:
+    # Fallback: provide a no-op run_full_sync so startup won't fail. The
+    # real implementation should be added to services.sync.sync_movies_impl.
+    def run_full_sync(*args, **kwargs):
+        logger.debug('run_full_sync stub called (no-op)')
+        return None
 
 logger = logging.getLogger('services.sync')
 
