@@ -61,6 +61,8 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
     # Prefer the movie-level path (the folder for the movie) or the movieFile path's directory
     # over the library rootFolderPath.
     radarr_path = None
+    # movie file information may be nested under 'movieFile'
+    moviefile = entry.get('movieFile') or {}
     try:
         # If Radarr provided a movieFile path, use its directory as the canonical movie folder
         if moviefile and isinstance(moviefile, dict) and moviefile.get('path'):
@@ -70,9 +72,6 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
             radarr_path = entry.get('path') or entry.get('rootFolderPath')
     except Exception:
         radarr_path = entry.get('path') or entry.get('rootFolderPath')
-
-    # movie file information may be nested under 'movieFile'
-    moviefile = entry.get('movieFile') or {}
     moviefile_path = moviefile.get('path') if isinstance(moviefile, dict) else None
     moviefile_size = None
     try:
@@ -133,6 +132,8 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
     # release dates (ISO strings) -> Date columns
     theater_release_date = None
     digital_release_date = None
+    # Ensure this variable is always defined so later code can reference it safely
+    physical_release_date = None
     try:
         from datetime import datetime as _dt
         rd = entry.get('releaseDate')
