@@ -4,6 +4,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
 from datetime import datetime
+from core.time import now_utc
 
 class Movie(Base):
     __tablename__ = "movie"
@@ -106,8 +107,8 @@ class Placeholder(Base):
     format_hint = Column(String, nullable=True)
     extra = Column(JSON, nullable=True)
     created_by = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
     # canonical determination mirrored from decider
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime, nullable=True)
@@ -122,13 +123,16 @@ class Job(Base):
     job_type = Column(String, nullable=False)               # e.g. 'import_list', 'process_series_add', 'file_import'
     payload = Column(JSON, nullable=True)                   # arbitrary JSON payload for the worker
     status = Column(String, default='PENDING')              # PENDING / CLAIMED / DONE / FAILED
-    run_after = Column(DateTime, nullable=True)             # optional delay for scheduling
+    # run_after is the canonical UTC-aware instant the job becomes eligible
+    run_after = Column(DateTime, nullable=True)             # optional delay for scheduling (UTC)
+    # run_after is the canonical UTC-aware instant the job becomes eligible
+    # (store and use this for all logic and comparisons)
     attempts = Column(Integer, default=0)
     max_attempts = Column(Integer, default=5)
     group_id = Column(String, nullable=True)                # optional grouping id for coalescing
     expected_counts = Column(JSON, nullable=True)          # optional per-series expected counts {series_id: count}
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
     error_message = Column(String, nullable=True)
 
     __table_args__ = (
@@ -205,7 +209,6 @@ class Season(Base):
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)
     sonarr_status = Column(String, nullable=True)
-    sonarrid = Column(Integer, nullable=True)
     sonarr_monitored = Column(Boolean, default=False)
     jellyfin_title = Column(String, nullable=True)
     jellyfin_id = Column(String, nullable=True)

@@ -1,7 +1,7 @@
 from services.arr_clients import fetch_radarr_movies, fetch_sonarr_series, fetch_sonarr_episodes
 from services.postgres.db import get_session
 from services.postgres.models import Movie, SubFlow, Job, Series, Season, Episode
-from services.orchestrator import OrchestratorRun, FAR_FUTURE, PHASES
+from services.orchestrator import OrchestratorRun, PHASES
 from datetime import datetime
 import os
 from typing import List
@@ -298,7 +298,9 @@ def capture_movies_fullsync_and_create_run(run_note: str = None) -> Orchestrator
         created = 0
         for sfid in subflow_ids:
             payload = {'run_id': run.run_id, 'phase': 'enrich_base', 'subflow_id': sfid, 'step_index': 0}
-            j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=FAR_FUTURE, group_id=grp)
+            # Use immediate run_after so jobs will be processed when running main locally
+            from core.time import now_utc
+            j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=now_utc(), group_id=grp)
             session.add(j)
             created += 1
         session.commit()
@@ -400,10 +402,9 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                                         season_row.sonarr_monitored = season_mon
                             except Exception:
                                 pass
-                            # Persist Sonarr season id/status when present
+                            # Persist Sonarr season status when present (Sonarr doesn't reliably provide a dedicated
+                            # season 'id' across versions; use seasonNumber as the canonical identifier)
                             try:
-                                if sd.get('id') and getattr(season_row, 'sonarrid', None) != sd.get('id'):
-                                    season_row.sonarrid = sd.get('id')
                                 if sd.get('status') and getattr(season_row, 'sonarr_status', None) != sd.get('status'):
                                     season_row.sonarr_status = sd.get('status')
                             except Exception:
@@ -530,10 +531,8 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                                         season_row.sonarr_monitored = season_mon
                             except Exception:
                                 pass
-                            # Persist Sonarr season id/status when present
+                            # Persist Sonarr season status when present (use seasonNumber as identifier)
                             try:
-                                if sd.get('id') and getattr(season_row, 'sonarrid', None) != sd.get('id'):
-                                    season_row.sonarrid = sd.get('id')
                                 if sd.get('status') and getattr(season_row, 'sonarr_status', None) != sd.get('status'):
                                     season_row.sonarr_status = sd.get('status')
                             except Exception:
@@ -600,7 +599,9 @@ def capture_series_fullsync_and_create_run(run_note: str = None) -> Orchestrator
         # create jobs for newly created series subflows (first step)
         for sf in session.query(SubFlow).filter(SubFlow.series_id.in_(series_ids)).all():
             payload = {'run_id': run.run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
-            j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=FAR_FUTURE, group_id=grp)
+            # Use immediate run_after so jobs will be processed when running main locally
+            from core.time import now_utc
+            j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=now_utc(), group_id=grp)
             session.add(j)
             created += 1
         session.commit()
@@ -627,8 +628,23 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
         include_specials = bool(settings.INCLUDE_SPECIALS)
 
     logger.info(f"Creating episode subflows for series {series_id} (include_specials={include_specials})")
-    # Fetch episodes from Sonarr
-    entries = fetch_sonarr_episodes(series_id)
+    # Resolve Sonarr series id from our Series row
+    session = get_session()
+    try:
+        srow = session.query(Series).filter(Series.id == series_id).first()
+        if not srow:
+            logger.info(f"Series id {series_id} not found in DB")
+            return 0
+        sonarr_series_id = srow.sonarrid
+    finally:
+        session.close()
+
+    if not sonarr_series_id:
+        logger.info(f"Series id {series_id} has no Sonarr id (sonarrid) — skipping episode fetch")
+        return 0
+
+    # Fetch episodes from Sonarr using the Sonarr series id
+    entries = fetch_sonarr_episodes(sonarr_series_id)
     if not entries:
         logger.info(f"No episodes returned for series {series_id}")
         return 0
@@ -681,7 +697,9 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
                 session.add(sf)
                 session.flush()
                 payload = {'run_id': run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
-                j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=FAR_FUTURE, group_id=grp)
+                # Use immediate run_after so jobs will be processed when running main locally
+                from core.time import now_utc
+                j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=now_utc(), group_id=grp)
                 session.add(j)
                 created_subflows += 1
 
@@ -712,7 +730,22 @@ def create_episode_subflows_for_season(series_id: int, season_number: int, run_i
         include_specials = bool(settings.INCLUDE_SPECIALS)
 
     logger.info(f"Creating episode subflows for series {series_id} season {season_number} (include_specials={include_specials})")
-    entries = fetch_sonarr_episodes(series_id)
+    # Resolve Sonarr series id from our Series row
+    session = get_session()
+    try:
+        srow = session.query(Series).filter(Series.id == series_id).first()
+        if not srow:
+            logger.info(f"Series id {series_id} not found in DB")
+            return 0
+        sonarr_series_id = srow.sonarrid
+    finally:
+        session.close()
+
+    if not sonarr_series_id:
+        logger.info(f"Series id {series_id} has no Sonarr id (sonarrid) — skipping episode fetch")
+        return 0
+
+    entries = fetch_sonarr_episodes(sonarr_series_id)
     if not entries:
         logger.info(f"No episodes returned for series {series_id}")
         return 0
@@ -764,7 +797,9 @@ def create_episode_subflow_for_episode(episode_id: int, run_id: str):
         session.flush()
         grp = f"{run_id}:enrich_base"
         payload = {'run_id': run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
-        j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=FAR_FUTURE, group_id=grp)
+        # Use immediate run_after so jobs will be processed when running main locally
+        from core.time import now_utc
+        j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=now_utc(), group_id=grp)
         session.add(j)
         session.commit()
         logger.info(f"Created episode subflow for {ep.title} S{ep.season_number}E{ep.episode_number}")
@@ -950,7 +985,8 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
             session.add(sf)
             session.flush()
             payload = {'run_id': run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
-            j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=FAR_FUTURE, group_id=grp)
+            from core.time import now_utc
+            j = Job(job_type='subjob:enrich_base', payload=payload, status='PENDING', run_after=now_utc(), group_id=grp)
             session.add(j)
             created_subflows += 1
 
@@ -959,3 +995,264 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
         session.close()
 
     return created_subflows
+
+
+def process_enrich_base_subflow(subflow_id: int, run_id: str):
+    """Process a single SubFlow's enrich_base step.
+
+    - If the SubFlow is a series-level subflow: create episode subflows (batched)
+    - If the SubFlow is an episode-level subflow: fetch Sonarr episode data and
+      persist episode file/quality/monitored flags and update season/series aggregates.
+
+    Returns number of created/updated items (int).
+    """
+    session = get_session()
+    try:
+        sf = session.query(SubFlow).filter(SubFlow.id == subflow_id).first()
+        if not sf:
+            logger.info(f"SubFlow id={subflow_id} not found")
+            return 0
+
+        # SERIES-level: create a follow-up discover job instead of doing discovery inline.
+        # This keeps the series enrich step focused on series metadata and lets discovery
+        # run as its own job (discover_episodes). We enqueue the discover job here idempotently.
+        if sf.series_id:
+            logger.info(f"Processing series enrich_base for series_id={sf.series_id}")
+            created = 0
+            try:
+                # Create discover job for this series subflow so discovery runs as a separate phase.
+                grp = f"{run_id}:discover_episodes"
+                payload = {'run_id': run_id, 'phase': 'discover_episodes', 'subflow_id': sf.id, 'step_index': sf.step_index or 0}
+                # Ensure we create the job in the same session/transaction so workers won't see it before
+                # the subflow changes are committed.
+                from core.time import now_utc
+                j = Job(job_type='subjob:discover_episodes', payload=payload, status='PENDING', run_after=now_utc(), group_id=grp)
+                session.add(j)
+                session.add(sf)
+                session.commit()
+                created = 1
+            except Exception:
+                session.rollback()
+            # Advance the subflow step_index to the next step (if any)
+            try:
+                steps = sf.steps.split(',') if sf.steps else []
+                if sf.step_index is None:
+                    sf.step_index = 0
+                if sf.step_index + 1 < len(steps):
+                    sf.step_index = sf.step_index + 1
+                else:
+                    sf.step_index = len(steps) - 1
+                sf.status = 'DONE'
+                session.add(sf)
+                session.commit()
+            except Exception:
+                session.rollback()
+            return created
+
+        # EPISODE-level: enrich episode metadata from Sonarr
+        if sf.episode_id:
+            ep = session.query(Episode).filter(Episode.id == sf.episode_id).first()
+            if not ep:
+                logger.info(f"Episode id {sf.episode_id} not found")
+                return 0
+
+            # Derive Sonarr series id via season -> series.sonarrid
+            try:
+                series_row = ep.season.series
+                sonarr_series_id = series_row.sonarrid if series_row else None
+            except Exception:
+                sonarr_series_id = None
+
+            if not sonarr_series_id:
+                logger.info(f"Could not determine Sonarr series id for episode id={ep.id}")
+                return 0
+
+            entries = fetch_sonarr_episodes(sonarr_series_id)
+            if not entries:
+                logger.info(f"No episodes returned from Sonarr for series {sonarr_series_id}")
+                return 0
+
+            # Find matching Sonarr entry by sonarrid or season/episode numbers
+            target = None
+            for e in entries:
+                if e.get('id') and ep.sonarrid and e.get('id') == ep.sonarrid:
+                    target = e
+                    break
+                if e.get('seasonNumber') == ep.season_number and e.get('episodeNumber') == ep.episode_number:
+                    target = e
+                    break
+
+            if not target:
+                logger.info(f"Could not find Sonarr entry for episode id={ep.id} S{ep.season_number}E{ep.episode_number}")
+                return 0
+
+            # Persist episode-level fields similar to batch helper
+            try:
+                session.begin()
+                ep_file = target.get('episodeFile') or {}
+                ep_file_path = ep_file.get('path') if isinstance(ep_file, dict) else None
+                ep_file_size = None
+                try:
+                    ep_file_size = ep_file.get('size') or ep_file.get('sizeOnDisk')
+                except Exception:
+                    ep_file_size = None
+                ep_overview = target.get('overview') or target.get('description') or None
+                ep_has_file = bool(target.get('hasFile') or (ep_file_path is not None))
+                ep_quality = None
+                try:
+                    q = ep_file.get('quality') if isinstance(ep_file, dict) else target.get('quality')
+                    if isinstance(q, dict):
+                        ep_quality = q.get('quality') or q.get('name')
+                    else:
+                        ep_quality = q
+                except Exception:
+                    ep_quality = None
+                ep_status = target.get('status') or None
+                ep_monitored = bool(target.get('monitored') or False)
+                ep_air = None
+                try:
+                    ad = target.get('airDate') or target.get('airDateUtc')
+                    if ad:
+                        from datetime import datetime as _dt
+                        adn = ad.replace('Z', '+00:00') if isinstance(ad, str) else ad
+                        ep_air = _dt.fromisoformat(adn).date()
+                except Exception:
+                    ep_air = None
+
+                changed = False
+                if ep.episodefile_path != ep_file_path:
+                    ep.episodefile_path = ep_file_path
+                    changed = True
+                if ep.episodefile_size != ep_file_size:
+                    ep.episodefile_size = ep_file_size
+                    changed = True
+                if ep.sonarr_episode_overview != ep_overview:
+                    ep.sonarr_episode_overview = ep_overview
+                    changed = True
+                if ep.has_file != ep_has_file:
+                    ep.has_file = ep_has_file
+                    changed = True
+                if ep.sonarr_quality != ep_quality:
+                    ep.sonarr_quality = ep_quality
+                    changed = True
+                if ep.sonarr_status != ep_status:
+                    ep.sonarr_status = ep_status
+                    changed = True
+                if ep.sonarr_monitored != ep_monitored:
+                    ep.sonarr_monitored = ep_monitored
+                    changed = True
+                if ep.air_date != ep_air:
+                    ep.air_date = ep_air
+                    changed = True
+
+                if changed:
+                    session.add(ep)
+
+                # Update season/series aggregates: seasonfile_count and has_files
+                season_row = ep.season
+                if season_row:
+                    try:
+                        # If Sonarr provides statistics for seasons via the series API we'll handle
+                        # that elsewhere; here we ensure the per-season has_files reflects episode rows
+                        # Count files for this season
+                        file_count = session.query(Episode).filter(Episode.season_id == season_row.id, Episode.has_file == True).count()
+                        if season_row.seasonfile_count != file_count:
+                            season_row.seasonfile_count = file_count
+                        if season_row.has_files != bool(file_count):
+                            season_row.has_files = bool(file_count)
+                        session.add(season_row)
+                    except Exception:
+                        pass
+
+                # Update series-level aggregate has_files
+                try:
+                    series_row = season_row.series if season_row else None
+                    if series_row:
+                        total_files = session.query(Episode).join(Season).filter(Season.series_id == series_row.id, Episode.has_file == True).count()
+                        if getattr(series_row, 'has_files', None) != bool(total_files):
+                            series_row.has_files = bool(total_files)
+                            session.add(series_row)
+                except Exception:
+                    pass
+
+                # Advance subflow step_index
+                try:
+                    steps = sf.steps.split(',') if sf.steps else []
+                    if sf.step_index is None:
+                        sf.step_index = 0
+                    if sf.step_index + 1 < len(steps):
+                        sf.step_index = sf.step_index + 1
+                    else:
+                        sf.step_index = len(steps) - 1
+                    sf.status = 'DONE'
+                    session.add(sf)
+
+                except Exception:
+                    pass
+
+                session.commit()
+                return 1
+            except Exception as exc:
+                session.rollback()
+                logger.info(f"Error enriching episode subflow id={subflow_id}: {exc}")
+                return 0
+
+        # MOVIE-level: nothing to do here for enrich_base (movies handled elsewhere)
+        if sf.movie_id:
+            logger.verbose(f"Movie enrich_base subflow {sf.id} - no-op in this helper")
+            try:
+                sf.step_index = (sf.step_index or 0) + 1
+                sf.status = 'DONE'
+                session.add(sf)
+                session.commit()
+            except Exception:
+                session.rollback()
+            return 0
+
+        return 0
+    finally:
+        session.close()
+
+
+def process_discover_episodes_subflow(subflow_id: int, run_id: str):
+    """Handler to run discovery for episodes for a series-level subflow.
+
+    This function looks up the series id from the SubFlow, resolves the Series row,
+    and calls create_episode_subflows_for_series to upsert episode rows and create
+    episode subflows + initial jobs in batches.
+    """
+    session = get_session()
+    try:
+        sf = session.query(SubFlow).filter(SubFlow.id == subflow_id).first()
+        if not sf or not sf.series_id:
+            logger.info(f"Discover job: subflow {subflow_id} not found or not a series-level subflow")
+            return 0
+        series_id = sf.series_id
+    finally:
+        session.close()
+
+    # Call the existing helper which handles batching and job creation
+    created = create_episode_subflows_for_series(series_id, run_id)
+    # Advance the subflow step_index after discovery
+    session = get_session()
+    try:
+        sf = session.query(SubFlow).filter(SubFlow.id == subflow_id).first()
+        if not sf:
+            return created
+        try:
+            steps = sf.steps.split(',') if sf.steps else []
+            if sf.step_index is None:
+                sf.step_index = 0
+            if sf.step_index + 1 < len(steps):
+                sf.step_index = sf.step_index + 1
+            else:
+                sf.step_index = len(steps) - 1
+            sf.status = 'DONE'
+            session.add(sf)
+            session.commit()
+        except Exception:
+            session.rollback()
+    finally:
+        session.close()
+
+    return created

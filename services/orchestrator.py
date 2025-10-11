@@ -24,7 +24,10 @@ PHASES = [
 def _enqueue_job_local(job_type: str, payload: dict, run_after: datetime = None, group_id: str = None):
     session = get_session()
     try:
-        j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after, group_id=group_id)
+        # If caller didn't provide run_after, use UTC now
+        from core.time import now_utc
+        run_after_ts = run_after if run_after is not None else now_utc()
+        j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after_ts, group_id=group_id)
         session.add(j)
         session.commit()
         # return created job id for caller convenience
@@ -49,7 +52,9 @@ class OrchestratorRun:
         for iid in item_ids:
             payload = {'run_id': self.run_id, 'phase': phase, 'item_id': iid}
             payload.update(payload_extra)
-            jid = _enqueue_job_local(job_type=f'subjob:{phase}', payload=payload, run_after=FAR_FUTURE, group_id=grp)
+            # Create phase subjobs with immediate run_after (now) so they behave like prod when running locally
+            from core.time import now_utc
+            jid = _enqueue_job_local(job_type=f'subjob:{phase}', payload=payload, run_after=now_utc(), group_id=grp)
             created_ids.append(jid)
         return created_ids
 
@@ -58,7 +63,8 @@ class OrchestratorRun:
         grp = f"{self.run_id}:{phase}"
         session = get_session()
         try:
-            now = datetime.now()
+            from core.time import now_utc
+            now = now_utc()
             session.query(Job).filter(Job.group_id == grp, Job.status == 'PENDING').update({Job.run_after: now})
             session.commit()
         finally:
