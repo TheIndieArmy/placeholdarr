@@ -11,6 +11,8 @@ from services.postgres.db import get_engine, init_db, get_session
 from services.postgres.models import Movie
 from services.sync import schedule_all_syncs
 import asyncio
+import threading
+from sqlalchemy.sql import text
 
 # Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +20,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def load_env_and_migrate():
     # Load environment variables from project .env (if present).
     load_dotenv(override=True)
+
+
+def log_db_summary():
+    """Log an INFO-level summary of key DB counts to help track progress."""
+    try:
+        session = get_session()
+        try:
+            total_jobs = session.execute(text('SELECT count(*) FROM job')).scalar()
+            pending = session.execute(text("SELECT count(*) FROM job WHERE status='PENDING'")).scalar()
+            done = session.execute(text("SELECT count(*) FROM job WHERE status='DONE'")).scalar()
+            subflows = session.execute(text('SELECT count(*) FROM subflow')).scalar()
+            movie_subflows = session.execute(text("SELECT count(*) FROM subflow WHERE movie_id IS NOT NULL")).scalar()
+            episode_subflows = session.execute(text("SELECT count(*) FROM subflow WHERE episode_id IS NOT NULL")).scalar()
+            series = session.execute(text('SELECT count(*) FROM series')).scalar()
+            episodes = session.execute(text('SELECT count(*) FROM episode')).scalar()
+            logger.info(f"DB SUMMARY: jobs total={total_jobs} pending={pending} done={done} subflows={subflows} moviesf={movie_subflows} ep_subflows={episode_subflows} series={series} episodes={episodes}", extra={'emoji_type': 'info'})
+        finally:
+            session.close()
+    except Exception as e:
+        logger.debug(f"Unable to compute DB summary: {e}", extra={'emoji_type': 'debug'})
 
 def clear_port(port: int, max_attempts: int = 3) -> bool:
     for attempt in range(max_attempts):
@@ -61,6 +83,12 @@ async def lifespan(app: FastAPI):
         engine = get_engine()
         init_db(engine)
 
+        # Log a DB summary after initialization so operators can see starting counts
+        try:
+            log_db_summary()
+        except Exception:
+            pass
+
         session = get_session()
         try:
             session.query(Movie).filter(Movie.status == 'QUEUED').update(
@@ -82,6 +110,7 @@ async def lifespan(app: FastAPI):
         # development so the database-seeding (list-capture) can run without
         # triggering downstream processing.
 
+
         # --- Schedule all Radarr syncs (startup and cron) ---
         schedule_all_syncs()
 
@@ -94,12 +123,23 @@ async def lifespan(app: FastAPI):
                     logger.info(f"Created startup movie fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
                 except Exception as e:
                     logger.error(f"Movie list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
+                else:
+                    # After seeding, log a DB summary so we can see how many jobs/subflows were created
+                    try:
+                        log_db_summary()
+                    except Exception:
+                        pass
             if getattr(settings, 'SONARR_SYNC_ON_STARTUP', False):
                 try:
                     run = capture_series_fullsync_and_create_run(run_note='startup tv fullsync')
                     logger.info(f"Created startup tv fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
                 except Exception as e:
                     logger.error(f"TV list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
+                else:
+                    try:
+                        log_db_summary()
+                    except Exception:
+                        pass
         except Exception:
             logger.debug('List-capture modules not available or failed to import', extra={'emoji_type': 'debug'})
 
@@ -107,10 +147,9 @@ async def lifespan(app: FastAPI):
     
         # which is already invoked above. Avoid running duplicate full-syncs here.
 
-        # --- Placeholder for future Sonarr sync entrypoint ---
-        # from services.sync import sync_series
-        # sync_series.schedule_all_syncs()
-        yield
+    # --- Placeholder for future Sonarr sync entrypoint ---
+    # from services.sync import sync_series
+    # sync_series.schedule_all_syncs()
     else:
         logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})
 
@@ -156,6 +195,21 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(arr_webhook_check_loop())
     else:
         logger.debug('No webhook checker available (services_old.integrations missing); skipping arr webhook loop', extra={'emoji_type': 'debug'})
+    # After startup seeding and scheduling, start the worker loop(s).
+    # We always start workers from the main process so behavior is deterministic for users.
+    try:
+        from services.worker import run_loop as _worker_run_loop
+        try:
+            worker_count = int(getattr(settings, 'WORKER_COUNT', 4) or 4)
+        except Exception:
+            worker_count = 4
+        for i in range(max(1, worker_count)):
+            t = threading.Thread(target=_worker_run_loop, name=f'worker-loop-{i+1}', daemon=True)
+            t.start()
+            logger.info(f'Worker loop thread started: worker-loop-{i+1}', extra={'emoji_type': 'gear'})
+    except Exception as e:
+        logger.error(f'Failed to start worker loop(s): {e}', extra={'emoji_type': 'error'})
+
     yield
 
 app = FastAPI(lifespan=lifespan)

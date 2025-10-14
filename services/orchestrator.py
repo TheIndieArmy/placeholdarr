@@ -1,15 +1,16 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 from typing import List
 
 from services.postgres.db import get_session
-from services.postgres.models import Job, Movie
+from services.postgres.models import Job, Movie, SubFlow
+from sqlalchemy import text
 
 
 # Minimal orchestrator that does not import services_old. It uses the project's
 # Job model directly to create and unlock phase subjobs.
 
-FAR_FUTURE = datetime(2999, 1, 1)
+FAR_FUTURE = datetime(2999, 1, 1, tzinfo=timezone.utc)
 
 PHASES = [
     'enrich_base',
@@ -22,18 +23,9 @@ PHASES = [
 
 
 def _enqueue_job_local(job_type: str, payload: dict, run_after: datetime = None, group_id: str = None):
-    session = get_session()
-    try:
-        # If caller didn't provide run_after, use UTC now
-        from core.time import now_utc
-        run_after_ts = run_after if run_after is not None else now_utc()
-        j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after_ts, group_id=group_id)
-        session.add(j)
-        session.commit()
-        # return created job id for caller convenience
-        return j.id
-    finally:
-        session.close()
+    # Use application-level insert helper which dedupes by group_id
+    from services.jobs import insert_job
+    return insert_job(job_type, payload, group_id=group_id, run_after=run_after)
 
 
 class OrchestratorRun:
@@ -41,31 +33,52 @@ class OrchestratorRun:
         self.run_id = run_id or f"fullsync:{uuid.uuid4()}"
         self.types = types or ['movie']
         self.note = note
-        self.created_at = datetime.now()
+        self.created_at = datetime.now(timezone.utc)
 
     def create_phase_subjobs(self, phase: str, item_ids: List[int], payload_extra: dict = None):
         if phase not in PHASES:
             raise ValueError('unknown phase')
         payload_extra = payload_extra or {}
         created_ids = []
-        grp = f"{self.run_id}:{phase}"
+        # Resolve existing SubFlow ids for these item_ids (only movie-level here)
+        session = get_session()
+        try:
+            rows = session.query(SubFlow.movie_id, SubFlow.id).filter(SubFlow.movie_id.in_(item_ids)).all()
+            sf_by_movie = {r[0]: r[1] for r in rows}
+        except Exception:
+            sf_by_movie = {}
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
         for iid in item_ids:
             payload = {'run_id': self.run_id, 'phase': phase, 'item_id': iid}
             payload.update(payload_extra)
-            # Create phase subjobs with immediate run_after (now) so they behave like prod when running locally
-            from core.time import now_utc
-            jid = _enqueue_job_local(job_type=f'subjob:{phase}', payload=payload, run_after=now_utc(), group_id=grp)
+            # Prefer a subflow-based group id when we can resolve the item's SubFlow id
+            group_id = f"item:{phase}:{iid}"
+            # If iid corresponds to a movie_id that has a SubFlow, prefer subflow group id
+            sfid = sf_by_movie.get(iid)
+            if sfid:
+                group_id = f"subflow:{sfid}:{phase}"
+                payload['subflow_id'] = sfid
+            # Let insert_job() default to the database clock (func.now()) so jobs
+            # become claimable immediately and there is no application/DB clock skew.
+            jid = _enqueue_job_local(job_type=f'subjob:{phase}', payload=payload, run_after=None, group_id=group_id)
             created_ids.append(jid)
         return created_ids
 
     def unlock_phase(self, phase: str):
         # Set run_after = now() for all jobs in this run+phase so workers can pick them up
-        grp = f"{self.run_id}:{phase}"
         session = get_session()
         try:
-            from core.time import now_utc
-            now = now_utc()
-            session.query(Job).filter(Job.group_id == grp, Job.status == 'PENDING').update({Job.run_after: now})
+            # Update any pending subjob for this run by inspecting the JSON payload's run_id
+            sql = text("""
+            UPDATE job
+            SET run_after = now(), updated_at = now()
+            WHERE job_type = :jt AND status = 'PENDING' AND (payload->>'run_id') = :rid
+            """)
+            session.execute(sql, {'jt': f'subjob:{phase}', 'rid': self.run_id})
             session.commit()
         finally:
             session.close()

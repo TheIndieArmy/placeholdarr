@@ -1,22 +1,67 @@
 from core.logger import logger
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from core.config import settings
 
 Base = declarative_base()
 
+# Module-level engine and session factory singletons to avoid creating
+# a new connection pool on every call (which exhausted DB connections).
+_engine = None
+_SessionFactory = None
+
+
 def get_engine():
+    global _engine, _SessionFactory
+    if _engine is not None:
+        return _engine
+
     url = (
         f"postgresql://{settings.DB_USER}:{settings.DB_PASS}"
         f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
     )
-    engine = create_engine(url, echo=False, future=True)
-    return engine
+    # Configure a conservative connection pool. These values can be tuned
+    # later based on your Postgres max_connections setting. Using a single
+    # engine instance prevents many pools from being created and hitting
+    # the "too many clients" error.
+    _engine = create_engine(
+        url,
+        echo=False,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+    )
+    # Ensure the DB session / display timezone is set to UTC on every new connection.
+    # This makes TIMESTAMPTZ values display consistently as UTC and avoids
+    # surprises when the Postgres server default_timezone differs from the app.
+    def _set_utc_timezone(dbapi_connection, connection_record):
+        try:
+            # dbapi_connection is a raw DB-API connection (psycopg2 or psycopg)
+            cur = dbapi_connection.cursor()
+            cur.execute("SET TIME ZONE 'UTC'")
+            cur.close()
+        except Exception:
+            # Non-fatal; if this fails, connections will use server timezone.
+            pass
+
+    event.listen(_engine, "connect", _set_utc_timezone)
+    # also prepare a Session factory so get_session can use it
+    _SessionFactory = sessionmaker(bind=_engine, future=True)
+    return _engine
+
 
 def get_session(engine=None):
-    engine = engine or get_engine()
-    Session = sessionmaker(bind=engine, future=True)
-    return Session()
+    """Return a SQLAlchemy Session from a module-level session factory.
+
+    Avoid creating new engines/sessionmakers on each call. Callers should
+    close() the returned session when finished.
+    """
+    global _engine, _SessionFactory
+    if _SessionFactory is None:
+        # ensure engine and session factory initialized
+        _engine = get_engine()
+    return _SessionFactory()
 
 def init_db(engine=None):
     engine = engine or get_engine()
@@ -38,6 +83,15 @@ def init_db(engine=None):
     # Add missing columns to existing tables
     _migrate_columns(engine, inspector)
 
+    # Convert existing TIMESTAMP (without time zone) columns to TIMESTAMP WITH TIME ZONE
+    # for any model-declared DateTime(timezone=True) columns. We default to
+    # interpreting existing naive timestamps as UTC when converting; if your
+    # data uses a different base timezone, adjust `source_tz` accordingly.
+    try:
+        _convert_timestamp_columns(engine, inspector, source_tz='UTC')
+    except Exception as ex:
+        logger.debug(f"Could not convert timestamp columns to timestamptz: {ex}", extra={'emoji_type': 'debug'})
+
     # Ensure critical partial unique indexes exist (add-only). These indexes
     # are required for atomic ON CONFLICT upserts used by the enqueue logic.
     try:
@@ -51,6 +105,35 @@ def init_db(engine=None):
             conn.execute(idx_sql)
     except Exception as ex:
         logger.debug(f"Could not ensure ux_job_enrichment_groupid index exists: {ex}", extra={'emoji_type': 'debug'})
+
+    # Ensure unique partial index to prevent multiple active SubFlows for same (movie_id, action, branch)
+    try:
+        from sqlalchemy import text
+        idx_sql2 = text(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_subflow_movie_action_branch_active "
+            "ON subflow(movie_id, action, branch) WHERE movie_id IS NOT NULL AND status IN ('PENDING','IN_QUEUE','CLAIMED')"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_sql2)
+    except Exception as ex:
+        logger.debug(f"Could not ensure ux_subflow_movie_action_branch_active index exists: {ex}", extra={'emoji_type': 'debug'})
+
+    # Ensure indexes to speed Sonarr lookups (sonarrid) for series and episodes
+    try:
+        from sqlalchemy import text
+        idx_series_sonarr = text(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_series_sonarrid ON series(sonarrid)"
+        )
+        idx_episode_sonarr = text(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_episode_sonarrid ON episode(sonarrid)"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_series_sonarr)
+            conn.execute(idx_episode_sonarr)
+    except Exception as ex:
+        logger.debug(f"Could not ensure sonarrid indexes exist: {ex}", extra={'emoji_type': 'debug'})
 
     inspector = inspect(engine)
     created_tables = inspector.get_table_names()
@@ -122,7 +205,18 @@ def _migrate_columns(engine, inspector):
             elif 'float' in tname or 'real' in tname:
                 sql_type = 'REAL'
             elif 'datetime' in tname or 'timestamp' in tname:
-                sql_type = 'TIMESTAMP'
+                # If the model column has timezone=True, create a timestamptz
+                # (Postgres: TIMESTAMP WITH TIME ZONE). Otherwise create a
+                # plain TIMESTAMP (without timezone).
+                try:
+                    has_tz = bool(getattr(col.type, 'timezone', False))
+                except Exception:
+                    has_tz = False
+
+                if has_tz:
+                    sql_type = 'TIMESTAMP WITH TIME ZONE'
+                else:
+                    sql_type = 'TIMESTAMP'
             elif 'json' in tname:
                 # Prefer JSONB in Postgres
                 sql_type = 'JSONB'
@@ -190,3 +284,64 @@ def _migrate_columns(engine, inspector):
                             logger.error(f"Failed to drop index {idx_name}: {ex}", extra={'emoji_type': 'error'})
                     else:
                         logger.debug(f"Found problematic unique index on {tname}.{colname} but no name returned by inspector", extra={'emoji_type': 'debug'})
+
+
+def _convert_timestamp_columns(engine, inspector, source_tz='UTC'):
+    """Convert timestamp columns without timezone to timestamptz for model-declared DateTime(timezone=True).
+
+    This function is destructive in the sense that it changes the column type.
+    It assumes existing naive/without-timezone values should be interpreted as
+    `source_tz` when converting. If your existing values are actually UTC,
+    use source_tz='UTC' (the default). If they are local server time, set
+    source_tz accordingly before running.
+    """
+    from sqlalchemy import text
+
+    logger.info("Scanning for timestamp columns to convert to TIMESTAMP WITH TIME ZONE", extra={'emoji_type': 'info'})
+
+    model_tables = list(Base.metadata.tables.keys())
+
+    for tbl in model_tables:
+        if tbl not in inspector.get_table_names():
+            continue
+
+        try:
+            db_cols = inspector.get_columns(tbl)
+        except Exception:
+            db_cols = []
+
+        db_col_map = {c['name']: c for c in db_cols}
+
+        for col in Base.metadata.tables[tbl].columns:
+            # Only consider DateTime columns where the model declares timezone=True
+            tname = type(col.type).__name__.lower()
+            if not ('datetime' in tname or 'timestamp' in tname):
+                continue
+            has_tz = bool(getattr(col.type, 'timezone', False))
+            if not has_tz:
+                continue
+
+            if col.name not in db_col_map:
+                # column missing — handled by _migrate_columns
+                continue
+
+            db_col = db_col_map[col.name]
+            # Inspector's 'type' may describe Postgres type; look for 'timestamp without time zone'
+            db_type = str(db_col.get('type') or '').lower()
+
+            if 'timestamp without time zone' in db_type or ('timestamp' in db_type and 'with time zone' not in db_type):
+                alter_sql = f'ALTER TABLE "{tbl}" ALTER COLUMN "{col.name}" TYPE TIMESTAMP WITH TIME ZONE USING ("{col.name}" AT TIME ZONE :src)'
+                try:
+                    logger.info(f"Converting {tbl}.{col.name} -> TIMESTAMP WITH TIME ZONE (interpreting existing values as {source_tz})", extra={'emoji_type': 'info'})
+                    with engine.connect() as conn:
+                        conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+                        conn.execute(text(alter_sql), {'src': source_tz})
+                        # record migration
+                        try:
+                            conn.execute(text("INSERT INTO auto_migrations (table_name, column_name, source) VALUES (:t, :c, :s)"), {"t": tbl, "c": col.name, "s": 'convert_to_timestamptz'})
+                        except Exception:
+                            pass
+                        conn.commit()
+                    logger.info(f"Converted {tbl}.{col.name} to timestamptz", extra={'emoji_type': 'success'})
+                except Exception as ex:
+                    logger.error(f"Failed to convert {tbl}.{col.name} to timestamptz: {ex}", extra={'emoji_type': 'error'})

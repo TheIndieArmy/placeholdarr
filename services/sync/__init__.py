@@ -30,47 +30,10 @@ def schedule_all_syncs():
     the same enrichment/attach flow is used as for TV.
     """
     # Startup syncs
-    try:
-        # Radarr movie startup syncs
-        if getattr(settings, 'RADARR_SYNC_ON_STARTUP', False):
-            logger.info('Running Radarr (standard) movie full-sync on startup...')
-            try:
-                run_full_sync(dry_run=False, batch_size=50, types=('movie',), is_4k=False)
-            except Exception:
-                logger.exception('Startup Radarr (standard) full-sync failed')
-    except Exception:
-        logger.exception('Failed running RADARR standard startup sync')
-
-    try:
-        if getattr(settings, 'RADARR_4K_SYNC_ON_STARTUP', False):
-            logger.info('Running Radarr (4K) movie full-sync on startup...')
-            try:
-                run_full_sync(dry_run=False, batch_size=50, types=('movie',), is_4k=True)
-            except Exception:
-                logger.exception('Startup Radarr (4K) full-sync failed')
-    except Exception:
-        logger.exception('Failed running RADARR 4K startup sync')
-
-    # Sonarr TV startup syncs
-    try:
-        if getattr(settings, 'SONARR_SYNC_ON_STARTUP', False):
-            logger.info('Running Sonarr TV full-sync on startup...')
-            try:
-                run_full_sync(dry_run=False, batch_size=50, types=('tv',), is_4k=False)
-            except Exception:
-                logger.exception('Startup Sonarr (standard) full-sync failed')
-    except Exception:
-        logger.exception('Failed running SONARR standard startup sync')
-
-    try:
-        if getattr(settings, 'SONARR_4K_SYNC_ON_STARTUP', False):
-            logger.info('Running Sonarr (4K) TV full-sync on startup...')
-            try:
-                run_full_sync(dry_run=False, batch_size=50, types=('tv',), is_4k=True)
-            except Exception:
-                logger.exception('Startup Sonarr (4K) full-sync failed')
-    except Exception:
-        logger.exception('Failed running SONARR 4K startup sync')
+    # Note: immediate startup full-syncs are intentionally NOT invoked here.
+    # `main.py` already performs list-capture seeding when configured and we want
+    # a single authority (main) to control startup seeding to avoid duplicate
+    # work. This function only configures cron-based syncs below.
 
     # Cron scheduling – parse simple cron-like strings split by whitespace into minute hour day month day_of_week
     def _start_cron(cron_str, target, label, is_4k=False):

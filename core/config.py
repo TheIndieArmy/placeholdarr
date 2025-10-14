@@ -91,10 +91,8 @@ class Settings(BaseSettings):
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
 
-    # Whether specials (season 0) are included when creating placeholders and
-    # when seeding episodes from Sonarr. Operators can set this to 'true' in
-    # their .env to include specials in processing.
-    INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").strip().lower() == "true"
+    # Include specials (season 0) when creating episode subflows
+    INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").split('#')[0].strip().lower() == "true"
 
     # Postgres
     DB_HOST: str
@@ -111,6 +109,8 @@ class Settings(BaseSettings):
     # Job queue / batching
     BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
     JOB_DEBOUNCE_SECONDS: int = int(os.getenv("JOB_DEBOUNCE_SECONDS", "3"))
+    # Number of worker threads to start when the app starts (default 4)
+    # Use WORKER_COUNT to tune parallelism; workers are always started by the app.
 
     # Add a method to clean string values
     @validator('*', pre=True)

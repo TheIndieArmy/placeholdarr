@@ -3,8 +3,12 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
-from datetime import datetime
-from core.time import now_utc
+from datetime import datetime, timezone
+
+
+def utcnow():
+    """Return a timezone-aware UTC datetime for SQLAlchemy defaults."""
+    return datetime.now(timezone.utc)
 
 class Movie(Base):
     __tablename__ = "movie"
@@ -59,7 +63,7 @@ class Movie(Base):
     is_deleted = Column(Boolean, default=False)
     # persisted canonical determination (one of: obsolete_placeholder, not_needed, placeholder_exists, needs_placeholder)
     determination = Column(String, nullable=True)
-    determination_updated_at = Column(DateTime, nullable=True)
+    determination_updated_at = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='movie')
 
@@ -107,11 +111,11 @@ class Placeholder(Base):
     format_hint = Column(String, nullable=True)
     extra = Column(JSON, nullable=True)
     created_by = Column(String, nullable=True)
-    created_at = Column(DateTime, default=now_utc)
-    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     # canonical determination mirrored from decider
     determination = Column(String, nullable=True)
-    determination_updated_at = Column(DateTime, nullable=True)
+    determination_updated_at = Column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self):
         return f"<Placeholder(id={self.id}, path={self.path!r})>"
@@ -123,16 +127,13 @@ class Job(Base):
     job_type = Column(String, nullable=False)               # e.g. 'import_list', 'process_series_add', 'file_import'
     payload = Column(JSON, nullable=True)                   # arbitrary JSON payload for the worker
     status = Column(String, default='PENDING')              # PENDING / CLAIMED / DONE / FAILED
-    # run_after is the canonical UTC-aware instant the job becomes eligible
-    run_after = Column(DateTime, nullable=True)             # optional delay for scheduling (UTC)
-    # run_after is the canonical UTC-aware instant the job becomes eligible
-    # (store and use this for all logic and comparisons)
+    run_after = Column(DateTime(timezone=True), nullable=True)             # optional delay for scheduling
     attempts = Column(Integer, default=0)
     max_attempts = Column(Integer, default=5)
     group_id = Column(String, nullable=True)                # optional grouping id for coalescing
     expected_counts = Column(JSON, nullable=True)          # optional per-series expected counts {series_id: count}
-    created_at = Column(DateTime, default=now_utc)
-    updated_at = Column(DateTime, default=now_utc, onupdate=now_utc)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     error_message = Column(String, nullable=True)
 
     __table_args__ = (
@@ -209,6 +210,7 @@ class Season(Base):
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)
     sonarr_status = Column(String, nullable=True)
+    sonarrid = Column(Integer, nullable=True)
     sonarr_monitored = Column(Boolean, default=False)
     jellyfin_title = Column(String, nullable=True)
     jellyfin_id = Column(String, nullable=True)
@@ -273,7 +275,7 @@ class Episode(Base):
     air_date = Column(Date, nullable=True)
     is_deleted = Column(Boolean, default=False)
     determination = Column(String, nullable=True)
-    determination_updated_at = Column(DateTime, nullable=True)
+    determination_updated_at = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='episode')
     season = relationship('Season', back_populates='episode')
