@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON, Index, text
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON, Index, text, func
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -64,6 +64,12 @@ class Movie(Base):
     # persisted canonical determination (one of: obsolete_placeholder, not_needed, placeholder_exists, needs_placeholder)
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # Creation timestamp (DB authoritative). Set once at INSERT and do not change.
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    # Last time this row was updated by the application/DB
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    # Last time this movie was observed in Radarr (authoritative DB clock)
+    last_found_in_radarr = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='movie')
 
@@ -87,6 +93,7 @@ class SubFlow(Base):
     status = Column(String, default='PENDING')
     retry_count = Column(Integer, default=0)
     error_message = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
 
     movie = relationship('Movie', back_populates='subflows')
     series = relationship('Series', back_populates='subflows')
@@ -111,11 +118,14 @@ class Placeholder(Base):
     format_hint = Column(String, nullable=True)
     extra = Column(JSON, nullable=True)
     created_by = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=utcnow)
-    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    # Last time this season metadata was observed in Sonarr
+    last_found_in_sonarr = Column(DateTime(timezone=True), nullable=True)
     # canonical determination mirrored from decider
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # (placeholder) last-observed timestamp for the placeholder row
 
     def __repr__(self):
         return f"<Placeholder(id={self.id}, path={self.path!r})>"
@@ -132,8 +142,8 @@ class Job(Base):
     max_attempts = Column(Integer, default=5)
     group_id = Column(String, nullable=True)                # optional grouping id for coalescing
     expected_counts = Column(JSON, nullable=True)          # optional per-series expected counts {series_id: count}
-    created_at = Column(DateTime(timezone=True), default=utcnow)
-    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
     error_message = Column(String, nullable=True)
 
     __table_args__ = (
@@ -185,6 +195,10 @@ class Series(Base):
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    # Last time this season metadata was observed in Sonarr
+    last_found_in_sonarr = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='series')
     season = relationship('Season', back_populates='series')
@@ -222,17 +236,15 @@ class Season(Base):
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'), onupdate=func.now())
 
     subflows = relationship('SubFlow', back_populates='season')
     series = relationship('Series', back_populates='season')
     episode = relationship('Episode', back_populates='season')
 
     def __repr__(self):
-        return (
-            f"<Season(id={self.id}, title={self.title!r}, year={self.year})>"
-            f"tvdbid={self.tvdbid})>"
-
-        )
+        return f"<Season(id={self.id}, title={self.title!r}, year={self.year})>"
 class Episode(Base):
     __tablename__ = "episode"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -276,6 +288,10 @@ class Episode(Base):
     is_deleted = Column(Boolean, default=False)
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'), onupdate=func.now())
+    # Last time this episode was observed in Sonarr
+    last_found_in_sonarr = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='episode')
     season = relationship('Season', back_populates='episode')

@@ -2,6 +2,7 @@ from core.logger import logger
 from sqlalchemy import create_engine, inspect, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from core.config import settings
+import os
 
 Base = declarative_base()
 
@@ -63,7 +64,12 @@ def get_session(engine=None):
         _engine = get_engine()
     return _SessionFactory()
 
-def init_db(engine=None):
+def init_db(engine=None, convert_ts: bool | None = None):
+    """Initialize DB schema and optionally convert naive timestamp columns to timestamptz.
+
+    By default conversion is opt-in. To force conversion at startup set the
+    environment variable CONVERT_TS=1 or call init_db(convert_ts=True).
+    """
     engine = engine or get_engine()
 
     logger.info(f"Connecting to database at: {engine.url}", extra={'emoji_type': 'info'})
@@ -77,20 +83,11 @@ def init_db(engine=None):
 
     logger.info(f"Tables registered in Base.metadata: {list(Base.metadata.tables.keys())}", extra={'emoji_type': 'info'})
 
-    # Create missing tables
-    Base.metadata.create_all(bind=engine, checkfirst=True)
-
-    # Add missing columns to existing tables
-    _migrate_columns(engine, inspector)
-
-    # Convert existing TIMESTAMP (without time zone) columns to TIMESTAMP WITH TIME ZONE
-    # for any model-declared DateTime(timezone=True) columns. We default to
-    # interpreting existing naive timestamps as UTC when converting; if your
-    # data uses a different base timezone, adjust `source_tz` accordingly.
-    try:
-        _convert_timestamp_columns(engine, inspector, source_tz='UTC')
-    except Exception as ex:
-        logger.debug(f"Could not convert timestamp columns to timestamptz: {ex}", extra={'emoji_type': 'debug'})
+    # NOTE: schema creation and destructive conversions are now managed by
+    # Alembic migrations. We intentionally skip automatic schema creation
+    # and add-only migrations at runtime. Use Alembic to create/alter tables
+    # and to perform one-time conversions.
+    logger.info("Schema management is delegated to Alembic migrations; skipping runtime create/migrate steps", extra={'emoji_type': 'info'})
 
     # Ensure critical partial unique indexes exist (add-only). These indexes
     # are required for atomic ON CONFLICT upserts used by the enqueue logic.
@@ -331,6 +328,20 @@ def _convert_timestamp_columns(engine, inspector, source_tz='UTC'):
 
             if 'timestamp without time zone' in db_type or ('timestamp' in db_type and 'with time zone' not in db_type):
                 alter_sql = f'ALTER TABLE "{tbl}" ALTER COLUMN "{col.name}" TYPE TIMESTAMP WITH TIME ZONE USING ("{col.name}" AT TIME ZONE :src)'
+                # Skip conversion if we've already recorded it in auto_migrations.
+                already_converted = False
+                try:
+                    with engine.connect() as conn:
+                        res = conn.execute(text("SELECT 1 FROM auto_migrations WHERE table_name=:t AND column_name=:c AND source='convert_to_timestamptz' LIMIT 1"), {"t": tbl, "c": col.name}).fetchone()
+                        already_converted = bool(res)
+                except Exception:
+                    # If the audit table/query fails, be conservative and proceed with conversion.
+                    already_converted = False
+
+                if already_converted:
+                    logger.debug(f"Skipping conversion for {tbl}.{col.name} because auto_migrations records it", extra={'emoji_type': 'debug'})
+                    continue
+
                 try:
                     logger.info(f"Converting {tbl}.{col.name} -> TIMESTAMP WITH TIME ZONE (interpreting existing values as {source_tz})", extra={'emoji_type': 'info'})
                     with engine.connect() as conn:

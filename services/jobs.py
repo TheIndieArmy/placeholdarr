@@ -30,9 +30,16 @@ def insert_job(job_type: str, payload: dict, group_id: Optional[str] = None, run
             else:
                 run_after_val = run_after
 
-        j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after_val, group_id=group_id)
+        j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after_val, group_id=group_id, created_at=func.now())
         session.add(j)
+        # Flush/commit and refresh so any server-defaults or DB expressions
+        # (created_at, etc.) are populated on the ORM instance.
         session.commit()
+        try:
+            session.refresh(j)
+        except Exception:
+            # Refresh is best-effort; ignore refresh errors and return id
+            pass
         return j.id
     finally:
         session.close()
@@ -57,10 +64,14 @@ def insert_job_with_session(session, job_type: str, payload: dict, group_id: Opt
         else:
             run_after_val = run_after
 
-    j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after_val, group_id=group_id)
+    j = Job(job_type=job_type, payload=payload, status='PENDING', run_after=run_after_val, group_id=group_id, created_at=func.now())
     session.add(j)
     # Do not commit here; caller controls transaction/commit
     session.flush()
+    try:
+        session.refresh(j)
+    except Exception:
+        pass
     return j.id
 
 
@@ -117,8 +128,12 @@ def requeue_job(job_id: int, delay_seconds: int = 10):
             session.commit()
             return
 
-        # Use a timezone-aware UTC datetime so DB receives an aware value
-        job.run_after = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        # Use the database clock (now()) + interval to schedule the retry so
+        # the run_after/updated_at values are authoritative and consistent
+        # across processes (avoids app/DB clock skew). Assign a SQL expression
+        # to the column so SQLAlchemy emits an UPDATE ... SET run_after = now() + interval 'X seconds'.
+        job.run_after = func.now() + text(f"interval '{int(delay_seconds)} seconds'")
+        job.updated_at = func.now()
         job.status = 'PENDING'
         session.add(job)
         session.commit()
@@ -137,8 +152,8 @@ def job_done(job_id: int, success: bool = True, error_message: str = None) -> bo
         j.status = 'DONE' if success else 'FAILED'
         if error_message:
             j.error_message = error_message
-        # Persist an aware UTC timestamp for updated_at to avoid timezone-ambiguity
-        j.updated_at = datetime.now(timezone.utc)
+        # Use the database clock for the authoritative updated_at timestamp
+        j.updated_at = func.now()
         session.add(j)
         session.commit()
         return True

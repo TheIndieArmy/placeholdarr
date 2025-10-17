@@ -29,11 +29,14 @@ def _enqueue_job_local(job_type: str, payload: dict, run_after: datetime = None,
 
 
 class OrchestratorRun:
-    def __init__(self, run_id: str = None, types: List[str] = None, note: str = None):
+    def __init__(self, run_id: str = None, types: List[str] = None, note: str = None, created_at: datetime = None):
         self.run_id = run_id or f"fullsync:{uuid.uuid4()}"
         self.types = types or ['movie']
         self.note = note
-        self.created_at = datetime.now(timezone.utc)
+        # Accept an optional created_at value. Prefer DB-provided timestamps when
+        # persisting runs; do NOT generate an application-side timestamp by default
+        # so persisted records are consistently authored by the DB clock.
+        self.created_at = created_at
 
     def create_phase_subjobs(self, phase: str, item_ids: List[int], payload_extra: dict = None):
         if phase not in PHASES:

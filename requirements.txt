@@ -10,3 +10,4 @@ pydantic-settings>=2.1.0
 sqlalchemy
 psycopg2-binary
 apscheduler
+alembic>=1.11.1

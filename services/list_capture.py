@@ -1,5 +1,6 @@
 from services.arr_clients import fetch_radarr_movies, fetch_sonarr_series, fetch_sonarr_episodes
 from services.postgres.db import get_session
+from sqlalchemy import text, func
 from services.postgres.models import Movie, SubFlow, Job, Series, Season, Episode
 from services.orchestrator import OrchestratorRun, FAR_FUTURE, PHASES
 from datetime import datetime, timezone
@@ -218,9 +219,15 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
             theater_release_date=theater_release_date,
             digital_release_date=digital_release_date,
             physical_release_date=physical_release_date,
+            created_at=func.now(),
+            last_found_in_radarr=func.now(),
         )
         session.add(mv)
         session.commit()
+        try:
+            session.refresh(mv)
+        except Exception:
+            pass
         return mv.id
 
     # Update fields when changed
@@ -282,9 +289,13 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
         mv.radarr_overview = overview
         changed = True
 
-    if changed:
-        session.add(mv)
-        session.commit()
+    # Always update last_found whenever we observe the item in Radarr.
+    try:
+        mv.last_found_in_radarr = func.now()
+    except Exception:
+        pass
+    session.add(mv)
+    session.commit()
     return mv.id
 
 
@@ -304,7 +315,60 @@ def capture_movies_fullsync_and_create_run(run_note: str = None) -> Orchestrator
         session.close()
 
     # Create an orchestrator run record (logical) and also create SubFlow rows for each movie.
-    run = OrchestratorRun(types=['movie'], note=run_note or f'fullsync:{datetime.now(timezone.utc).isoformat()}')
+    # Use the database clock for the authoritative run timestamp used in notes.
+    session = get_session()
+    try:
+        db_now = session.execute(text('SELECT now()')).scalar_one()
+    finally:
+        session.close()
+
+    run = OrchestratorRun(types=['movie'], note=run_note or f'fullsync:{db_now.isoformat()}', created_at=db_now)
+
+    # Simple safety: cancel any previous incomplete fullsync subflows/jobs for the same movies
+    if movie_ids:
+        ses = get_session()
+        try:
+            try:
+                rows = ses.execute(text("""
+                    SELECT id FROM subflow
+                    WHERE action='fullsync' AND movie_id = ANY(:mids)
+                      AND status IN ('PENDING','CLAIMED','WORKING','RUNNING')
+                """), {'mids': movie_ids}).fetchall()
+                prev_ids = [r[0] for r in rows]
+            except Exception:
+                prev_ids = []
+
+            if prev_ids:
+                try:
+                    ses.execute(text("""
+                        UPDATE job
+                        SET status='CANCELLED', error_message = coalesce(error_message, '') || ' | superseded_by_fullsync'
+                        WHERE status IN ('PENDING','CLAIMED','WORKING')
+                          AND (payload->>'subflow_id') IS NOT NULL
+                          AND (payload->>'subflow_id')::int = ANY(:prev_ids)
+                    """), {'prev_ids': prev_ids})
+                except Exception:
+                    pass
+                try:
+                    ses.execute(text("""
+                        UPDATE subflow
+                        SET status='CANCELLED', error_message = coalesce(error_message, '') || ' | superseded_by_fullsync'
+                        WHERE id = ANY(:prev_ids)
+                    """), {'prev_ids': prev_ids})
+                except Exception:
+                    pass
+                try:
+                    ses.commit()
+                except Exception:
+                    try:
+                        ses.rollback()
+                    except Exception:
+                        pass
+        finally:
+            try:
+                ses.close()
+            except Exception:
+                pass
 
     # Persist SubFlows for each movie. We'll create one SubFlow per movie with the
     # full set of phases and leave step_index at 0. Then create only the first-step
@@ -355,12 +419,21 @@ def capture_movies_fullsync_and_create_run(run_note: str = None) -> Orchestrator
 
 
 def upsert_series_from_sonarr_entry(session, entry: dict):
+    """Upsert a Series from a Sonarr entry.
+
+    Behavior:
+    - Update Series.last_found_in_sonarr whenever the series or any of its
+      episodes in the payload are observed.
+    - Upsert episodes only for episodes present in the payload and set
+      Episode.last_found_in_sonarr for those episodes. Do not mass-update all
+      episodes or seasons.
+    - Do not maintain Season.last_found_in_sonarr automatically.
+    """
     tvdb = entry.get('tvdbId') or entry.get('tvdb') or entry.get('tvdbId')
     title = entry.get('title')
     year = entry.get('year') or None
     sonarrid = entry.get('id')
 
-    # Sonarr may provide imdb id and a remote poster at the series level
     imdb = entry.get('imdbId') or entry.get('imdb')
     remote_poster = entry.get('remotePoster')
     if not remote_poster:
@@ -375,14 +448,60 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
             except Exception:
                 continue
 
+    # Find existing series
     s = None
     if tvdb:
         try:
             s = session.query(Series).filter(Series.tvdbid == int(tvdb)).first()
         except Exception:
-            pass
+            s = None
     if not s and sonarrid:
-        s = session.query(Series).filter(Series.sonarrid == int(sonarrid)).first()
+        try:
+            s = session.query(Series).filter(Series.sonarrid == int(sonarrid)).first()
+        except Exception:
+            s = None
+
+    # Helper to persist seasons metadata without touching season.last_found
+    def _persist_season_row(sd, series_obj):
+        sn = sd.get('seasonNumber')
+        if sn is None:
+            return
+        season_row = session.query(Season).filter(Season.series_id == series_obj.id, Season.season_number == int(sn)).first()
+        if not season_row:
+            season_row = Season(series_id=series_obj.id, season_number=int(sn), title=f"Season {sn}", year=entry.get('year') or 0, created_at=func.now())
+            session.add(season_row)
+            session.flush()
+        so = sd.get('overview') or sd.get('description')
+        if so and getattr(season_row, 'sonarr_season_overview', None) != so:
+            season_row.sonarr_season_overview = so
+            session.add(season_row)
+        try:
+            stats = sd.get('statistics') or {}
+            if stats:
+                if getattr(season_row, 'seasonfile_count', None) != stats.get('episodeFileCount'):
+                    season_row.seasonfile_count = stats.get('episodeFileCount')
+                if getattr(season_row, 'has_files', None) != bool(stats.get('episodeFileCount')):
+                    season_row.has_files = bool(stats.get('episodeFileCount'))
+                if bool(stats.get('episodeFileCount')):
+                    # caller will aggregate into series later
+                    pass
+                if 'monitored' in sd:
+                    season_mon = bool(sd.get('monitored'))
+                    if getattr(season_row, 'sonarr_monitored', None) != season_mon:
+                        season_row.sonarr_monitored = season_mon
+                if sd.get('id') and getattr(season_row, 'sonarrid', None) != sd.get('id'):
+                    season_row.sonarrid = sd.get('id')
+                if sd.get('status') and getattr(season_row, 'sonarr_status', None) != sd.get('status'):
+                    season_row.sonarr_status = sd.get('status')
+                sp = sd.get('path')
+                sp_final = sp or series_obj.sonarrpath
+                if sp_final and getattr(season_row, 'sonarrpath', None) != sp_final:
+                    season_row.sonarrpath = sp_final
+                session.add(season_row)
+        except Exception:
+            pass
+
+    # If series does not exist, create and process seasons/episodes if present
     if not s:
         s = Series(
             title=title or 'Unknown',
@@ -392,217 +511,238 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
             imdbid=imdb,
             remote_poster=remote_poster,
             sonarr_series_overview=entry.get('overview') or entry.get('description'),
-            # Persist Sonarr series path if provided
             sonarrpath=entry.get('path') or entry.get('rootFolderPath'),
-            # Persist whether Sonarr is monitoring this series and a representative quality label
             sonarr_monitored=bool(entry.get('monitored') or False),
             sonarr_quality=(lambda q: (q.get('quality') or q.get('name')) if isinstance(q, dict) else q)(entry.get('quality') or entry.get('qualityProfile') or None),
+            created_at=func.now(),
+            last_found_in_sonarr=func.now(),
         )
         session.add(s)
         session.commit()
-        # Persist any season summaries present on the entry (idempotent)
         try:
-            seasons = entry.get('seasons') or []
-            # Determine aggregate has_files at series level
-            series_has_files = bool(entry.get('hasFile', False))
-            for sd in seasons:
-                try:
-                    sn = sd.get('seasonNumber')
-                    if sn is None:
-                        continue
-                    # find existing season row
-                    season_row = session.query(Season).filter(Season.series_id == s.id, Season.season_number == int(sn)).first()
-                    if not season_row:
-                        season_row = Season(series_id=s.id, season_number=int(sn), title=f"Season {sn}", year=entry.get('year') or 0)
-                        session.add(season_row)
-                        session.flush()
-                    # persist Sonarr season overview if present
-                    so = sd.get('overview') or sd.get('description')
-                    if so and getattr(season_row, 'sonarr_season_overview', None) != so:
-                        season_row.sonarr_season_overview = so
-                        session.add(season_row)
-                    # persist per-season aggregates if provided
-                    try:
-                        stats = sd.get('statistics') or {}
-                        if stats:
-                            if getattr(season_row, 'seasonfile_count', None) != stats.get('episodeFileCount'):
-                                season_row.seasonfile_count = stats.get('episodeFileCount')
-                            if getattr(season_row, 'has_files', None) != bool(stats.get('episodeFileCount')):
-                                season_row.has_files = bool(stats.get('episodeFileCount'))
-                            # If any season has files, mark series_has_files True
-                            if bool(stats.get('episodeFileCount')):
-                                series_has_files = True
-                            # Persist monitored status at season-level if Sonarr reports it
-                            try:
-                                if 'monitored' in sd:
-                                    season_mon = bool(sd.get('monitored'))
-                                    if getattr(season_row, 'sonarr_monitored', None) != season_mon:
-                                        season_row.sonarr_monitored = season_mon
-                            except Exception:
-                                pass
-                            # Persist Sonarr season id/status when present
-                            try:
-                                if sd.get('id') and getattr(season_row, 'sonarrid', None) != sd.get('id'):
-                                    season_row.sonarrid = sd.get('id')
-                                if sd.get('status') and getattr(season_row, 'sonarr_status', None) != sd.get('status'):
-                                    season_row.sonarr_status = sd.get('status')
-                            except Exception:
-                                pass
-                            # Persist season path when Sonarr provides it
-                            try:
-                                sp = sd.get('path')
-                                # Prefer explicit season path from Sonarr; otherwise mirror the
-                                # parent series sonarrpath for consistency.
-                                sp_final = sp or s.sonarrpath
-                                if sp_final and getattr(season_row, 'sonarrpath', None) != sp_final:
-                                    season_row.sonarrpath = sp_final
-                            except Exception:
-                                pass
-                            session.add(season_row)
-                    except Exception:
-                        pass
-                except Exception:
-                    continue
-            # Persist aggregate to series row if computed
-            try:
-                if getattr(s, 'has_files', None) != series_has_files:
-                    s.has_files = series_has_files
-                    session.add(s)
-            except Exception:
-                pass
-            session.commit()
-            logger.verbose(f"Persisted seasons for series {s.title} (tvdb={s.tvdbid})", extra={'emoji_type': 'tv'})
-        except Exception:
-            # don't fail upsert if season persistence errors
-            session.rollback()
-        return s.id
-    else:
-        changed = False
-        if title and s.title != title:
-            s.title = title
-            changed = True
-        if year and getattr(s, 'year', None) != year:
-            try:
-                s.year = int(year)
-                changed = True
-            except Exception:
-                pass
-        if sonarrid and s.sonarrid != sonarrid:
-            s.sonarrid = sonarrid
-            changed = True
-        # Persist series-level auxiliary fields
-        if imdb and getattr(s, 'imdbid', None) != imdb:
-            s.imdbid = imdb
-            changed = True
-        if remote_poster and getattr(s, 'remote_poster', None) != remote_poster:
-            s.remote_poster = remote_poster
-            changed = True
-        # Persist Sonarr series path if present
-        try:
-            spath = entry.get('path') or entry.get('rootFolderPath')
-            if spath and getattr(s, 'sonarrpath', None) != spath:
-                s.sonarrpath = spath
-                changed = True
+            session.refresh(s)
         except Exception:
             pass
-        # Persist monitored status and quality for series when available
-        try:
-            series_mon = bool(entry.get('monitored') or False)
-            if getattr(s, 'sonarr_monitored', None) != series_mon:
-                s.sonarr_monitored = series_mon
-                changed = True
-        except Exception:
-            pass
-        try:
-            sq = entry.get('quality') or entry.get('qualityProfile') or None
-            series_quality = (sq.get('quality') or sq.get('name')) if isinstance(sq, dict) else sq
-            if series_quality and getattr(s, 'sonarr_quality', None) != series_quality:
-                s.sonarr_quality = series_quality
-                changed = True
-        except Exception:
-            pass
-        # Persist series overview if present
-        ov = entry.get('overview') or entry.get('description')
-        if ov and getattr(s, 'sonarr_series_overview', None) != ov:
-            s.sonarr_series_overview = ov
-            changed = True
-        if changed:
-            session.add(s)
-            session.commit()
 
-        # Always process season summaries present on the Sonarr entry so per-season
-        # monitored/status/path values are persisted even when the series record
-        # itself didn't change. This ensures season-level metadata stays up-to-date.
-        try:
-            seasons = entry.get('seasons') or []
-            # Determine aggregate has_files at series level
-            series_has_files = bool(entry.get('hasFile', False))
-            for sd in seasons:
+        # Persist seasons metadata (no season.last_found updates)
+        seasons = entry.get('seasons') or []
+        series_has_files = bool(entry.get('hasFile', False))
+        for sd in seasons:
+            try:
+                _persist_season_row(sd, s)
+            except Exception:
+                continue
+
+        # If explicit episodes were included on the series payload, upsert them and mark last_found on each
+        episodes_payload = entry.get('episodes') or []
+        if episodes_payload:
+            for ent in episodes_payload:
                 try:
-                    sn = sd.get('seasonNumber')
-                    if sn is None:
-                        continue
+                    sn = ent.get('seasonNumber') or 0
                     season_row = session.query(Season).filter(Season.series_id == s.id, Season.season_number == int(sn)).first()
                     if not season_row:
-                        season_row = Season(series_id=s.id, season_number=int(sn), title=f"Season {sn}", year=entry.get('year') or 0)
+                        season_row = Season(series_id=s.id, season_number=sn, title=f"Season {sn}", year=s.year or 0, created_at=func.now())
                         session.add(season_row)
                         session.flush()
-                    so = sd.get('overview') or sd.get('description')
-                    if so and getattr(season_row, 'sonarr_season_overview', None) != so:
-                        season_row.sonarr_season_overview = so
-                        session.add(season_row)
-                    # persist per-season aggregates if provided
-                    try:
-                        stats = sd.get('statistics') or {}
-                        if stats:
-                            if getattr(season_row, 'seasonfile_count', None) != stats.get('episodeFileCount'):
-                                season_row.seasonfile_count = stats.get('episodeFileCount')
-                            if getattr(season_row, 'has_files', None) != bool(stats.get('episodeFileCount')):
-                                season_row.has_files = bool(stats.get('episodeFileCount'))
-                            # If any season has files, mark series_has_files True
-                            if bool(stats.get('episodeFileCount')):
-                                series_has_files = True
-                            # Persist monitored status at season-level if Sonarr reports it
+
+                    ep_num = ent.get('episodeNumber')
+                    ep_sonarrid = ent.get('id')
+
+                    # Try to locate existing episode by Sonarr id first, then by season+number
+                    ep = None
+                    if ep_sonarrid:
+                        try:
+                            ep = session.query(Episode).filter(Episode.sonarrid == ep_sonarrid).first()
+                        except Exception:
+                            ep = None
+                    if not ep:
+                        ep = session.query(Episode).filter(Episode.season_id == season_row.id, Episode.episode_number == ep_num).first()
+
+                    if not ep:
+                        ep = Episode(
+                            season_id=season_row.id,
+                            episode_number=ep_num,
+                            title=ent.get('title') or f"Episode {ep_num}",
+                            year=_extract_year(ent.get('year') or ent.get('airDateUtc') or ent.get('airDate') or 0),
+                            sonarrid=ep_sonarrid,
+                            created_at=func.now(),
+                        )
+                        # mark episode observed and persist
+                        try:
+                            ep.last_found_in_sonarr = func.now()
+                        except Exception:
+                            pass
+                        session.add(ep)
+                        session.flush()
+                    else:
+                        # Update a few stable fields if changed and mark observed
+                        changed_ep = False
+                        title_e = ent.get('title') or ep.title
+                        if ep.title != title_e:
+                            ep.title = title_e
+                            changed_ep = True
+                        try:
+                            if ep.sonarrid != ep_sonarrid and ep_sonarrid:
+                                ep.sonarrid = ep_sonarrid
+                                changed_ep = True
+                        except Exception:
+                            pass
+                        if changed_ep:
                             try:
-                                if 'monitored' in sd:
-                                    season_mon = bool(sd.get('monitored'))
-                                    if getattr(season_row, 'sonarr_monitored', None) != season_mon:
-                                        season_row.sonarr_monitored = season_mon
+                                ep.last_found_in_sonarr = func.now()
                             except Exception:
                                 pass
-                            # Persist Sonarr season id/status when present
-                            try:
-                                if sd.get('id') and getattr(season_row, 'sonarrid', None) != sd.get('id'):
-                                    season_row.sonarrid = sd.get('id')
-                                if sd.get('status') and getattr(season_row, 'sonarr_status', None) != sd.get('status'):
-                                    season_row.sonarr_status = sd.get('status')
-                            except Exception:
-                                pass
-                            # Persist season path when Sonarr provides it, else mirror series path
-                            try:
-                                sp = sd.get('path')
-                                sp_final = sp or s.sonarrpath
-                                if sp_final and getattr(season_row, 'sonarrpath', None) != sp_final:
-                                    season_row.sonarrpath = sp_final
-                            except Exception:
-                                pass
-                            session.add(season_row)
-                    except Exception:
-                        pass
+                            session.add(ep)
                 except Exception:
+                    # Non-fatal for a single episode in the payload
                     continue
-            # Persist aggregate to series row if computed/changed
-            try:
-                if getattr(s, 'has_files', None) != series_has_files:
-                    s.has_files = series_has_files
-                    session.add(s)
-            except Exception:
-                pass
+
+        try:
             session.commit()
-            logger.verbose(f"Updated seasons for series {s.title} (tvdb={s.tvdbid})", extra={'emoji_type': 'tv'})
         except Exception:
             session.rollback()
         return s.id
+
+    # Existing series: update fields when changed and persist seasons/episodes if present
+    changed = False
+    if title and s.title != title:
+        s.title = title
+        changed = True
+    if year and getattr(s, 'year', None) != year:
+        try:
+            s.year = int(year)
+            changed = True
+        except Exception:
+            pass
+    if sonarrid and s.sonarrid != sonarrid:
+        s.sonarrid = sonarrid
+        changed = True
+    if imdb and getattr(s, 'imdbid', None) != imdb:
+        s.imdbid = imdb
+        changed = True
+    if remote_poster and getattr(s, 'remote_poster', None) != remote_poster:
+        s.remote_poster = remote_poster
+        changed = True
+    try:
+        spath = entry.get('path') or entry.get('rootFolderPath')
+        if spath and getattr(s, 'sonarrpath', None) != spath:
+            s.sonarrpath = spath
+            changed = True
+    except Exception:
+        pass
+    try:
+        series_mon = bool(entry.get('monitored') or False)
+        if getattr(s, 'sonarr_monitored', None) != series_mon:
+            s.sonarr_monitored = series_mon
+            changed = True
+    except Exception:
+        pass
+    try:
+        sq = entry.get('quality') or entry.get('qualityProfile') or None
+        series_quality = (sq.get('quality') or sq.get('name')) if isinstance(sq, dict) else sq
+        if series_quality and getattr(s, 'sonarr_quality', None) != series_quality:
+            s.sonarr_quality = series_quality
+            changed = True
+    except Exception:
+        pass
+    ov = entry.get('overview') or entry.get('description')
+    if ov and getattr(s, 'sonarr_series_overview', None) != ov:
+        s.sonarr_series_overview = ov
+        changed = True
+
+    # Always mark series as observed now
+    try:
+        s.last_found_in_sonarr = func.now()
+    except Exception:
+        pass
+    session.add(s)
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+
+    # Persist seasons metadata without updating season.last_found
+    seasons = entry.get('seasons') or []
+    for sd in seasons:
+        try:
+            _persist_season_row(sd, s)
+        except Exception:
+            continue
+
+    # If series payload contained explicit episodes, upsert them and mark last_found
+    episodes_payload = entry.get('episodes') or []
+    if episodes_payload:
+        for ent in episodes_payload:
+            sn = ent.get('seasonNumber') or 0
+            # Ensure the season row exists; if we can't create/find it, skip this episode
+            try:
+                season_row = session.query(Season).filter(Season.series_id == s.id, Season.season_number == int(sn)).first()
+                if not season_row:
+                    season_row = Season(series_id=s.id, season_number=sn, title=f"Season {sn}", year=s.year or 0, created_at=func.now())
+                    session.add(season_row)
+                    session.flush()
+            except Exception:
+                continue
+
+            try:
+                ep_num = ent.get('episodeNumber')
+                ep_sonarrid = ent.get('id')
+
+                # Try to locate existing episode by Sonarr id first, then by season+number
+                ep = None
+                if ep_sonarrid:
+                    try:
+                        ep = session.query(Episode).filter(Episode.sonarrid == ep_sonarrid).first()
+                    except Exception:
+                        ep = None
+                if not ep:
+                    ep = session.query(Episode).filter(Episode.season_id == season_row.id, Episode.episode_number == ep_num).first()
+
+                if not ep:
+                    ep = Episode(
+                        season_id=season_row.id,
+                        episode_number=ep_num,
+                        title=ent.get('title') or f"Episode {ep_num}",
+                        year=_extract_year(ent.get('year') or ent.get('airDateUtc') or ent.get('airDate') or 0),
+                        sonarrid=ep_sonarrid,
+                        created_at=func.now(),
+                    )
+                    # mark episode observed and persist
+                    try:
+                        ep.last_found_in_sonarr = func.now()
+                    except Exception:
+                        pass
+                    session.add(ep)
+                    session.flush()
+                else:
+                    # Update a few stable fields if changed and mark observed
+                    changed_ep = False
+                    title_e = ent.get('title') or ep.title
+                    if ep.title != title_e:
+                        ep.title = title_e
+                        changed_ep = True
+                    try:
+                        if ep.sonarrid != ep_sonarrid and ep_sonarrid:
+                            ep.sonarrid = ep_sonarrid
+                            changed_ep = True
+                    except Exception:
+                        pass
+                    if changed_ep:
+                        try:
+                            ep.last_found_in_sonarr = func.now()
+                        except Exception:
+                            pass
+                        session.add(ep)
+            except Exception:
+                # Non-fatal for a single episode in the payload
+                continue
+
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+
+    return s.id
 
 
 def capture_series_fullsync_and_create_run(run_note: str = None) -> OrchestratorRun:
@@ -620,7 +760,63 @@ def capture_series_fullsync_and_create_run(run_note: str = None) -> Orchestrator
     finally:
         session.close()
 
-    run = OrchestratorRun(types=['tv'], note=run_note or f'fullsync_tv:{datetime.now(timezone.utc).isoformat()}')
+    # Use DB clock for run timestamp
+    session = get_session()
+    try:
+        db_now = session.execute(text('SELECT now()')).scalar_one()
+    finally:
+        session.close()
+
+    run = OrchestratorRun(types=['tv'], note=run_note or f'fullsync_tv:{db_now.isoformat()}', created_at=db_now)
+
+    # Simple safety: cancel any previous incomplete fullsync subflows/jobs for the same series
+    if series_ids:
+        ses = get_session()
+        try:
+            try:
+                # find prior subflows for these series that are still incomplete
+                rows = ses.execute(text("""
+                    SELECT id FROM subflow
+                    WHERE action='fullsync' AND series_id = ANY(:sids)
+                      AND status IN ('PENDING','CLAIMED','WORKING','RUNNING')
+                """), {'sids': series_ids}).fetchall()
+                prev_ids = [r[0] for r in rows]
+            except Exception:
+                prev_ids = []
+
+            if prev_ids:
+                try:
+                    # cancel jobs that reference those subflows
+                    ses.execute(text("""
+                        UPDATE job
+                        SET status='CANCELLED', error_message = coalesce(error_message, '') || ' | superseded_by_fullsync'
+                        WHERE status IN ('PENDING','CLAIMED','WORKING')
+                          AND (payload->>'subflow_id') IS NOT NULL
+                          AND (payload->>'subflow_id')::int = ANY(:prev_ids)
+                    """), {'prev_ids': prev_ids})
+                except Exception:
+                    # best-effort: don't fail the fullsync creation if job cancel fails
+                    pass
+                try:
+                    ses.execute(text("""
+                        UPDATE subflow
+                        SET status='CANCELLED', error_message = coalesce(error_message, '') || ' | superseded_by_fullsync'
+                        WHERE id = ANY(:prev_ids)
+                    """), {'prev_ids': prev_ids})
+                except Exception:
+                    pass
+                try:
+                    ses.commit()
+                except Exception:
+                    try:
+                        ses.rollback()
+                    except Exception:
+                        pass
+        finally:
+            try:
+                ses.close()
+            except Exception:
+                pass
 
     # Create SubFlows for each series and only enqueue the enrich_base job (FAR_FUTURE)
     session = get_session()
@@ -718,9 +914,13 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
                 # Upsert season
                 season_row = session.query(Season).filter(Season.series_id == series_id, Season.season_number == s_num).first()
                 if not season_row:
-                    season_row = Season(series_id=series_id, season_number=s_num, title=f"Season {s_num}", year=_extract_year(ent.get('airDateUtc', None) or ent.get('airDateUtc') or ent.get('airDate') or ent.get('year') or 0))
+                    season_row = Season(series_id=series_id, season_number=s_num, title=f"Season {s_num}", year=_extract_year(ent.get('airDateUtc', None) or ent.get('airDateUtc') or ent.get('airDate') or ent.get('year') or 0), created_at=func.now(), last_found_in_sonarr=func.now())
                     session.add(season_row)
                     session.flush()  # get id
+                    try:
+                        session.refresh(season_row)
+                    except Exception:
+                        pass
 
                 # Upsert episode
                 ep_num = ent.get('episodeNumber')
@@ -734,9 +934,25 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
                 if not ep:
                     ep = session.query(Episode).filter(Episode.season_id == season_row.id, Episode.episode_number == ep_num).first()
                 if not ep:
-                    ep = Episode(season_id=season_row.id, episode_number=ep_num, title=ent.get('title') or f"Episode {ep_num}", year=_extract_year(ent.get('year') or ent.get('airDateUtc') or ent.get('airDate') or 0), sonarrid=ent.get('id'))
+                    ep = Episode(
+                        season_id=season_row.id,
+                        episode_number=ep_num,
+                        title=ent.get('title') or f"Episode {ep_num}",
+                        year=_extract_year(ent.get('year') or ent.get('airDateUtc') or ent.get('airDate') or 0),
+                        sonarrid=ent.get('id'),
+                        created_at=func.now(),
+                    )
+                    # mark episode observed and persist
+                    try:
+                        ep.last_found_in_sonarr = func.now()
+                    except Exception:
+                        pass
                     session.add(ep)
                     session.flush()
+                    try:
+                        session.refresh(ep)
+                    except Exception:
+                        pass
 
                 episode_ids.append(ep.id)
 
@@ -752,6 +968,10 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
                 sf = SubFlow(episode_id=eid, action='fullsync', branch='main', steps=','.join(PHASES), step_index=0, status='PENDING')
                 session.add(sf)
                 session.flush()
+                try:
+                    session.refresh(sf)
+                except Exception:
+                    pass
                 payload = {'run_id': run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
                 group_id = f"subflow:{sf.id}:enrich_base"
                 insert_job_with_session(session, 'subjob:enrich_base', payload, group_id=group_id)
@@ -993,7 +1213,13 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                     sonarr_status=ep_status,
                     sonarr_monitored=ep_monitored,
                     air_date=ep_air,
+                    created_at=func.now(),
                 )
+                # mark episode observed and persist
+                try:
+                    ep.last_found_in_sonarr = func.now()
+                except Exception:
+                    pass
                 session.add(ep)
                 session.flush()
             else:
@@ -1035,6 +1261,10 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                     ep.air_date = ep_air
                     changed_ep = True
                 if changed_ep:
+                    try:
+                        ep.last_found_in_sonarr = func.now()
+                    except Exception:
+                        pass
                     session.add(ep)
 
             episode_ids.append(ep.id)
@@ -1045,16 +1275,16 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
         grp = f"{run_id}:enrich_base"
         from services.jobs import insert_job_with_session
         for eid in episode_ids:
-                if eid in existing_ids:
-                    logger.verbose(f"Skipping existing episode subflow for episode id {eid}")
-                    continue
-                sf = SubFlow(episode_id=eid, action='fullsync', branch='main', steps=','.join(PHASES), step_index=0, status='PENDING')
-                session.add(sf)
-                session.flush()
-                payload = {'run_id': run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
-                group_id = f"subflow:{sf.id}:enrich_base"
-                insert_job_with_session(session, 'subjob:enrich_base', payload, group_id=group_id)
-                created_subflows += 1
+            if eid in existing_ids:
+                logger.verbose(f"Skipping existing episode subflow for episode id {eid}")
+                continue
+            sf = SubFlow(episode_id=eid, action='fullsync', branch='main', steps=','.join(PHASES), step_index=0, status='PENDING')
+            session.add(sf)
+            session.flush()
+            payload = {'run_id': run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
+            group_id = f"subflow:{sf.id}:enrich_base"
+            insert_job_with_session(session, 'subjob:enrich_base', payload, group_id=group_id)
+            created_subflows += 1
 
         session.commit()
     finally:
