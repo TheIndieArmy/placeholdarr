@@ -75,8 +75,21 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                     else:
                         try:
                             os.link(dummy_source, file_path)
-                        except OSError:
-                            shutil.copy2(dummy_source, file_path)
+                        except OSError as e:
+                            # Log a clear warning and fall back to copying the dummy file
+                            logger.warning(
+                                f"Failed to create hardlink for {file_path} from {dummy_source}: {e}; falling back to copy",
+                                extra={'emoji_type': 'warning'}
+                            )
+                            try:
+                                shutil.copy2(dummy_source, file_path)
+                                logger.debug(f"Copied dummy file as fallback: {file_path}", extra={'emoji_type': 'create'})
+                            except Exception as ce:
+                                logger.error(
+                                    f"Failed to copy dummy file for {file_path} after hardlink failure: {ce}",
+                                    extra={'emoji_type': 'error'}
+                                )
+                                raise
                     logger.debug(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
                     # Write an NFO next to the dummy to help media servers detect metadata quickly
                     try:
@@ -126,8 +139,20 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                 else:
                     try:
                         os.link(dummy_source, file_path)
-                    except OSError:
-                        shutil.copy2(dummy_source, file_path)
+                    except OSError as e:
+                        logger.warning(
+                            f"Failed to create hardlink for {file_path} from {dummy_source}: {e}; falling back to copy",
+                            extra={'emoji_type': 'warning'}
+                        )
+                        try:
+                            shutil.copy2(dummy_source, file_path)
+                            logger.debug(f"Copied dummy file as fallback: {file_path}", extra={'emoji_type': 'create'})
+                        except Exception as ce:
+                            logger.error(
+                                f"Failed to copy dummy file for {file_path} after hardlink failure: {ce}",
+                                extra={'emoji_type': 'error'}
+                            )
+                            raise
                 logger.debug(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
                 # Write a movie NFO to assist media servers
                 try:
