@@ -110,6 +110,7 @@ Required settings in `.env`:
 - `SONARR_URL`, `SONARR_API_KEY`: Sonarr connection details
 - `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin
 - `DUMMY_FILE_PATH`: Path to your dummy.mp4 file
+ - `EMBY_URL`, `EMBY_TOKEN`: Emby server details (if using Emby). Note: Emby commonly exposes its API under an `/emby/` prefix. Set `EMBY_URL` to the server base (e.g., `http://localhost:8096`) and `EMBY_TOKEN` to an API key.
 
 Optional settings:
 - `PLACEHOLDER_STRATEGY`: How to create placeholders (`hardlink` or `copy`)
@@ -146,6 +147,9 @@ Optional settings:
 
 - **To disable Jellyfin:**  
   Leave `JELLYFIN_URL` and `JELLYFIN_TOKEN` blank in your `.env` file.
+
+- **To disable Emby:**
+  Leave `EMBY_URL` and `EMBY_TOKEN` blank in your `.env` file.
 
 **Note:**  
 You must have at least one of Plex or Jellyfin configured. Placeholdarr will automatically detect which server(s) to use based on which variables are set.
@@ -219,6 +223,26 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 7. Save the webhook.
 
 **Note:** Placeholdarr will automatically detect and process both Tautulli (Plex) and Jellyfin webhooks using their respective payload formats. No extra configuration is needed—just set up the webhook as shown.
+
+---
+
+### Emby Webhook Setup
+
+1. Install the Webhooks plugin for Emby (if not already installed):
+   - In Emby Server, go to **Plugins → Catalog** and search for **Webhooks**. Install it and restart Emby if prompted.
+2. After installation, go to **Plugins → Webhooks** (or **Notifications → Webhooks** depending on your Emby version) and click **Add** (or **Add Notification**).
+3. Configure the webhook/notification:
+   - Name: Placeholdarr
+   - URL: `http://your-server:8000/webhook`
+   - Method: POST
+   - Content Type: `application/json`
+4. Configure the notification triggers:
+   - Enable **Playback → Start** (Playback Start) so Emby sends a webhook when playback begins.
+5. Save the notification.
+
+Notes:
+- Use the same webhook URL you use for other services (Plex/Jellyfin). Placeholdarr accepts Emby payloads and will extract the file path from `Item.Path` or look up the item on the Emby server if needed (when `EMBY_URL` and `EMBY_TOKEN` are configured in your `.env`).
+- Be sure to set `EMBY_URL` and `EMBY_TOKEN` in your `.env` if you want Placeholdarr to query Emby for item details when the payload doesn't include a `Path`.
 
 ---
 

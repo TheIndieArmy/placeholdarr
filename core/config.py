@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # Jellyfin
     JELLYFIN_URL: Optional[str] = None
     JELLYFIN_TOKEN: Optional[str] = None
+    
+    # Emby (similar to Jellyfin)
+    EMBY_URL: Optional[str] = None
+    EMBY_TOKEN: Optional[str] = None
 
     # Services
     RADARR_URL: str
@@ -119,16 +123,21 @@ class Settings(BaseSettings):
     def check_media_providers(cls, values):
         enable_plex = values.get('ENABLE_PLEX', True)
         enable_jellyfin = values.get('ENABLE_JELLYFIN', True)
+        enable_emby = values.get('ENABLE_EMBY', False)
         plex_keys = [values.get('PLEX_URL'), values.get('PLEX_TOKEN')]
         jellyfin_keys = [values.get('JELLYFIN_URL'), values.get('JELLYFIN_TOKEN')]
+        emby_keys = [values.get('EMBY_URL'), values.get('EMBY_TOKEN')]
         plex_configured = all(plex_keys)
         jellyfin_configured = all(jellyfin_keys)
+        emby_configured = all(emby_keys)
         if enable_plex and not plex_configured:
             raise ValueError("ENABLE_PLEX is true but PLEX_URL or PLEX_TOKEN is missing.")
         if enable_jellyfin and not jellyfin_configured:
             raise ValueError("ENABLE_JELLYFIN is true but JELLYFIN_URL or JELLYFIN_TOKEN is missing.")
-        if not (enable_plex or enable_jellyfin):
-            raise ValueError("At least one of ENABLE_PLEX or ENABLE_JELLYFIN must be true.")
+        if enable_emby and not emby_configured:
+            raise ValueError("ENABLE_EMBY is true but EMBY_URL or EMBY_TOKEN is missing.")
+        if not (enable_plex or enable_jellyfin or enable_emby):
+            raise ValueError("At least one of ENABLE_PLEX, ENABLE_JELLYFIN or ENABLE_EMBY must be true.")
         return values
 
     @property
@@ -138,6 +147,11 @@ class Settings(BaseSettings):
     @property
     def jellyfin_enabled(self) -> bool:
         return self.ENABLE_JELLYFIN and bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
+
+    @property
+    def emby_enabled(self) -> bool:
+        enable_emby = getattr(self, 'ENABLE_EMBY', False)
+        return enable_emby and bool(getattr(self, 'EMBY_URL', None) and getattr(self, 'EMBY_TOKEN', None))
 
     @property
     def radarr_4k_port(self) -> int:

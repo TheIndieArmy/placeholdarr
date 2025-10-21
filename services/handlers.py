@@ -4,6 +4,7 @@ from core.config import settings
 from core.logger import logger
 from services.plex_client import plex, build_plex_url, refresh_plex_item
 from services.jellyfin_client import build_jellyfin_url, refresh_jellyfin_item, get_jellyfin_file_path
+from services.emby_client import get_emby_file_path
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
     schedule_movie_request_update, 
@@ -63,16 +64,44 @@ def handle_webhook(data: dict, source_port: int = None):
     # Log incoming webhook but keep it brief
     logger.debug(f"{source} payload: {data}", extra={'emoji_type': 'debug'})
     
-    # Get file path for quality detection
-    file_path = (data.get('media', {}).get('file_info', {}).get('path') or 
-                 data.get('movie', {}).get('folderPath') or 
-                 data.get('file', '') or
-                 get_jellyfin_file_path(data.get("ItemId"), data.get("UserId")))
+    # Get file path for quality detection. Try Tautulli/Plex, Radarr/Sonarr, then Jellyfin, then Emby.
+    file_path = ''
+    # Tautulli / Plex style
+    file_path = data.get('media', {}).get('file_info', {}).get('path') or file_path
+    # Radarr/Sonarr style
+    if not file_path:
+        file_path = data.get('movie', {}).get('folderPath') or data.get('file', '') or file_path
+    # Jellyfin (ItemId + UserId)
+    if not file_path and data.get('ItemId') and settings.jellyfin_enabled:
+        try:
+            file_path = get_jellyfin_file_path(data.get('ItemId'), data.get('UserId')) or ''
+        except Exception:
+            file_path = ''
+    # Emby: payload may include an Item object with Path, or an Id requiring a lookup
+    if not file_path and isinstance(data.get('Item'), dict):
+        item = data.get('Item', {})
+        # Prefer an explicit Path in the payload (read regardless of emby_enabled)
+        file_path = item.get('Path') or item.get('path') or file_path
+        # If no explicit path and Emby integration is enabled, attempt a server lookup
+        if not file_path and item.get('Id') and settings.emby_enabled:
+            user_id = None
+            # Emby may include a top-level User or Session.UserId
+            if isinstance(data.get('User'), dict):
+                user_id = data.get('User').get('Id')
+            if not user_id and isinstance(data.get('Session'), dict):
+                user_id = data.get('Session').get('UserId') or data.get('Session').get('User', {}).get('Id')
+            try:
+                file_path = get_emby_file_path(item.get('Id'), user_id) or ''
+            except Exception:
+                file_path = ''
     
     is_4k = is_4k_request(file_path, source_port)
     logger.debug(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
     
-    event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
+    # Normalize top-level keys case-insensitively (support Emby 'Event' etc.)
+    lc_map = { (k.lower() if isinstance(k, str) else k): v for k, v in data.items() }
+    event_val = lc_map.get('event') or lc_map.get('eventtype') or lc_map.get('notificationtype') or 'unknown'
+    event_type = str(event_val).lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
     
     # Handle import events directly for cleanup
@@ -490,23 +519,42 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
 
 # In handle_playback, we need to keep the existing structure but integrate with queue monitoring
 
-def handle_playback(data: dict):
+def handle_playback(data: dict, precomputed_file_path: str = None):
     try:
         media = data.get("media", {}) or {}
-        notification = data.get("NotificationType")
-        # Determine file path source
-        if notification:
-            # Jellyfin payload
-            item_id = data.get("ItemId")
-            user_id = data.get("UserId")
-            file_path = get_jellyfin_file_path(item_id, user_id) or ""
+        # Use precomputed file path if provided, otherwise compute here (fallback to Item)
+        if precomputed_file_path is not None:
+            file_path = precomputed_file_path
         else:
-            # Tautulli payload
-            file_path = media.get("file_info", {}).get("path", "")
+            notification = data.get("NotificationType")
+            # Jellyfin sends NotificationType / ItemId / UserId
+            if notification and data.get('ItemId') and settings.jellyfin_enabled:
+                item_id = data.get("ItemId")
+                user_id = data.get("UserId")
+                file_path = get_jellyfin_file_path(item_id, user_id) or ""
+            else:
+                # Tautulli/Plex style
+                file_path = media.get("file_info", {}).get("path", "")
+                # Radarr/Sonarr style fallback
+                if not file_path:
+                    file_path = data.get('movie', {}).get('folderPath') or data.get('file', '') or file_path
+                # Emby payloads: prefer Item.Path if present
+                if not file_path and isinstance(data.get('Item'), dict):
+                    item = data.get('Item', {})
+                    file_path = item.get('Path') or item.get('path') or file_path
+                    if not file_path and item.get('Id') and settings.emby_enabled:
+                        user_id = None
+                        if isinstance(data.get('User'), dict):
+                            user_id = data.get('User').get('Id')
+                        if not user_id and isinstance(data.get('Session'), dict):
+                            user_id = data.get('Session').get('UserId') or data.get('Session').get('User', {}).get('Id')
+                        file_path = get_emby_file_path(item.get('Id'), user_id) or ''
+
         is_4k = is_4k_request(file_path)
-        title = media.get("title", data.get("Name", "Unknown Title"))
-        rating_key = media.get("ids", {}).get("plex") or data.get("ItemId")
-        media_type = media.get("type") or data.get("ItemType", "").lower()
+        # Title and type resolution: prefer media block, fall back to top-level or Item fields
+        title = media.get("title") or data.get("Name") or (data.get('Item') or {}).get('Name') or "Unknown Title"
+        rating_key = (media.get("ids", {}) or {}).get("plex") or data.get("ItemId") or (data.get('Item') or {}).get('Id')
+        media_type = (media.get("type") or data.get("ItemType") or (data.get('Item') or {}).get('Type') or "").lower()
 
         # Debug log the file path 
         logger.debug(f"Processing playback for file path: {file_path}", extra={'emoji_type': 'debug'})
@@ -549,13 +597,32 @@ def handle_playback(data: dict):
             return JSONResponse({"status": "error", "message": "Failed to find/add movie"}, status_code=400)
             
         elif media_type == "episode":
-            # Extract episode details from webhook
-            series_title   = media.get("show_name") or data.get("SeriesName", "Unknown Series")
-            episode_title  = media.get("episode_name") or data.get("Name", "Unknown Episode")
-            season_number  = int(media.get("season_num") or data.get("SeasonNumber", 0))
-            episode_number = int(media.get("episode_num") or data.get("EpisodeNumber", 0))
-            tvdb_id        = media.get("ids", {}).get("tvdb") or data.get("Provider_tvdb")
-            year = media.get("year", "")
+            # Extract episode details from webhook. Prefer media block, fall back to Item (Emby/Jellyfin)
+            item = data.get('Item', {}) or {}
+            series_title = media.get("show_name") or data.get("SeriesName") or item.get('SeriesName') or "Unknown Series"
+            episode_title = media.get("episode_name") or data.get("Name") or item.get('Name') or "Unknown Episode"
+            # season/episode numbers: prefer media fields, then standard keys, then Item fields
+            try:
+                season_number = int(media.get("season_num") or data.get("SeasonNumber") or item.get('ParentIndexNumber') or item.get('SeasonNumber') or 0)
+            except Exception:
+                season_number = 0
+            try:
+                episode_number = int(media.get("episode_num") or data.get("EpisodeNumber") or item.get('IndexNumber') or item.get('EpisodeNumber') or 0)
+            except Exception:
+                episode_number = 0
+            # tvdb id: try media ids, top-level Provider_tvdb, then Item.ProviderIds (case variants)
+            tvdb_id = None
+            try:
+                tvdb_id = (media.get("ids", {}) or {}).get("tvdb")
+            except Exception:
+                tvdb_id = None
+            if not tvdb_id:
+                tvdb_id = data.get("Provider_tvdb") or data.get('Provider_TVDB') or None
+            if not tvdb_id:
+                provider_ids = item.get('ProviderIds') or {}
+                # ProviderIds keys may have capitalized names like 'Tvdb'
+                tvdb_id = provider_ids.get('Tvdb') or provider_ids.get('tvdb') or tvdb_id
+            year = media.get("year") or data.get("Year") or item.get('ProductionYear') or ""
             
             full_title = (
                 f"{series_title} - S{season_number:02d}E{episode_number:02d}"
@@ -567,6 +634,7 @@ def handle_playback(data: dict):
                 return JSONResponse({"status": "skipped", "message": "Playback suppressed (cooldown active)"})
 
             logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'process'})
+            logger.debug(f"🐛 Episode payload values: tvdb_id={tvdb_id}, series_title={series_title}, season={season_number}, episode={episode_number}, rating_key={rating_key}, file_path={file_path}", extra={'emoji_type': 'debug'})
             series_id = search_in_sonarr(
                 tvdb_id=tvdb_id, title=series_title, rating_key=rating_key,
                 is_4k=is_4k, file_path=file_path
