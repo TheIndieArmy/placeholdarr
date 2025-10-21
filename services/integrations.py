@@ -1,4 +1,6 @@
 import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
+import xml.etree.ElementTree as ET
+from core.nfo import generate_movie_nfo, generate_episode_nfo, write_nfo_for_file
 from core.config import settings
 from core.logger import logger
 from services.utils import (
@@ -28,11 +30,14 @@ def get_folder_path(media_type, base_path, title, year=None, media_id=None, seas
             return os.path.join(base_path, folder_name)
 
 
-def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None, 
+def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None,
                     season_number=None, episode_range=None, episode_title=None, episode_id=None,
-                    dummy_file_override=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None):
+                    dummy_file_override=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None,
+                    overview=None, request_mark=False, imdb_id=None, genres=None, studio=None, runtime=None, premiered=None, tagline=None,
+                    rating=None, votes=None, collection=None, sorttitle=None, actors=None, director=None, credits=None, poster_url=None):
     """
     Create a dummy video file in the correct location. Uses resolve_final_folder for path resolution.
+    Accepts optional `overview` to embed in NFO and `request_mark` to prefix episode titles with [REQUEST].
     """
     import os
     try:
@@ -48,14 +53,22 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
         clean_title = sanitize_filename(title)
         clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
         year_str = f" ({year})" if year else ""
+
+        # TV episodes (possibly a range)
         if media_type == 'tv' and season_number is not None and episode_range:
             start_ep, end_ep = episode_range
             for ep_num in range(int(start_ep), int(end_ep) + 1):
                 ep_title = episode_title or f"Episode {ep_num}"
                 file_name = f"{clean_title}{year_str} - s{season_number:02d}e{ep_num:02d} - {ep_title}.mp4"
                 file_path = os.path.join(final_folder, sanitize_filename(file_name))
+
+                # Remove any existing placeholder file
                 if os.path.exists(file_path):
-                    os.remove(file_path)
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        logger.debug(f"Could not remove existing file before creating placeholder: {file_path}", extra={'emoji_type': 'debug'})
+
                 try:
                     if settings.PLACEHOLDER_STRATEGY == "copy":
                         shutil.copy2(dummy_source, file_path)
@@ -65,18 +78,48 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                         except OSError:
                             shutil.copy2(dummy_source, file_path)
                     logger.debug(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
+                    # Write an NFO next to the dummy to help media servers detect metadata quickly
+                    try:
+                        meta = {
+                            'title': f"[REQUEST] {ep_title}" if request_mark and ep_title else ep_title,
+                            'showtitle': title,
+                            'season': season_number,
+                            'episode': ep_num,
+                            'tvdb_id': media_id,
+                            'plot': overview,
+                            'aired': premiered,
+                            'genres': genres,
+                            'actors': actors,
+                            'director': director,
+                            'credits': credits,
+                            'poster_url': poster_url,
+                        }
+                        elem = generate_episode_nfo(meta)
+                        write_nfo_for_file(file_path, elem, overwrite=False, mtime_source=file_path)
+                    except Exception as e:
+                        logger.debug(f"Failed to write episode NFO for {file_path}: {e}", extra={'emoji_type': 'debug'})
                     os.utime(file_path, None)
                 except Exception as e:
                     logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
                     return None
+
+            # Return path to the first created episode file
             ep_title = episode_title or f"Episode {start_ep}"
             file_name = f"{clean_title}{year_str} - s{season_number:02d}e{start_ep:02d} - {ep_title}.mp4"
             return os.path.join(final_folder, sanitize_filename(file_name))
+
+        # Movie or single dummy
         else:
             file_name = f"{clean_title}{year_str} (dummy).mp4"
             file_path = os.path.join(final_folder, sanitize_filename(file_name))
+
+            # Remove existing placeholder if present
             if os.path.exists(file_path):
-                os.remove(file_path)
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    logger.debug(f"Could not remove existing file before creating placeholder: {file_path}", extra={'emoji_type': 'debug'})
+
             try:
                 if settings.PLACEHOLDER_STRATEGY == "copy":
                     shutil.copy2(dummy_source, file_path)
@@ -86,13 +129,283 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
                     except OSError:
                         shutil.copy2(dummy_source, file_path)
                 logger.debug(f"Created dummy file: {file_path}", extra={'emoji_type': 'create'})
+                # Write a movie NFO to assist media servers
+                try:
+                    meta = {
+                        'title': title,
+                        'originaltitle': title,
+                        'year': year,
+                        'tmdb_id': media_id,
+                        'plot': overview,
+                        'imdb_id': imdb_id,
+                        'genres': genres,
+                        'studio': studio,
+                        'runtime': runtime,
+                        'premiered': premiered,
+                        'tagline': tagline,
+                        'rating': rating,
+                        'votes': votes,
+                        'collection': collection,
+                        'sorttitle': sorttitle,
+                        'actors': actors,
+                        'poster_url': poster_url,
+                    }
+                    elem = generate_movie_nfo(meta)
+                    write_nfo_for_file(file_path, elem, overwrite=False, mtime_source=file_path)
+                except Exception as e:
+                    logger.debug(f"Failed to write movie NFO for {file_path}: {e}", extra={'emoji_type': 'debug'})
                 os.utime(file_path, None)
             except Exception as e:
                 logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
                 return None
+
             return file_path
     except Exception as e:
         logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+        return None
+
+
+def _write_movie_nfo(dummy_path, title, year=None, tmdb_id=None, overview=None, imdb_id=None, genres=None, studio=None, runtime=None, premiered=None, tagline=None, rating=None, votes=None, collection=None, sorttitle=None, actors=None):
+    """Write a minimal movie NFO (XML) next to the dummy file to help media servers pick up metadata quickly."""
+    try:
+        base, _ = os.path.splitext(dummy_path)
+        nfo_path = f"{base}.nfo"
+        movie = ET.Element('movie')
+        # Basic fields
+        title_el = ET.SubElement(movie, 'title')
+        title_el.text = title
+        original_el = ET.SubElement(movie, 'originaltitle')
+        original_el.text = title
+        if year:
+            year_el = ET.SubElement(movie, 'year')
+            year_el.text = str(year)
+        if overview:
+            plot_el = ET.SubElement(movie, 'plot')
+            plot_el.text = overview
+        if tagline:
+            tagline_el = ET.SubElement(movie, 'tagline')
+            tagline_el.text = tagline
+        if studio:
+            studio_el = ET.SubElement(movie, 'studio')
+            studio_el.text = studio
+        if genres:
+            # genres may be list or comma-separated string
+            if isinstance(genres, (list, tuple)):
+                for g in genres:
+                    genre_el = ET.SubElement(movie, 'genre')
+                    genre_el.text = g
+            else:
+                for g in str(genres).split(','):
+                    genre_el = ET.SubElement(movie, 'genre')
+                    genre_el.text = g.strip()
+        if runtime:
+            runtime_el = ET.SubElement(movie, 'runtime')
+            runtime_el.text = str(runtime)
+        if premiered:
+            premiered_el = ET.SubElement(movie, 'premiered')
+            premiered_el.text = str(premiered)
+        # IDs
+        if tmdb_id:
+            tmdb_el = ET.SubElement(movie, 'tmdbid')
+            tmdb_el.text = str(tmdb_id)
+            # also add a uniqueid element used by some agents
+            unique_el = ET.SubElement(movie, 'uniqueid')
+            unique_el.set('type', 'tmdb')
+            unique_el.text = str(tmdb_id)
+        if imdb_id:
+            imdb_el = ET.SubElement(movie, 'imdbid')
+            imdb_el.text = str(imdb_id)
+        if rating:
+            rating_el = ET.SubElement(movie, 'rating')
+            rating_el.text = str(rating)
+        if votes:
+            votes_el = ET.SubElement(movie, 'votes')
+            votes_el.text = str(votes)
+        if collection:
+            collection_el = ET.SubElement(movie, 'collection')
+            collection_el.text = str(collection)
+        if sorttitle:
+            sort_el = ET.SubElement(movie, 'sorttitle')
+            sort_el.text = str(sorttitle)
+        if actors:
+            try:
+                # actors may be list of dicts or list of names
+                if isinstance(actors, (list, tuple)):
+                    actors_el = ET.SubElement(movie, 'actors')
+                    for a in actors:
+                        actor_el = ET.SubElement(actors_el, 'actor')
+                        if isinstance(a, dict):
+                            name = a.get('name') or a.get('Name')
+                            role = a.get('role') or a.get('Role')
+                        else:
+                            name = str(a)
+                            role = None
+                        name_el = ET.SubElement(actor_el, 'name')
+                        name_el.text = name
+                        if role:
+                            role_el = ET.SubElement(actor_el, 'role')
+                            role_el.text = str(role)
+            except Exception:
+                pass
+        # Leave placeholders for common optional tags (imdb, plot) if we ever have them
+        # Write out the tree
+        tree = ET.ElementTree(movie)
+        tree.write(nfo_path, encoding='utf-8', xml_declaration=True)
+        logger.debug(f"Wrote movie NFO: {nfo_path}", extra={'emoji_type': 'debug'})
+    except Exception as e:
+        logger.debug(f"Error writing movie NFO for {dummy_path}: {e}", extra={'emoji_type': 'debug'})
+
+
+def _write_episode_nfo(dummy_path, series_title, season_number, episode_number, tvdb_id=None, episode_title=None, overview=None, request_mark=False, genres=None, aired=None, actors=None, director=None, credits=None):
+    """Write a minimal episode NFO next to the dummy file with tvdb/season/episode metadata.
+    If request_mark is True, prepend "[REQUEST] " to the episode title so placeholders indicate request state.
+    """
+    try:
+        base, _ = os.path.splitext(dummy_path)
+        nfo_path = f"{base}.nfo"
+        episode = ET.Element('episodedetails')
+        # Basic fields
+        # Optionally prepend request marker
+        final_title = episode_title or ''
+        if request_mark and final_title:
+            final_title = f"[REQUEST] {final_title}"
+        title_el = ET.SubElement(episode, 'title')
+        title_el.text = final_title
+        show_el = ET.SubElement(episode, 'showtitle')
+        show_el.text = series_title or ''
+        season_el = ET.SubElement(episode, 'season')
+        season_el.text = str(season_number or 0)
+        epnum_el = ET.SubElement(episode, 'episode')
+        epnum_el.text = str(episode_number or 0)
+        # IDs - tvdb
+        if tvdb_id:
+            id_el = ET.SubElement(episode, 'id')
+            id_el.text = str(tvdb_id)
+            # also include tvdb-specific tag
+            tvdb_el = ET.SubElement(episode, 'tvdbid')
+            tvdb_el.text = str(tvdb_id)
+            # add uniqueid element for compatibility
+            unique_el = ET.SubElement(episode, 'uniqueid')
+            unique_el.set('type', 'tvdb')
+            unique_el.text = str(tvdb_id)
+        # Optional aired/plot fields could be added if available
+        if overview:
+            plot_el = ET.SubElement(episode, 'plot')
+            plot_el.text = overview
+        if aired:
+            aired_el = ET.SubElement(episode, 'aired')
+            aired_el.text = str(aired)
+        if genres:
+            if isinstance(genres, (list, tuple)):
+                for g in genres:
+                    genre_el = ET.SubElement(episode, 'genre')
+                    genre_el.text = g
+            else:
+                for g in str(genres).split(','):
+                    genre_el = ET.SubElement(episode, 'genre')
+                    genre_el.text = g.strip()
+        if actors:
+            try:
+                actors_el = ET.SubElement(episode, 'actors')
+                if isinstance(actors, (list, tuple)):
+                    for a in actors:
+                        actor_el = ET.SubElement(actors_el, 'actor')
+                        if isinstance(a, dict):
+                            name = a.get('name') or a.get('Name')
+                            role = a.get('role') or a.get('Role')
+                        else:
+                            name = str(a)
+                            role = None
+                        name_el = ET.SubElement(actor_el, 'name')
+                        name_el.text = name
+                        if role:
+                            role_el = ET.SubElement(actor_el, 'role')
+                            role_el.text = str(role)
+            except Exception:
+                pass
+        if director:
+            director_el = ET.SubElement(episode, 'director')
+            director_el.text = str(director)
+        if credits:
+            credits_el = ET.SubElement(episode, 'credits')
+            credits_el.text = str(credits)
+        tree = ET.ElementTree(episode)
+        tree.write(nfo_path, encoding='utf-8', xml_declaration=True)
+        logger.debug(f"Wrote episode NFO: {nfo_path}", extra={'emoji_type': 'debug'})
+    except Exception as e:
+        logger.debug(f"Error writing episode NFO for {dummy_path}: {e}", extra={'emoji_type': 'debug'})
+
+
+def _write_series_nfo(series_folder, title, year=None, tvdb_id=None, tmdb_id=None, overview=None, poster_url=None, imdb_id=None, tvmaze_id=None, rating=None, status=None, tags=None):
+    """Write a Sonarr-like series/tvshow NFO (tvshow.nfo) in the series folder using core.nfo utilities."""
+    try:
+        if not series_folder:
+            logger.debug("No series folder provided for series NFO write", extra={'emoji_type': 'debug'})
+            return
+        os.makedirs(series_folder, exist_ok=True)
+        meta = {
+            'title': title,
+            'rating': rating,
+            'plot': overview,
+            'id': tvdb_id,
+            'tmdb_id': tmdb_id,
+            'imdb_id': imdb_id,
+            'tvmaze_id': tvmaze_id,
+            'genres': None,
+            'tags': tags,
+            'status': status,
+            'premiered': year,
+            'studio': None,
+            'poster_url': poster_url,
+        }
+        from core.nfo import generate_series_nfo, write_nfo_to_path
+        tvshow_elem = generate_series_nfo(meta)
+        nfo_path = os.path.join(series_folder, 'tvshow.nfo')
+        write_nfo_to_path(nfo_path, tvshow_elem, overwrite=False, mtime_source=None)
+        logger.debug(f"Wrote series NFO: {nfo_path}", extra={'emoji_type': 'debug'})
+    except Exception as e:
+        logger.debug(f"Error writing series NFO for {series_folder}: {e}", extra={'emoji_type': 'debug'})
+
+
+def fetch_sonarr_series(series_id):
+    """Fetch series metadata from Sonarr by series ID. Returns a dict with common fields or None on error."""
+    try:
+        if not series_id:
+            return None
+        url = f"{settings.SONARR_URL}/series/{series_id}"
+        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        # Extract common fields
+        # attempt to extract a poster/url for use in NFO thumb tag
+        poster_url = None
+        if data.get('remotePoster'):
+            poster_url = data.get('remotePoster')
+        elif data.get('images') and isinstance(data.get('images'), list):
+            # Sonarr may provide images array with 'cover' or 'poster' types
+            for img in data.get('images'):
+                if isinstance(img, dict) and img.get('coverType') in ('poster', 'poster', 'cover'):
+                    poster_url = img.get('url') or img.get('remoteUrl')
+                    break
+            if not poster_url and data.get('images'):
+                first = data.get('images')[0]
+                if isinstance(first, dict):
+                    poster_url = first.get('url') or first.get('remoteUrl')
+
+        result = {
+            'overview': data.get('overview') or data.get('summary') or None,
+            'genres': data.get('genres') or None,
+            'premiered': data.get('firstAired') or data.get('premiered') or None,
+            'imdb_id': data.get('imdbId') or None,
+            'tvdb_id': data.get('tvdbId') or None,
+            'studio': data.get('studio') or None,
+            'actors': data.get('actors') or None,
+            'poster_url': poster_url
+        }
+        return result
+    except Exception as e:
+        logger.debug(f"Failed to fetch Sonarr series {series_id}: {e}", extra={'emoji_type': 'debug'})
         return None
 
 def update_title_status(media_type, media_id, title, status, **kwargs):
@@ -537,6 +850,43 @@ def get_episodes_for_lookahead(series_id, current_season, current_episode, looka
         logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
     
     return filtered_episodes, reached_end
+
+
+def fetch_sonarr_episodes(series_id):
+    """Fetch all episodes for a series from Sonarr and return a mapping keyed by (season, episode).
+    The returned dict contains episode metadata such as overview, title, episodeId, airDate, guestStars, directors, tvdbId, tmdbId, imdbId
+    """
+    try:
+        if not series_id:
+            return {}
+        url = f"{settings.SONARR_URL}/episode"
+        params = {'seriesId': series_id}
+        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        r.raise_for_status()
+        eps = r.json()
+        mapping = {}
+        for ep in eps:
+            s = ep.get('seasonNumber')
+            e = ep.get('episodeNumber')
+            if s is None or e is None:
+                continue
+            key = (int(s), int(e))
+            mapping[key] = {
+                'overview': ep.get('overview') or ep.get('summary') or None,
+                'title': ep.get('title') or None,
+                'episodeId': ep.get('id') or None,
+                'airDate': ep.get('airDate') or ep.get('airDateUtc') or None,
+                'guestStars': ep.get('guestStars') or None,
+                'directors': ep.get('directors') or None,
+                'tvdbId': ep.get('tvdbId') or None,
+                'tmdbId': ep.get('tmdbId') or None,
+                'imdbId': ep.get('imdbId') or None,
+            }
+        return mapping
+    except Exception as e:
+        logger.debug(f"Failed to fetch episodes for series {series_id}: {e}", extra={'emoji_type': 'debug'})
+        return {}
 
 def monitor_episodes(series_id, episode_ids, monitor=True):
     """Mark multiple episodes as monitored/unmonitored in batch"""

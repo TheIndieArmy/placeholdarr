@@ -4,7 +4,7 @@ from core.config import settings
 from core.logger import logger
 from services.plex_client import plex, build_plex_url, refresh_plex_item
 from services.jellyfin_client import build_jellyfin_url, refresh_jellyfin_item, get_jellyfin_file_path
-from services.emby_client import get_emby_file_path
+from services.emby_client import get_emby_file_path, refresh_emby_item
 from services.integrations import (
     place_dummy_file, delete_dummy_files, schedule_episode_request_update,
     schedule_movie_request_update, 
@@ -184,11 +184,26 @@ def handle_import_event(data: dict, is_4k: bool = False):
                     refresh_plex_item(parent_folder)
                 if settings.jellyfin_enabled:
                     refresh_jellyfin_item(parent_folder)
+                if settings.emby_enabled:
+                    try:
+                        refresh_emby_item(parent_folder)
+                    except Exception:
+                        logger.debug(f"Emby refresh failed for {parent_folder}", extra={'emoji_type': 'debug'})
             # Also refresh the dummy folder
             if settings.plex_enabled:
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder, "Deleted")
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(dummy_folder, "Deleted")
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {dummy_folder}", extra={'emoji_type': 'debug'})
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(dummy_folder, "Deleted")
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {dummy_folder}", extra={'emoji_type': 'debug'})
         elif 'episodes' in data and 'series' in data:
             # TV episode import handling
             series = data['series']
@@ -244,11 +259,21 @@ def handle_import_event(data: dict, is_4k: bool = False):
                     refresh_plex_item(parent_folder)
                 if settings.jellyfin_enabled:
                     refresh_jellyfin_item(parent_folder)
+                if settings.emby_enabled:
+                    try:
+                        refresh_emby_item(parent_folder)
+                    except Exception:
+                        logger.debug(f"Emby refresh failed for {parent_folder}", extra={'emoji_type': 'debug'})
             # Also refresh the dummy folder
             if settings.plex_enabled:
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder, "Deleted")
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(dummy_folder, "Deleted")
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {dummy_folder}", extra={'emoji_type': 'debug'})
     except Exception as e:
         logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
 
@@ -287,7 +312,43 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         season_number=None,
         season_folder_name=None
     )
+    # Write a series-level NFO to help Emby/Jellyfin detect the series quickly
+    try:
+        from services.integrations import _write_series_nfo, fetch_sonarr_series
+        series_meta = None
+        # If Sonarr provided a numeric series id in payload, attempt to fetch richer metadata
+        sid = series.get('id') or series.get('seriesId')
+        if sid:
+            try:
+                series_meta = fetch_sonarr_series(sid)
+            except Exception:
+                series_meta = None
+
+        # prefer series_meta values when present
+        if series_meta:
+            _write_series_nfo(
+                series_folder,
+                series_title,
+                year=series_year,
+                tvdb_id=tvdb_id,
+                tmdb_id=series_meta.get('tmdb_id') if series_meta else None,
+                overview=series_meta.get('overview'),
+                poster_url=series_meta.get('poster_url') if series_meta else None
+            )
+        else:
+            _write_series_nfo(series_folder, series_title, year=series_year, tvdb_id=tvdb_id)
+    except Exception as e:
+        logger.debug(f"Failed to write series NFO for {series_title}: {e}", extra={'emoji_type': 'debug'})
     episode_list = []
+    # If available, fetch episode-level metadata from Sonarr once
+    sonarr_episode_map = {}
+    try:
+        from services.integrations import fetch_sonarr_episodes
+        sid = series.get('id') or series.get('seriesId')
+        if sid:
+            sonarr_episode_map = fetch_sonarr_episodes(sid) or {}
+    except Exception:
+        sonarr_episode_map = {}
     for ep in episodes:
         season_num = ep.get('seasonNumber')
         episode_num = ep.get('episodeNumber')
@@ -300,13 +361,37 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         if check_episode_has_file(tvdb_id, season_num, episode_num, is_4k):
             logger.info(f"Skipping placeholder for {series_title} S{season_num}E{episode_num} (real file exists)", extra={'emoji_type': 'skip'})
             continue
+        # Prefer per-episode metadata (Sonarr) then series_meta then payload
+        ep_key = (int(season_num), int(episode_num))
+        ep_meta = sonarr_episode_map.get(ep_key, {})
+        ep_overview = ep_meta.get('overview') or (series_meta.get('overview') if series_meta and series_meta.get('overview') else (series.get('overview') or series.get('synopsis')))
+        ep_genres = series_meta.get('genres') if series_meta and series_meta.get('genres') else (series.get('genres') or series.get('genre'))
+        ep_premiered = ep_meta.get('airDate') or (series_meta.get('premiered') if series_meta and series_meta.get('premiered') else (series.get('premiered') or series.get('firstAired')))
+        ep_title_final = ep_meta.get('title') or episode_title
+        # Map Sonarr guestStars/directors into NFO fields
+        ep_actors = ep_meta.get('guestStars') or (series_meta.get('actors') if series_meta else None)
+        ep_director = None
+        if ep_meta.get('directors'):
+            if isinstance(ep_meta.get('directors'), (list, tuple)):
+                ep_director = ', '.join([d for d in ep_meta.get('directors') if d])
+            else:
+                ep_director = ep_meta.get('directors')
+
         dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
                                     library_path,
                                     season_number=season_num,
                                     episode_range=(episode_num, episode_num),
-                                    episode_title=episode_title,
+                                    episode_title=ep_title_final,
                                     folder_path=series.get('folderPath') or series.get('path'),
-                                    arr_root_folder=series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None))
+                                    arr_root_folder=series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None),
+                                    overview=ep_overview,
+                                    request_mark=False,
+                                    genres=ep_genres,
+                                    premiered=ep_premiered,
+                                    actors=ep_actors,
+                                    director=ep_director,
+                                    poster_url=series_meta.get('poster_url') if series_meta else None)
+
         if dummy_path:
             episode_updates.append((series_title, season_num, episode_num, tvdb_id))
             episode_list.append({
@@ -324,6 +409,11 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
             refresh_plex_item(series_folder)
         if settings.jellyfin_enabled:
             refresh_jellyfin_item(series_folder)
+        if settings.emby_enabled:
+            try:
+                refresh_emby_item(series_folder)
+            except Exception:
+                logger.debug(f"Emby refresh failed for {series_folder}", extra={'emoji_type': 'debug'})
     # --- Batch status update for Plex using polling utility ---
     if settings.plex_enabled and episode_list:
         threading.Thread(target=batch_poll_and_update_plex_status, args=(tvdb_id, series_title, episode_list), daemon=True).start()
@@ -375,12 +465,27 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                                       episode_range=(episode_num, episode_num),
                                       episode_title=episode_title,
                                       folder_path=folder_path,
-                                      arr_root_folder=arr_root_folder)
+                                      arr_root_folder=arr_root_folder,
+                                      overview=series.get('overview') or series.get('synopsis') or None,
+                                      request_mark=True,
+                                      genres=series.get('genres') or series.get('genre') or None,
+                                      premiered=series.get('premiered') or series.get('firstAired') or None,
+                                      poster_url=series.get('remotePoster') or (series.get('images')[0].get('url') if series.get('images') and isinstance(series.get('images'), list) else None))
         if dummy_path:
             if settings.plex_enabled:
                 refresh_plex_item(os.path.dirname(dummy_path))
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(os.path.dirname(dummy_path), "Changed")
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(os.path.dirname(dummy_path), "Changed")
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {os.path.dirname(dummy_path)}", extra={'emoji_type': 'debug'})
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(os.path.dirname(dummy_path), "Changed")
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {os.path.dirname(dummy_path)}", extra={'emoji_type': 'debug'})
         else:
             logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
         # --- NEW: Always refresh parent folder ---
@@ -390,6 +495,11 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                 refresh_plex_item(parent_folder)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(parent_folder)
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(parent_folder)
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {parent_folder}", extra={'emoji_type': 'debug'})
         schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
     logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
     return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
@@ -409,6 +519,27 @@ def handle_moviefiledelete(data: dict):
         # Create a placeholder dummy file for the deleted movie
         from services.integrations import place_dummy_file
         dummy_path = place_dummy_file('movie', title, year, tmdb_id, base_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        # Try to pass richer metadata if present
+        try:
+            poster = None
+            try:
+                poster = movie.get('remotePoster') or (movie.get('images')[0].get('url') if movie.get('images') and isinstance(movie.get('images'), list) else None)
+            except Exception:
+                poster = None
+            dummy_path = place_dummy_file(
+                'movie', title, year, tmdb_id, base_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder,
+                overview=movie.get('overview') or movie.get('synopsis') or None,
+                imdb_id=movie.get('imdbId') or movie.get('imdb') or None,
+                genres=movie.get('genres') or movie.get('genre') or None,
+                studio=movie.get('studio') or movie.get('studios') or None,
+                runtime=movie.get('runtime') or movie.get('runTime') or None,
+                premiered=movie.get('premiered') or movie.get('releaseDate') or None,
+                tagline=movie.get('tagline') or None,
+                request_mark=False,
+                poster_url=poster
+            )
+        except Exception:
+            pass
         if dummy_path:
             if settings.plex_enabled:
                 refresh_plex_item(os.path.dirname(dummy_path))
@@ -443,6 +574,11 @@ def handle_movie_delete(data: dict):
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder, "Deleted")
+            if settings.emby_enabled:
+                try:
+                    refresh_emby_item(dummy_folder, "Deleted")
+                except Exception:
+                    logger.debug(f"Emby refresh failed for {dummy_folder}", extra={'emoji_type': 'debug'})
         return JSONResponse({"status": "success", "message": "MovieDelete processed"})
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
@@ -472,13 +608,48 @@ def handle_movieadd(data: dict):
             # Use folderPath from webhook if available
             folder_path = data.get('movie', {}).get('folderPath')
             arr_root_folder = data.get('movie', {}).get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
-            dummy_path = place_dummy_file("movie", title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder)
+            # Try basic placeholder first
+            dummy_path = place_dummy_file("movie", title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder,
+                                         overview=movie.get('overview') or movie.get('synopsis') or None,
+                                         imdb_id=movie.get('imdbId') or movie.get('imdb') or None,
+                                         genres=movie.get('genres') or movie.get('genre') or None,
+                                         studio=movie.get('studio') or movie.get('studios') or None,
+                                         runtime=movie.get('runtime') or movie.get('runTime') or None,
+                                         premiered=movie.get('premiered') or movie.get('releaseDate') or None,
+                                         tagline=movie.get('tagline') or None,
+                                         request_mark=False)
+            # If available, try again including poster URL so NFOs include <thumb> tag (URL-only; no local download)
+            if not dummy_path:
+                poster = None
+                try:
+                    poster = movie.get('remotePoster') or (movie.get('images')[0].get('url') if movie.get('images') and isinstance(movie.get('images'), list) else None)
+                except Exception:
+                    poster = None
+                if poster:
+                    try:
+                        dummy_path = place_dummy_file("movie", title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder,
+                                                     overview=movie.get('overview') or movie.get('synopsis') or None,
+                                                     imdb_id=movie.get('imdbId') or movie.get('imdb') or None,
+                                                     genres=movie.get('genres') or movie.get('genre') or None,
+                                                     studio=movie.get('studio') or movie.get('studios') or None,
+                                                     runtime=movie.get('runtime') or movie.get('runTime') or None,
+                                                     premiered=movie.get('premiered') or movie.get('releaseDate') or None,
+                                                     tagline=movie.get('tagline') or None,
+                                                     request_mark=False,
+                                                     poster_url=poster)
+                    except Exception:
+                        pass
             if dummy_path:
                 logger.info(f"Created placeholder file for movie '{title}'", extra={'emoji_type': 'create'})
                 if settings.plex_enabled:
                     refresh_plex_item(os.path.dirname(dummy_path))
                 if settings.jellyfin_enabled:
                     refresh_jellyfin_item(os.path.dirname(dummy_path))
+                if settings.emby_enabled:
+                    try:
+                        refresh_emby_item(os.path.dirname(dummy_path))
+                    except Exception:
+                        logger.debug(f"Emby refresh failed for {os.path.dirname(dummy_path)}", extra={'emoji_type': 'debug'})
                 schedule_movie_request_update
             else:
                 logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
@@ -506,6 +677,19 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
         from services.integrations import delete_dummy_files
         delete_dummy_files('tv', title, year, tvdb_id, base_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
+        # Remove series-level NFO if present
+        try:
+            from services.integrations import _write_series_nfo
+            import os
+            nfo_path = os.path.join(base_path, f"{sanitize_filename(title)} ({year}) {{tvdb-{tvdb_id}}}", 'tvshow.nfo')
+            if os.path.exists(nfo_path):
+                try:
+                    os.remove(nfo_path)
+                    logger.debug(f"Removed series NFO: {nfo_path}", extra={'emoji_type': 'debug'})
+                except Exception as e:
+                    logger.debug(f"Failed to remove series NFO {nfo_path}: {e}", extra={'emoji_type': 'debug'})
+        except Exception:
+            pass
         # Optionally refresh Plex/Jellyfin at the dummy folder location
         if base_path:
             import os
@@ -573,8 +757,28 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
         logger.debug(f"Is placeholder check result: {is_placeholder}", extra={'emoji_type': 'debug'})
         
         if media_type == "movie":
-            tmdb_id = media.get("ids", {}).get("tmdb") or data.get("Provider_tmdb")
-            imdb_id = media.get("ids", {}).get("imdb") or data.get("Provider_imdb")
+            # Prefer media.ids, then top-level Provider_tmdb/Provider_imdb, then Item.ProviderIds (case variants)
+            tmdb_id = None
+            imdb_id = None
+            try:
+                tmdb_id = (media.get("ids", {}) or {}).get("tmdb")
+            except Exception:
+                tmdb_id = None
+            try:
+                imdb_id = (media.get("ids", {}) or {}).get("imdb")
+            except Exception:
+                imdb_id = None
+            if not tmdb_id:
+                tmdb_id = data.get("Provider_tmdb") or data.get('Provider_TMDB') or None
+            if not imdb_id:
+                imdb_id = data.get("Provider_imdb") or data.get('Provider_IMDB') or None
+            # Last resort: check Item.ProviderIds (case-insensitive keys like 'Tmdb' or 'tmdb')
+            if (not tmdb_id or not imdb_id) and isinstance(data.get('Item'), dict):
+                prov = data.get('Item', {}).get('ProviderIds') or {}
+                if not tmdb_id:
+                    tmdb_id = prov.get('Tmdb') or prov.get('tmdb') or prov.get('TMDB') or tmdb_id
+                if not imdb_id:
+                    imdb_id = prov.get('Imdb') or prov.get('imdb') or prov.get('IMDB') or imdb_id
             year = media.get("year") or data.get("Year", "")
             
             logger.info(f"Processing movie playback for {title}", extra={'emoji_type': 'process'})

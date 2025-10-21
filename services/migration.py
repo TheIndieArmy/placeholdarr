@@ -81,6 +81,12 @@ def migrate_placeholders():
                         refresh_plex_item(str(parent))
                     if settings.jellyfin_enabled:
                         refresh_jellyfin_item(str(parent), "Deleted")
+                    if settings.emby_enabled:
+                        try:
+                            from services.emby_client import refresh_emby_item
+                            refresh_emby_item(str(parent), "Deleted")
+                        except Exception:
+                            logger.debug(f"Emby refresh failed for {str(parent)}", extra={'emoji_type': 'debug'})
                 except Exception as e:
                     logger.error(f"Error removing stale dummy at {path}: {e}")
 

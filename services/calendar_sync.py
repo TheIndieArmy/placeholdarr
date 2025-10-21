@@ -159,6 +159,12 @@ def sync_calendar_episodes():
             if settings.jellyfin_enabled:
                 logger.info("Refreshing Jellyfin TV library folder for batch placeholder update after all placeholders...", extra={'emoji_type': 'refresh'})
                 refresh_jellyfin_item(settings.TV_LIBRARY_FOLDER)
+                if settings.emby_enabled:
+                    try:
+                        from services.emby_client import refresh_emby_item
+                        refresh_emby_item(settings.TV_LIBRARY_FOLDER)
+                    except Exception:
+                        logger.debug(f"Emby refresh failed for {settings.TV_LIBRARY_FOLDER}", extra={'emoji_type': 'debug'})
                 logger.info("Waiting 30 seconds for Jellyfin to scan new placeholders...", extra={'emoji_type': 'refresh'})
                 time.sleep(30)
 
@@ -268,6 +274,12 @@ def sync_calendar_episodes():
                     resolved_folder = resolve_final_folder(folder, eps[0].get('arr_root_folder'), 'tv')
                     logger.info(f"Refreshing Jellyfin folder for batch placeholder update: {resolved_folder}", extra={'emoji_type': 'refresh'})
                     refresh_jellyfin_item(resolved_folder)
+                    if settings.emby_enabled:
+                        try:
+                            from services.emby_client import refresh_emby_item
+                            refresh_emby_item(resolved_folder)
+                        except Exception:
+                            logger.debug(f"Emby refresh failed for {resolved_folder}", extra={'emoji_type': 'debug'})
                     logger.info("Waiting 10 seconds for Jellyfin to scan new placeholders in folder...", extra={'emoji_type': 'refresh'})
                     time.sleep(10)
                     # Batch update episode statuses for Jellyfin
@@ -347,7 +359,9 @@ def sync_calendar_episodes():
                 "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER,
                 dummy_file_override=dummy_file,
                 folder_path=folder_path,
-                arr_root_folder=arr_root_folder
+                arr_root_folder=arr_root_folder,
+                overview=movie.get('overview') or movie.get('synopsis') or None,
+                request_mark=(status == 'Request')
             )
             movies_to_update.append({
                 "title": title,
@@ -377,6 +391,12 @@ def sync_calendar_episodes():
             logger.info("Refreshing Jellyfin TV and Movie library folders for batch placeholder update...", extra={'emoji_type': 'refresh'})
             for folder in plex_folders:
                 refresh_jellyfin_item(folder)
+                if settings.emby_enabled:
+                    try:
+                        from services.emby_client import refresh_emby_item
+                        refresh_emby_item(folder)
+                    except Exception:
+                        logger.debug(f"Emby refresh failed for {folder}", extra={'emoji_type': 'debug'})
             logger.info("Waiting 30 seconds for Jellyfin to scan new placeholders...", extra={'emoji_type': 'refresh'})
             time.sleep(30)
     except Exception as e:
@@ -470,7 +490,9 @@ def batch_create_placeholders(episodes):
             episode_title=ep["title"],
             dummy_file_override=dummy_file,
             folder_path=ep["folder_path"],
-            arr_root_folder=ep["arr_root_folder"]
+            arr_root_folder=ep["arr_root_folder"],
+            overview=ep.get('overview') or ep.get('summary') or None,
+            request_mark=(ep.get('status') == 'Request')
         )
         if dummy_path:
             logger.info(f"Created/updated placeholder file: {dummy_path}", extra={'emoji_type': 'create'})

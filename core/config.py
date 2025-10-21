@@ -85,6 +85,7 @@ class Settings(BaseSettings):
 
     ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").split('#')[0].strip().lower() == "true"
     ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_EMBY: bool = os.getenv("ENABLE_EMBY", "false").split('#')[0].strip().lower() == "true"
 
     # Add a method to clean string values
     @validator('*', pre=True)
