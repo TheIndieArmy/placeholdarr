@@ -111,24 +111,26 @@ def is_4k_request(file_path: str, source_port: int = None) -> bool:
 def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
     """Get appropriate *arr configuration based on media type and quality"""
     if media_type == "movie":
+        base = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
         return {
-            "url": settings.RADARR_4K_URL if is_4k else settings.RADARR_URL,
+            "url": normalize_arr_base(base) if base else normalize_arr_base(settings.RADARR_URL),
             "api_key": settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY,
             "library_folder": settings.MOVIE_LIBRARY_4K_FOLDER if is_4k else settings.MOVIE_LIBRARY_FOLDER,
             "section_id": settings.PLEX_MOVIE_SECTION_ID,
             "id_type": "tmdbId",
             "queue_id_field": "movieId",
-            "search_type": "movie"  # Added this
+            "search_type": "movie"
         }
     else:  # TV
+        base = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
         return {
-            "url": settings.SONARR_4K_URL if is_4k else settings.SONARR_URL,
+            "url": normalize_arr_base(base) if base else normalize_arr_base(settings.SONARR_URL),
             "api_key": settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY,
             "library_folder": settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER,
             "section_id": settings.PLEX_TV_SECTION_ID,
             "id_type": "tvdbId",
             "queue_id_field": "episodeId",
-            "search_type": media_type  # This will be 'episode', 'season', or 'series'
+            "search_type": media_type
         }
 
 def resolve_final_folder(media_type, title=None, year=None, media_id=None, season_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None, payload=None):

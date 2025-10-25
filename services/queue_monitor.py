@@ -5,6 +5,7 @@ from core.logger import logger
 from core.config import settings
 from services.integrations import get_sonarr_queue, get_radarr_queue, strip_status_markers
 from datetime import datetime, timezone, timedelta
+from services.utils import get_arr_config, join_endpoint
 
 # Global registry to track monitored media
 MONITORED_MEDIA = {}
@@ -655,12 +656,10 @@ def get_radarr_history(movie_id, is_4k=False):
         List of history records
     """
     try:
-        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-        
+        cfg = get_arr_config('movie', is_4k)
         params = {'movieId': movie_id, 'pageSize': 10}
-        url = f"{base_url}/history"
-        headers = {'X-Api-Key': api_key}
+        url = join_endpoint(cfg['url'], 'history')
+        headers = {'X-Api-Key': cfg['api_key']}
         
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
@@ -684,11 +683,9 @@ def check_movie_has_file(radarr_id, is_4k=False):
         True if the movie has a file, False otherwise
     """
     try:
-        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-        
-        url = f"{base_url}/movie/{radarr_id}"
-        headers = {'X-Api-Key': api_key}
+        cfg = get_arr_config('movie', is_4k)
+        url = join_endpoint(cfg['url'], f"movie/{radarr_id}")
+        headers = {'X-Api-Key': cfg['api_key']}
         
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -726,12 +723,10 @@ def get_sonarr_episode_history(tvdb_id, season_number, episode_number, is_4k=Fal
             return []
             
         # Get history for this episode
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
+        cfg = get_arr_config('tv', is_4k)
         params = {'episodeId': episode_id, 'pageSize': 10}
-        url = f"{base_url}/history"
-        headers = {'X-Api-Key': api_key}
+        url = join_endpoint(cfg['url'], 'history')
+        headers = {'X-Api-Key': cfg['api_key']}
         
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
@@ -764,12 +759,10 @@ def check_episode_has_file(tvdb_id, season_number, episode_number, is_4k=False):
             return False
         
         # Then get episode details
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        url = f"{base_url}/episode"
+        cfg = get_arr_config('tv', is_4k)
+        url = join_endpoint(cfg['url'], 'episode')
         params = {'seriesId': series_id}
-        headers = {'X-Api-Key': api_key}
+        headers = {'X-Api-Key': cfg['api_key']}
         
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
@@ -806,11 +799,9 @@ def get_sonarr_series_id_by_tvdb(tvdb_id, is_4k=False):
     
     # Not in cache, need to fetch
     try:
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        url = f"{base_url}/series"
-        headers = {'X-Api-Key': api_key}
+        cfg = get_arr_config('tv', is_4k)
+        url = join_endpoint(cfg['url'], 'series')
+        headers = {'X-Api-Key': cfg['api_key']}
         
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -845,12 +836,10 @@ def get_sonarr_episode_id(series_id, season_number, episode_number, is_4k=False)
         Episode ID or None if not found
     """
     try:
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
+        cfg = get_arr_config('tv', is_4k)
         params = {'seriesId': series_id}
-        url = f"{base_url}/episode"
-        headers = {'X-Api-Key': api_key}
+        url = join_endpoint(cfg['url'], 'episode')
+        headers = {'X-Api-Key': cfg['api_key']}
         
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
@@ -886,10 +875,11 @@ def _check_downloads_status():
         
         # Check Sonarr standard queue
         sonarr_queue = {}
-        if settings.SONARR_URL and settings.SONARR_API_KEY:
+        cfg_tv = get_arr_config('tv', False)
+        if cfg_tv['url'] and cfg_tv['api_key']:
             try:
-                sonarr_url = f"{settings.SONARR_URL}/queue"
-                headers = {'X-Api-Key': settings.SONARR_API_KEY}
+                sonarr_url = join_endpoint(cfg_tv['url'], 'queue')
+                headers = {'X-Api-Key': cfg_tv['api_key']}
                 response = requests.get(sonarr_url, headers=headers)
                 if response.status_code == 200:
                     queue_data = response.json()
@@ -918,10 +908,11 @@ def _check_downloads_status():
         
         # Check Sonarr 4K queue if configured
         sonarr_4k_queue = {}
-        if settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY:
+        cfg_tv_4k = get_arr_config('tv', True)
+        if cfg_tv_4k['url'] and cfg_tv_4k['api_key']:
             try:
-                sonarr_url = f"{settings.SONARR_4K_URL}/queue"
-                headers = {'X-Api-Key': settings.SONARR_4K_API_KEY}
+                sonarr_url = join_endpoint(cfg_tv_4k['url'], 'queue')
+                headers = {'X-Api-Key': cfg_tv_4k['api_key']}
                 response = requests.get(sonarr_url, headers=headers)
                 if response.status_code == 200:
                     queue_data = response.json()
@@ -995,10 +986,11 @@ def _check_downloads_status():
             
         # Check Radarr standard queue
         radarr_queue = {}
-        if settings.RADARR_URL and settings.RADARR_API_KEY:
+        cfg_movie = get_arr_config('movie', False)
+        if cfg_movie['url'] and cfg_movie['api_key']:
             try:
-                radarr_url = f"{settings.RADARR_URL}/queue"
-                headers = {'X-Api-Key': settings.RADARR_API_KEY}
+                radarr_url = join_endpoint(cfg_movie['url'], 'queue')
+                headers = {'X-Api-Key': cfg_movie['api_key']}
                 response = requests.get(radarr_url, headers=headers)
                 if response.status_code == 200:
                     queue_data = response.json()
@@ -1034,10 +1026,11 @@ def _check_downloads_status():
         
         # Check Radarr 4K queue if configured
         radarr_4k_queue = {}
-        if settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY:
+        cfg_movie_4k = get_arr_config('movie', True)
+        if cfg_movie_4k['url'] and cfg_movie_4k['api_key']:
             try:
-                radarr_url = f"{settings.RADARR_4K_URL}/queue"
-                headers = {'X-Api-Key': settings.RADARR_4K_API_KEY}
+                radarr_url = join_endpoint(cfg_movie_4k['url'], 'queue')
+                headers = {'X-Api-Key': cfg_movie_4k['api_key']}
                 response = requests.get(radarr_url, headers=headers)
                 if response.status_code == 200:
                     queue_data = response.json()

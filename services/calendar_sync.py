@@ -9,7 +9,7 @@ from core.logger import logger
 from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update, update_title_status
 from services.plex_client import refresh_plex_item
 from services.jellyfin_client import refresh_jellyfin_item
-from services.utils import sanitize_filename, is_same_file, resolve_final_folder
+from services.utils import sanitize_filename, is_same_file, resolve_final_folder, get_arr_config, join_endpoint
 
 # --- Scheduler/Timer ---
 
@@ -58,9 +58,10 @@ def sync_calendar_episodes():
 
     # --- Sonarr: TV Episodes ---
     try:
-        sonarr_url = settings.SONARR_URL
-        sonarr_api_key = settings.SONARR_API_KEY
-        calendar_url = f"{sonarr_url}/calendar"
+        arr_cfg = get_arr_config("tv")
+        sonarr_url = arr_cfg["url"]
+        sonarr_api_key = arr_cfg["api_key"]
+        calendar_url = join_endpoint(sonarr_url, "calendar")
         # Extend window to include previous 2 days
         calendar_start = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         params = {
@@ -83,7 +84,7 @@ def sync_calendar_episodes():
                 series_id = ep.get('seriesId')
                 series = None
                 if series_id:
-                    s_resp = requests.get(f"{sonarr_url}/series/{series_id}", headers=headers)
+                    s_resp = requests.get(join_endpoint(sonarr_url, f"series/{series_id}"), headers=headers)
                     if s_resp.status_code == 200:
                         series = s_resp.json()
             if not series:
@@ -307,9 +308,10 @@ def sync_calendar_episodes():
 
     # --- Radarr: Movies ---
     try:
-        radarr_url = settings.RADARR_URL
-        radarr_api_key = settings.RADARR_API_KEY
-        calendar_url = f"{radarr_url}/calendar"
+        arr_cfg = get_arr_config("movie")
+        radarr_url = arr_cfg["url"]
+        radarr_api_key = arr_cfg["api_key"]
+        calendar_url = join_endpoint(radarr_url, "calendar")
         params = {
             "start": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "end": window_end.strftime("%Y-%m-%dT%H:%M:%SZ")

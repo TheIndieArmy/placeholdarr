@@ -2,6 +2,7 @@ import os
 import requests
 import time
 from pathlib import Path
+from services.utils import get_arr_config, join_endpoint
 from fastapi.responses import JSONResponse
 
 from core.config import settings
@@ -24,10 +25,10 @@ from services.jellyfin_client import refresh_jellyfin_item
 
 def migrate_placeholders():
     arr_configs = [
-        (settings.SONARR_URL, settings.SONARR_API_KEY, 'tv', handle_seriesadd),
-        (settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY, 'tv', handle_seriesadd),  # tv4k treated as tv
-        (settings.RADARR_URL, settings.RADARR_API_KEY, 'movie', handle_movieadd),
-        (settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY, 'movie', handle_movieadd),  # movie4k treated as movie
+        (get_arr_config('tv')["url"], get_arr_config('tv')["api_key"], 'tv', handle_seriesadd),
+        (get_arr_config('tv', True)["url"], get_arr_config('tv', True)["api_key"], 'tv', handle_seriesadd),  # tv4k treated as tv
+        (get_arr_config('movie')["url"], get_arr_config('movie')["api_key"], 'movie', handle_movieadd),
+        (get_arr_config('movie', True)["url"], get_arr_config('movie', True)["api_key"], 'movie', handle_movieadd),  # movie4k treated as movie
     ]
 
     for url, api_key, media_type, handler in arr_configs:
@@ -36,24 +37,25 @@ def migrate_placeholders():
             continue
         hdr = {'X-Api-Key': api_key}
         # series endpoints use /series, movie endpoints use /movie
-        list_ep = '/series' if media_type == 'tv' else '/movie'
+        list_ep = 'series' if media_type == 'tv' else 'movie'
 
         # 1) Fetch tags to find dummy_tag_id
+        dummy_tag_id = None
         try:
-            tag_resp = requests.get(f"{url}/tag", headers=hdr)
+            tag_resp = requests.get(join_endpoint(url, "tag"), headers=hdr)
             tag_resp.raise_for_status()
             tags_list = tag_resp.json()
             dummy_tag_id = next((t['id'] for t in tags_list if t.get('label', '').lower() == 'dummy'), None)
-            if dummy_tag_id is None:
-                logger.info(f"No 'dummy' tag defined for {media_type} at {url}; skipping")
-                continue
         except Exception as e:
             logger.error(f"Failed fetching tags from {url}: {e}")
+        if dummy_tag_id is None:
+            logger.info(f"No 'dummy' tag defined for {media_type} at {url}; skipping")
             continue
 
         # 2) Fetch items
+        items = []
         try:
-            resp = requests.get(f"{url}{list_ep}", headers=hdr)
+            resp = requests.get(join_endpoint(url, list_ep), headers=hdr)
             resp.raise_for_status()
             items = resp.json()
             logger.info(f"Fetched {len(items)} {media_type} items from {url}")
@@ -94,7 +96,7 @@ def migrate_placeholders():
                 # b) Create placeholder
                 if media_type == 'tv':
                     eps_resp = requests.get(
-                        f"{url}/episode", params={'seriesId': item['id']}, headers=hdr
+                        join_endpoint(url, "episode"), params={'seriesId': item['id']}, headers=hdr
                     )
                     eps_resp.raise_for_status()
                     handler({'series': item, 'episodes': eps_resp.json()}, is_4k=(api_key == settings.SONARR_4K_API_KEY))

@@ -398,8 +398,9 @@ def fetch_sonarr_series(series_id):
     try:
         if not series_id:
             return None
-        url = f"{settings.SONARR_URL}/series/{series_id}"
-        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        sonarr_cfg = get_arr_config('tv', False)
+        url = join_endpoint(sonarr_cfg['url'], f'series/{series_id}')
+        headers = {'X-Api-Key': sonarr_cfg['api_key']}
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -563,7 +564,9 @@ def schedule_movie_request_update(movie_title, media_id, year=None, delay=10, re
 # Radarr integration functions
 def trigger_radarr_search(movie_id, movie_title=None):
     try:
-        response = requests.post(f"{settings.RADARR_URL}/command", json={'name': 'MoviesSearch', 'movieIds': [movie_id]}, headers={'X-Api-Key': settings.RADARR_API_KEY})
+        radarr_cfg = get_arr_config('movie', False)
+        cmd_url = join_endpoint(radarr_cfg['url'], 'command')
+        response = requests.post(cmd_url, json={'name': 'MoviesSearch', 'movieIds': [movie_id]}, headers={'X-Api-Key': radarr_cfg['api_key']})
         response.raise_for_status()
         logger.debug(f"Radarr search triggered for movie id {movie_id}", extra={'emoji_type': 'debug'})
         if movie_title:
@@ -583,7 +586,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
         logger.error(f"Invalid TMDB ID received: {tmdb_id}", extra={'emoji_type': 'error'})
         return False
     try:
-        movies_response = requests.get(f"{config['url']}/movie", headers={'X-Api-Key': config['api_key']})
+        movies_response = requests.get(join_endpoint(config['url'], 'movie'), headers={'X-Api-Key': config['api_key']})
         movies_response.raise_for_status()
         try:
             movies = movies_response.json()
@@ -603,7 +606,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
             logger.info(f"Movie already exists in Radarr: {movie_data['title']}", extra={'emoji_type': 'info'})
             if not movie_data.get("monitored", False):
                 movie_data["monitored"] = True
-                put_response = requests.put(f"{config['url']}/movie/{movie_data['id']}", json=movie_data, headers={'X-Api-Key': config['api_key']})
+                put_response = requests.put(join_endpoint(config['url'], f"movie/{movie_data['id']}"), json=movie_data, headers={'X-Api-Key': config['api_key']})
                 put_response.raise_for_status()
                 logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'monitored'})
             now = time.time()
@@ -615,7 +618,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
             # Do not schedule further timer retries if TMDB ID is invalid
             return movie_data['id']
 
-        lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
+        lookup = requests.get(join_endpoint(config['url'], 'movie/lookup'), params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
         lookup.raise_for_status()
         try:
             lookup_json = lookup.json()
@@ -645,7 +648,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
                 'monitor': 'movieOnly'
             }
         }
-        response = requests.post(f"{config['url']}/movie", json=payload, headers={'X-Api-Key': config['api_key']})
+        response = requests.post(join_endpoint(config['url'], 'movie'), json=payload, headers={'X-Api-Key': config['api_key']})
         response.raise_for_status()
         logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
         # Safely parse response JSON for the added movie ID
@@ -743,7 +746,7 @@ def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, serie
     """Trigger a search in Sonarr for episodes"""
     try:
         # Get Sonarr configuration
-        config = get_arr_config('sonarr', is_4k)
+        config = get_arr_config('tv', is_4k)
         url = config.get('url')
         api_key = config.get('api_key')
         
@@ -780,7 +783,7 @@ def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, serie
             log_message = f"Triggered series search for {series_title}"
             
         # Send search command to Sonarr
-        r = requests.post(f"{url}/command", json=data, headers=headers)
+        r = requests.post(join_endpoint(url, 'command'), json=data, headers=headers)
         r.raise_for_status()
         
         # Log single message for the search operation
@@ -796,10 +799,11 @@ def trigger_sonarr_episode_search(episode_id):
     """Trigger a specific episode search in Sonarr"""
     try:
         episode_id_int = int(episode_id)
+        cfg = get_arr_config('tv', False)
         response = requests.post(
-            f"{settings.SONARR_URL}/command",
+            join_endpoint(cfg['url'], 'command'),
             json={'name': 'EpisodeSearch', 'episodeIds': [episode_id_int]},
-            headers={'X-Api-Key': settings.SONARR_API_KEY}
+            headers={'X-Api-Key': cfg['api_key']}
         )
         response.raise_for_status()
         logger.debug(f"Sonarr episode search triggered for episode id {episode_id_int}", extra={'emoji_type': 'debug'})
@@ -816,10 +820,11 @@ def get_episodes_for_lookahead(series_id, current_season, current_episode, looka
                 extra={'emoji_type': 'debug'})
     
     # Get all episodes for the series from Sonarr
-    url = f"{settings.SONARR_URL}/episode"
+    sonarr_cfg = get_arr_config('tv', False)
+    url = join_endpoint(sonarr_cfg['url'], 'episode')
     params = {'seriesId': series_id}
-    headers = {'X-Api-Key': settings.SONARR_API_KEY}
-    
+    headers = {'X-Api-Key': sonarr_cfg['api_key']}
+
     try:
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
@@ -918,9 +923,10 @@ def fetch_sonarr_episodes(series_id):
     try:
         if not series_id:
             return {}
-        url = f"{settings.SONARR_URL}/episode"
+        sonarr_cfg = get_arr_config('tv', False)
+        url = join_endpoint(sonarr_cfg['url'], 'episode')
         params = {'seriesId': series_id}
-        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+        headers = {'X-Api-Key': sonarr_cfg['api_key']}
         r = requests.get(url, params=params, headers=headers, timeout=15)
         r.raise_for_status()
         eps = r.json()
@@ -951,27 +957,28 @@ def monitor_episodes(series_id, episode_ids, monitor=True):
     """Mark multiple episodes as monitored/unmonitored in batch"""
     try:
         # Get episode details first to preserve other properties
-        url = f"{settings.SONARR_URL}/episode"
+        sonarr_cfg = get_arr_config('tv', False)
+        url = join_endpoint(sonarr_cfg['url'], 'episode')
         params = {'seriesId': series_id}
-        headers = {'X-Api-Key': settings.SONARR_API_KEY}
-        
+        headers = {'X-Api-Key': sonarr_cfg['api_key']}
+
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
         episodes = response.json()
-        
+
         # Filter to requested episodes and update monitored status
         to_update = [
             {**ep, 'monitored': monitor}
             for ep in episodes if ep['id'] in episode_ids
         ]
-        
+
         # Update episodes in batch
         if to_update:
             for ep in to_update:
-                update_url = f"{settings.SONARR_URL}/episode/{ep['id']}"
+                update_url = join_endpoint(sonarr_cfg['url'], f"episode/{ep['id']}")
                 update_response = requests.put(update_url, json=ep, headers=headers)
                 update_response.raise_for_status()
-                
+
             logger.info(f"Marked {len(to_update)} episodes as {'monitored' if monitor else 'unmonitored'}", 
                       extra={'emoji_type': 'monitored'})
             return True
@@ -984,16 +991,17 @@ def mark_series_monitored(series_id, mark_seasons=False, include_specials=False)
     """Mark series as monitored, with options to control season monitoring"""
     try:
         # Get series details
-        url = f"{settings.SONARR_URL}/series/{series_id}"
-        headers = {'X-Api-Key': settings.SONARR_API_KEY}
-        
+        sonarr_cfg = get_arr_config('tv', False)
+        url = join_endpoint(sonarr_cfg['url'], f'series/{series_id}')
+        headers = {'X-Api-Key': sonarr_cfg['api_key']}
+
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         series = response.json()
-        
+
         # Always mark series as monitored
         series['monitored'] = True
-        
+
         # Optionally mark seasons as monitored
         if mark_seasons:
             for season in series.get('seasons', []):
@@ -1001,11 +1009,11 @@ def mark_series_monitored(series_id, mark_seasons=False, include_specials=False)
                 # Mark normal seasons, only mark specials if requested
                 if season_number > 0 or (season_number == 0 and include_specials):
                     season['monitored'] = True
-        
+
         # Update the series
         update_response = requests.put(url, json=series, headers=headers)
         update_response.raise_for_status()
-        
+
         log_message = f"Marked series '{series.get('title')}' as monitored"
         if mark_seasons:
             log_message += " with all seasons"
@@ -1021,26 +1029,27 @@ def monitor_season(series_id, season_number):
     """Mark a specific season as monitored"""
     try:
         # Get series details
-        url = f"{settings.SONARR_URL}/series/{series_id}"
-        headers = {'X-Api-Key': settings.SONARR_API_KEY}
-        
+        sonarr_cfg = get_arr_config('tv', False)
+        url = join_endpoint(sonarr_cfg['url'], f'series/{series_id}')
+        headers = {'X-Api-Key': sonarr_cfg['api_key']}
+
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         series = response.json()
-        
+
         # Mark series as monitored
         series['monitored'] = True
-        
+
         # Mark the specific season as monitored
         for season in series.get('seasons', []):
             if season.get('seasonNumber') == int(season_number):
                 season['monitored'] = True
                 break
-        
+
         # Update the series
         update_response = requests.put(url, json=series, headers=headers)
         update_response.raise_for_status()
-        
+
         logger.info(f"Marked season {season_number} of '{series.get('title')}' as monitored", 
                   extra={'emoji_type': 'monitored'})
         return True
@@ -1066,19 +1075,14 @@ def update_plex_title(rating_key, base_title, status):
 def get_sonarr_queue(is_4k=False):
     """Get current queue items from Sonarr"""
     try:
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
-        
-        url = f"{base_url}/queue"
+        cfg = get_arr_config('tv', is_4k)
+        url = join_endpoint(cfg['url'], 'queue')
         params = {'pageSize': 50}
-        headers = {'X-Api-Key': api_key}
-        
+        headers = {'X-Api-Key': cfg['api_key']}
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
-        
         data = response.json()
         return data.get('records', [])
-    
     except Exception as e:
         logger.error(f"Error fetching Sonarr queue: {e}", extra={'emoji_type': 'error'})
         return []
@@ -1086,19 +1090,14 @@ def get_sonarr_queue(is_4k=False):
 def get_radarr_queue(is_4k=False):
     """Get current queue items from Radarr"""
     try:
-        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-        
-        url = f"{base_url}/queue"
+        cfg = get_arr_config('movie', is_4k)
+        url = join_endpoint(cfg['url'], 'queue')
         params = {'pageSize': 50}
-        headers = {'X-Api-Key': api_key}
-        
+        headers = {'X-Api-Key': cfg['api_key']}
         response = requests.get(url, params=params, headers=headers)
         response.raise_for_status()
-        
         data = response.json()
         return data.get('records', [])
-    
     except Exception as e:
         logger.error(f"Error fetching Radarr queue: {e}", extra={'emoji_type': 'error'})
         return []
@@ -1113,16 +1112,16 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
     """
     try:
         # Determine which Sonarr instance to use
-        sonarr_url = settings.SONARR_URL_4K if is_4k else settings.SONARR_URL
-        sonarr_api_key = settings.SONARR_API_KEY_4K if is_4k else settings.SONARR_API_KEY
-        headers = {"X-Api-Key": sonarr_api_key}
+        cfg = get_arr_config('tv', is_4k)
+        sonarr_url = cfg['url']
+        headers = {"X-Api-Key": cfg['api_key']}
         
         # --- Always resolve folder path for placeholder creation/deletion ---
         folder_path = file_path or None
         arr_root_folder = getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
 
         # Get all series from Sonarr for efficient matching
-        series_url = f"{sonarr_url}/series"
+        series_url = join_endpoint(sonarr_url, 'series')
         series_response = requests.get(series_url, headers=headers)
         
         if series_response.status_code != 200:

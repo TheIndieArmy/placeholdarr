@@ -15,7 +15,7 @@ from services.integrations import (
 from services.queue_monitor import add_to_monitor
 from services.utils import (
     strip_movie_status, sanitize_filename, extract_episode_title, 
-    is_4k_request, strip_status_markers
+    is_4k_request, strip_status_markers, get_arr_config, join_endpoint
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
@@ -290,9 +290,10 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
     if not episodes:
         series_id = series.get('id')
         if series_id:
-            r = requests.get(f"{settings.SONARR_URL}/episode",
-                             params={'seriesId': series_id},
-                             headers={'X-Api-Key': settings.SONARR_API_KEY})
+            sonarr_cfg = get_arr_config('tv', is_4k)
+            url = join_endpoint(sonarr_cfg['url'], 'episode')
+            headers = {'X-Api-Key': sonarr_cfg.get('api_key') or settings.SONARR_API_KEY}
+            r = requests.get(url, params={'seriesId': series_id}, headers=headers)
             r.raise_for_status()
             episodes = r.json()
         else:
@@ -886,10 +887,11 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
                         })
             
             elif play_mode == "season":
-                url = f"{settings.SONARR_URL}/episode"
+                sonarr_cfg = get_arr_config('tv', is_4k)
+                url = join_endpoint(sonarr_cfg['url'], 'episode')
                 params = {'seriesId': series_id}
-                headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                
+                headers = {'X-Api-Key': sonarr_cfg.get('api_key') or settings.SONARR_API_KEY}
+
                 try:
                     response = requests.get(url, params=params, headers=headers)
                     response.raise_for_status()
@@ -939,9 +941,10 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
                         
                     if search_success:
                         # Get all episodes for this season
-                        url = f"{settings.SONARR_URL}/episode"
+                        sonarr_cfg = get_arr_config('tv', is_4k)
+                        url = join_endpoint(sonarr_cfg['url'], 'episode')
                         params = {'seriesId': series_id}
-                        headers = {'X-Api-Key': settings.SONARR_API_KEY}
+                        headers = {'X-Api-Key': sonarr_cfg.get('api_key') or settings.SONARR_API_KEY}
                         try:
                             response = requests.get(url, params=params, headers=headers)
                             response.raise_for_status()
@@ -982,12 +985,13 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
                     if search_success:
                         # Fallback to get episodes and add to batch monitoring
                         try:
-                            url = f"{settings.SONARR_URL}/episode"
+                            sonarr_cfg = get_arr_config('tv', is_4k)
+                            url = join_endpoint(sonarr_cfg['url'], 'episode')
                             params = {'seriesId': series_id}
-                            headers = {'X-Api-Key': settings.SONARR_API_KEY}
+                            headers = {'X-Api-Key': sonarr_cfg.get('api_key') or settings.SONARR_API_KEY}
                             response = requests.get(url, params=params, headers=headers)
                             response.raise_for_status()
-                            
+
                             # Get episodes for this season
                             all_episodes = response.json()
                             season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == int(season_number)]
@@ -1012,10 +1016,11 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
             
             else:  # series mode
                 # First check if all episodes already have files
-                url = f"{settings.SONARR_URL}/episode"
+                sonarr_cfg = get_arr_config('tv', is_4k)
+                url = join_endpoint(sonarr_cfg['url'], 'episode')
                 params = {'seriesId': series_id}
-                headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                
+                headers = {'X-Api-Key': sonarr_cfg.get('api_key') or settings.SONARR_API_KEY}
+
                 try:
                     response = requests.get(url, params=params, headers=headers)
                     response.raise_for_status()
@@ -1072,6 +1077,9 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
                     if search_success:
                         # Fall back to getting all episodes
                         try:
+                            sonarr_cfg = get_arr_config('tv', is_4k)
+                            url = join_endpoint(sonarr_cfg['url'], 'episode')
+                            headers = {'X-Api-Key': sonarr_cfg.get('api_key') or settings.SONARR_API_KEY}
                             response = requests.get(url, params=params, headers=headers)
                             response.raise_for_status()
                             all_episodes = response.json()

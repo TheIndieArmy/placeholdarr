@@ -43,12 +43,21 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
 
 logger = logging.getLogger(__name__)
 logger.setLevel(settings.LOG_LEVEL)
-
+# Always log to stdout (Docker-friendly)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-
-file_handler = logging.FileHandler('media_handler.log')
-file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-
 logger.addHandler(console_handler)
-logger.addHandler(file_handler)
+
+# Try to also log to a file if possible. Use LOG_FILE env var to override; default
+# is the historic 'media_handler.log'. If opening the file fails (permissions, read-only
+# filesystem), we fall back to stdout only and emit a warning instead of crashing.
+log_file = os.getenv('LOG_FILE', 'media_handler.log')
+file_handler = None
+try:
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(file_handler)
+except Exception as e:
+    # Use the console logger to report this so startup doesn't crash for users who run
+    # the container as a non-root user or haven't mounted a writable path.
+    logger.warning(f"Log file '{log_file}' not writable, continuing with stdout only: {e}", extra={'emoji_type': 'warning'})
