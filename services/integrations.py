@@ -4,7 +4,8 @@ from core.nfo import generate_movie_nfo, generate_episode_nfo, write_nfo_for_fil
 from core.config import settings
 from core.logger import logger
 from services.utils import (
-    resolve_final_folder, sanitize_filename, strip_status_markers, get_arr_config
+    resolve_final_folder, sanitize_filename, strip_status_markers, get_arr_config,
+    normalize_arr_base, join_endpoint
 )
 from services.plex_client import plex
 import hashlib
@@ -584,7 +585,14 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
     try:
         movies_response = requests.get(f"{config['url']}/movie", headers={'X-Api-Key': config['api_key']})
         movies_response.raise_for_status()
-        movies = movies_response.json()
+        try:
+            movies = movies_response.json()
+        except ValueError:
+            logger.error(
+                f"Failed to parse JSON from Radarr /movie: status={movies_response.status_code} content-type={movies_response.headers.get('Content-Type')} body={movies_response.text[:200]}",
+                extra={'emoji_type': 'error'}
+            )
+            return False
         if not isinstance(movies, list):
             logger.error(f"Expected list from Radarr /movie endpoint but got {type(movies)}", extra={'emoji_type': 'error'})
             return False
@@ -609,7 +617,21 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
 
         lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
         lookup.raise_for_status()
-        movie_data = lookup.json()[0]
+        try:
+            lookup_json = lookup.json()
+            movie_data = lookup_json[0]
+        except ValueError:
+            logger.error(
+                f"Failed to parse JSON from Radarr /movie/lookup: status={lookup.status_code} content-type={lookup.headers.get('Content-Type')} body={lookup.text[:200]}",
+                extra={'emoji_type': 'error'}
+            )
+            return False
+        except (IndexError, TypeError) as e:
+            logger.error(
+                f"Unexpected lookup response structure: {e} - body={lookup.text[:200]}",
+                extra={'emoji_type': 'error'}
+            )
+            return False
         payload = {
             'title': movie_data['title'],
             'qualityProfileId': 7,
@@ -626,10 +648,22 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
         response = requests.post(f"{config['url']}/movie", json=payload, headers={'X-Api-Key': config['api_key']})
         response.raise_for_status()
         logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
+        # Safely parse response JSON for the added movie ID
+        try:
+            resp_json = response.json()
+            added_id = resp_json.get('id')
+        except ValueError:
+            logger.error(
+                f"Failed to parse JSON from Radarr /movie add response: status={response.status_code} content-type={response.headers.get('Content-Type')} body={response.text[:200]}",
+                extra={'emoji_type': 'error'}
+            )
+            return False
+
         now = time.time()
         if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
             LAST_RADARR_SEARCH[rating_key] = now
-            trigger_radarr_search(response.json()['id'], movie_data['title'])
+            if added_id:
+                trigger_radarr_search(added_id, movie_data['title'])
         else:
             logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
         return True
@@ -1209,7 +1243,14 @@ def check_arr_webhook(arr_name, arr_url, api_key, webhook_url):
         headers = {'X-Api-Key': api_key}
         response = requests.get(f"{arr_url}/notification", headers=headers, timeout=10)
         response.raise_for_status()
-        notifications = response.json()
+        try:
+            notifications = response.json()
+        except ValueError:
+            logger.error(
+                f"Failed to parse JSON from {arr_name} /notification: status={response.status_code} content-type={response.headers.get('Content-Type')} body={response.text[:200]}",
+                extra={'emoji_type': 'error'}
+            )
+            return False
         found = False
         for n in notifications:
             if n.get('implementation', '').lower() == 'webhook':
@@ -1223,7 +1264,17 @@ def check_arr_webhook(arr_name, arr_url, api_key, webhook_url):
             logger.info(f"{arr_name} webhook for Placeholdarr is configured.", extra={'emoji_type': 'success'})
             return True
         else:
-            logger.warning(f"{arr_name} webhook for Placeholdarr is NOT configured! Please add a webhook in {arr_name} Connect settings pointing to {webhook_url}.", extra={'emoji_type': 'warning'})
+            # Provide clearer guidance for reverse-proxy setups
+            if webhook_url:
+                logger.warning(
+                    f"{arr_name} webhook for Placeholdarr is NOT configured. Please add a webhook in {arr_name} Connect settings pointing to: {webhook_url}. If you're using a reverse proxy, set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook (example: https://placeholdarr.example.com/webhook).",
+                    extra={'emoji_type': 'warning'}
+                )
+            else:
+                logger.warning(
+                    f"{arr_name} webhook for Placeholdarr is NOT configured. Placeholdarr couldn't determine a webhook URL from your settings. Please set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook URL (example: https://placeholdarr.example.com/webhook) and restart.",
+                    extra={'emoji_type': 'warning'}
+                )
             return False
     except Exception as e:
         logger.error(f"Failed to check {arr_name} webhook configuration: {e}", extra={'emoji_type': 'error'})
@@ -1252,27 +1303,53 @@ def check_all_arr_webhooks():
     elif arr_urls:
         import urllib.parse
         parsed = urllib.parse.urlparse(arr_urls[0])
+        scheme = parsed.scheme or 'http'
         host = parsed.hostname
-        scheme = parsed.scheme
-        port = os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', 8001)
-        webhook_url = f"{scheme}://{host}:{port}/webhook"
+        # Fallback to localhost when hostname can't be parsed
+        if not host:
+            host = 'localhost'
+        # Handle IPv6 addresses for display
+        if ':' in host and not host.startswith('['):
+            host_display = f"[{host}]"
+        else:
+            host_display = host
+        port_env = os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', None)
+        try:
+            port_int = int(port_env) if port_env else None
+        except Exception:
+            port_int = None
+        # Only include port when it's non-standard for the scheme
+        if port_int and not ((scheme == 'http' and port_int == 80) or (scheme == 'https' and port_int == 443)):
+            webhook_url = f"{scheme}://{host_display}:{port_int}/webhook"
+        else:
+            webhook_url = f"{scheme}://{host_display}/webhook"
+        # Sanity-check: if URL looks malformed, don't use it
+        if '::' in webhook_url or host_display in (None, ''):
+            webhook_url = None
     else:
-        port = os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', 8001)
-        webhook_url = f"http://localhost:{port}/webhook"
+        port_env = os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', None)
+        try:
+            port_int = int(port_env) if port_env else None
+        except Exception:
+            port_int = None
+        if port_int:
+            webhook_url = f"http://localhost:{port_int}/webhook"
+        else:
+            webhook_url = "http://localhost/webhook"
 
     arrs = []
     # Radarr
     if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
-        arrs.append(('Radarr', settings.RADARR_URL.rstrip('/'), settings.RADARR_API_KEY))
+        arrs.append(('Radarr', normalize_arr_base(settings.RADARR_URL), settings.RADARR_API_KEY))
     # Radarr 4K
     if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None) and settings.RADARR_4K_URL.strip():
-        arrs.append(('Radarr 4K', settings.RADARR_4K_URL.rstrip('/'), settings.RADARR_4K_API_KEY))
+        arrs.append(('Radarr 4K', normalize_arr_base(settings.RADARR_4K_URL), settings.RADARR_4K_API_KEY))
     # Sonarr
     if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
-        arrs.append(('Sonarr', settings.SONARR_URL.rstrip('/'), settings.SONARR_API_KEY))
+        arrs.append(('Sonarr', normalize_arr_base(settings.SONARR_URL), settings.SONARR_API_KEY))
     # Sonarr 4K
     if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None) and settings.SONARR_4K_URL.strip():
-        arrs.append(('Sonarr 4K', settings.SONARR_4K_URL.rstrip('/'), settings.SONARR_4K_API_KEY))
+        arrs.append(('Sonarr 4K', normalize_arr_base(settings.SONARR_4K_URL), settings.SONARR_4K_API_KEY))
 
     if not arrs:
         logger.error("No *arr services are configured.", extra={'emoji_type': 'error'})

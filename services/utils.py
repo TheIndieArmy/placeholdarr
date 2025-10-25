@@ -1,6 +1,49 @@
 import re
 import os
 from core.config import settings
+import urllib.parse
+
+
+def normalize_arr_base(url: str) -> str:
+    """Normalize an *arr base URL so callers can safely append endpoints.
+
+    - Strips trailing slashes
+    - Preserves an existing /api or /api/v3 path if present
+    - Returns a scheme://netloc[/api...] string
+    """
+    if not url:
+        return url
+    parsed = urllib.parse.urlparse(url)
+    scheme = parsed.scheme or 'http'
+    netloc = parsed.netloc
+    path = (parsed.path or '').rstrip('/')
+
+    # If the input was something like 'host/path' without scheme, try reparsing
+    if not netloc and parsed.path and '//' not in url:
+        # try adding scheme so parsing yields netloc
+        parsed2 = urllib.parse.urlparse(f"{scheme}://{url}")
+        netloc = parsed2.netloc
+        path = (parsed2.path or '').rstrip('/')
+
+    # Keep any /api prefix (case-insensitive)
+    api_path = ''
+    if path:
+        lower = path.lower()
+        api_idx = lower.find('/api')
+        if api_idx >= 0:
+            api_path = path[api_idx:]
+
+    base = f"{scheme}://{netloc}"
+    if api_path:
+        base = f"{base}{api_path}"
+    return base.rstrip('/')
+
+
+def join_endpoint(base: str, endpoint: str) -> str:
+    """Safely join base and endpoint ensuring a single slash."""
+    if not base:
+        return endpoint
+    return base.rstrip('/') + '/' + endpoint.lstrip('/')
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', name).strip()
