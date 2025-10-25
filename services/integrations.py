@@ -1239,46 +1239,74 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
         return False
 
 def check_arr_webhook(arr_name, arr_url, api_key, webhook_url):
+    import urllib.parse
     try:
         headers = {'X-Api-Key': api_key}
         response = requests.get(f"{arr_url}/notification", headers=headers, timeout=10)
         response.raise_for_status()
-        try:
-            notifications = response.json()
-        except ValueError:
-            logger.error(
-                f"Failed to parse JSON from {arr_name} /notification: status={response.status_code} content-type={response.headers.get('Content-Type')} body={response.text[:200]}",
-                extra={'emoji_type': 'error'}
-            )
-            return False
-        found = False
-        for n in notifications:
-            if n.get('implementation', '').lower() == 'webhook':
-                for field in n.get('fields', []):
-                    if field.get('name') == 'url' and webhook_url in str(field.get('value', '')):
-                        found = True
-                        break
-            if found:
-                break
-        if found:
-            logger.info(f"{arr_name} webhook for Placeholdarr is configured.", extra={'emoji_type': 'success'})
-            return True
-        else:
-            # Provide clearer guidance for reverse-proxy setups
-            if webhook_url:
-                logger.warning(
-                    f"{arr_name} webhook for Placeholdarr is NOT configured. Please add a webhook in {arr_name} Connect settings pointing to: {webhook_url}. If you're using a reverse proxy, set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook (example: https://placeholdarr.example.com/webhook).",
-                    extra={'emoji_type': 'warning'}
-                )
-            else:
-                logger.warning(
-                    f"{arr_name} webhook for Placeholdarr is NOT configured. Placeholdarr couldn't determine a webhook URL from your settings. Please set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook URL (example: https://placeholdarr.example.com/webhook) and restart.",
-                    extra={'emoji_type': 'warning'}
-                )
-            return False
     except Exception as e:
-        logger.error(f"Failed to check {arr_name} webhook configuration: {e}", extra={'emoji_type': 'error'})
+        # Could not contact the *arr API - show a hint for debugging
+        logger.error(f"Failed to call {arr_name} /notification: {e}", extra={'emoji_type': 'error'})
+        # Provide a safe curl hint (no API key printed)
+        try:
+            hint_base = arr_url.rstrip('/')
+            logger.debug(f"Hint: verify {arr_name} is reachable from Placeholdarr host. Try: curl -H 'X-Api-Key: <api_key>' -i {hint_base}/notification", extra={'emoji_type': 'debug'})
+        except Exception:
+            pass
         return False
+
+    try:
+        notifications = response.json()
+    except ValueError:
+        logger.error(
+            f"Failed to parse JSON from {arr_name} /notification: status={response.status_code} content-type={response.headers.get('Content-Type')} body={response.text[:200]}",
+            extra={'emoji_type': 'error'}
+        )
+        logger.debug(f"Hint: try: curl -H 'X-Api-Key: <api_key>' -i {arr_url.rstrip('/')}/notification", extra={'emoji_type': 'debug'})
+        return False
+
+    found = False
+    for n in notifications:
+        if n.get('implementation', '').lower() == 'webhook':
+            for field in n.get('fields', []):
+                if field.get('name') == 'url' and webhook_url and webhook_url in str(field.get('value', '')):
+                    found = True
+                    break
+        if found:
+            break
+
+    if found:
+        logger.info(f"{arr_name} webhook for Placeholdarr is configured.", extra={'emoji_type': 'success'})
+        return True
+
+    # Not found - tailor message based on local vs remote intent
+    parsed_arr = urllib.parse.urlparse(arr_url or '')
+    arr_host = (parsed_arr.hostname or '').lower()
+    parsed_wh = urllib.parse.urlparse(webhook_url or '') if webhook_url else None
+    wh_host = (parsed_wh.hostname or '').lower() if parsed_wh else ''
+    local_hosts = ('localhost', '127.0.0.1', '::1')
+    is_local = (arr_host in local_hosts) or (wh_host in local_hosts) or (not webhook_url and arr_host in local_hosts)
+
+    if is_local:
+        # Localhost deployments: provide INFO-level guidance
+        target = webhook_url or f"http://localhost:{os.getenv('PLACEHOLDARR_PORT') or getattr(settings, 'PLACEHOLDARR_PORT', 8001)}/webhook"
+        logger.info(
+            f"{arr_name} webhook for Placeholdarr is NOT configured. Detected local setup; add a webhook in {arr_name} Connect pointing to: {target}. If {arr_name} is remote instead, set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook (example: https://placeholdarr.example.com/webhook).",
+            extra={'emoji_type': 'info'}
+        )
+    else:
+        # Reverse-proxy/public deployments: warn and recommend explicit override
+        if webhook_url:
+            logger.warning(
+                f"{arr_name} webhook for Placeholdarr is NOT configured. Please add a webhook in {arr_name} Connect settings pointing to: {webhook_url}. If you're using a reverse proxy, set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook (example: https://placeholdarr.example.com/webhook).",
+                extra={'emoji_type': 'warning'}
+            )
+        else:
+            logger.warning(
+                f"{arr_name} webhook for Placeholdarr is NOT configured. Placeholdarr couldn't determine a webhook URL from your settings. Please set PLACEHOLDARR_WEBHOOK_URL to the externally reachable webhook URL (example: https://placeholdarr.example.com/webhook) and restart.",
+                extra={'emoji_type': 'warning'}
+            )
+    return False
 
 
 def check_all_arr_webhooks():
