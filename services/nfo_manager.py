@@ -118,9 +118,17 @@ def create_series_nfo(series: Series, request_status: str = None) -> str:
     if series.year:
         ET.SubElement(root, "year").text = str(series.year)
     if series.premiered:
-        ET.SubElement(root, "premiered").text = series.premiered.isoformat()
+        # Handle both string and datetime objects
+        if hasattr(series.premiered, 'isoformat'):
+            ET.SubElement(root, "premiered").text = series.premiered.isoformat()
+        else:
+            ET.SubElement(root, "premiered").text = str(series.premiered)
     if series.ended:
-        ET.SubElement(root, "enddate").text = series.ended.isoformat()
+        # Handle both string and datetime objects
+        if hasattr(series.ended, 'isoformat'):
+            ET.SubElement(root, "enddate").text = series.ended.isoformat()
+        else:
+            ET.SubElement(root, "enddate").text = str(series.ended)
     
     # IDs  
     if series.tvdbid:
@@ -242,7 +250,11 @@ def create_episode_nfo(episode: Episode, request_status: str = None) -> str:
     if episode.rating:
         ET.SubElement(root, "mpaa").text = episode.rating
     if episode.air_date:
-        ET.SubElement(root, "aired").text = episode.air_date.isoformat()
+        # Handle both string and datetime objects
+        if hasattr(episode.air_date, 'isoformat'):
+            ET.SubElement(root, "aired").text = episode.air_date.isoformat()
+        else:
+            ET.SubElement(root, "aired").text = str(episode.air_date)
     
     # IDs
     if episode.tvdbid:

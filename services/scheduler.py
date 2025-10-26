@@ -5,11 +5,12 @@ from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Union, Type
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func
 from services.postgres.db import get_session, db_session_scope, db_operation_with_retry, db_batch_scope
 from services.postgres.models import Movie, Series, Season, Episode, SubFlow
 from services.flow_manager import flow_manager
 from core.config import settings
+from core.handler_logging import end_handler_logging, get_handler_session_for_entity
 from importlib import import_module
 from sqlalchemy.exc import SQLAlchemyError
 from core.logger import logger
@@ -74,6 +75,9 @@ class ActionScheduler:
     def poll_and_enqueue(self):
         logger.verbose(f"Polling for subflows - action: {self.action}", extra={'emoji_type': 'search'})
         
+        # First, check for stalled progressions due to scheduler congestion
+        self._detect_and_fix_stalled_progressions()
+        
         def get_pending_subflows():
             with db_session_scope() as session:
                 # Process a batch of SubFlows per poll to increase throughput.
@@ -83,7 +87,7 @@ class ActionScheduler:
                     .with_for_update(skip_locked=True)
                     .filter(
                         SubFlow.status.in_(["PENDING", "FAILED"]),
-                        SubFlow.retry_count < self.max_retries,
+                        func.coalesce(SubFlow.retry_count, 0) < self.max_retries,
                         SubFlow.steps.isnot(None),
                         SubFlow.steps != '',
                         SubFlow.action == self.action,
@@ -110,14 +114,10 @@ class ActionScheduler:
 
                     next_func_name = steps[sf.step_index]
                     logger.verbose(f"Next step for subflow {sf.id}: {next_func_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
-                    sf.status = 'QUEUED'
+                    # Don't mark as QUEUED yet - keep as PENDING until job actually starts
                     schedule_plan.append((sf.id, next_func_name, sf.episode_id))
 
-                # Bulk update status to QUEUED in single commit
-                session.bulk_update_mappings(
-                    SubFlow,
-                    [{"id": sf.id, "status": "QUEUED"} for sf in sfs if sf.step_index < len(sf.steps.split(','))]
-                )
+                # Don't bulk update status to QUEUED - leave as PENDING until job execution starts
                 
                 return schedule_plan
 
@@ -148,7 +148,7 @@ class ActionScheduler:
         try:
             failed = session.query(SubFlow).filter(
                 SubFlow.status == 'FAILED',
-                SubFlow.retry_count >= self.max_retries
+                func.coalesce(SubFlow.retry_count, 0) >= self.max_retries
             ).all()
             
             logger.verbose(f"Found {len(failed)} failed subflows to retry for action '{self.action}'", extra={'emoji_type': 'processing'})
@@ -157,7 +157,7 @@ class ActionScheduler:
             for sf in failed:
                 try:
                     logger.verbose(f"Retrying subflow {sf.id} (was failed with {sf.retry_count} retries)", extra={'emoji_type': 'retry'})
-                    sf.status = 'QUEUED'
+                    sf.status = 'PENDING'  # Reset to PENDING, will be QUEUED when execution starts
                     sf.retry_count = 0
                     session.add(sf)
                     
@@ -216,6 +216,319 @@ class ActionScheduler:
         finally:
             session.close()
 
+    def _detect_and_fix_stalled_progressions(self):
+        """
+        Detect and fix ALL types of stalled progressions across ALL actions and steps.
+        This is a comprehensive solution that prevents entities from getting stuck at any stage.
+        
+        Stalls can happen when:
+        1. SubFlows complete but fail to advance to next step due to scheduler congestion
+        2. All SubFlows for an entity complete but entity advancement fails
+        3. Entities have mismatched status vs their actual SubFlow completions
+        """
+        
+        try:
+            with db_session_scope() as session:
+                stall_fixes = 0
+                # --- Detect stalled QUEUED subflows ---
+                # Get all SubFlows with status QUEUED for this action
+                queued_subflows = session.query(SubFlow).filter(
+                    SubFlow.action == self.action,
+                    SubFlow.status == 'QUEUED'
+                ).all()
+
+                # Get all job IDs from the scheduler
+                scheduler_job_ids = set(job.id for job in self.scheduler.get_jobs())
+
+                # For each QUEUED SubFlow, check if a corresponding job exists in the scheduler
+                import datetime
+                stalled_queued = []
+                for sf in queued_subflows:
+                    job_id_prefix = f"{self.action}_{sf.id}_"
+                    found = any(jid.startswith(job_id_prefix) for jid in scheduler_job_ids)
+                    # Check if QUEUED for more than 5 minutes
+                    time_threshold = datetime.datetime.now() - datetime.timedelta(minutes=5)
+                    if sf.created_time and sf.created_time < time_threshold:
+                        # Mark as FAILED and remove job if exists
+                        sf.status = 'FAILED'
+                        sf.error_message = 'SubFlow QUEUED for over 5 minutes, marked as FAILED by scheduler stall detection.'
+                        session.add(sf)
+                        stall_fixes += 1
+                        logger.warning(f"SubFlow {sf.id} QUEUED for over 5 minutes, marking as FAILED", extra={'emoji_type': 'warning'})
+                        # Remove job from scheduler if present
+                        for job_id in scheduler_job_ids:
+                            if job_id.startswith(job_id_prefix):
+                                self.scheduler.remove_job(job_id)
+                                logger.info(f"Removed stalled job {job_id} from scheduler", extra={'emoji_type': 'repair'})
+                    elif not found:
+                        stalled_queued.append(sf)
+
+                if stalled_queued:
+                    logger.warning(f"Detected {len(stalled_queued)} stalled QUEUED subflows for action '{self.action}' (QUEUED in DB but not in scheduler)", extra={'emoji_type': 'warning'})
+                    for sf in stalled_queued:
+                        logger.warning(f"Stalled QUEUED SubFlow: id={sf.id}, entity={{'movie_id': sf.movie_id, 'series_id': sf.series_id, 'episode_id': sf.episode_id}}, step_index={sf.step_index}", extra={'emoji_type': 'warning'})
+                        # Optionally, reset status to PENDING for retry
+                        sf.status = 'PENDING'
+                        session.add(sf)
+                        stall_fixes += 1
+                else:
+                    logger.verbose(f"No stalled QUEUED subflows detected for action '{self.action}'", extra={'emoji_type': 'debug'})
+                # 1. Find SubFlows that completed all steps but didn't trigger entity advancement
+                completed_subflows = session.query(SubFlow).filter(
+                    SubFlow.action == self.action,
+                    SubFlow.status == 'DONE'
+                ).all()
+                
+                logger.verbose(f"Checking {len(completed_subflows)} completed SubFlows for stalled entity advancement", extra={'emoji_type': 'debug'})
+                
+                # Group by entity to check if all SubFlows are done for each entity
+                entities_to_check = {}
+                for sf in completed_subflows:
+                    # Determine entity type and ID
+                    if sf.movie_id is not None:
+                        entity_key = ('Movie', sf.movie_id)
+                    elif sf.series_id is not None and sf.episode_id is None:
+                        entity_key = ('Series', sf.series_id) 
+                    elif sf.episode_id is not None:
+                        entity_key = ('Episode', sf.episode_id)
+                    else:
+                        continue
+                        
+                    if entity_key not in entities_to_check:
+                        entities_to_check[entity_key] = []
+                    entities_to_check[entity_key].append(sf)
+                
+                # Check each entity to see if it needs advancement
+                for (entity_type, entity_id), entity_subflows in entities_to_check.items():
+                    try:
+                        # Get the entity model class
+                        if entity_type == 'Movie':
+                            from services.postgres.models import Movie
+                            entity_model = Movie
+                        elif entity_type == 'Series':
+                            from services.postgres.models import Series
+                            entity_model = Series
+                        elif entity_type == 'Episode':
+                            from services.postgres.models import Episode
+                            entity_model = Episode
+                        else:
+                            continue
+                            
+                        # Check if entity exists and get its current status
+                        entity = session.query(entity_model).get(entity_id)
+                        if not entity:
+                            continue
+                            
+                        # Find ALL SubFlows for this entity and action (including pending/failed)
+                        if entity_type == 'Movie':
+                            all_subflows = session.query(SubFlow).filter(
+                                SubFlow.movie_id == entity_id,
+                                SubFlow.action == self.action,
+                                SubFlow.status != 'CANCELLED'
+                            ).all()
+                        elif entity_type == 'Series':
+                            all_subflows = session.query(SubFlow).filter(
+                                SubFlow.series_id == entity_id,
+                                SubFlow.episode_id.is_(None),  # Series-level SubFlows only
+                                SubFlow.action == self.action,
+                                SubFlow.status != 'CANCELLED'
+                            ).all()
+                        elif entity_type == 'Episode':
+                            all_subflows = session.query(SubFlow).filter(
+                                SubFlow.episode_id == entity_id,
+                                SubFlow.action == self.action,
+                                SubFlow.status != 'CANCELLED'
+                            ).all()
+                        else:
+                            continue
+                            
+                        # Check if ALL SubFlows are complete
+                        pending_subflows = [sf for sf in all_subflows if sf.status in ['PENDING', 'QUEUED', 'FAILED']]
+                        
+                        if not pending_subflows:
+                            # All SubFlows are DONE - entity should be advanced
+                            logger.verbose(f"All SubFlows complete for {entity_type} {entity_id}, checking if entity needs advancement", extra={'emoji_type': 'debug'})
+                            
+                            # Check if entity is still in a processing state when it should be advanced
+                            # CRITICAL FIX: Only advance if the entity's current action matches this scheduler's action
+                            # This prevents infinite loops where completed entities get re-advanced by wrong schedulers
+                            # Note: Removed QUEUED from check since entities in QUEUED are actively executing
+                            if (hasattr(entity, 'status') and entity.status in ['PENDING'] and
+                                hasattr(entity, 'action') and entity.action == self.action):
+                                logger.info(f"Detected stalled {entity_type} {entity_id} - all SubFlows done for action '{self.action}' but entity status is {entity.status}", extra={'emoji_type': 'repair'})
+                                
+                                # Try to advance the entity to next flow stage
+                                try:
+                                    self._advance_entity(entity_id, entity_model)
+                                    stall_fixes += 1
+                                    logger.info(f"Fixed stalled {entity_type} {entity_id} by advancing to next stage", extra={'emoji_type': 'success'})
+                                except Exception as advance_error:
+                                    logger.warning(f"Failed to advance stalled {entity_type} {entity_id}: {advance_error}", extra={'emoji_type': 'warning'})
+                            elif hasattr(entity, 'action') and entity.action != self.action:
+                                logger.verbose(f"{entity_type} {entity_id} has completed SubFlows for action '{self.action}' but entity is now on action '{entity.action}' - no advancement needed", extra={'emoji_type': 'debug'})
+                            else:
+                                logger.verbose(f"{entity_type} {entity_id} has status {entity.status if hasattr(entity, 'status') else 'unknown'} - no advancement needed", extra={'emoji_type': 'debug'})
+                        else:
+                            # Entity has active SubFlows - it will advance naturally when they complete
+                            active_subflows = [sf for sf in pending_subflows if sf.status in ['PENDING', 'QUEUED']]
+                            if active_subflows:
+                                logger.verbose(f"{entity_type} {entity_id} has {len(active_subflows)} active SubFlows - will advance naturally when they complete", extra={'emoji_type': 'debug'})
+                            
+                            # Some SubFlows are still pending - check for stuck SubFlows that should have been processed
+                            for pending_sf in pending_subflows:
+                                # Check if this SubFlow has been stuck for too long (e.g., more than 5 minutes)
+                                import datetime
+                                time_threshold = datetime.datetime.now() - datetime.timedelta(minutes=5)
+                                
+                                if pending_sf.created_time and pending_sf.created_time < time_threshold:
+                                    if pending_sf.status == 'FAILED' and (pending_sf.retry_count or 0) >= self.max_retries:
+                                        # Reset failed SubFlow for retry
+                                        logger.info(f"Resetting stuck failed SubFlow {pending_sf.id} for {entity_type} {entity_id}", extra={'emoji_type': 'repair'})
+                                        pending_sf.status = 'PENDING'
+                                        pending_sf.retry_count = 0
+                                        pending_sf.error_message = None
+                                        session.add(pending_sf)
+                                        stall_fixes += 1
+                                    elif pending_sf.status == 'PENDING':
+                                        # SubFlow has been pending too long - might be overlooked by scheduler
+                                        logger.verbose(f"SubFlow {pending_sf.id} has been PENDING for over 5 minutes - will be picked up in next poll", extra={'emoji_type': 'info'})
+                                        
+                    except Exception as entity_error:
+                        logger.warning(f"Error checking {entity_type} {entity_id} for stalls: {entity_error}", extra={'emoji_type': 'warning'})
+                
+                # 2. Look for entities that should have SubFlows but don't have any
+                # This handles cases where SubFlow creation failed but entity is marked as PENDING/QUEUED
+                if self.model:
+                    try:
+                        # Find entities in PENDING state with no SubFlows (truly stalled)
+                        # Note: Exclude QUEUED entities since they're actively being processed
+                        if hasattr(self.model, 'status'):
+                            entities_without_subflows = session.query(self.model).filter(
+                                self.model.status == 'PENDING',  # Only PENDING, not QUEUED (QUEUED means actively processing)
+                                hasattr(self.model, 'action') and self.model.action == self.action  # Only entities for this action
+                            ).all()
+                            
+                            for entity in entities_without_subflows:
+                                # Check if this entity has any active SubFlows for current action
+                                if self.model.__name__ == 'Movie':
+                                    existing_active_subflows = session.query(SubFlow).filter(
+                                        SubFlow.movie_id == entity.id,
+                                        SubFlow.action == self.action,
+                                        SubFlow.status.in_(['PENDING', 'QUEUED'])  # Only check for active SubFlows
+                                    ).count()
+                                elif self.model.__name__ == 'Series':
+                                    existing_active_subflows = session.query(SubFlow).filter(
+                                        SubFlow.series_id == entity.id,
+                                        SubFlow.action == self.action,
+                                        SubFlow.status.in_(['PENDING', 'QUEUED'])
+                                    ).count()
+                                elif self.model.__name__ == 'Episode':
+                                    existing_active_subflows = session.query(SubFlow).filter(
+                                        SubFlow.episode_id == entity.id,
+                                        SubFlow.action == self.action,
+                                        SubFlow.status.in_(['PENDING', 'QUEUED'])
+                                    ).count()
+                                else:
+                                    existing_active_subflows = 1  # Skip unknown models
+                                    
+                                if existing_active_subflows == 0:
+                                    # Check if entity is not at the final step of the flow
+                                    try:
+                                        current_step = entity.current_step_name if hasattr(entity, 'current_step_name') else None
+                                        next_entry = flow_manager.next_entry(self.action, current_step) if current_step else flow_manager.get_initial(self.action)
+                                        
+                                        if next_entry is not None:
+                                            # Entity is not at final step and has no active SubFlows - truly stalled
+                                            logger.info(f"Detected {self.model.__name__} {entity.id} in PENDING state with no active SubFlows (current_step: {current_step}) - re-enqueueing", extra={'emoji_type': 'repair'})
+                                            
+                                            # Re-enqueue the entity to create missing SubFlows
+                                            try:
+                                                result = self.enqueue(entity)
+                                                if result:
+                                                    stall_fixes += 1
+                                                    logger.info(f"Re-enqueued stalled {self.model.__name__} {entity.id}", extra={'emoji_type': 'success'})
+                                            except Exception as enqueue_error:
+                                                logger.warning(f"Failed to re-enqueue {self.model.__name__} {entity.id}: {enqueue_error}", extra={'emoji_type': 'warning'})
+                                        else:
+                                            # Entity is at final step - no need to re-enqueue
+                                            logger.verbose(f"{self.model.__name__} {entity.id} is PENDING but at final step (current_step: {current_step}) - no re-enqueue needed", extra={'emoji_type': 'debug'})
+                                    except Exception as flow_check_error:
+                                        logger.warning(f"Failed to check flow status for {self.model.__name__} {entity.id}: {flow_check_error}", extra={'emoji_type': 'warning'})
+                                else:
+                                    # Entity has active SubFlows - check if they're on the correct step
+                                    current_step = entity.current_step_name if hasattr(entity, 'current_step_name') else None
+                                    
+                                    if current_step:
+                                        # Get the active SubFlows to check their steps
+                                        if self.model.__name__ == 'Movie':
+                                            active_subflows = session.query(SubFlow).filter(
+                                                SubFlow.movie_id == entity.id,
+                                                SubFlow.action == self.action,
+                                                SubFlow.status.in_(['PENDING', 'QUEUED'])
+                                            ).all()
+                                        elif self.model.__name__ == 'Series':
+                                            active_subflows = session.query(SubFlow).filter(
+                                                SubFlow.series_id == entity.id,
+                                                SubFlow.action == self.action,
+                                                SubFlow.status.in_(['PENDING', 'QUEUED'])
+                                            ).all()
+                                        elif self.model.__name__ == 'Episode':
+                                            active_subflows = session.query(SubFlow).filter(
+                                                SubFlow.episode_id == entity.id,
+                                                SubFlow.action == self.action,
+                                                SubFlow.status.in_(['PENDING', 'QUEUED'])
+                                            ).all()
+                                        else:
+                                            active_subflows = []
+                                        
+                                        # Check if any SubFlow is working on the expected step
+                                        correct_step_subflows = []
+                                        for sf in active_subflows:
+                                            sf_steps = sf.steps.split(',') if sf.steps else []
+                                            if sf.step_index < len(sf_steps):
+                                                current_sf_step = sf_steps[sf.step_index]
+                                                if current_sf_step == current_step:
+                                                    correct_step_subflows.append(sf)
+                                        
+                                        if correct_step_subflows:
+                                            logger.verbose(f"{self.model.__name__} {entity.id} has {len(correct_step_subflows)} SubFlows correctly working on step '{current_step}' - will advance naturally", extra={'emoji_type': 'debug'})
+                                        else:
+                                            # SubFlows exist but none are on the correct step - potential stall
+                                            logger.warning(f"{self.model.__name__} {entity.id} has {existing_active_subflows} active SubFlows but none are on expected step '{current_step}' - checking for step mismatch", extra={'emoji_type': 'warning'})
+                                            
+                                            # Log what steps the SubFlows are actually on
+                                            for sf in active_subflows:
+                                                sf_steps = sf.steps.split(',') if sf.steps else []
+                                                actual_step = sf_steps[sf.step_index] if sf.step_index < len(sf_steps) else 'unknown'
+                                                logger.verbose(f"  SubFlow {sf.id}: step_index={sf.step_index}, actual_step='{actual_step}', expected='{current_step}'", extra={'emoji_type': 'debug'})
+                                            
+                                            # This could indicate a step synchronization issue - consider re-enqueueing
+                                            try:
+                                                next_entry = flow_manager.next_entry(self.action, current_step)
+                                                if next_entry is not None:
+                                                    logger.info(f"Step mismatch detected for {self.model.__name__} {entity.id} - re-enqueueing to sync steps", extra={'emoji_type': 'repair'})
+                                                    result = self.enqueue(entity)
+                                                    if result:
+                                                        stall_fixes += 1
+                                                        logger.info(f"Re-enqueued {self.model.__name__} {entity.id} due to step mismatch", extra={'emoji_type': 'success'})
+                                            except Exception as step_sync_error:
+                                                logger.warning(f"Failed to fix step mismatch for {self.model.__name__} {entity.id}: {step_sync_error}", extra={'emoji_type': 'warning'})
+                                    else:
+                                        logger.verbose(f"{self.model.__name__} {entity.id} has {existing_active_subflows} active SubFlows (no current_step_name set) - will advance naturally", extra={'emoji_type': 'debug'})
+                                        
+                    except Exception as model_error:
+                        logger.warning(f"Error checking {self.model.__name__} entities for missing SubFlows: {model_error}", extra={'emoji_type': 'warning'})
+                
+                # Commit all stall fixes
+                if stall_fixes > 0:
+                    session.commit()
+                    logger.info(f"Fixed {stall_fixes} stalled progressions for action '{self.action}'", extra={'emoji_type': 'success'})
+                else:
+                    logger.verbose(f"No stalled progressions detected for action '{self.action}'", extra={'emoji_type': 'debug'})
+                        
+        except Exception as e:
+            logger.error(f"Error detecting stalled progressions for action '{self.action}': {e}", extra={'emoji_type': 'error'})
+
     def enqueue(self, obj): 
         """
         Enqueue an object for processing.
@@ -256,65 +569,65 @@ class ActionScheduler:
                 if not ent:
                     logger.warning(f"No {self.model.__name__} found with ID {obj_id}", extra={'emoji_type': 'warning'})
                     return None
-                    
+
+                # Always cancel previous action subflows for this entity if action is changing
+                if not hasattr(ent, 'action') or ent.action != self.action:
+                    logger.info(f"Entity {self.model.__name__} {obj_id} action changed to '{self.action}' - cancelling previous action subflows", extra={'emoji_type': 'repair'})
+                    ent.action = self.action
+                    # Find all subflows for this entity with a different action and not CANCELLED
+                    if self.model is Movie:
+                        prev_subflows = session.query(SubFlow).filter(
+                            SubFlow.movie_id == obj_id,
+                            SubFlow.action != self.action,
+                            SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE', 'FAILED'])
+                        ).all()
+                    elif self.model is Series:
+                        prev_subflows = session.query(SubFlow).filter(
+                            SubFlow.series_id == obj_id,
+                            SubFlow.action != self.action,
+                            SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE', 'FAILED'])
+                        ).all()
+                    elif self.model is Episode:
+                        prev_subflows = session.query(SubFlow).filter(
+                            SubFlow.episode_id == obj_id,
+                            SubFlow.action != self.action,
+                            SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE', 'FAILED'])
+                        ).all()
+                    else:
+                        prev_subflows = []
+                    for old_sf in prev_subflows:
+                        logger.info(f"Cancelling previous action SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
+                        old_sf.status = 'CANCELLED'
+                        old_sf.error_message = f"Cancelled due to new action: {self.action}"
+                        # Remove scheduled jobs for previous subflows
+                        job_id_pattern = f"{old_sf.action}_{old_sf.id}_"
+                        try:
+                            jobs_to_remove = []
+                            for job in self.scheduler.get_jobs():
+                                if job.id and job.id.startswith(job_id_pattern):
+                                    jobs_to_remove.append(job.id)
+                            for job_id in jobs_to_remove:
+                                self.scheduler.remove_job(job_id)
+                                logger.verbose(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
+                        except Exception as e:
+                            logger.warning(f"Failed to cancel job for SubFlow {old_sf.id}: {e}", extra={'emoji_type': 'warning'})
+
+                # If entity is not PENDING, reset for reprocessing
                 if ent.status != 'PENDING':
-                    # Check if this is a reprocessing request (entity is DONE/QUEUED but we want to restart)
                     if ent.status in ['DONE', 'QUEUED']:
                         logger.verbose(f"{self.model.__name__} {obj_id} has status '{ent.status}' - resetting to PENDING for new action '{self.action}'", extra={'emoji_type': 'refresh'})
                         ent.status = 'PENDING'
-                        ent.current_step_name = None  # Reset the step to start from beginning
-                        
-                        # Cancel any existing SubFlows for this entity (delete should cancel add immediately)
-                        
-                        if self.model is Movie:
-                            existing_subflows = session.query(SubFlow).filter(
-                                SubFlow.movie_id == obj_id,
-                                SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])  # Include DONE to reset completed flows
-                            ).all()
-                        elif self.model is Series:
-                            existing_subflows = session.query(SubFlow).filter(
-                                SubFlow.series_id == obj_id,
-                                SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])
-                            ).all()
-                        elif self.model is Episode:
-                            existing_subflows = session.query(SubFlow).filter(
-                                SubFlow.episode_id == obj_id,
-                                SubFlow.status.in_(['PENDING', 'QUEUED', 'DONE'])
-                            ).all()
-                        else:
-                            existing_subflows = []
-                        
-                        # Cancel all existing SubFlows (delete should immediately cancel add)
-                        if existing_subflows:
-                            logger.verbose(f"Found {len(existing_subflows)} existing subflows for {self.model.__name__} {obj_id}, cancelling for reprocessing", extra={'emoji_type': 'refresh'})
-                            for old_sf in existing_subflows:
-                                logger.verbose(f"Cancelling SubFlow {old_sf.id} (action: {old_sf.action}, status: {old_sf.status})", extra={'emoji_type': 'cancel'})
-                                old_sf.status = 'CANCELLED'
-                                old_sf.error_message = f"Cancelled for reprocessing by action: {self.action}"
-                                
-                                # Try to cancel scheduled jobs
-                                job_id_pattern = f"{old_sf.action}_{old_sf.id}_"
-                                try:
-                                    jobs_to_remove = []
-                                    for job in self.scheduler.get_jobs():
-                                        if job.id and job.id.startswith(job_id_pattern):
-                                            jobs_to_remove.append(job.id)
-                                    
-                                    for job_id in jobs_to_remove:
-                                        self.scheduler.remove_job(job_id)
-                                        logger.verbose(f"Cancelled scheduled job: {job_id}", extra={'emoji_type': 'cancel'})
-                                        
-                                except Exception as e:
-                                    logger.warning(f"Failed to cancel job for SubFlow {old_sf.id}: {e}", extra={'emoji_type': 'warning'})
-                            
-                            logger.verbose(f"Successfully reset {self.model.__name__} {obj_id} for reprocessing", extra={'emoji_type': 'success'})
+                        ent.current_step_name = None
                     else:
                         logger.warning(f"{self.model.__name__} {obj_id} has status '{ent.status}' (expected PENDING)", extra={'emoji_type': 'warning'})
                         return None
-                    
+
                 logger.debug(f"Found PENDING {self.model.__name__} {obj_id} - creating subflows", extra={'emoji_type': 'success'})
-                
-                # Call _create_subflows with the initial flow entry
+                if not hasattr(ent, 'current_step_name') or ent.current_step_name is None:
+                    ent.current_step_name = None
+                session.add(ent)
+                session.commit()
+
                 initial_entry = flow_manager.get_initial(self.action)
                 entry_description = (
                     initial_entry.__name__ if callable(initial_entry)
@@ -323,9 +636,7 @@ class ActionScheduler:
                     else str(type(initial_entry))
                 )
                 logger.debug(f"Initial flow entry: {entry_description}", extra={'emoji_type': 'debug'})
-                
                 self._create_subflows(obj_id, initial_entry)
-                
                 logger.verbose(f"Successfully enqueued {self.model.__name__} {obj_id} for processing", extra={'emoji_type': 'success'})
                 return obj_id
         
@@ -870,6 +1181,9 @@ class ActionScheduler:
         step_name: str,
         context: Union[int, None] = None
     ):
+        # Import here to avoid circular imports
+        from core.logger import set_subflow_context, clear_subflow_context
+        
         logger.info(f"Starting subflow {sf_id} step '{step_name}' with context {context}", extra={'emoji_type': 'processing'})
         session = get_session()
         try:
@@ -877,6 +1191,15 @@ class ActionScheduler:
             if not sf:
                 logger.error(f"SubFlow {sf_id} not found in database", extra={'emoji_type': 'error'})
                 return
+            
+            # Set SubFlow context for all log messages in this thread
+            entity_id = sf.movie_id or sf.episode_id or sf.series_id
+            entity_type = 'movie' if sf.movie_id else ('episode' if sf.episode_id else 'series')
+            set_subflow_context(
+                subflow_id=sf_id,
+                entity_id=entity_id,
+                entity_type=entity_type
+            )
                 
             # Check if SubFlow was cancelled before execution
             if sf.status == 'CANCELLED':
@@ -910,9 +1233,58 @@ class ActionScheduler:
                         return
                 logger.verbose(f"Determined model type for SubFlow {sf_id}: {current_model.__name__}", extra={'emoji_type': 'debug'})
                 
+                # Mark SubFlow as QUEUED and update entity status to QUEUED when execution starts
+                sf.status = 'QUEUED'
+                
+                # Update the entity status to QUEUED to indicate it's actively being processed
+                try:
+                    # Determine which entity to update based on SubFlow type
+                    if sf.movie_id is not None:
+                        entity = session.query(Movie).get(sf.movie_id)
+                        entity_desc = f"Movie {sf.movie_id}"
+                    elif sf.episode_id is not None:
+                        entity = session.query(Episode).get(sf.episode_id)
+                        entity_desc = f"Episode {sf.episode_id}"
+                    elif sf.series_id is not None:
+                        entity = session.query(Series).get(sf.series_id)
+                        entity_desc = f"Series {sf.series_id}"
+                    else:
+                        entity = None
+                        entity_desc = "Unknown entity"
+                    
+                    if entity and hasattr(entity, 'status'):
+                        if entity.status != 'QUEUED':
+                            logger.verbose(f"Updating {entity_desc} status from '{entity.status}' to 'QUEUED' (execution started)", extra={'emoji_type': 'processing'})
+                            entity.status = 'QUEUED'
+                            # Update current_step_name to the step that's about to execute
+                            if hasattr(entity, 'current_step_name'):
+                                entity.current_step_name = step_name
+                                logger.verbose(f"Updated {entity_desc} current_step_name to '{step_name}'", extra={'emoji_type': 'debug'})
+                            session.add(entity)
+                        else:
+                            logger.verbose(f"{entity_desc} already has QUEUED status", extra={'emoji_type': 'debug'})
+                    else:
+                        logger.verbose(f"Could not update entity status for {entity_desc} - entity not found or no status field", extra={'emoji_type': 'debug'})
+                        
+                except Exception as entity_update_error:
+                    logger.warning(f"Failed to update entity status to QUEUED: {entity_update_error}", extra={'emoji_type': 'warning'})
+                
+                # Commit both SubFlow and entity status updates
+                session.commit()
+                
                 for attempt in range(self.max_retries):
                     try:
-                        arg = context if context is not None else sf.movie_id
+                        # Determine the correct argument based on SubFlow entity type
+                        if context is not None:
+                            arg = context
+                        elif sf.movie_id is not None:
+                            arg = sf.movie_id
+                        elif sf.episode_id is not None:
+                            arg = sf.episode_id
+                        elif sf.series_id is not None:
+                            arg = sf.series_id
+                        else:
+                            arg = None
                         logger.verbose(f"Calling {step_name} with arg={arg}, model={current_model}, action={self.action}", extra={'emoji_type': 'debug'})
                         
                         flow_func = self._get_flow_function(step_name)
@@ -1064,19 +1436,29 @@ class ActionScheduler:
                         advance_id = None
                         
                     if not still_pending and advance_id:
-                        logger.info(f"All subflows complete for {check_model.__name__} {advance_id} action {self.action}, advancing entity", extra={'emoji_type': 'success'})
+                        logger.info(f"All subflows complete for {check_model.__name__} {advance_id} action {self.action}, checking if advancement needed", extra={'emoji_type': 'success'})
                         
                         # Update entity's current_step_name to reflect the completed step
                         entity = session.query(check_model).get(advance_id)
                         if entity:
-                            # Get the step name that was just completed
-                            completed_step_name = step_name  # This is the step that just finished
-                            logger.verbose(f"Updating {check_model.__name__} {advance_id} current_step_name from '{entity.current_step_name}' to '{completed_step_name}'", extra={'emoji_type': 'debug'})
-                            entity.current_step_name = completed_step_name
-                            session.add(entity)
-                            session.commit()
-                        
-                        self._advance_entity(advance_id, check_model)
+                            # CRITICAL FIX: Only advance if entity's current action matches this scheduler's action
+                            # This prevents infinite loops where SubFlow completion triggers advancement by wrong schedulers
+                            if hasattr(entity, 'action') and entity.action == self.action:
+                                # FIXED: Set current_step_name to the step that just completed
+                                # This will be used by flow_manager.next_entry() to determine the next step
+                                completed_step_name = step_name  # This is the step that just finished
+                                logger.verbose(f"Updating {check_model.__name__} {advance_id} current_step_name from '{entity.current_step_name}' to '{completed_step_name}'", extra={'emoji_type': 'debug'})
+                                entity.current_step_name = completed_step_name
+                                session.add(entity)
+                                session.commit()
+                                
+                                logger.verbose(f"Advancing {check_model.__name__} {advance_id} - entity action '{entity.action}' matches scheduler action '{self.action}'", extra={'emoji_type': 'debug'})
+                                self._advance_entity(advance_id, check_model)
+                            else:
+                                entity_action = entity.action if hasattr(entity, 'action') else 'unknown'
+                                logger.verbose(f"{check_model.__name__} {advance_id} has completed SubFlows for action '{self.action}' but entity is now on action '{entity_action}' - no advancement needed", extra={'emoji_type': 'debug'})
+                        else:
+                            logger.warning(f"{check_model.__name__} {advance_id} not found when trying to advance", extra={'emoji_type': 'warning'})
                     elif still_pending:
                         logger.verbose(f"Still have pending subflows for {check_model.__name__ if check_model else 'unknown'} action {self.action}, not advancing yet", extra={'emoji_type': 'info'})
                     else:
@@ -1119,6 +1501,8 @@ class ActionScheduler:
             logger.error(f"Critical error in _run_subflow for {sf_id}: {outer_error}", extra={'emoji_type': 'error'})
             logger.verbose(f"Critical error traceback:\n{traceback.format_exc()}", extra={'emoji_type': 'debug'})
         finally:
+            # Clear SubFlow context when execution is complete
+            clear_subflow_context()
             session.close()
 
     def _advance_entity(self, ent_id: int, model_type=None):
@@ -1138,7 +1522,11 @@ class ActionScheduler:
                 
             logger.debug(f"Current entity status: {ent.status}, current_step_name: {getattr(ent, 'current_step_name', 'None')}", extra={'emoji_type': 'debug'})
             
-            entry = flow_manager.next_entry(self.action, None, ent.current_step_name)
+            # Determine the correct branch from completed SubFlows
+            current_branch = self._get_entity_branch(session, ent_id, entity_model)
+            logger.verbose(f"Determined branch for {entity_model.__name__} {ent_id}: {current_branch}", extra={'emoji_type': 'debug'})
+            
+            entry = flow_manager.next_entry(self.action, current_branch, ent.current_step_name)
             
             if entry:
                 new_step_name = flow_manager.get_entry_id(self.action, entry)
@@ -1168,11 +1556,158 @@ class ActionScheduler:
                 session.commit()
                 logger.info(f"{entity_model.__name__} {ent_id} processing complete", extra={'emoji_type': 'success'})
                 
+                # End handler logging session if this completes the handler
+                self._check_and_end_handler_session(ent_id, entity_model, ent)
+                
         except Exception as e:
             logger.error(f"Error advancing entity {ent_id}: {e}", extra={'emoji_type': 'error'})
             session.rollback()
         finally:
             session.close()
+    
+    def _check_and_end_handler_session(self, ent_id: int, entity_model: Type, entity):
+        """
+        Check if handler processing is complete and end the logging session.
+        For series: Check if all episodes are DONE
+        For movies: Entity completion means handler is done
+        """
+        try:
+            # Find active logging session for this handler and entity
+            session_id = get_handler_session_for_entity(self.action, ent_id)
+            if not session_id:
+                return  # No active logging session
+            
+            if entity_model.__name__ == 'Series':
+                # For series, check if all episodes are DONE
+                session = get_session()
+                try:
+                    # Count episodes that are not DONE for this series and action
+                    pending_episodes = session.query(Episode).join(Season).filter(
+                        Season.series_id == ent_id,
+                        Episode.action == self.action,
+                        Episode.status != 'DONE'
+                    ).count()
+                    
+                    if pending_episodes == 0:
+                        # All episodes are done, end the handler session
+                        total_episodes = session.query(Episode).join(Season).filter(
+                            Season.series_id == ent_id,
+                            Episode.action == self.action
+                        ).count()
+                        
+                        end_handler_logging(
+                            session_id, 
+                            success=True,
+                            summary=f"Series processing complete - {total_episodes} episodes processed"
+                        )
+                        logger.info(f"🏁 Handler session ended for series {ent_id} - all {total_episodes} episodes complete", extra={'emoji_type': 'success'})
+                    else:
+                        logger.debug(f"Series {ent_id} still has {pending_episodes} pending episodes", extra={'emoji_type': 'debug'})
+                        
+                finally:
+                    session.close()
+                    
+            elif entity_model.__name__ == 'Movie':
+                # For movies, entity completion means handler is done
+                end_handler_logging(
+                    session_id,
+                    success=(entity.status == 'DONE'),
+                    summary=f"Movie processing {'complete' if entity.status == 'DONE' else 'failed'}"
+                )
+                logger.info(f"🏁 Handler session ended for movie {ent_id}", extra={'emoji_type': 'success'})
+                
+        except Exception as e:
+            logger.error(f"Error checking/ending handler session for {entity_model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
+
+    def _get_entity_branch(self, session, ent_id: int, entity_model):
+        """
+        Determine the current branch for an entity based on its completed SubFlows.
+        Returns the branch name from the most recently completed SubFlow, or None if no branch info available.
+        """
+        try:
+            # Query for the most recent completed SubFlow for this entity and action
+            if entity_model is Movie:
+                latest_subflows = session.query(SubFlow).filter(
+                    SubFlow.movie_id == ent_id,
+                    SubFlow.action == self.action,
+                    SubFlow.status == 'DONE'
+                ).order_by(SubFlow.id.desc()).limit(5).all()
+            elif entity_model is Series:
+                # For series, look at episode-level SubFlows
+                latest_subflows = session.query(SubFlow).join(Episode).join(Season).filter(
+                    Season.series_id == ent_id,
+                    SubFlow.action == self.action,
+                    SubFlow.status == 'DONE'
+                ).order_by(SubFlow.id.desc()).limit(5).all()
+            elif entity_model is Episode:
+                latest_subflows = session.query(SubFlow).filter(
+                    SubFlow.episode_id == ent_id,
+                    SubFlow.action == self.action,
+                    SubFlow.status == 'DONE'
+                ).order_by(SubFlow.id.desc()).limit(5).all()
+            else:
+                logger.warning(f"Unknown entity model for branch detection: {entity_model.__name__}", extra={'emoji_type': 'warning'})
+                return None
+            
+            # Look for all valid branch names: "main", episode IDs, "jellyfin", "plex"
+            # Branch types: main | episode_id | jellyfin | plex
+            all_branches = []
+            for sf in latest_subflows:
+                if sf.branch:
+                    all_branches.append(sf.branch)
+                    logger.verbose(f"Found branch '{sf.branch}' from SubFlow {sf.id}", extra={'emoji_type': 'debug'})
+            
+            if all_branches:
+                # Return the most recent branch (prioritize service branches over episode IDs)
+                # Priority: jellyfin/plex > main > episode_id
+                service_branches = [b for b in all_branches if b in ['jellyfin', 'plex']]
+                main_branches = [b for b in all_branches if b == 'main']
+                
+                if service_branches:
+                    branch = service_branches[0]  # Most recent service branch
+                    logger.verbose(f"Selected service branch '{branch}' for {entity_model.__name__} {ent_id}", extra={'emoji_type': 'debug'})
+                    return branch
+                elif main_branches:
+                    branch = main_branches[0]  # Most recent main branch
+                    logger.verbose(f"Selected main branch '{branch}' for {entity_model.__name__} {ent_id}", extra={'emoji_type': 'debug'})
+                    return branch
+                else:
+                    # Use the most recent branch (likely episode ID)
+                    branch = all_branches[0]
+                    logger.verbose(f"Selected episode/other branch '{branch}' for {entity_model.__name__} {ent_id}", extra={'emoji_type': 'debug'})
+                    return branch
+            
+            # If no meaningful branch found, check if we need to determine branch from flow structure
+            # This handles cases where we're about to enter a branching step
+            return self._determine_branch_from_flow(session, ent_id, entity_model)
+            
+        except Exception as e:
+            logger.warning(f"Error determining branch for {entity_model.__name__} {ent_id}: {e}", extra={'emoji_type': 'warning'})
+            return None
+
+    def _determine_branch_from_flow(self, session, ent_id: int, entity_model):
+        """
+        Determine which branch to use when entering a branching step.
+        This checks system configuration (Plex/Jellyfin enabled) to decide the branch.
+        """
+        try:
+            from core.config import settings
+            
+            # Default branch selection based on enabled services
+            if hasattr(settings, 'jellyfin_enabled') and settings.jellyfin_enabled:
+                logger.verbose(f"Jellyfin is enabled, selecting 'jellyfin' branch for {entity_model.__name__} {ent_id}", extra={'emoji_type': 'debug'})
+                return "jellyfin"
+            elif hasattr(settings, 'plex_enabled') and settings.plex_enabled:
+                logger.verbose(f"Plex is enabled, selecting 'plex' branch for {entity_model.__name__} {ent_id}", extra={'emoji_type': 'debug'})
+                return "plex"
+            else:
+                # If neither is enabled or we can't determine, let flow_manager handle it with None
+                logger.verbose(f"No specific service enabled, using None branch for {entity_model.__name__} {ent_id}", extra={'emoji_type': 'debug'})
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error determining branch from flow for {entity_model.__name__} {ent_id}: {e}", extra={'emoji_type': 'warning'})
+            return None
 
     def check_entity_advancement(self, ent_id: int):
         """

@@ -2,6 +2,7 @@ import os, re, threading, time, shutil, requests
 from fastapi.responses import JSONResponse
 from core.config import settings
 from core.logger import logger
+from core.handler_logging import start_handler_logging, end_handler_logging
 from services.jellyfin_client import get_jellyfin_file_path
 from services.utils import ( 
     is_4k_request
@@ -80,6 +81,15 @@ def handle_webhook(data: dict, source_port: int = None):
 
 def handle_import_event(data: dict, is_4k: bool = False):
     """Handle media import events and clean up placeholders using scheduler"""
+    # Start handler logging session
+    session_id = start_handler_logging(
+        'handle_import_event',
+        0,  # Will be updated with actual ID once determined
+        'import',
+        is_4k=is_4k,
+        data_keys=list(data.keys())
+    )
+    
     try:
         if 'movie' in data:
             # Movie import handling
@@ -90,6 +100,8 @@ def handle_import_event(data: dict, is_4k: bool = False):
             
             if not tmdb_id:
                 logger.error("Missing TMDB ID for movie import", extra={'emoji_type': 'error'})
+                end_handler_logging(session_id, success=False, 
+                                   summary="Missing TMDB ID for movie import")
                 return JSONResponse({"status": "error", "message": "Missing TMDB ID"}, status_code=400)
             
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
@@ -111,10 +123,15 @@ def handle_import_event(data: dict, is_4k: bool = False):
             job_scheduled = handle_import_event_scheduler.enqueue(movie)
             if job_scheduled:
                 logger.info(f"Enqueued 'handle_import_event' action for TMDB ID {tmdb_id}", extra={'emoji_type': 'queue'})
+                # Note: Don't end logging session here - scheduler will continue processing
+                session.close()
+                return JSONResponse({"status": "success", "message": "Movie import cleanup scheduled"})
             else:
                 logger.warning(f"Failed to enqueue 'handle_import_event' action for TMDB ID {tmdb_id}", extra={'emoji_type': 'warning'})
-            
-            session.close()
+                end_handler_logging(session_id, success=False, 
+                                   summary="Failed to enqueue movie import processing")
+                session.close()
+                return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
 
         elif 'episodes' in data and 'series' in data:
             series = data['series']
@@ -138,25 +155,41 @@ def handle_import_event(data: dict, is_4k: bool = False):
             series_entity = repo.get_by_tvdbid(tvdb_id, is_4k)
             if not series_entity:
                 logger.warning(f"Series {series_title} not found in database for import event", extra={'emoji_type': 'warning'})
+                end_handler_logging(session_id, success=True, 
+                                   summary="Series not tracked, no cleanup needed")
                 return JSONResponse({"status": "success", "message": "Series not tracked, no cleanup needed"})
-            ep = repo.get_ep_by_series(series, season_num, episode_num)
-            ep.status = 'PENDING'
-            ep.action = 'handle_episode_import'
-            ep.jellyfin
-            session.commit()
+            ep = repo.get_ep_by_series(series_entity, season_num, episode_num)
+            if ep:
+                ep.status = 'PENDING'
+                session.commit()
 
-            job_scheduled = handle_import_event_scheduler.enqueue(ep)
-            if job_scheduled:
-                logger.info(f"Enqueued 'handle_movie_import' action for TMDB ID {tmdb_id}", extra={'emoji_type': 'queue'})
+                job_scheduled = handle_import_event_scheduler.enqueue(ep)
+                if job_scheduled:
+                    logger.info(f"Enqueued 'handle_import_event' action for episode {full_title}", extra={'emoji_type': 'queue'})
+                    # Note: Don't end logging session here - scheduler will continue processing
+                    session.close()
+                    return JSONResponse({"status": "success", "message": "Episode import cleanup scheduled"})
+                else:
+                    logger.warning(f"Failed to enqueue 'handle_import_event' action for episode {full_title}", extra={'emoji_type': 'warning'})
+                    end_handler_logging(session_id, success=False, 
+                                       summary="Failed to enqueue episode import processing")
+                    session.close()
+                    return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
             else:
-                logger.warning(f"Failed to enqueue 'handle_movie_import' action for TMDB ID {tmdb_id}", extra={'emoji_type': 'warning'})
-
-            session.close()
+                logger.warning(f"Episode {full_title} not found in database", extra={'emoji_type': 'warning'})
+                end_handler_logging(session_id, success=True, 
+                                   summary="Episode not tracked, no cleanup needed")
+                session.close()
+                return JSONResponse({"status": "success", "message": "Episode not tracked, no cleanup needed"})
 
     except Exception as e:
         logger.error(f"Import event scheduling failed: {e}", extra={'emoji_type': 'error'})
+        end_handler_logging(session_id, success=False, 
+                           summary=f"Handler failed: {e}")
         return JSONResponse({"status": "error", "message": f"Error: {str(e)}"}, status_code=500)
 
+    end_handler_logging(session_id, success=True, 
+                       summary="Import cleanup completed")
     return JSONResponse({"status": "success", "message": "Import cleanup scheduled"})
 
 def handle_seriesadd(data: dict, is_4k: bool = False):
@@ -168,19 +201,34 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
     tvdb_id = series.get('tvdbId')
     series_path = series.get('path')
     series_id = series.get('id')
-    if not episodes:
-        if series_id:
-            r = requests.get(f"{settings.SONARR_URL}/episode",
-                             params={'seriesId': series_id},
-                             headers={'X-Api-Key': settings.SONARR_API_KEY})
-            r.raise_for_status()
-            episodes = r.json()
-        else:
-            logger.warning("No series ID provided in seriesadd event.", extra={'emoji_type': 'warning'})
-            episodes = []
-    session = get_session()
-    repo = SeriesRepository(session)
+    
+    # Start handler logging session - we'll get the series DB ID later
+    temp_session_id = start_handler_logging(
+        'handle_seriesadd', 
+        tvdb_id,  # Use tvdb_id as identifier for now
+        'series',
+        title=series_title,
+        year=series_year,
+        tvdb_id=tvdb_id,
+        is_4k=is_4k,
+        episode_count=len(episodes)
+    )
+    
     try:
+        if not episodes:
+            if series_id:
+                r = requests.get(f"{settings.SONARR_URL}/episode",
+                                 params={'seriesId': series_id},
+                                 headers={'X-Api-Key': settings.SONARR_API_KEY})
+                r.raise_for_status()
+                episodes = r.json()
+            else:
+                logger.warning("No series ID provided in seriesadd event.", extra={'emoji_type': 'warning'})
+                episodes = []
+        
+        session = get_session()
+        repo = SeriesRepository(session)
+        
         series = repo.get_by_tvdbid(tvdb_id, is_4k)
         if not series:
             # Create the Series record using tvdbid (Sonarr provides tvdbId)
@@ -198,6 +246,8 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                 logger.info(f"Series added: {series}", extra={'emoji_type': 'success'})
             except ValueError as ve:
                 logger.error(f"Series creation failed: {ve}", extra={'emoji_type': 'error'})
+                end_handler_logging(temp_session_id, success=False, 
+                                   summary=f"Series creation failed: {ve}")
                 return JSONResponse({"status": "error", "message": str(ve)}, status_code=400)
         else:
             logger.info("Series already present", extra={'emoji_type':'warning'})
@@ -206,20 +256,34 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
+        
         # Pass the model instance so the scheduler can infer model type and create subflows
         job_scheduled = handle_seriesadd_scheduler.enqueue(series)
+        
+        session.close()
+        
+        if job_scheduled:
+            logger.info(f"Enqueued 'handle_seriesadd' action for TVDB ID {tvdb_id}")
+            # Note: We don't end the logging session here because the scheduler will continue processing
+            # The scheduler should end the session when all episodes are done
+            return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
+        else:
+            logger.warning(f"Failed to enqueue 'handle_seriesadd' action for TVDB ID {tvdb_id}")
+            end_handler_logging(temp_session_id, success=False, 
+                               summary="Failed to enqueue handler")
+            return JSONResponse({"status": "error", "message": "Failed to schedule processing"})
+            
+    except Exception as e:
+        logger.error(f"handle_seriesadd failed: {e}", extra={'emoji_type': 'error'})
+        end_handler_logging(temp_session_id, success=False, 
+                           summary=f"Handler failed: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
     finally:
         try:
-            session.close()
+            if 'session' in locals():
+                session.close()
         except Exception:
             pass
-    
-    if job_scheduled:
-        logger.info(f"Enqueued 'handle_movieadd' action for TVDB ID {tvdb_id}")
-    else:
-        logger.warning(f"Failed to enqueue 'handle_movieadd' action for TVDB ID {tvdb_id}")
-    
-    return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
 
 def handle_episodefiledelete(data: dict, is_4k: bool = False):
     # Similar to seriesadd: recreate dummy for episode deletion.
@@ -229,27 +293,58 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     series_year = series.get('year')
     tvdb_id = series.get('tvdbId')
     episode_file_path = data.get("episodeFile", {}).get("path")
+    
+    # Start handler logging session
+    session_id = start_handler_logging(
+        'handle_episodefiledelete',
+        tvdb_id,
+        'series',
+        title=series_title,
+        year=series_year,
+        tvdb_id=tvdb_id,
+        is_4k=is_4k,
+        episode_count=len(episodes),
+        episode_file_path=episode_file_path
+    )
 
     # season_num = next(ep.get('seasonNumber'))
     # episode_num = next(ep.get('episodeNumber'))
     # episode_title = next(ep.get('title'))
     
-    session = get_session()
-    repo = SeriesRepository(session)
-    series = repo.get_by_tvdbid(tvdb_id, is_4k)
-    if not series:
-        logger.info("Series not found in database", extra={'emoji_type': 'warning'})
-        return JSONResponse({"status": "error", "message": "Series not found"}, status_code=404)
-    repo.delete_seasons_and_episodes(series, episodes)
-    logger.info(f"Episode data updated in db for series {series_title}", extra={'emoji_type':'success'})
-    job_scheduled = handle_episodefiledelete_scheduler.enqueue(series)
-    if job_scheduled:
-        logger.info(f"Enqueued 'handle_episodefiledelete' action for TVDB ID {tvdb_id}")
-    else:
-        logger.warning(f"Failed to enqueue 'handle_episodefiledelete' action for TVDB ID {tvdb_id}")
+    try:
+        session = get_session()
+        repo = SeriesRepository(session)
+        series = repo.get_by_tvdbid(tvdb_id, is_4k)
+        if not series:
+            logger.info("Series not found in database", extra={'emoji_type': 'warning'})
+            end_handler_logging(session_id, success=False, 
+                               summary="Series not found in database")
+            return JSONResponse({"status": "error", "message": "Series not found"}, status_code=404)
+        repo.delete_seasons_and_episodes(series, episodes)
+        logger.info(f"Episode data updated in db for series {series_title}", extra={'emoji_type':'success'})
+        job_scheduled = handle_episodefiledelete_scheduler.enqueue(series)
+        if job_scheduled:
+            logger.info(f"Enqueued 'handle_episodefiledelete' action for TVDB ID {tvdb_id}")
+            logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
+            # Note: Don't end logging session here - scheduler will continue processing
+            return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
+        else:
+            logger.warning(f"Failed to enqueue 'handle_episodefiledelete' action for TVDB ID {tvdb_id}")
+            end_handler_logging(session_id, success=False, 
+                               summary="Failed to enqueue episodefiledelete processing")
+            return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
 
-    logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
-    return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
+    except Exception as e:
+        logger.error(f"handle_episodefiledelete failed: {e}", extra={'emoji_type': 'error'})
+        end_handler_logging(session_id, success=False, 
+                           summary=f"Handler failed: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+    finally:
+        try:
+            if 'session' in locals():
+                session.close()
+        except Exception:
+            pass
 
 def handle_moviefiledelete(data: dict, is_4k):
     if 'movie' in data:
@@ -262,18 +357,50 @@ def handle_moviefiledelete(data: dict, is_4k):
         year = movie.get('year')
         movie_file_path = data.get("movieFile", {}).get("path")
 
-        session = get_session()
-        repo = MovieRepository(session)
-        movie = repo.get_by_tmdbid(tmdb_id, is_4k)
-        if movie:
-            job_scheduled = handle_moviefiledelete_scheduler.enqueue(movie)
-            if job_scheduled:
-                logger.info(f"Enqueued 'handle_moviefiledelete' action for TMDB ID {movie.tmdbid}")
-            else:
-                logger.warning(f"Failed to enqueue 'handle_moviefiledelete' action for TMDB ID {movie.tmdbid}")
+        # Start handler logging session
+        session_id = start_handler_logging(
+            'handle_moviefiledelete',
+            tmdb_id,
+            'movie', 
+            title=title,
+            year=year,
+            tmdb_id=tmdb_id,
+            is_4k=is_4k,
+            movie_file_path=movie_file_path
+        )
 
-        else:
-            logger.info("Movie not found!", extra={'emoji_type':'warning'})
+        try:
+            session = get_session()
+            repo = MovieRepository(session)
+            movie = repo.get_by_tmdbid(tmdb_id, is_4k)
+            if movie:
+                job_scheduled = handle_moviefiledelete_scheduler.enqueue(movie)
+                if job_scheduled:
+                    logger.info(f"Enqueued 'handle_moviefiledelete' action for TMDB ID {movie.tmdbid}")
+                    # Note: Don't end logging session here - scheduler will continue processing
+                    return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
+                else:
+                    logger.warning(f"Failed to enqueue 'handle_moviefiledelete' action for TMDB ID {movie.tmdbid}")
+                    end_handler_logging(session_id, success=False, 
+                                       summary="Failed to enqueue moviefiledelete processing")
+                    return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
+            else:
+                logger.info("Movie not found!", extra={'emoji_type':'warning'})
+                end_handler_logging(session_id, success=False, 
+                                   summary="Movie not found in database")
+                return JSONResponse({"status": "error", "message": "Movie not found"}, status_code=404)
+
+        except Exception as e:
+            logger.error(f"handle_moviefiledelete failed: {e}", extra={'emoji_type': 'error'})
+            end_handler_logging(session_id, success=False, 
+                               summary=f"Handler failed: {e}")
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        finally:
+            try:
+                if 'session' in locals():
+                    session.close()
+            except Exception:
+                pass
 
     return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
 
@@ -287,18 +414,49 @@ def handle_movie_delete(data: dict, is_4k: bool = False):
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
 
-        session = get_session()
-        repo = MovieRepository(session)
-        movie = repo.get_by_tmdbid(tmdb_id, is_4k)
-        if movie:
-            job_scheduled = handle_movie_delete_scheduler.enqueue(movie)
-            if job_scheduled:
-                logger.info(f"Enqueued 'handle_movie_delete' action for TMDB ID {movie.tmdbid}")
-            else:
-                logger.warning(f"Failed to enqueue 'handle_movie_delete' action for TMDB ID {movie.tmdbid}")
+        # Start handler logging session
+        session_id = start_handler_logging(
+            'handle_movie_delete',
+            tmdb_id,
+            'movie',
+            title=title,
+            year=year,
+            tmdb_id=tmdb_id,
+            is_4k=is_4k
+        )
 
-        else:
-            logger.info("Movie not found!", extra={'emoji_type':'warning'})
+        try:
+            session = get_session()
+            repo = MovieRepository(session)
+            movie = repo.get_by_tmdbid(tmdb_id, is_4k)
+            if movie:
+                job_scheduled = handle_movie_delete_scheduler.enqueue(movie)
+                if job_scheduled:
+                    logger.info(f"Enqueued 'handle_movie_delete' action for TMDB ID {movie.tmdbid}")
+                    # Note: Don't end logging session here - scheduler will continue processing
+                    return JSONResponse({"status": "success", "message": "MovieDelete processed"})
+                else:
+                    logger.warning(f"Failed to enqueue 'handle_movie_delete' action for TMDB ID {movie.tmdbid}")
+                    end_handler_logging(session_id, success=False, 
+                                       summary="Failed to enqueue movie delete processing")
+                    return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
+            else:
+                logger.info("Movie not found!", extra={'emoji_type':'warning'})
+                end_handler_logging(session_id, success=False, 
+                                   summary="Movie not found in database")
+                return JSONResponse({"status": "error", "message": "Movie not found"}, status_code=404)
+
+        except Exception as e:
+            logger.error(f"handle_movie_delete failed: {e}", extra={'emoji_type': 'error'})
+            end_handler_logging(session_id, success=False, 
+                               summary=f"Handler failed: {e}")
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        finally:
+            try:
+                if 'session' in locals():
+                    session.close()
+            except Exception:
+                pass
 
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
@@ -313,6 +471,18 @@ def handle_movieadd(data: dict, is_4k: bool = False):
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year', '')
         radarr_id = movie.get('id')
+        
+        # Start handler logging session
+        session_id = start_handler_logging(
+            'handle_movieadd',
+            tmdb_id,
+            'movie',
+            title=title,
+            year=year,
+            tmdb_id=tmdb_id,
+            is_4k=is_4k,
+            radarr_id=radarr_id
+        )
 
         # Extract movieFile / hasFile / quality information when present in the webhook
         movie_file = movie.get('movieFile') or data.get('movieFile') or {}
@@ -416,14 +586,16 @@ def handle_movieadd(data: dict, is_4k: bool = False):
             logger.error(f"Failed to start enrichment thread: {e}", extra={'emoji_type': 'error'})
 
         job_scheduled = handle_movieadd_scheduler.enqueue(m)
+        session.close()
+        
         if job_scheduled:
             logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}")
+            # Note: Session will be ended by scheduler when movie processing completes
+            return JSONResponse({"status": "success", "message": "MovieAdd scheduled"})
         else:
             logger.warning(f"Failed to enqueue 'handle_movieadd' action for TMDB ID {m.tmdbid}")
-
-        session.close()
-
-        return JSONResponse({"status": "success", "message": "MovieAdd scheduled"})
+            end_handler_logging(session_id, success=False, summary="Failed to enqueue movie processing")
+            return JSONResponse({"status": "error", "message": "Failed to schedule processing"})
 
     return JSONResponse({"status": "success", "message": "MovieAdd processed"})
 
@@ -435,25 +607,56 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
         title = series.get('title', 'Unknown Series')
         year = series.get('year')
         
+        # Start handler logging session
+        session_id = start_handler_logging(
+            'handle_seriesdelete',
+            tvdb_id,
+            'series',
+            title=title,
+            year=year,
+            tvdb_id=tvdb_id,
+            is_4k=is_4k
+        )
+        
         if tvdb_id:
-            # Construct folder path using get_folder_path for consistency
-            session = get_session()
-            repo = SeriesRepository(session)
-            series = repo.get_by_tvdbid(tvdb_id, is_4k)
-            if not series:
-                logger.info(f"Series {title} not found in database for deletion", extra={'emoji_type': 'warning'}) 
-                return JSONResponse({"status": "success", "message": "Series not tracked, no cleanup needed"})
-            if repo.get_by_tvdbid(tvdb_id, is_4k):
+            try:
+                # Construct folder path using get_folder_path for consistency
+                session = get_session()
+                repo = SeriesRepository(session)
+                series = repo.get_by_tvdbid(tvdb_id, is_4k)
+                if not series:
+                    logger.info(f"Series {title} not found in database for deletion", extra={'emoji_type': 'warning'}) 
+                    end_handler_logging(session_id, success=True, 
+                                       summary="Series not tracked, no cleanup needed")
+                    return JSONResponse({"status": "success", "message": "Series not tracked, no cleanup needed"})
+                
                 job_scheduled = handle_seriesdelete_scheduler.enqueue(series)
                 if job_scheduled:
                     logger.info(f"Enqueued 'handle_seriesdelete' action for TVDB ID {series.tvdbid}")
+                    # Note: Don't end logging session here - scheduler will continue processing
+                    return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
                 else:
                     logger.warning(f"Failed to enqueue 'handle_seriesdelete' action for TVDB ID {series.tvdbid}")
+                    end_handler_logging(session_id, success=False, 
+                                       summary="Failed to enqueue series delete processing")
+                    return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
 
-            else:
-                logger.info("Series not found!", extra={'emoji_type':'warning'})
+            except Exception as e:
+                logger.error(f"handle_seriesdelete failed: {e}", extra={'emoji_type': 'error'})
+                end_handler_logging(session_id, success=False, 
+                                   summary=f"Handler failed: {e}")
+                return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+            finally:
+                try:
+                    if 'session' in locals():
+                        session.close()
+                except Exception:
+                    pass
         else:
             logger.info("Series not found or invalid tvdbid!", extra={'emoji_type':'warning'})
+            end_handler_logging(session_id, success=False, 
+                               summary="Invalid or missing TVDB ID")
+            return JSONResponse({"status": "error", "message": "Invalid or missing TVDB ID"}, status_code=400)
 
     return JSONResponse({"status": "success", "message": "SeriesDelete processed"})
 
@@ -472,12 +675,23 @@ def handle_playback(data: dict):
         logger.error("Playback payload missing file path", extra={"emoji_type": "error"})
         return JSONResponse({"status": "error", "message": "Missing file path"}, status_code=400)
 
+    # Start handler logging session
+    session_id = start_handler_logging(
+        'handle_playback',
+        0,  # No specific ID available at this point
+        'playback',
+        file_path=file_path,
+        notification_type=notification
+    )
+
     # 2) Ignore if not in placeholder folders
     folders = [settings.MOVIE_LIBRARY_FOLDER, settings.TV_LIBRARY_FOLDER]
     if settings.MOVIE_LIBRARY_4K_FOLDER: folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
     if settings.TV_LIBRARY_4K_FOLDER:    folders.append(settings.TV_LIBRARY_4K_FOLDER)
     if not any(file_path.startswith(f) for f in folders if f):
         logger.info(f"Ignored real playback: {file_path}", extra={"emoji_type": "info"})
+        end_handler_logging(session_id, success=True, 
+                           summary="Ignored real playback - not placeholder path")
         return JSONResponse({"status": "ignored", "message": "Not placeholder path"})
 
     is_4k = is_4k_request(file_path)
@@ -492,8 +706,19 @@ def handle_playback(data: dict):
             movie = repo.get_by_tmdbid(tmdb, is_4k) if tmdb else repo.get_by_path(file_path)
             if not movie:
                 logger.error(f"No DB Movie for path {file_path}")
+                end_handler_logging(session_id, success=False, 
+                                   summary="Movie not found in database")
                 return JSONResponse({"status": "error", "message": "Movie not found"}, status_code=404)
-            playback_scheduler.enqueue(movie)
+            
+            job_scheduled = playback_scheduler.enqueue(movie)
+            if job_scheduled:
+                logger.info(f"Enqueued playback for movie {movie.title}")
+                # Note: Don't end logging session here - scheduler will continue processing
+                return JSONResponse({"status": "scheduled", "message": "Movie playback enqueued"})
+            else:
+                end_handler_logging(session_id, success=False, 
+                                   summary="Failed to enqueue movie playback processing")
+                return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
 
         elif media_type == "episode":
             # extract series, season & episode numbers
@@ -504,24 +729,38 @@ def handle_playback(data: dict):
             series = repo.get_by_tvdbid(series_tvdb, is_4k)
             if not series:
                 logger.error(f"No DB Series for TVDB {series_tvdb}")
+                end_handler_logging(session_id, success=False, 
+                                   summary="Series not found in database")
                 return JSONResponse({"status": "error", "message": "Series not found"}, status_code=404)
 
             # find matching Episode under that series
             ep = repo.get_ep_by_series(series, season_number, episode_number)
             if not ep:
                 logger.error(f"No DB Episode for {series.title} S{season_number}E{episode_number}")
+                end_handler_logging(session_id, success=False, 
+                                   summary="Episode not found in database")
                 return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
 
-            playback_scheduler.enqueue(ep)
+            job_scheduled = playback_scheduler.enqueue(ep)
+            if job_scheduled:
+                logger.info(f"Enqueued playback for episode {ep.title}")
+                # Note: Don't end logging session here - scheduler will continue processing
+                return JSONResponse({"status": "scheduled", "message": "Episode playback enqueued"})
+            else:
+                end_handler_logging(session_id, success=False, 
+                                   summary="Failed to enqueue episode playback processing")
+                return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
 
         else:
             logger.warning(f"Unsupported media type: {media_type}")
+            end_handler_logging(session_id, success=False, 
+                               summary=f"Unsupported media type: {media_type}")
             return JSONResponse({"status": "error", "message": "Unsupported media type"}, status_code=400)
 
     except Exception as e:
         logger.error(f"Error in handle_playback: {e}")
+        end_handler_logging(session_id, success=False, 
+                           summary=f"Handler failed: {e}")
         return JSONResponse({"status": "error", "message": "Internal error"}, status_code=500)
     finally:
         session.close()
-
-    return JSONResponse({"status": "scheduled", "message": f"{media_type} playback enqueued"})

@@ -72,6 +72,23 @@ class FlowManager:
                         else:
                             # move to next global
                             return steps[idx+1] if idx+1 < len(steps) else None
+                elif branch is None or branch not in entry:
+                    # No branch specified or branch doesn't exist - check all branches for last_step_id
+                    for branch_name, funcs in entry.items():
+                        names = [f.__name__ for f in funcs]
+                        if last_step_id in names:
+                            pos = names.index(last_step_id) + 1
+                            if pos < len(funcs):
+                                return funcs[pos]
+                            else:
+                                # move to next global step
+                                return steps[idx+1] if idx+1 < len(steps) else None
+                    
+                    # If last_step_id not found in any branch but we're at a dict entry,
+                    # it means we're transitioning into branching - return the dict itself
+                    # so the scheduler can handle branch selection
+                    if last_step_id is not None:
+                        return entry
             elif isinstance(entry, list):
                 names = [f.__name__ for f in entry]
                 if last_step_id in names or last_step_id is None:

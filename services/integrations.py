@@ -1638,7 +1638,7 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
                 for image in images:
                     if isinstance(image, dict):
                         cover_type = image.get('coverType')
-                        url = image.get('url') or image.get('remoteUrl')
+                        url = image.get('remoteUrl')
                         if url:
                             # Convert relative URLs to full URLs
                             if url.startswith('/'):
@@ -1825,7 +1825,7 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                 for image in images:
                     if isinstance(image, dict):
                         cover_type = image.get('coverType')
-                        url = image.get('url') or image.get('remoteUrl')
+                        url = image.get('remoteUrl')
                         if url:
                             # Convert relative URLs to full URLs
                             if url.startswith('/'):
@@ -1889,14 +1889,23 @@ def enrich_movie_metadata(session, ent_id, model, action):
 
 def enrich_series_metadata(session, ent_id, model, action):
     """Enrich series with metadata from Sonarr before creating NFO"""
-    if model != Series:
-        logger.info(f"Skipping enrichment for non-Series entity: {model.__name__}", extra={'emoji_type': 'skip'})
-        return True
-    
     try:
-        series = session.query(Series).get(ent_id)
+        # Handle both direct Series calls and Episode-based SubFlows
+        if model == Series:
+            series = session.query(Series).get(ent_id)
+        elif model == Episode:
+            # When called from Episode SubFlow, get the series through episode->season->series
+            episode = session.query(Episode).get(ent_id)
+            if not episode or not episode.season:
+                logger.error(f"Episode {ent_id} or its season not found for series enrichment", extra={'emoji_type': 'error'})
+                return False
+            series = episode.season.series
+        else:
+            logger.info(f"Skipping series enrichment for unsupported entity: {model.__name__}", extra={'emoji_type': 'skip'})
+            return True
+        
         if not series:
-            logger.error(f"Series {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            logger.error(f"Series not found for enrichment", extra={'emoji_type': 'error'})
             return False
         
         logger.info(f"Enriching series metadata from Sonarr: {series.title}", extra={'emoji_type': 'update'})
@@ -1923,15 +1932,25 @@ def enrich_series_metadata(session, ent_id, model, action):
 
 def enrich_season_metadata(session, ent_id, model, action):
     """Enrich season with metadata from Sonarr before creating NFO"""
-    if model.__name__ != 'Season':
-        logger.info(f"Skipping enrichment for non-Season entity: {model.__name__}", extra={'emoji_type': 'skip'})
-        return True
-    
     try:
         from services.postgres.models import Season
-        season = session.query(Season).get(ent_id)
+        
+        # Handle both direct Season calls and Episode-based SubFlows
+        if model.__name__ == 'Season':
+            season = session.query(Season).get(ent_id)
+        elif model == Episode:
+            # When called from Episode SubFlow, get the season through episode->season
+            episode = session.query(Episode).get(ent_id)
+            if not episode or not episode.season:
+                logger.error(f"Episode {ent_id} or its season not found for season enrichment", extra={'emoji_type': 'error'})
+                return False
+            season = episode.season
+        else:
+            logger.info(f"Skipping season enrichment for unsupported entity: {model.__name__}", extra={'emoji_type': 'skip'})
+            return True
+        
         if not season:
-            logger.error(f"Season {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            logger.error(f"Season not found for enrichment", extra={'emoji_type': 'error'})
             return False
         
         logger.info(f"Enriching season metadata from Sonarr: {season.title} S{season.season_number}", extra={'emoji_type': 'update'})
@@ -1981,7 +2000,7 @@ def enrich_season_metadata(session, ent_id, model, action):
                     for image in images:
                         if isinstance(image, dict):
                             cover_type = image.get('coverType')
-                            url = image.get('url') or image.get('remoteUrl')
+                            url = image.get('remoteUrl')
                             if url:
                                 config = get_arr_config('tv', series.is_4k)
                                 if config and url.startswith('/'):
@@ -2012,18 +2031,19 @@ def enrich_season_metadata(session, ent_id, model, action):
 
 def enrich_episode_metadata(session, ent_id, model, action):
     """Enrich episode with metadata from Sonarr before creating NFO"""
-    if model.__name__ != 'Episode':
-        logger.info(f"Skipping enrichment for non-Episode entity: {model.__name__}", extra={'emoji_type': 'skip'})
-        return True
-    
     try:
-        from services.postgres.models import Episode
-        episode = session.query(Episode).get(ent_id)
+        # Handle both direct Episode calls and Episode-based SubFlows  
+        if model == Episode:
+            episode = session.query(Episode).get(ent_id)
+        else:
+            logger.info(f"Skipping episode enrichment for non-Episode entity: {model.__name__}", extra={'emoji_type': 'skip'})
+            return True
+        
         if not episode:
             logger.error(f"Episode {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
             return False
         
-        logger.info(f"Enriching episode metadata from Sonarr: {episode.title} S{episode.season_number}E{episode.episode_number}", extra={'emoji_type': 'update'})
+        logger.info(f"Enriching episode metadata from Sonarr: {episode.title} S{episode.season.season_number if episode.season else '?'}E{episode.episode_number}", extra={'emoji_type': 'update'})
         
         # Get the parent series through season
         series = episode.season.series if episode.season else None
@@ -2090,7 +2110,7 @@ def enrich_episode_metadata(session, ent_id, model, action):
                     images = matching_episode.get('images', [])
                     for image in images:
                         if isinstance(image, dict) and image.get('coverType') == 'screenshot':
-                            url = image.get('url') or image.get('remoteUrl')
+                            url = image.get('remoteUrl')
                             if url:
                                 if url.startswith('/'):
                                     url = base_url.replace('/api/v3', '') + url
@@ -2120,22 +2140,183 @@ def enrich_episode_metadata(session, ent_id, model, action):
         # Don't fail the entire flow if enrichment fails
         return True
 
-def enrich_all_episodes_metadata(session, ent_id, model, action):
-    """Enrich all episodes of a series with metadata from Sonarr"""
-    if model != Series:
-        logger.info(f"Skipping episode enrichment for non-Series entity: {model.__name__}", extra={'emoji_type': 'skip'})
-        return True
+
+def check_series_ready_for_enrichment(session, ent_id, model, action):
+    """
+    Check if all episodes in a series have completed delayed_placeholders.
+    Only proceed to enrich_comprehensive_metadata when all episodes are ready.
+    This prevents multiple enrichment calls per series.
+    """
+    from services.postgres.models import SubFlow, Episode, Season, Series
     
+    # Get the series ID based on the model type
+    if model == Episode:
+        episode = session.query(Episode).get(ent_id)
+        if not episode or not episode.season:
+            logger.error(f"Episode {ent_id} not found or has no season", extra={'emoji_type': 'error'})
+            return False
+        series_id = episode.season.series_id
+    elif model == Series:
+        series_id = ent_id
+    else:
+        logger.error(f"check_series_ready_for_enrichment expects Episode or Series model, got {model.__name__}", extra={'emoji_type': 'error'})
+        return False
+    
+    # Use a database-level approach to atomically check and create enrichment SubFlow
+    # This prevents race conditions in concurrent execution
+    
+    # First, check if enrichment SubFlow already exists for this series
+    existing_enrichment = session.query(SubFlow).filter(
+        SubFlow.series_id == series_id,
+        SubFlow.steps == "enrich_comprehensive_metadata",
+        SubFlow.episode_id.is_(None)  # Series-level SubFlow
+    ).first()
+    
+    if existing_enrichment:
+        logger.debug(f"Series {series_id} enrichment SubFlow already exists: {existing_enrichment.status}", extra={'emoji_type': 'debug'})
+        
+        # Only skip if it's currently PENDING or QUEUED (actively running)
+        # For DONE or FAILED, we should create a new enrichment SubFlow
+        if existing_enrichment.status in ['PENDING', 'QUEUED']:
+            logger.debug(f"Skipping enrichment - already in progress", extra={'emoji_type': 'debug'})
+            return True
+        else:
+            logger.debug(f"Previous enrichment was {existing_enrichment.status}, will create new enrichment", extra={'emoji_type': 'debug'})
+    
+    # Check how many episodes are still on delayed_placeholders (excluding current one if Episode)
+    query = session.query(SubFlow).filter(
+        SubFlow.series_id == series_id,
+        SubFlow.steps == "delayed_placeholders",
+        SubFlow.status != "DONE"
+    )
+    
+    # If this is being called from an Episode that just completed, exclude it from the count
+    if model == Episode:
+        query = query.filter(SubFlow.episode_id != ent_id)
+    
+    remaining_placeholders = query.count()
+    
+    logger.debug(f"Series {series_id}: {remaining_placeholders} episodes still on delayed_placeholders (excluding current)", extra={'emoji_type': 'debug'})
+    
+    # Check if all episodes have completed their delayed_placeholders step
+    if remaining_placeholders > 0:
+        # Not all episodes are ready yet - wait for them to complete
+        logger.verbose(f"Series {series_id} not ready for enrichment: {remaining_placeholders} episodes still processing placeholders", extra={'emoji_type': 'wait'})
+        return True  # This episode's step is done, but series isn't ready
+    
+    # All episodes have completed delayed_placeholders, now ensure series-level enrichment exists
+    logger.info(f"🚀 All episodes ready! Ensuring series-level enrichment for series {series_id}", extra={'emoji_type': 'success'})
+    
+    # Try to create series-level enrichment SubFlow (if it doesn't exist)
     try:
-        series = session.query(Series).get(ent_id)
+        # Create SubFlow with race condition protection using SELECT FOR UPDATE
+        # This provides true atomicity by locking the specific series row during check+insert
+        from services.postgres.db import get_session
+        
+        with get_session() as atomic_session:
+            try:
+                # Lock the series row to prevent concurrent modifications
+                # This ensures only one episode can create the enrichment SubFlow at a time
+                series_lock = atomic_session.query(Series).filter(
+                    Series.id == series_id
+                ).with_for_update().first()
+                
+                if not series_lock:
+                    logger.error(f"Series {series_id} not found for enrichment SubFlow creation", extra={'emoji_type': 'error'})
+                    return True
+                
+                # Now check for existing ACTIVE enrichment SubFlow while holding the series lock
+                # Only check for PENDING/QUEUED SubFlows, not DONE/FAILED ones
+                existing_enrichment = atomic_session.query(SubFlow).filter(
+                    SubFlow.series_id == series_id,
+                    SubFlow.steps == "enrich_comprehensive_metadata",
+                    SubFlow.episode_id.is_(None),
+                    SubFlow.status.in_(['PENDING', 'QUEUED'])  # Only active SubFlows
+                ).first()
+                
+                if not existing_enrichment:
+                    # Create the series-level enrichment SubFlow
+                    series_subflow = SubFlow(
+                        series_id=series_id,
+                        episode_id=None,  # Series-level
+                        action=action,
+                        steps="enrich_comprehensive_metadata",
+                        branch=str(series_id),
+                        status="QUEUED"
+                    )
+                    atomic_session.add(series_subflow)
+                    atomic_session.commit()
+                    
+                    logger.info(f"✅ Created series-level enrichment SubFlow {series_subflow.id} for series {series_id}", extra={'emoji_type': 'success'})
+                else:
+                    logger.debug(f"Series {series_id} enrichment SubFlow already exists ({existing_enrichment.status})", extra={'emoji_type': 'debug'})
+                    
+            except Exception as e:
+                atomic_session.rollback()
+                logger.warning(f"Error creating enrichment SubFlow for series {series_id}: {e}", extra={'emoji_type': 'warning'})
+            
+    except Exception as e:
+        # If creation fails (e.g., due to race condition), that's okay - another thread likely created it
+        logger.debug(f"Failed to create enrichment SubFlow for series {series_id}: {e} (likely created by another thread)", extra={'emoji_type': 'debug'})
+    
+    # This episode's step (check_series_ready_for_enrichment) is complete
+    # Let the scheduler naturally advance to the next step (enrich_comprehensive_metadata)
+    logger.info(f"✅ Episode {ent_id} check_series_ready_for_enrichment completed", extra={'emoji_type': 'success'})
+    
+    return True
+
+
+def enrich_comprehensive_metadata(session, ent_id, model, action):
+    """Comprehensive enrichment: series, seasons, and episodes metadata from Sonarr"""
+    try:
+        # Handle both direct Series calls and Episode-based SubFlows
+        if model == Series:
+            # For series-level SubFlows, ent_id should be the series_id
+            if ent_id is None:
+                logger.error(f"Series ID is None for comprehensive enrichment", extra={'emoji_type': 'error'})
+                return False
+            series = session.query(Series).get(ent_id)
+        elif model == Episode:
+            # When called from Episode SubFlow, get the series through episode->season->series
+            episode = session.query(Episode).get(ent_id)
+            if not episode or not episode.season:
+                logger.error(f"Episode {ent_id} or its season not found for comprehensive enrichment", extra={'emoji_type': 'error'})
+                return False
+            series = episode.season.series
+        else:
+            logger.info(f"Skipping comprehensive enrichment for unsupported entity: {model.__name__}", extra={'emoji_type': 'skip'})
+            return True
+        
         if not series:
-            logger.error(f"Series {ent_id} not found for episode enrichment", extra={'emoji_type': 'error'})
+            logger.error(f"Series not found for comprehensive enrichment (ent_id={ent_id})", extra={'emoji_type': 'error'})
             return False
         
-        logger.info(f"Enriching all episodes metadata for series: {series.title}", extra={'emoji_type': 'update'})
+        logger.info(f"🔄 Starting comprehensive metadata enrichment for series: {series.title}", extra={'emoji_type': 'update'})
         
-        # Get all episodes for this series
-        from services.postgres.models import Episode, Season
+        # Step 1: Enrich Series metadata
+        logger.info(f"📺 Enriching series metadata...", extra={'emoji_type': 'update'})
+        series_success = enrich_series_metadata(session, ent_id, model, action)
+        if not series_success:
+            logger.warning(f"Series metadata enrichment failed, continuing with seasons/episodes", extra={'emoji_type': 'warning'})
+        
+        # Step 2: Enrich Season metadata for all seasons
+        seasons = session.query(Season).filter(Season.series_id == series.id).all()
+        
+        enriched_seasons = 0
+        for season in seasons:
+            try:
+                logger.info(f"📁 Enriching season {season.season_number} metadata...", extra={'emoji_type': 'update'})
+                # Call season enrichment with the season directly
+                season_success = enrich_season_metadata(session, season.id, Season, action)
+                if season_success:
+                    enriched_seasons += 1
+            except Exception as e:
+                logger.error(f"Failed to enrich season {season.id}: {e}", extra={'emoji_type': 'error'})
+                continue
+        
+        logger.info(f"✅ Enriched {enriched_seasons}/{len(seasons)} seasons", extra={'emoji_type': 'success'})
+        
+        # Step 3: Enrich Episode metadata for all episodes
         episodes = session.query(Episode).join(Season).filter(
             Season.series_id == series.id
         ).all()
@@ -2144,21 +2325,65 @@ def enrich_all_episodes_metadata(session, ent_id, model, action):
             logger.info(f"No episodes found for series {series.title}", extra={'emoji_type': 'info'})
             return True
         
-        enriched_count = 0
+        logger.info(f"🎬 Enriching metadata for {len(episodes)} episodes...", extra={'emoji_type': 'update'})
+        enriched_episodes = 0
         for episode in episodes:
             try:
-                # Call the episode enrichment function
-                success = enrich_episode_metadata(session, episode.id, Episode, action)
-                if success:
-                    enriched_count += 1
+                # Call episode enrichment with the episode directly
+                episode_success = enrich_episode_metadata(session, episode.id, Episode, action)
+                if episode_success:
+                    enriched_episodes += 1
             except Exception as e:
                 logger.error(f"Failed to enrich episode {episode.id}: {e}", extra={'emoji_type': 'error'})
                 continue
         
-        logger.info(f"Successfully enriched {enriched_count}/{len(episodes)} episodes for series {series.title}", extra={'emoji_type': 'success'})
+        logger.info(f"✅ Comprehensive enrichment completed: Series ✓, {enriched_seasons}/{len(seasons)} seasons, {enriched_episodes}/{len(episodes)} episodes", extra={'emoji_type': 'success'})
+        
+        # After series-level enrichment, create episode-level SubFlows for the next step in flow
+        if model == Series:
+            logger.info(f"🔄 Creating episode SubFlows for next step in flow", extra={'emoji_type': 'process'})
+            
+            # Get all episodes in this series that need to continue the flow
+            episodes_to_process = session.query(Episode).join(Season).filter(
+                Season.series_id == series.id
+            ).all()
+            
+            created_count = 0
+            for episode in episodes_to_process:
+                # Check if episode already has a SubFlow for the branching step
+                existing_branch_flow = session.query(SubFlow).filter(
+                    SubFlow.episode_id == episode.id,
+                    SubFlow.action == action,
+                    SubFlow.steps.like("%jellyfin%")  # Contains jellyfin/plex branching
+                ).first()
+                
+                if not existing_branch_flow:
+                    # Create episode-level SubFlow that will hit the branching step in the flow
+                    # The flow manager will handle the jellyfin/plex branching automatically
+                    episode_subflow = SubFlow(
+                        series_id=series.id,
+                        episode_id=episode.id,
+                        action=action,
+                        steps="create_jellyfin_nfo,refresh_jellyfin_dummy,verify_dummy_scan_jellyfin,update_placeholder_status,verify_dummy_scan_jellyfin",
+                        branch="jellyfin",  # Default to jellyfin branch
+                        status="PENDING",
+                        step_index=0  # Start at first step in the branch
+                    )
+                    session.add(episode_subflow)
+                    
+                    # Update episode to reflect its new step
+                    episode.current_step_name = "create_jellyfin_nfo"
+                    episode.status = 'PENDING'
+                    session.add(episode)
+                    
+                    created_count += 1
+            
+            session.commit()
+            logger.info(f"✅ Created {created_count} episode SubFlows for platform processing", extra={'emoji_type': 'success'})
+        
         return True
         
     except Exception as e:
-        logger.error(f"Error during series episode enrichment: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Error during comprehensive enrichment: {e}", extra={'emoji_type': 'error'})
         # Don't fail the entire flow if enrichment fails
         return True
