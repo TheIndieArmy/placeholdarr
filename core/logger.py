@@ -51,9 +51,13 @@ logger.addHandler(console_handler)
 # Try to also log to a file if possible. Use LOG_FILE env var to override; default
 # is the historic 'media_handler.log'. If opening the file fails (permissions, read-only
 # filesystem), we fall back to stdout only and emit a warning instead of crashing.
-log_file = os.getenv('LOG_FILE', 'media_handler.log')
+log_file = os.getenv('LOG_FILE', '/var/log/placeholdarr/media_handler.log')
 file_handler = None
 try:
+    # Ensure the log directory exists
+    log_dir = os.path.dirname(log_file)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
