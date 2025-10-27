@@ -9,7 +9,7 @@ from core.logger import logger
 from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update, update_title_status
 from services.plex_client import refresh_plex_item
 from services.jellyfin_client import refresh_jellyfin_item
-from services.utils import sanitize_filename, is_same_file, resolve_final_folder, get_arr_config, join_endpoint
+from services.utils import sanitize_filename, resolve_final_folder, get_arr_config, join_endpoint
 
 # --- Scheduler/Timer ---
 
@@ -76,6 +76,8 @@ def sync_calendar_episodes():
 
         # --- Step 1: Aggregate all eligible episodes and their info ---
         all_episodes = []
+        # Cache Sonarr episode listings per series to allow authoritative hasFile checks
+        sonarr_episode_cache = {}
         for ep in episodes:
             # Fetch series info if needed
             if 'series' in ep and ep['series']:
@@ -100,6 +102,25 @@ def sync_calendar_episodes():
             # --- Always check for both folderPath and path ---
             folder_path = series.get('folderPath') or series.get('path')
             arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            # --- Authoritative hasFile from Sonarr: fetch per-series episode list once and cache ---
+            series_internal_id = series.get('id') or ep.get('seriesId')
+            has_file = False
+            if series_internal_id:
+                if series_internal_id not in sonarr_episode_cache:
+                    try:
+                        se_resp = requests.get(join_endpoint(sonarr_url, 'episode'), params={'seriesId': series_internal_id}, headers=headers)
+                        se_resp.raise_for_status()
+                        se_list = se_resp.json()
+                        # Build map (season, episode) -> hasFile
+                        m = {}
+                        for s_ep in se_list:
+                            key = (s_ep.get('seasonNumber'), s_ep.get('episodeNumber'))
+                            m[key] = bool(s_ep.get('hasFile', False))
+                        sonarr_episode_cache[series_internal_id] = m
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch Sonarr episodes for series {series_internal_id}: {e}", extra={'emoji_type': 'debug'})
+                        sonarr_episode_cache[series_internal_id] = {}
+                has_file = sonarr_episode_cache[series_internal_id].get((season_num, episode_num), False)
             if not air_date:
                 continue
             if not enable_placeholders:
@@ -134,7 +155,9 @@ def sync_calendar_episodes():
                 "air_date": air_date,
                 "dummy_file": dummy_file,
                 "folder_path": folder_path,
-                "arr_root_folder": arr_root_folder
+                "arr_root_folder": arr_root_folder,
+                # include authoritative hasFile flag from Sonarr when available
+                "hasFile": bool(has_file)
             })
 
         # --- Step 2: Batch check which placeholders need creation or update ---
@@ -342,20 +365,20 @@ def sync_calendar_episodes():
                 status = "Request"
                 dummy_file = settings.DUMMY_FILE_PATH
 
-            # --- Check for real file presence before creating dummy ---
-            real_file_exists = False
-            if folder_path and os.path.isdir(folder_path):
-                for fname in os.listdir(folder_path):
-                    if fname.lower().endswith(('.mp4', '.mkv', '.avi')):
-                        fpath = os.path.join(folder_path, fname)
-                        # Skip if it's the dummy file (by content, not just name)
-                        if not is_same_file(fpath, dummy_file):
-                            real_file_exists = True
-                            logger.debug(f"Real movie file exists, skipping dummy: {fpath}", extra={'emoji_type': 'debug'})
-                            break
-            if real_file_exists:
+            # --- Use Radarr's hasFile flag as authoritative; avoid filesystem checks ---
+            has_file = bool(movie.get('hasFile', False))
+            # If Radarr didn't include hasFile in calendar response, try fetching the movie record
+            if not has_file and movie.get('id'):
+                try:
+                    m_resp = requests.get(join_endpoint(radarr_url, f"movie/{movie.get('id')}"), headers=headers)
+                    if m_resp.status_code == 200:
+                        m_data = m_resp.json()
+                        has_file = bool(m_data.get('hasFile', False))
+                except Exception as e:
+                    logger.debug(f"Failed to fetch Radarr movie record for id {movie.get('id')}: {e}", extra={'emoji_type': 'debug'})
+            if has_file:
+                logger.debug(f"Radarr reports file exists for movie, skipping dummy: {title} ({year})", extra={'emoji_type': 'debug'})
                 continue
-            # --- END real file check ---
 
             dummy_path = place_dummy_file(
                 "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER,
@@ -438,42 +461,19 @@ def get_episodes_needing_placeholder(episodes):
         folder_path = ep["folder_path"]
         arr_root_folder = ep.get("arr_root_folder") or ""
         season_folder = ep.get('season_folder') or f"Season {ep['season_num']:02d}"
-        final_folder = resolve_final_folder(folder_path, arr_root_folder, 'tv')
-        file_path = os.path.join(final_folder, season_folder, sanitize_filename(file_name))
+        # Use ARR-provided hasFile flag as authoritative. If ARR reports the file exists, skip creating a placeholder.
         coming_soon_dummy = getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or settings.DUMMY_FILE_PATH
         regular_dummy = settings.DUMMY_FILE_PATH
         air_date = ep["air_date"]
-        file_exists = os.path.exists(file_path)
-        # --- NEW: Check for real file presence ---
-        # If a real episode file exists (not a dummy), skip placeholder creation
-        if file_exists and not is_same_file(file_path, coming_soon_dummy) and not is_same_file(file_path, regular_dummy):
-            logger.debug(f"Real file exists for episode, skipping placeholder: {file_path}", extra={'emoji_type': 'debug'})
+        if ep.get('hasFile', False):
+            logger.debug(f"ARR reports file exists for episode, skipping placeholder: {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}", extra={'emoji_type': 'debug'})
             continue
-        if not file_exists:
-            logger.debug(f"Checking episode: {file_path} | Exists: {file_exists} | Air date: {air_date}", extra={'emoji_type': 'debug'})
-        if not file_exists:
-            ep = ep.copy()
-            ep["_target_dummy"] = coming_soon_dummy if air_date > now else regular_dummy
-            logger.debug(f"Placeholder missing, will create: {file_path}", extra={'emoji_type': 'debug'})
-            needing.append(ep)
-        else:
-            if air_date > now:
-                same = is_same_file(file_path, coming_soon_dummy)
-                if not same:
-                    logger.debug(f"File exists for future air date but is not a match: {file_path} vs {coming_soon_dummy}", extra={'emoji_type': 'debug'})
-                if not same:
-                    ep = ep.copy()
-                    ep["_target_dummy"] = coming_soon_dummy
-                    logger.debug(f"Placeholder outdated, will update: {file_path}", extra={'emoji_type': 'debug'})
-                    needing.append(ep)
-            else:
-                same = is_same_file(file_path, regular_dummy)
-                logger.debug(f"File exists for past air date. is_same_file: {same} | {file_path} vs {regular_dummy}", extra={'emoji_type': 'debug'})
-                if not same:
-                    ep = ep.copy()
-                    ep["_target_dummy"] = regular_dummy
-                    logger.debug(f"Placeholder outdated, will update: {file_path}", extra={'emoji_type': 'debug'})
-                    needing.append(ep)
+
+        # ARR did not report a file; create/update placeholder based on air date
+        ep = ep.copy()
+        ep["_target_dummy"] = coming_soon_dummy if air_date > now else regular_dummy
+        logger.debug(f"Placeholder missing or outdated according to ARR, will create/update for: {ep['series_title']} S{ep['season_num']:02d}E{ep['episode_num']:02d}", extra={'emoji_type': 'debug'})
+        needing.append(ep)
     logger.info(f"Episodes needing placeholder: {len(needing)} / {len(episodes)}", extra={'emoji_type': 'debug'})
     return needing
 
