@@ -1,5 +1,5 @@
 from services.postgres.db import get_session
-from services.postgres.models import SubFlow, Episode, Season, Movie
+from services.postgres.models import SubFlow, Episode, Season, Movie, Series
 from services.arr_clients import fetch_sonarr_episodes
 from services.postgres.db import get_engine
 from core.logger import logger
@@ -7,6 +7,7 @@ from sqlalchemy import text
 from datetime import datetime
 from core.config import settings
 from services.orchestrator import OrchestratorRun
+from services.integrations import flow_enrich_series
 
 
 def _pg_try_advisory_lock(conn, key: int) -> bool:
@@ -42,25 +43,14 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
             logger.info(f"SubFlow id {subflow_id} not found")
             return True
         if not sf.episode_id:
-            # If this SubFlow is a series-level SubFlow, create episode subflows
+            # If this SubFlow is a series-level SubFlow, do NOT perform episode
+            # discovery inline here. The worker's phase advance logic will enqueue
+            # the dedicated 'subjob:create_episode_subflows' job which is the
+            # canonical place to run batch discovery and creation. Returning True
+            # allows the worker to advance the subflow and insert the next-phase
+            # job so that dedupe/gating/batching remains centralized in the
+            # job pipeline.
             if getattr(sf, 'series_id', None):
-                try:
-                    from services.list_capture import create_episode_subflows_for_series
-                    # create a logical run id for this operation
-                    run = OrchestratorRun(types=['tv'], note=f'create_episode_subflows_for_series:subflow:{sf.id}')
-                    created = create_episode_subflows_for_series(sf.series_id, run.run_id, include_specials=getattr(settings, 'INCLUDE_SPECIALS', False))
-                    logger.info(f"Created {created} episode subflows for series subflow {sf.id}")
-                except Exception as ex:
-                    logger.exception(f"Failed to create episode subflows for series {getattr(sf, 'series_id', None)}: {ex}")
-                    # transient failure: let caller requeue
-                    return False
-                # mark the series-level subflow as DONE
-                try:
-                    sf.status = 'DONE'
-                    session.add(sf)
-                    session.commit()
-                except Exception:
-                    session.rollback()
                 return True
             # If this is a movie-level SubFlow, perform minimal movie enrichment
             if getattr(sf, 'movie_id', None):
@@ -134,7 +124,7 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                                 if moviefile and isinstance(moviefile, dict) and moviefile.get('path'):
                                     moviefile_path = moviefile.get('path')
                                 if moviefile_path:
-                                    mv.moviefile_path = moviefile_path
+                                    mv.radarr_filepath = moviefile_path
                                 mv.moviefile_size = moviefile.get('size') or moviefile.get('sizeOnDisk') or mv.moviefile_size
                                 mv.has_file = bool(matched.get('hasFile') or moviefile_path)
                             except Exception:
@@ -194,6 +184,17 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                                 pass
 
                             session.add(mv)
+                            # populate placeholder_folder during ARR enrichment so later phases can match
+                            try:
+                                # Use the integration helper to populate placeholder_folder if blank
+                                from services.postgres.models import Movie as MovieModel
+                                try:
+                                    flow_enrich_series(session, mv.id, MovieModel)
+                                except Exception:
+                                    # best-effort: do not fail enrichment for placeholder population
+                                    logger.debug(f'flow_enrich_series failed for movie {mv.id}', extra={'emoji_type': 'debug'})
+                            except Exception:
+                                pass
                             # mark subflow done
                             sf.status = 'DONE'
                             session.add(sf)
@@ -298,7 +299,7 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                             ep_file_size = None
 
                         # persist file info
-                        episode.episodefile_path = ep_file_path
+                        episode.sonarr_filepath = ep_file_path
                         episode.episodefile_size = ep_file_size
                         episode.sonarr_episode_overview = target.get('overview') or target.get('description') or episode.sonarr_episode_overview
                         episode.has_file = bool(target.get('hasFile') or (ep_file_path is not None))
@@ -345,6 +346,44 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                         except Exception:
                             pass
                         session.add(episode)
+                        # populate placeholder_folder for the series/episode during ARR enrichment
+                        try:
+                            from services.postgres.models import Episode as EpisodeModel
+                            try:
+                                flow_enrich_series(session, episode.id, EpisodeModel)
+                            except Exception:
+                                logger.debug(f'flow_enrich_series failed for episode {episode.id}', extra={'emoji_type': 'debug'})
+                        except Exception:
+                            pass
+                        # Conservative propagation: if series has placeholder_folder and season/episode lack it, copy down
+                        try:
+                            if episode and episode.season_id:
+                                try:
+                                    season_obj = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+                                except Exception:
+                                    season_obj = None
+                                try:
+                                    series_obj = None
+                                    if season_obj and getattr(season_obj, 'series_id', None):
+                                        series_obj = session.query(Series).filter(Series.id == int(season_obj.series_id)).first()
+                                except Exception:
+                                    series_obj = None
+                                if series_obj and getattr(series_obj, 'placeholder_folder', None):
+                                    pdir = series_obj.placeholder_folder
+                                    try:
+                                        if season_obj and not getattr(season_obj, 'placeholder_folder', None):
+                                            season_obj.placeholder_folder = pdir
+                                            session.add(season_obj)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if not getattr(episode, 'placeholder_folder', None):
+                                            episode.placeholder_folder = pdir
+                                            session.add(episode)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                         # mark subflow done
                         sf.status = 'DONE'
                         sf.retry_count = 0
@@ -445,7 +484,7 @@ def enrich_episode(episode_id: int) -> bool:
                         ep_file_size = None
 
                     # persist file info
-                    episode.episodefile_path = ep_file_path
+                    episode.sonarr_filepath = ep_file_path
                     episode.episodefile_size = ep_file_size
                     episode.sonarr_episode_overview = target.get('overview') or target.get('description') or episode.sonarr_episode_overview
                     episode.has_file = bool(target.get('hasFile') or (ep_file_path is not None))
@@ -486,6 +525,35 @@ def enrich_episode(episode_id: int) -> bool:
                     except Exception:
                         pass
                     session.add(episode)
+                    # Conservative propagation: if series has placeholder_folder and season/episode lack it, copy down
+                    try:
+                        try:
+                            season_obj = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+                        except Exception:
+                            season_obj = None
+                        try:
+                            series_obj = None
+                            if season_obj and getattr(season_obj, 'series_id', None):
+                                series_obj = session.query(Series).filter(Series.id == int(season_obj.series_id)).first()
+                        except Exception:
+                            series_obj = None
+                        if series_obj and getattr(series_obj, 'placeholder_folder', None):
+                            pdir = series_obj.placeholder_folder
+                            try:
+                                if season_obj and not getattr(season_obj, 'placeholder_folder', None):
+                                    season_obj.placeholder_folder = pdir
+                                    session.add(season_obj)
+                            except Exception:
+                                pass
+                            try:
+                                if not getattr(episode, 'placeholder_folder', None):
+                                    episode.placeholder_folder = pdir
+                                    session.add(episode)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
                     session.commit()
                     return True
                 else:

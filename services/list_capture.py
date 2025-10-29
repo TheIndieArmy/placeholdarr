@@ -45,8 +45,8 @@ def _extract_year(val):
 EPISODE_BATCH_SIZE = 500
 # Series-specific phase list: series should perform base enrichment then create episode subflows
 SERIES_PHASES = ['enrich_base', 'create_episode_subflows']
-# Movie-specific phases: skip list_capture (we removed it globally) and go straight to enrichment
-MOVIE_PHASES = ['enrich_base', 'fs_scan', 'merge_scan', 'determine', 'materialize']
+# Movie-specific phases: use combined 'enrich_and_merge' phase (replaces enrich_files + merge_scan)
+MOVIE_PHASES = ['enrich_base', 'enrich_and_merge', 'determine', 'materialize']
 
 
 def upsert_movie_from_radarr_entry(session, entry: dict):
@@ -66,9 +66,8 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
         if rd:
             try:
                 # releaseDate may include timezone 'Z'
-                from datetime import datetime as _dt
-                rdnorm = rd.replace('Z', '+00:00') if isinstance(rd, str) else rd
-                year = _dt.fromisoformat(rdnorm).year
+                    from datetime import datetime as _dt
+                    year = _dt.fromisoformat(rdnorm).year
             except Exception:
                 year = None
 
@@ -209,7 +208,7 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
             imdbid=imdb,
             remote_poster=remote_poster,
             radarrpath=radarr_path,
-            moviefile_path=moviefile_path,
+            radarr_filepath=moviefile_path,
             moviefile_size=moviefile_size,
             has_file=has_file,
             radarr_monitored=monitored,
@@ -259,8 +258,11 @@ def upsert_movie_from_radarr_entry(session, entry: dict):
     if radarr_path and getattr(mv, 'radarrpath', None) != radarr_path:
         mv.radarrpath = radarr_path
         changed = True
-    if moviefile_path and getattr(mv, 'moviefile_path', None) != moviefile_path:
-        mv.moviefile_path = moviefile_path
+    if moviefile_path and getattr(mv, 'radarr_filepath', None) != moviefile_path:
+        try:
+            mv.radarr_filepath = moviefile_path
+        except Exception:
+            pass
         changed = True
     if moviefile_size and getattr(mv, 'moviefile_size', None) != moviefile_size:
         mv.moviefile_size = moviefile_size
@@ -522,6 +524,30 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
         try:
             session.refresh(s)
         except Exception:
+            pass
+
+        # Populate placeholder_folder conservatively so downstream placeholder matching
+        # can use the configured canonical folder. Use the resolver if available.
+        try:
+            from services.services_old.utils import resolve_final_folder
+            folder = None
+            try:
+                # safe best-effort: build folder using resolver; media_type 'tv'
+                folder = resolve_final_folder(media_type='tv', title=title, year=year, media_id=tvdb, payload=None)
+            except Exception:
+                folder = None
+            if folder and not getattr(s, 'placeholder_folder', None):
+                try:
+                    s.placeholder_folder = folder
+                    session.add(s)
+                    session.commit()
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+        except Exception:
+            # fallback: do not fail series creation if resolver not present
             pass
 
         # Persist seasons metadata (no season.last_found updates)
@@ -1205,7 +1231,7 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                     title=ep_title,
                     year=ep_year,
                     sonarrid=ep_sonarrid,
-                    episodefile_path=ep_file_path,
+                    sonarr_filepath=ep_file_path,
                     episodefile_size=ep_file_size,
                     sonarr_episode_overview=ep_overview,
                     has_file=ep_has_file,
@@ -1236,8 +1262,11 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                 if ep.sonarrid != ep_sonarrid:
                     ep.sonarrid = ep_sonarrid
                     changed_ep = True
-                if ep.episodefile_path != ep_file_path:
-                    ep.episodefile_path = ep_file_path
+                if getattr(ep, 'sonarr_filepath', None) != ep_file_path:
+                    try:
+                        ep.sonarr_filepath = ep_file_path
+                    except Exception:
+                        pass
                     changed_ep = True
                 if ep.episodefile_size != ep_file_size:
                     ep.episodefile_size = ep_file_size

@@ -150,7 +150,7 @@ def discover_and_create_episode_subflows(series_id: int, run_id: str, include_sp
                         episode_number=int(ep_num),
                         title=ep_title,
                         year=ep_year,
-                        episodefile_path=ep_file_path,
+                        sonarr_filepath=ep_file_path,
                         episodefile_size=ep_file_size,
                         sonarr_episode_overview=ep_overview,
                         has_file=ep_has_file,
@@ -175,8 +175,8 @@ def discover_and_create_episode_subflows(series_id: int, run_id: str, include_sp
                             changed = True
                         except Exception:
                             pass
-                    if existing.episodefile_path != ep_file_path:
-                        existing.episodefile_path = ep_file_path
+                    if getattr(existing, 'sonarr_filepath', None) != ep_file_path:
+                        existing.sonarr_filepath = ep_file_path
                         changed = True
                     if existing.episodefile_size != ep_file_size:
                         existing.episodefile_size = ep_file_size

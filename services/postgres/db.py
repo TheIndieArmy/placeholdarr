@@ -1,5 +1,5 @@
 from core.logger import logger
-from sqlalchemy import create_engine, inspect, event
+from sqlalchemy import create_engine, inspect, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from core.config import settings
 import os
@@ -83,11 +83,69 @@ def init_db(engine=None, convert_ts: bool | None = None):
 
     logger.info(f"Tables registered in Base.metadata: {list(Base.metadata.tables.keys())}", extra={'emoji_type': 'info'})
 
-    # NOTE: schema creation and destructive conversions are now managed by
-    # Alembic migrations. We intentionally skip automatic schema creation
-    # and add-only migrations at runtime. Use Alembic to create/alter tables
-    # and to perform one-time conversions.
-    logger.info("Schema management is delegated to Alembic migrations; skipping runtime create/migrate steps", extra={'emoji_type': 'info'})
+    # Runtime schema management: create tables and apply add-only migrations.
+    #
+    # Historically this project delegated schema changes to Alembic. Per the
+    # repository configuration for development/testing we now create any
+    # missing tables and add missing columns on startup. This is an
+    # add-only migration path intended for local/dev/test usage. If you run
+    # multiple instances, we acquire a Postgres advisory lock to avoid race
+    # conditions when creating or altering schema concurrently.
+    logger.info("Runtime schema management: create tables + apply add-only migrations", extra={'emoji_type': 'info'})
+
+    # Acquire an advisory lock so concurrent processes don't run create/migrate
+    # at the same time. The numeric key is arbitrary but should be stable.
+    lock_key = 987654321
+    got_lock = False
+    try:
+        with engine.connect() as conn:
+            # Try to acquire advisory lock with a few short retries to handle
+            # races when multiple processes start at nearly the same time.
+            attempts = 0
+            while attempts < 5 and not got_lock:
+                try:
+                    got_lock = bool(conn.execute(text('SELECT pg_try_advisory_lock(:k)'), {'k': lock_key}).scalar())
+                except Exception:
+                    got_lock = False
+                if not got_lock:
+                    import time
+                    time.sleep(0.25)
+                    attempts += 1
+
+            if not got_lock:
+                logger.warning('Could not acquire advisory lock for runtime schema operations after retries; proceeding anyway (race risk)', extra={'emoji_type': 'warning'})
+
+            # Import models so they are registered with Base.metadata
+            import services.postgres.models  # noqa: F401
+
+            logger.info(f"Creating tables from SQLAlchemy models: {list(Base.metadata.tables.keys())}", extra={'emoji_type': 'info'})
+            try:
+                Base.metadata.create_all(bind=engine)
+            except Exception as ex:
+                logger.error(f"Failed to create tables via create_all(): {ex}", extra={'emoji_type': 'error'})
+
+            # Refresh inspector and run add-only column migrations
+            inspector = inspect(engine)
+            try:
+                _migrate_columns(engine, inspector)
+            except Exception as ex:
+                logger.error(f"Runtime add-only column migration failed: {ex}", extra={'emoji_type': 'error'})
+
+            # Optionally perform timestamp conversions if configured
+            try:
+                if os.getenv('CONVERT_TS') == '1':
+                    _convert_timestamp_columns(engine, inspector)
+            except Exception as ex:
+                logger.error(f"Runtime timestamp conversion failed: {ex}", extra={'emoji_type': 'error'})
+
+            # Release advisory lock if we acquired it
+            if got_lock:
+                try:
+                    conn.execute(text('SELECT pg_advisory_unlock(:k)'), {'k': lock_key})
+                except Exception:
+                    pass
+    except Exception as ex:
+        logger.error(f"Runtime schema management failed: {ex}", extra={'emoji_type': 'error'})
 
     # Ensure critical partial unique indexes exist (add-only). These indexes
     # are required for atomic ON CONFLICT upserts used by the enqueue logic.

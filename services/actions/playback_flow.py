@@ -26,7 +26,8 @@ def identify_source(session: Session, ent_id: int, model: Type, action: str = No
     """
     logger.info(f"identify_source called for {model.__name__} id={ent_id} action={action}")
     rec = session.query(model).get(ent_id)
-    path = getattr(rec, 'dummypath', None)
+    # prefer explicit placeholder_filepath, fall back to placeholder_folder
+    path = getattr(rec, 'placeholder_filepath', None) or getattr(rec, 'placeholder_folder', None)
     logger.debug(f"Placeholder path from DB: {path}")
     if not path:
         logger.error(f"[{model.__name__}] no placeholder path recorded for id {ent_id}")

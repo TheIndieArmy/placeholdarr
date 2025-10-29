@@ -17,11 +17,13 @@ class Movie(Base):
     year = Column(Integer, nullable=False)
     tmdbid = Column(Integer, unique=True, nullable=False)
     is_4k  = Column(Boolean, default=False)
-    dummypath = Column(String, nullable=True)
+    # New preferred placeholder folder (where we'd create a placeholder)
+    placeholder_folder = Column(String, nullable=True)
     # Radarr configured library path (the folder configured in Radarr for the movie)
     radarrpath = Column(String, nullable=True)
-    # Exact path to the actual movie file when Radarr has imported one (movieFile.path)
-    moviefile_path = Column(String, nullable=True)
+    # Standardized name for the movie file path when Radarr has imported one
+    # (previously moviefile_filepath; renamed to radarr_filepath)
+    radarr_filepath = Column(String, nullable=True)
     # ARR-provided synopsis/overview for NFO/metadata generation
     radarr_overview = Column(String, nullable=True)
     # Size in bytes reported for the movie file (if available)
@@ -51,9 +53,10 @@ class Movie(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
-    # Boolean to track if placeholder file physically exists
-    placeholder_exists = Column(Boolean, default=False)
-    filepath = Column(String, nullable=True)
+    # Boolean to track if placeholder file physically exists (aggregated)
+    has_placeholder = Column(Boolean, default=False)
+    # Canonical observed placeholder file path for this movie (derived)
+    placeholder_filepath = Column(String, nullable=True)
     last_search = Column(Date, nullable=True)
     theater_release_date = Column(Date, nullable=True)
     digital_release_date = Column(Date, nullable=True)
@@ -110,7 +113,8 @@ class Placeholder(Base):
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
     episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)
     path = Column(String, nullable=False)
-    exists = Column(Boolean, default=False)
+    # Whether the placeholder file currently exists on disk (FS-observed)
+    has_placeholder = Column(Boolean, default=False)
     lifecycle_status = Column(String, nullable=True)
     display_status = Column(String, nullable=True)
     display_progress = Column(Integer, nullable=True)
@@ -120,8 +124,13 @@ class Placeholder(Base):
     created_by = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
-    # Last time this season metadata was observed in Sonarr
-    last_found_in_sonarr = Column(DateTime(timezone=True), nullable=True)
+    # Last time this placeholder file was observed on disk (FS-scan)
+    last_observed_at = Column(DateTime(timezone=True), nullable=True)
+    # Last time this placeholder was processed by the enrichment/merge phase
+    last_enriched_at = Column(DateTime(timezone=True), nullable=True)
+    # Short signature/hash of attributes used to determine if a placeholder changed
+    # (e.g. fingerprint|size|inode). Helps skip unchanged placeholders during enrichment.
+    enriched_signature = Column(String, nullable=True)
     # canonical determination mirrored from decider
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
@@ -160,6 +169,18 @@ class Job(Base):
     def __repr__(self):
         return f"<Job(id={self.id}, type={self.job_type!r}, status={self.status})>"
 
+
+# Table to claim a single FS-scan per external run (e.g. fullsync:<id>)
+class FSScanRun(Base):
+    __tablename__ = 'fs_scan_run'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # external run identifier (for fullsync runs we use 'fullsync:<uuid>')
+    run_id = Column(String, nullable=False, unique=True)
+    claimed_by = Column(String, nullable=True)
+    claimed_at = Column(DateTime(timezone=True), server_default=text('now()'))
+
+    def __repr__(self):
+        return f"<FSScanRun(id={self.id}, run_id={self.run_id!r})>"
 class Series(Base):
     __tablename__ = "series"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -167,7 +188,8 @@ class Series(Base):
     year = Column(Integer, nullable=False)
     tvdbid = Column(Integer, unique=True, nullable=False)
     is_4k  = Column(Boolean, default=False)
-    dummypath = Column(String, nullable=True)
+    # preferred placeholder folder for series-level placeholders
+    placeholder_folder = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
     # ARR-provided synopsis/overview for series-level metadata
     sonarr_series_overview = Column(String, nullable=True)
@@ -216,7 +238,8 @@ class Season(Base):
     season_number = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
-    dummypath = Column(String, nullable=True)
+    # preferred placeholder folder for season-level placeholders
+    placeholder_folder = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
     # ARR-provided synopsis/overview for series-level metadata
     sonarr_season_overview = Column(String, nullable=True)
@@ -253,10 +276,12 @@ class Episode(Base):
     episode_number = Column(Integer, nullable=False, index=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
-    dummypath = Column(String, nullable=True)
+    # preferred placeholder folder for episode-level placeholders
+    placeholder_folder = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
-    # Exact path to the episode file when Sonarr has it
-    episodefile_path = Column(String, nullable=True)
+    # Standardized episode content file path naming (previously episodefile_filepath)
+    # Now named `sonarr_filepath` to make intent explicit (source: Sonarr)
+    sonarr_filepath = Column(String, nullable=True)
     episodefile_size = Column(BigInteger, nullable=True)
     # Episode-level overview (if provided by Sonarr)
     sonarr_episode_overview = Column(String, nullable=True)
@@ -279,9 +304,10 @@ class Episode(Base):
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
     placeholder_status = Column(String, nullable=True)
-    # Boolean to track if placeholder file physically exists
-    placeholder_exists = Column(Boolean, default=False)
-    filepath = Column(String, nullable=True)
+    # Boolean to track if placeholder file physically exists (aggregated)
+    has_placeholder = Column(Boolean, default=False)
+    # Canonical observed placeholder file path for this episode (derived)
+    placeholder_filepath = Column(String, nullable=True)
     sonarr_progress = Column(Integer, nullable=True, default=0)
     sonarr_status = Column(String, nullable=True)
     air_date = Column(Date, nullable=True)

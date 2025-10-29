@@ -143,6 +143,27 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.debug('List-capture modules not available or failed to import', extra={'emoji_type': 'debug'})
 
+        # Perform a single filesystem placeholder scan at startup when a fullsync was requested.
+            try:
+                from services.fs_scan import scan_once_if_needed
+                # Consider 4K variants as well when deciding to run a startup fullsync scan
+                radarr_flags = any([
+                    getattr(settings, 'RADARR_SYNC_ON_STARTUP', False),
+                    getattr(settings, 'RADARR_4K_SYNC_ON_STARTUP', False)
+                ])
+                sonarr_flags = any([
+                    getattr(settings, 'SONARR_SYNC_ON_STARTUP', False),
+                    getattr(settings, 'SONARR_4K_SYNC_ON_STARTUP', False)
+                ])
+                if radarr_flags or sonarr_flags:
+                    try:
+                        count = scan_once_if_needed()
+                        logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
+                    except Exception as e:
+                        logger.error(f'FS-scan at startup failed: {e}', extra={'emoji_type': 'error'})
+            except Exception:
+                logger.debug('services.fs_scan not available; skipping startup FS-scan', extra={'emoji_type': 'debug'})
+
         # Startup syncs are scheduled via services.sync.schedule_all_syncs()
     
         # which is already invoked above. Avoid running duplicate full-syncs here.

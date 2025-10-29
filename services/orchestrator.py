@@ -14,9 +14,9 @@ FAR_FUTURE = datetime(2999, 1, 1, tzinfo=timezone.utc)
 
 PHASES = [
     'enrich_base',
-    'enrich_files',
-    'fs_scan',
-    'merge_scan',
+    # global FS-scan is centralized and should not be a per-item phase;
+    # workers will trigger the idempotent run-level scanner when appropriate.
+    'enrich_and_merge',
     'determine',
     'materialize',
 ]
