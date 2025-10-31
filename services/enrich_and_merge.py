@@ -8,6 +8,45 @@ from core.config import settings
 import hashlib
 from typing import List, Optional
 from sqlalchemy import or_, and_
+import threading
+import time as _time
+
+# Aggregator for noisy "no placeholders to process" events.
+# We move per-occurrence messages to VERBOSE and emit an INFO summary
+# every _AGG_MAX_COUNT occurrences or when _AGG_MAX_SECONDS elapsed.
+_AGG_MAX_COUNT = 1000
+_AGG_MAX_SECONDS = 10
+_agg_lock = threading.Lock()
+_agg_map: dict = {}
+
+def _record_no_placeholders(key: str):
+    now = _time.time()
+    with _agg_lock:
+        entry = _agg_map.get(key)
+        if not entry:
+            entry = {'count': 0, 'last_emit': now}
+            _agg_map[key] = entry
+        entry['count'] += 1
+        # Emit when threshold or timeout reached
+        if entry['count'] >= _AGG_MAX_COUNT or (now - entry['last_emit']) >= _AGG_MAX_SECONDS:
+            try:
+                logger.info(f"➡️ {key}: no placeholders to process (aggregated {entry['count']} occurrences)")
+            except Exception:
+                pass
+            entry['count'] = 0
+            entry['last_emit'] = now
+
+def _emit_all_summaries():
+    now = _time.time()
+    with _agg_lock:
+        for key, entry in list(_agg_map.items()):
+            if entry.get('count', 0) > 0:
+                try:
+                    logger.info(f"➡️ {key}: no placeholders to process (aggregated {entry['count']} occurrences)")
+                except Exception:
+                    pass
+                entry['count'] = 0
+                entry['last_emit'] = now
 
 
 def compute_signature(ph_row: Placeholder) -> str:
@@ -124,7 +163,12 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
                 phs = _placeholders_to_process(session, placeholder_ids=placeholder_ids, limit=getattr(settings, 'ENRICH_BATCH_SIZE', 500))
 
             if not phs:
-                logger.info(f"enrich_and_merge: no placeholders to process (subflow={subflow_id})")
+                # move noisy messages to VERBOSE and aggregate INFO summaries
+                try:
+                    logger.verbose(f"enrich_and_merge: no placeholders to process (subflow={subflow_id})")
+                except Exception:
+                    pass
+                _record_no_placeholders('enrich_and_merge')
                 return True
 
             processed = 0
@@ -449,6 +493,11 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
                     except Exception:
                         pass
 
+            # emit any pending aggregated summaries for this module
+            try:
+                _emit_all_summaries()
+            except Exception:
+                pass
             logger.info(f"enrich_and_merge: processed {processed} placeholders for subflow={subflow_id}")
             return True
         finally:
@@ -478,7 +527,12 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
                 phs = _placeholders_to_process(session, placeholder_ids=placeholder_ids, limit=limit)
 
             if not phs:
-                logger.info(f"process_placeholders: no placeholders to process (subflow={subflow_id})")
+                # move noisy per-call messages to VERBOSE and aggregate INFO summaries
+                try:
+                    logger.verbose(f"process_placeholders: no placeholders to process (subflow={subflow_id})")
+                except Exception:
+                    pass
+                _record_no_placeholders('process_placeholders')
                 return {'ok': True, 'processed': 0}
 
             processed = 0
@@ -781,6 +835,10 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
                     except Exception:
                         pass
 
+            try:
+                _emit_all_summaries()
+            except Exception:
+                pass
             logger.info(f"process_placeholders: processed {processed} placeholders for subflow={subflow_id}")
             return {'ok': True, 'processed': processed}
         finally:
