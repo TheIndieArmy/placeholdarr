@@ -166,10 +166,11 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
                         if ep:
                             try:
                                 ep.has_placeholder = True
-                                # persist sonarr filepath if missing
+                                # persist observed placeholder filepath (do NOT overwrite sonarr_filepath
+                                # which should come from Sonarr/ARR payloads)
                                 try:
-                                    if not getattr(ep, 'sonarr_filepath', None) and ph.path:
-                                        ep.sonarr_filepath = ph.path
+                                    if getattr(ep, 'placeholder_filepath', None) != ph.path and ph.path:
+                                        ep.placeholder_filepath = ph.path
                                 except Exception:
                                     pass
                                 # Authoritative: update episode.placeholder_filepath when it differs
@@ -250,8 +251,9 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
                                                 try:
                                                     ep.has_placeholder = True
                                                     try:
-                                                        if not getattr(ep, 'sonarr_filepath', None) and ph.path:
-                                                            ep.sonarr_filepath = ph.path
+                                                        # observed placeholder path -> persist as placeholder_filepath
+                                                        if getattr(ep, 'placeholder_filepath', None) != ph.path and ph.path:
+                                                            ep.placeholder_filepath = ph.path
                                                     except Exception:
                                                         pass
                                                     try:
@@ -330,23 +332,27 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
                                             ph.episode_id = ep.id
                                             try:
                                                 ep.has_placeholder = True
-                                                if not getattr(ep, 'sonarr_filepath', None):
-                                                    ep.sonarr_filepath = ph.path
+                                                try:
+                                                    # observed placeholder path -> persist as placeholder_filepath
+                                                    if getattr(ep, 'placeholder_filepath', None) != ph.path and ph.path:
+                                                        ep.placeholder_filepath = ph.path
+                                                except Exception:
+                                                    pass
+                                                try:
                                                     # persist series/season placeholder_folder from observed path
-                                                    try:
-                                                        if ph.path:
-                                                            pdir = os.path.dirname(ph.path)
-                                                            if getattr(best_ss, 'placeholder_folder', None) != pdir:
-                                                                best_ss.placeholder_folder = pdir
-                                                            try:
-                                                                if getattr(ep, 'season', None) and getattr(ep.season, 'placeholder_folder', None) != pdir:
-                                                                    ep.season.placeholder_folder = pdir
-                                                                    session.add(ep.season)
-                                                            except Exception:
-                                                                pass
-                                                    except Exception:
-                                                        pass
-                                                    session.add(ep)
+                                                    if ph.path:
+                                                        pdir = os.path.dirname(ph.path)
+                                                        if getattr(best_ss, 'placeholder_folder', None) != pdir:
+                                                            best_ss.placeholder_folder = pdir
+                                                        try:
+                                                            if getattr(ep, 'season', None) and getattr(ep.season, 'placeholder_folder', None) != pdir:
+                                                                ep.season.placeholder_folder = pdir
+                                                                session.add(ep.season)
+                                                        except Exception:
+                                                            pass
+                                                except Exception:
+                                                    pass
+                                                session.add(ep)
                                             except Exception:
                                                 pass
                                         linked = True
@@ -511,12 +517,8 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
                             try:
                                 ep.has_placeholder = True
                                 try:
-                                    if not getattr(ep, 'sonarr_filepath', None) and ph.path:
-                                        ep.sonarr_filepath = ph.path
-                                except Exception:
-                                    pass
-                                try:
-                                    if getattr(ep, 'placeholder_filepath', None) != ph.path:
+                                    # observed placeholder path -> persist as placeholder_filepath
+                                    if getattr(ep, 'placeholder_filepath', None) != ph.path and ph.path:
                                         ep.placeholder_filepath = ph.path
                                 except Exception:
                                     pass
@@ -585,13 +587,22 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
                                                 try:
                                                     ep.has_placeholder = True
                                                     try:
-                                                        if not getattr(ep, 'sonarr_filepath', None) and ph.path:
-                                                            ep.sonarr_filepath = ph.path
+                                                        # observed placeholder path -> persist as placeholder_filepath
+                                                        if getattr(ep, 'placeholder_filepath', None) != ph.path and ph.path:
+                                                            ep.placeholder_filepath = ph.path
                                                     except Exception:
                                                         pass
                                                     try:
-                                                        if getattr(ep, 'placeholder_filepath', None) != ph.path:
-                                                            ep.placeholder_filepath = ph.path
+                                                        if ph.path:
+                                                            pdir = os.path.dirname(ph.path)
+                                                            if getattr(ep, 'placeholder_folder', None) != pdir:
+                                                                ep.placeholder_folder = pdir
+                                                            try:
+                                                                if getattr(ep, 'season', None) and getattr(ep.season, 'placeholder_folder', None) != pdir:
+                                                                    ep.season.placeholder_folder = pdir
+                                                                    session.add(ep.season)
+                                                            except Exception:
+                                                                pass
                                                     except Exception:
                                                         pass
                                                     session.add(ep)
@@ -662,22 +673,25 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
                                             ph.episode_id = ep.id
                                             try:
                                                 ep.has_placeholder = True
-                                                if not getattr(ep, 'sonarr_filepath', None):
-                                                    ep.sonarr_filepath = ph.path
-                                                    try:
-                                                        if ph.path:
-                                                            pdir = os.path.dirname(ph.path)
-                                                            if getattr(best_ss, 'placeholder_folder', None) != pdir:
-                                                                best_ss.placeholder_folder = pdir
-                                                            try:
-                                                                if getattr(ep, 'season', None) and getattr(ep.season, 'placeholder_folder', None) != pdir:
-                                                                    ep.season.placeholder_folder = pdir
-                                                                    session.add(ep.season)
-                                                            except Exception:
-                                                                pass
-                                                    except Exception:
-                                                        pass
-                                                    session.add(ep)
+                                                try:
+                                                    if getattr(ep, 'placeholder_filepath', None) != ph.path and ph.path:
+                                                        ep.placeholder_filepath = ph.path
+                                                except Exception:
+                                                    pass
+                                                try:
+                                                    if ph.path:
+                                                        pdir = os.path.dirname(ph.path)
+                                                        if getattr(best_ss, 'placeholder_folder', None) != pdir:
+                                                            best_ss.placeholder_folder = pdir
+                                                        try:
+                                                            if getattr(ep, 'season', None) and getattr(ep.season, 'placeholder_folder', None) != pdir:
+                                                                ep.season.placeholder_folder = pdir
+                                                                session.add(ep.season)
+                                                        except Exception:
+                                                            pass
+                                                except Exception:
+                                                    pass
+                                                session.add(ep)
                                             except Exception:
                                                 pass
                                         linked = True
