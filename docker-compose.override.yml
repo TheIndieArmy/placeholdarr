@@ -21,7 +21,7 @@ services:
       - WATCHDOG_ENABLED=true
   
   placeholdarr_postgres:
-    container_name: placeholdarr_postgress
+    container_name: placeholdarr_postgres
     image: postgres:15-alpine
     restart: always
     environment:

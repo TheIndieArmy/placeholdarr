@@ -12,9 +12,12 @@ from services.postgres.models import Episode, Movie, SubFlow, Season
 from services.integrations import get_radarr_queue, get_sonarr_queue
 from services.postgres.models import Series
 import concurrent.futures
+from services.integrations import update_placeholder_status
+from services.jellyfin_client import create_jellyfin_nfo
+from core.logger import logger
 
-logger = logging.getLogger("queue_monitor")
-logger.setLevel(logging.INFO)
+# logger = logging.getLogger("queue_monitor")
+# logger.setLevel(logging.INFO)
 
 POLL_INTERVAL = 10      # seconds
 IDLE_TIMEOUT  = 120     # seconds without any pending playback jobs
@@ -80,7 +83,7 @@ class ProgressMonitor:
         session = get_session()
         try:
             now = datetime.now(timezone.utc)
-            in_queue = session.query(SubFlow).filter_by(status='IN_QUEUE', action='playback').all()
+            in_queue = session.query(SubFlow).filter_by(status='IN_QUEUE', action='playback', steps='monitoring').all()
             
             # If no items in queue, return False
             if not in_queue:
@@ -137,7 +140,10 @@ class ProgressMonitor:
         """Thread-safe Jellyfin update with lock"""
         with self._jellyfin_lock:
             try:
-                update_jellyfin_title_status(**kwargs)
+                update_placeholder_status(kwargs.get('session'), ent_id=kwargs.get('ent_id'), model=kwargs.get('model'), action=kwargs.get('action'), status = kwargs.get('status'))
+                create_jellyfin_nfo(kwargs.get('session'), ent_id=kwargs.get('ent_id'), model=kwargs.get('model'), action=kwargs.get('action'), status = kwargs.get('status'))
+
+                # update_jellyfin_title_status(**kwargs)
             except Exception as e:
                 logger.error(f"Error updating Jellyfin: {str(e)}", extra={'emoji_type': 'error'})
 
@@ -204,10 +210,14 @@ class ProgressMonitor:
                 if sf.movie_id:
                     update_params = {
                         'media_type': 'movie',
+                        'model': Movie,
+                        'ent_id': rec.id,
+                        'action': 'playback',
                         'media_id': rec.tmdbid,
                         'title': rec.title,
                         'status': f"Downloading ({progress}%)",
-                        'year': rec.year
+                        'year': rec.year,
+                        'session': session
                     }
                 else:
                     # For episodes, get series info through relationships
@@ -215,11 +225,15 @@ class ProgressMonitor:
                     if series:
                         update_params = {
                             'media_type': 'tv',
+                            'model': Episode,
+                            'ent_id': rec.id,
+                            'action': 'playback',
                             'media_id': series.tvdbid,
                             'title': series.title,
                             'status': f"Downloading ({progress}%)",
                             'season': rec.season_number,
-                            'episode': rec.episode_number
+                            'episode': rec.episode_number,
+                            'session': session
                         }
                 
                 # Send updates to both services concurrently but with locks

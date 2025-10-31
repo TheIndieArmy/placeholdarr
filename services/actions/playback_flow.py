@@ -4,16 +4,17 @@ import os
 from typing import Type, List
 from sqlalchemy.orm import Session
 from core.config import settings
-from services.postgres.models import Movie, Episode, SubFlow
+from services.postgres.models import Movie, Episode, Season, SubFlow
 from services.integrations import (
     trigger_radarr_search,
     trigger_sonarr_search,
     api_monitor_episodes,
     mark_movie_monitored
 )
+from core.logger import logger
 
-logger = logging.getLogger("playback_flow")
-logger.setLevel(logging.INFO)
+# logger = logging.getLogger("playback_flow")
+# logger.setLevel(logging.INFO)
 
 
 def identify_source(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
@@ -46,9 +47,9 @@ def db_get_episodes(session: Session, series_id: int, season_num: int, ep_num: i
     # Query episodes in same season >= current ep
     eps = (
         session.query(Episode)
-            .join(Episode.season)
-            .filter(Episode.season.has(series_id=series_id))
-            .order_by(Episode.season.has(season_num), Episode.episode_number)
+            .join(Season)
+            .filter(Season.series_id == series_id)
+            .order_by(Season.season_number, Episode.episode_number)
             .all()
     )
     # flatten in order by season,ep
@@ -64,18 +65,23 @@ def lookup_and_monitor(session: Session,
                        ent_id: int,
                        model: Type,
                        action: str = None) -> bool:
+    logger.info(f"Starting lookup_and_monitor for {model.__name__} {ent_id}, action: {action}")
     if model is Movie:
         m = session.query(Movie).get(ent_id)
+        logger.debug(f"Processing movie: {m.title} (ID: {m.id})")
         success = mark_movie_monitored(
             m.radarrid,
             is_4k=m.is_4k
         )
+        logger.info(f"Movie monitoring result for {m.title}: {success}")
         return bool(success)
 
     # Episode flow
     ep: Episode = session.query(Episode).get(ent_id)
+    logger.debug(f"Processing episode: S{ep.season.season_number}E{ep.episode_number} (ID: {ep.id})")
     series_id = ep.season.series_id
     play_mode = settings.TV_PLAY_MODE.lower()
+    logger.debug(f"Play mode: {play_mode}, series ID: {series_id}")
     ep_ids: List[int] = []
 
     if play_mode == 'episode':
@@ -87,6 +93,7 @@ def lookup_and_monitor(session: Session,
             lookahead=settings.EPISODES_LOOKAHEAD
         )
         ep_ids = [e.sonarrid for e in eps if e.sonarrid]
+        logger.debug(f"Episode mode: Found {len(ep_ids)} episodes to monitor")
 
     elif play_mode == 'season':
         S = ep.season.season_number
@@ -99,41 +106,46 @@ def lookup_and_monitor(session: Session,
         if ep.episode_number == eps[-1].episode_number:
             next_eps = (
                 session.query(Episode)
-                    .join(Episode.season)
+                    .join(Season)
                     .filter(
-                        Episode.season.has(series_id=series_id, season_number=S+1)
+                        Season.series_id == series_id,
+                        Season.season_number == S+1
                     )
                     .all()
             )
             ep_ids += [e.sonarrid for e in next_eps if e.sonarrid]
+            eps.extend(next_eps)
+        logger.debug(f"Season mode: Found {len(ep_ids)} episodes to monitor")
 
     elif play_mode == 'series':
-        all_eps = (
+        eps = (
             session.query(Episode)
                 .join(Episode.season)
-                .filter(Episode.season.has(series_id=series_id))
+                .filter(Season.series_id == series_id)
                 .all()
         )
-        ep_ids = [e.sonarrid for e in all_eps if e.sonarrid]
+        ep_ids = [e.sonarrid for e in eps if e.sonarrid]
+        logger.debug(f"Series mode: Found {len(ep_ids)} episodes to monitor")
 
     else:
         logger.warning(f"Unknown TV_PLAY_MODE '{play_mode}'")
         ep_ids = [ep.sonarrid] if ep.sonarrid else []
 
     if not ep_ids:
+        logger.warning(f"No episode IDs found for {model.__name__} {ent_id}")
         return False
 
     series = ep.season.series
     sonarr_id = series.sonarrid
+    logger.debug(f"Calling api_monitor_episodes for series {series.title} (Sonarr ID: {sonarr_id}), episodes: {ep_ids}")
     # call actual API to mark monitored
     api_monitor_episodes(sonarr_id, ep_ids, is_4k=series.is_4k)
 
-    # stash context in DB
-    sf: SubFlow = (session.query(SubFlow)
-                      .filter_by(episode_id=ent_id, status='QUEUED')
-                      .first())
-    sf.context = ','.join(map(str, ep_ids))
-    session.add(sf)
+    for e in eps:
+        e.placeholder_status = "Search"
+        session.add(e)
+    logger.info(f"Updated placeholder_status to 'Search' for {len(eps)} episodes in series {series.title}")
+    logger.info(f"Completed lookup_and_monitor for {model.__name__} {ent_id}")
     return True
 
 
@@ -143,16 +155,14 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         success = trigger_radarr_search(m.radarrid, m.title)
         return bool(success)
 
-    sf: SubFlow = session.query(SubFlow).get(ent_id)
-    ep_ids = [int(x) for x in sf.context.split(',') if x]
+    series = session.query(Episode).get(ent_id).season.series
+    eps = session.query(Episode).join(Season).filter(Season.series_id == series.id).all()
+    ep_ids = [e.sonarrid for e in eps if e.sonarrid and e.placeholder_status == "Search" and e.status not in ["IN_QUEUE", "IN_PROGRESS"]]
     if not ep_ids:
         return False
 
-    # new signature: series_id, season_number=None, episode_ids, series_title, is_4k
-    series_id = sf.movie_id or sf.episode_id
-    series = session.query(Episode).get(sf.episode_id).season.series
     return trigger_sonarr_search(
-        series_id.sonarrid,
+        series.sonarrid,
         episode_ids=ep_ids,
         series_title=None,
         is_4k=series.is_4k
@@ -184,7 +194,8 @@ def enqueue_monitor(session: Session, ent_id: int, model: Type, action: str = No
             existing = session.query(SubFlow).filter_by(
             movie_id=ent_id,
             episode_id=None,
-            action='playback'
+            action='playback',
+            steps='monitoring'
             ).first()
             
             if existing:
@@ -195,36 +206,47 @@ def enqueue_monitor(session: Session, ent_id: int, model: Type, action: str = No
             movie_id=ent_id,
             episode_id=None,
             status='IN_QUEUE',
-            action='playback'
+            action='playback',
+            branch='playback',
+            steps='monitoring'
             )
+            movie = session.query(Movie).get(ent_id)
+            movie.status = 'IN_QUEUE'
+            session.add(subflow)
+            session.add(movie)
+
             logger.info(f"Created SubFlow for Movie ID {ent_id}", extra={'emoji_type': 'queue'})
             
         elif model == Episode:
-            existing = session.query(SubFlow).filter_by(
-            movie_id=None,
-            episode_id=ent_id,
-            action='playback'
-            ).first()
-            
-            if existing:
-                logger.info(f"SubFlow for Episode ID {ent_id} already exists", extra={'emoji_type': 'info'})
-                return True
-            
-            subflow = SubFlow(
-            movie_id=None,
-            episode_id=ent_id,
-            status='IN_QUEUE', 
-            action='playback'
-            )
-            logger.info(f"Created SubFlow for Episode ID {ent_id}", extra={'emoji_type': 'queue'})
+            series = session.query(Episode).get(ent_id).season.series
+            eps = session.query(Episode).join(Season).filter(Season.series_id == series.id, Episode.placeholder_status == "Search").all()
+            for e in eps:
+                existing = session.query(SubFlow).filter_by(
+                movie_id=None,
+                episode_id=e.id,
+                action='playback',
+                steps='monitoring'
+                ).first()
+                if existing:
+                    logger.info(f"SubFlow for Episode ID {e.id} already exists", extra={'emoji_type': 'info'})
+                    return True
+                subflow = SubFlow(
+                movie_id=None,
+                episode_id=e.id,
+                status='IN_QUEUE',
+                action='playback',
+                branch='playback',
+                steps='monitoring'
+                )
+                episode = session.query(Episode).get(e.id)
+                episode.status = 'IN_QUEUE'
+                session.add(subflow)
+                session.add(episode)
+                logger.info(f"Created SubFlow for Episode ID {e.id}", extra={'emoji_type': 'queue'})
             
         else:
             return False
-        
-        # Add to session and commit
-        session.add(subflow)
-        session.commit()
-        
+                
         from services.queue_monitor import trigger_monitoring
         trigger_monitoring()
         

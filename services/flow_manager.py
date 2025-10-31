@@ -47,10 +47,12 @@ class FlowManager:
         self,
         action: str,
         branch: Optional[str],
-        last_step_id: Optional[str]
+        last_step_id: Optional[str],
+        step_index: Optional[int] = None
     ) -> Optional[Entry]:
         """
-        Return the entry following last_step_id within the given branch (if branching) or globally.
+        Return the entry following last_step_id (and step_index if provided) within the given branch (if branching) or globally.
+        Handles repeated steps by using step_index to disambiguate.
         """
         steps = self.flows.get(action, [])
         if not steps:
@@ -65,33 +67,61 @@ class FlowManager:
                 if branch and branch in entry:
                     funcs = entry[branch]
                     names = [f.__name__ for f in funcs]
+                    # Use step_index to disambiguate repeated steps
                     if last_step_id in names:
-                        pos = names.index(last_step_id) + 1
-                        if pos < len(funcs):
-                            return funcs[pos]
+                        # If step_index is provided, use it
+                        if step_index is not None and 0 <= step_index < len(funcs):
+                            pos = step_index + 1
+                            if pos < len(funcs):
+                                return funcs[pos]
+                            else:
+                                # End of branch, return None to terminate
+                                return None
                         else:
-                            # move to next global
-                            return steps[idx+1] if idx+1 < len(steps) else None
+                            # Fallback: use first occurrence
+                            pos = names.index(last_step_id) + 1
+                            if pos < len(funcs):
+                                return funcs[pos]
+                            else:
+                                return None
                 elif branch is None or branch not in entry:
                     # No branch specified or branch doesn't exist - check all branches for last_step_id
                     for branch_name, funcs in entry.items():
                         names = [f.__name__ for f in funcs]
                         if last_step_id in names:
-                            pos = names.index(last_step_id) + 1
-                            if pos < len(funcs):
-                                return funcs[pos]
+                            if step_index is not None and 0 <= step_index < len(funcs):
+                                pos = step_index + 1
+                                if pos < len(funcs):
+                                    return funcs[pos]
+                                else:
+                                    return None
                             else:
-                                # move to next global step
-                                return steps[idx+1] if idx+1 < len(steps) else None
-                    
+                                pos = names.index(last_step_id) + 1
+                                if pos < len(funcs):
+                                    return funcs[pos]
+                                else:
+                                    return None
                     # If last_step_id not found in any branch but we're at a dict entry,
                     # it means we're transitioning into branching - return the dict itself
-                    # so the scheduler can handle branch selection
                     if last_step_id is not None:
                         return entry
             elif isinstance(entry, list):
                 names = [f.__name__ for f in entry]
-                if last_step_id in names or last_step_id is None:
+                # Use step_index for repeated steps
+                if last_step_id in names:
+                    if step_index is not None and 0 <= step_index < len(entry):
+                        pos = step_index + 1
+                        if pos < len(entry):
+                            return entry[pos]
+                        else:
+                            return None
+                    else:
+                        pos = names.index(last_step_id) + 1
+                        if pos < len(entry):
+                            return entry[pos]
+                        else:
+                            return None
+                elif last_step_id is None:
                     return entry
             else:
                 if entry.__name__ == last_step_id:

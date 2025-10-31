@@ -152,7 +152,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             session = get_session()
             repo = SeriesRepository(session)
             
-            series_entity = repo.get_by_tvdbid(tvdb_id, is_4k)
+            series_entity = repo.get_by_series_tvdbid(tvdb_id, is_4k)
             if not series_entity:
                 logger.warning(f"Series {series_title} not found in database for import event", extra={'emoji_type': 'warning'})
                 end_handler_logging(session_id, success=True, 
@@ -215,21 +215,10 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
     )
     
     try:
-        if not episodes:
-            if series_id:
-                r = requests.get(f"{settings.SONARR_URL}/episode",
-                                 params={'seriesId': series_id},
-                                 headers={'X-Api-Key': settings.SONARR_API_KEY})
-                r.raise_for_status()
-                episodes = r.json()
-            else:
-                logger.warning("No series ID provided in seriesadd event.", extra={'emoji_type': 'warning'})
-                episodes = []
-        
         session = get_session()
         repo = SeriesRepository(session)
         
-        series = repo.get_by_tvdbid(tvdb_id, is_4k)
+        series = repo.get_by_series_tvdbid(tvdb_id, is_4k)
         if not series:
             # Create the Series record using tvdbid (Sonarr provides tvdbId)
             try:
@@ -252,7 +241,6 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         else:
             logger.info("Series already present", extra={'emoji_type':'warning'})
             repo.is_deleted(series, False)
-
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
@@ -314,7 +302,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     try:
         session = get_session()
         repo = SeriesRepository(session)
-        series = repo.get_by_tvdbid(tvdb_id, is_4k)
+        series = repo.get_by_series_tvdbid(tvdb_id, is_4k)
         if not series:
             logger.info("Series not found in database", extra={'emoji_type': 'warning'})
             end_handler_logging(session_id, success=False, 
@@ -623,7 +611,7 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
                 # Construct folder path using get_folder_path for consistency
                 session = get_session()
                 repo = SeriesRepository(session)
-                series = repo.get_by_tvdbid(tvdb_id, is_4k)
+                series = repo.get_by_series_tvdbid(tvdb_id, is_4k)
                 if not series:
                     logger.info(f"Series {title} not found in database for deletion", extra={'emoji_type': 'warning'}) 
                     end_handler_logging(session_id, success=True, 
@@ -723,10 +711,18 @@ def handle_playback(data: dict):
         elif media_type == "episode":
             # extract series, season & episode numbers
             series_tvdb   = media.get("ids", {}).get("tvdb") or data.get("Provider_tvdb")
+            # item_id = None
+            # if "ServerName" in data and data.get("ServerName") == "jellyfin":
+            #     item_id = data.get("ItemId")
+            # else:
+            #     logger.debug("Non-Jellyfin playback event or missing ItemId", extra={"emoji_type": "debug"})
             season_number = int(media.get("season_num")  or data.get("SeasonNumber", 0))
             episode_number= int(media.get("episode_num") or data.get("EpisodeNumber", 0))
             repo = SeriesRepository(session)
-            series = repo.get_by_tvdbid(series_tvdb, is_4k)
+            # if item_id:
+            #     series = repo.get_by_jellyfin_itemid(item_id, is_4k)
+            # else:
+            series = repo.get_by_ep_tvdbid(series_tvdb, is_4k)
             if not series:
                 logger.error(f"No DB Series for TVDB {series_tvdb}")
                 end_handler_logging(session_id, success=False, 

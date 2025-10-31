@@ -15,16 +15,16 @@ def steps():
         enrich_comprehensive_metadata,
         {
             'jellyfin': [
+                update_placeholder_status,
                 create_jellyfin_nfo,
                 refresh_jellyfin_dummy,
                 verify_dummy_scan_jellyfin, 
-                update_placeholder_status, 
-                verify_dummy_scan_jellyfin
+                # verify_dummy_scan_jellyfin
             ],
             'plex': [
+                update_placeholder_status, 
                 refresh_plex_dummy, 
                 verify_dummy_scan_plex, 
-                update_placeholder_status, 
                 update_plex_title_status, 
                 verify_dummy_scan_plex, 
                 retry_failed_plex_title_updates

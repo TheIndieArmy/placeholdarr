@@ -1,5 +1,8 @@
 import logging
 import re
+
+import requests
+from core.config import settings
 from sqlalchemy.orm import Session
 from services.postgres.models import Episode, Series, Season
 
@@ -57,10 +60,21 @@ def _map_keys_to_allowed(payload: dict, allowed: set) -> dict:
 class SeriesRepository:
     def __init__(self, session: Session):
         self.session = session
-
-    def get_by_tvdbid(self, tvdbid: int, is_4k: bool) -> Series | None:
+    def get_by_series_tvdbid(self, tvdbid: int, is_4k: bool) -> Series | None:
         return self.session.query(Series).filter_by(tvdbid=tvdbid,is_4k=is_4k).first()
+
+    def get_by_ep_tvdbid(self, tvdbid: int, is_4k: bool) -> Series | None:
+        return self.session.query(Series).join(Series.season).join(Season.episode).filter(
+            Episode.tvdbid == tvdbid,
+            Series.is_4k == is_4k
+        ).first()
     
+    def get_by_jellyfin_itemid(self, jellyfin_itemid: str, is_4k: bool) -> Series | None:
+        return self.session.query(Series).join(Series.season).join(Season.episode).filter(
+            Episode.jellyfin_dummy_id == jellyfin_itemid,
+            Series.is_4k == is_4k
+        ).first()
+
     def get_by_id(self, seriesid: int) -> Series | None:
         return self.session.query(Series).filter_by(id=seriesid).first()
 
@@ -165,15 +179,26 @@ class SeriesRepository:
         self.session.commit()
 
 
-    def add_missing_seasons_and_episodes(self, series: Series, episodes_data: list[dict]):
+    def add_missing_seasons_and_episodes(self, series: Series, episodes_data: list[dict] = None):
         """
         episodes_data: list of dicts, each with keys:
         - 'seasonNumber'
         - 'episodeNumber'
         - 'title'
         - ...any other metadata
-        """        
+        """
         # group episodes by season number
+        if not episodes_data:
+            series_id = series.sonarrid
+            if series_id:
+                r = requests.get(f"{settings.SONARR_URL}/episode",
+                                 params={'seriesId': series_id},
+                                 headers={'X-Api-Key': settings.SONARR_API_KEY})
+                r.raise_for_status()
+                episodes_data = r.json()
+            else:
+                logger.warning("No series ID provided in seriesadd event.", extra={'emoji_type': 'warning'})
+                episodes_data = []
         by_season = {}
         for ep in episodes_data:
             # be robust: Sonarr may provide seasonNumber as int or missing (treat missing as 0)

@@ -67,9 +67,11 @@ class HandlerLogManager:
         # Archive existing log.txt if it exists
         archived_log = self._archive_existing_log(handler_name)
         
-        # Create new log file path (always log.txt)
+    # Create new log file path (always log.txt)
         log_file = self.base_log_dir / handler_name / "log.txt"
-        
+        # Ensure the log directory exists
+        import os
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
         # Create file handler with all log levels including VERBOSE
         file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
         from core.logger import VERBOSE_LEVEL_NUM

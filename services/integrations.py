@@ -552,14 +552,13 @@ def delete_dummy_file(
     except Exception as e:
         logger.error(f"Error deleting dummy file for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
 
-def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, action: str):
+def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, action: str, status: str = None):
     """Update the status of a placeholder file"""
     try:
-        status = None
-        if 'add' in action:
+        if not status and 'add' in action:
             status = "Request"
-        elif 'delete' in action or 'import' in action:
-            status = None
+        # elif 'delete' in action or 'import' in action:
+        #     status = None
         if model is Movie:
             movie = dbSession.query(Movie).get(ent_id)
             if not movie:
@@ -1105,6 +1104,17 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 session.commit()
                 logger.debug(f"Set series dummy path to: {series_path}", extra={'emoji_type': 'debug'})
 
+        # After all episode subflows, update series current_step_name to latest completed step if possible
+        if hasattr(series, 'current_step_name'):
+            last_done_subflow = session.query(SubFlow).filter(
+                SubFlow.series_id == series.id,
+                SubFlow.status == 'DONE',
+                SubFlow.episode_id == None
+            ).order_by(SubFlow.id.desc()).first()
+            if last_done_subflow:
+                series.current_step_name = last_done_subflow.steps
+                session.add(series)
+                session.commit()
         logger.info(f"Completed placeholder processing for series '{series.title}'", extra={'emoji_type': 'success'})
         return True
 
@@ -1213,6 +1223,11 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             if not ep:
                 # Mark the subflow DONE to avoid reprocessing orphan entries
                 subflow.status = "DONE"
+                # Try to update current_step_name for orphaned episode if possible
+                orphan_ep = session.query(Episode).get(subflow.episode_id)
+                if orphan_ep and hasattr(orphan_ep, 'current_step_name'):
+                    orphan_ep.current_step_name = subflow.steps
+                    session.add(orphan_ep)
                 session.add(subflow)
                 session.commit()
                 continue
@@ -1224,6 +1239,10 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             
             if has_real_file or dummy_file_exists:
                 subflow.status = "DONE"
+                # Update current_step_name on entity when SubFlow is marked DONE
+                if hasattr(ep, 'current_step_name'):
+                    ep.current_step_name = subflow.steps
+                    session.add(ep)
                 session.add(subflow)
                 session.commit()
                 continue
@@ -1241,17 +1260,10 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             episode_num = ep.episode_number
             episode_title = ep.title
 
-            # Normalize tvdb id for checks/enrichment
-            normalized_tvdb = None
-            try:
-                normalized_tvdb = getattr(ep, 'tvdbid', None) or getattr(series, 'tvdbid', None) or getattr(ep, 'tvdb_id', None) or getattr(series, 'tvdb_id', None) or normalized_series_tvdb
-            except Exception:
-                normalized_tvdb = normalized_series_tvdb
-
             # Quick check: if episode already has a real file via queue monitor, skip
             from services.queue_monitor import check_episode_has_file
             try:
-                if normalized_tvdb and check_episode_has_file(normalized_tvdb, season_num, episode_num, is_4k):
+                if normalized_series_tvdb and check_episode_has_file(normalized_series_tvdb, season_num, episode_num, is_4k):
                     logger.info(
                         f"Skipping placeholder for {series.title} S{season_num}E{episode_num} (real file exists)",
                         extra={'emoji_type': 'skip'}
@@ -1294,7 +1306,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     "tv",
                     series.title,
                     series.year,
-                    normalized_tvdb,
+                    normalized_series_tvdb,
                     tv_library,
                     season_number=season_num,
                     episode_range=(episode_num, episode_num),
@@ -1306,6 +1318,8 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             if dummy_path:
                 ep.dummypath = dummy_path
                 ep.placeholder_exists = True  # Mark that placeholder file exists
+                if hasattr(ep, 'current_step_name'):
+                    ep.current_step_name = subflow.steps
                 session.add(ep)
                 # Commit immediately so external scanners and other workers see file presence
                 session.commit()
@@ -2089,7 +2103,7 @@ def enrich_episode_metadata(session, ent_id, model, action):
                         changed = True
                     
                     # Episode TVDB ID
-                    tvdb_id = matching_episode.get('tvDbEpisodeId')
+                    tvdb_id = matching_episode.get('tvdbId')
                     if tvdb_id and episode.tvdbid != tvdb_id:
                         episode.tvdbid = tvdb_id
                         changed = True
@@ -2106,6 +2120,11 @@ def enrich_episode_metadata(session, ent_id, model, action):
                         except (ValueError, TypeError):
                             pass
                     
+                    ep_sonarrid = matching_episode.get('id')
+                    if ep_sonarrid and episode.sonarrid != ep_sonarrid:
+                        episode.sonarrid = ep_sonarrid
+                        changed = True
+           
                     # Episode thumbnail
                     images = matching_episode.get('images', [])
                     for image in images:
@@ -2354,7 +2373,7 @@ def enrich_comprehensive_metadata(session, ent_id, model, action):
                 existing_branch_flow = session.query(SubFlow).filter(
                     SubFlow.episode_id == episode.id,
                     SubFlow.action == action,
-                    SubFlow.steps.like("%jellyfin%")  # Contains jellyfin/plex branching
+                    SubFlow.steps.like("%jellyfin%")  # Contains jellyfin branching
                 ).first()
                 
                 if not existing_branch_flow:

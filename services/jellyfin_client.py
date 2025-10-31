@@ -195,7 +195,7 @@ def retry_call(
     return last_result
 
 
-def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
+def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: str, status: str = None) -> bool:
     """
     Create NFO file alongside placeholder for Jellyfin metadata.
     This function is called by the scheduler as a step in the flow.
@@ -223,9 +223,9 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
         if not entity:
             logger.error(f"{model.__name__} {ent_id} not found", extra={'emoji_type': 'error'})
             return False
-        
-        request_status = "Request"  # Default status prefix
-        
+
+        request_status = status if status else entity.placeholder_status  # Default status prefix
+
         if model == Movie:
             # Handle movie NFO creation
             placeholder_path = getattr(entity, 'dummypath', None)
@@ -439,7 +439,7 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
         else:
             logger.info(f"Placeholder file {dummy_path} still exists - triggering deletion scan", extra={'emoji_type': 'scan'})
         
-        # Update placeholder_exists status
+        # Update d_exists status
         if hasattr(entity, 'placeholder_exists'):
             entity.placeholder_exists = False
             dbsession.add(entity)
@@ -1397,7 +1397,7 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
             logger.error(f"Failed to find series match in Jellyfin", extra={'emoji_type': 'error'})
             return False
         jf_series_id = match['Id']
-        logger.info(f"Saving Jellyfin series ID {jf_series_id} for series {series.id}", extra={'emoji_type': 'success'})
+        logger.info(f"Saving Jellyfin dummy series ID {jf_series_id} for series {series.id}", extra={'emoji_type': 'success'})
         save_jellyfin_dummy_id(dbsession, Series, series.id, match)
 
     # 2) Cache season IDs
@@ -1480,7 +1480,10 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                 continue
             if it['Path'] == ep2.dummypath:
                 save_jellyfin_dummy_id(dbsession, Episode, ep2.id, it)
-                sf.status = 'DONE'
+                if steps.index('verify_dummy_scan_jellyfin') + 1 < len(steps):
+                    sf.step_index = steps.index('verify_dummy_scan_jellyfin')+1
+                else:
+                    sf.status = 'DONE'
                 dbsession.add(sf)
                 if ep2.id == ent_id:
                     matched = True

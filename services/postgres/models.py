@@ -9,6 +9,7 @@ class Movie(Base):
     __tablename__ = "movie"
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_time = Column(DateTime, server_default=func.now(), nullable=False)
+    modified_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     tmdbid = Column(Integer, unique=True, nullable=False)
@@ -79,6 +80,7 @@ class SubFlow(Base):
     __tablename__ = 'subflow'
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_time = Column(DateTime, server_default=func.now(), nullable=False)
+    modified_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
@@ -90,6 +92,7 @@ class SubFlow(Base):
     status = Column(String, default='PENDING')
     retry_count = Column(Integer, default=0)
     error_message = Column(String, nullable=True)
+    # trigger_id = Column(Integer, default=None, nullable=True)
 
     movie = relationship('Movie', back_populates='subflows')
     series = relationship('Series', back_populates='subflows')
@@ -100,6 +103,7 @@ class Series(Base):
     __tablename__ = "series"
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_time = Column(DateTime, server_default=func.now(), nullable=False)
+    modified_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     tvdbid = Column(Integer, unique=True, nullable=False)
@@ -153,6 +157,7 @@ class Season(Base):
     __tablename__ = "season"
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_time = Column(DateTime, server_default=func.now(), nullable=False)
+    modified_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=False)
     # season_number must NOT be unique across the whole table — uniqueness applies per series
     season_number = Column(Integer, nullable=False, index=True)
@@ -198,6 +203,7 @@ class Episode(Base):
     __tablename__ = "episode"
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_time = Column(DateTime, server_default=func.now(), nullable=False)
+    modified_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=False)
     # episode_number must NOT be unique across the whole table — uniqueness applies per season
     episode_number = Column(Integer, nullable=False, index=True)
