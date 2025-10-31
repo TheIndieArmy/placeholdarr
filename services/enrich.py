@@ -3,6 +3,43 @@ from services.postgres.models import SubFlow, Episode, Season, Movie, Series
 from services.arr_clients import fetch_sonarr_episodes
 from services.postgres.db import get_engine
 from core.logger import logger
+import threading
+import time
+
+# Summary aggregation for enriched movies
+_enrich_lock = threading.Lock()
+_enrich_count = 0
+_enrich_since = 0.0
+_enrich_ids = []
+_ENRICH_COUNT_THRESHOLD = 1000
+_ENRICH_TIME_THRESHOLD = 10.0
+
+
+def _maybe_flush_enrich_summary(force: bool = False):
+    global _enrich_count, _enrich_since, _enrich_ids
+    now = time.time()
+    with _enrich_lock:
+        if not force and _enrich_count < _ENRICH_COUNT_THRESHOLD and (now - _enrich_since) < _ENRICH_TIME_THRESHOLD:
+            return
+        if _enrich_count == 0:
+            _enrich_since = now
+            return
+        # Log a compact INFO summary
+        try:
+            logger.info(f"Processed {_enrich_count} enriched movies; sample ids={_enrich_ids[:10]}")
+        except Exception:
+            pass
+        # reset
+        _enrich_count = 0
+        _enrich_ids = []
+        _enrich_since = now
+
+# Ensure we flush at process exit
+try:
+    import atexit
+    atexit.register(lambda: _maybe_flush_enrich_summary(force=True))
+except Exception:
+    pass
 from sqlalchemy import text
 from datetime import datetime
 from core.config import settings
@@ -199,7 +236,25 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                             sf.status = 'DONE'
                             session.add(sf)
                             session.commit()
-                            logger.info(f"Enriched Movie SubFlow {sf.id} from Radarr (movie_id={sf.movie_id})")
+                            # Per-item enrichment messages are VERBOSE; aggregate summaries are INFO
+                            try:
+                                logger.verbose(f"Enriched Movie SubFlow {sf.id} from Radarr (movie_id={sf.movie_id})")
+                            except Exception:
+                                pass
+                            # Update aggregated counters and maybe flush
+                            try:
+                                with _enrich_lock:
+                                    _enrich_count += 1
+                                    _enrich_ids.append(int(sf.movie_id) if sf.movie_id else int(sf.id))
+                                    if _enrich_count >= _ENRICH_COUNT_THRESHOLD:
+                                        # flush from background context
+                                        _maybe_flush_enrich_summary(force=True)
+                                    else:
+                                        # time-based flush handled by checking in call
+                                        _maybe_flush_enrich_summary()
+                            except Exception:
+                                pass
+                            return True
                             return True
                         except Exception as ex:
                             session.rollback()

@@ -32,10 +32,11 @@ def log_db_summary():
             done = session.execute(text("SELECT count(*) FROM job WHERE status='DONE'")).scalar()
             subflows = session.execute(text('SELECT count(*) FROM subflow')).scalar()
             movie_subflows = session.execute(text("SELECT count(*) FROM subflow WHERE movie_id IS NOT NULL")).scalar()
+            movies = session.execute(text('SELECT count(*) FROM movie')).scalar()
             episode_subflows = session.execute(text("SELECT count(*) FROM subflow WHERE episode_id IS NOT NULL")).scalar()
             series = session.execute(text('SELECT count(*) FROM series')).scalar()
             episodes = session.execute(text('SELECT count(*) FROM episode')).scalar()
-            logger.info(f"DB SUMMARY: jobs total={total_jobs} pending={pending} done={done} subflows={subflows} moviesf={movie_subflows} ep_subflows={episode_subflows} series={series} episodes={episodes}", extra={'emoji_type': 'info'})
+            logger.info(f"DB SUMMARY: jobs total={total_jobs} pending={pending} done={done} subflows={subflows} movie_subflows={movie_subflows} movies={movies} ep_subflows={episode_subflows} series={series} episodes={episodes}", extra={'emoji_type': 'info'})
         finally:
             session.close()
     except Exception as e:
@@ -117,10 +118,29 @@ async def lifespan(app: FastAPI):
         # If configured, perform immediate list-capture seeding for RADARR/SONARR
         try:
             from services.list_capture import capture_movies_fullsync_and_create_run, capture_series_fullsync_and_create_run
+            # Track whether we've invoked an FS-scan as part of the list-capture seeding
+            _startup_scan_performed = False
+
             if getattr(settings, 'RADARR_SYNC_ON_STARTUP', False):
                 try:
                     run = capture_movies_fullsync_and_create_run(run_note='startup movie fullsync')
                     logger.info(f"Created startup movie fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
+                    # Immediately perform an FS-scan and claim an fs_scan_run row for auditing
+                    try:
+                        from services.fs_scan import scan_once_if_needed
+                        res = scan_once_if_needed(run.run_id)
+                        # scan_once_if_needed may return (count, info) when a skip reason is provided
+                        if isinstance(res, tuple):
+                            count, info = res
+                        else:
+                            count, info = res, None
+                        if info and info.get('reason') == 'time_guard':
+                            logger.info(f'FS-scan (movie fullsync) skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s) (run_id={run.run_id})', extra={'emoji_type': 'info'})
+                        else:
+                            logger.info(f'FS-scan (movie fullsync) seeded {count} placeholders at startup (run_id={run.run_id})', extra={'emoji_type': 'info'})
+                        _startup_scan_performed = True
+                    except Exception as e:
+                        logger.error(f'FS-scan during movie fullsync failed: {e}', extra={'emoji_type': 'error'})
                 except Exception as e:
                     logger.error(f"Movie list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
                 else:
@@ -129,10 +149,26 @@ async def lifespan(app: FastAPI):
                         log_db_summary()
                     except Exception:
                         pass
+
             if getattr(settings, 'SONARR_SYNC_ON_STARTUP', False):
                 try:
                     run = capture_series_fullsync_and_create_run(run_note='startup tv fullsync')
                     logger.info(f"Created startup tv fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
+                    # Immediately perform an FS-scan and claim an fs_scan_run row for auditing
+                    try:
+                        from services.fs_scan import scan_once_if_needed
+                        res = scan_once_if_needed(run.run_id)
+                        if isinstance(res, tuple):
+                            count, info = res
+                        else:
+                            count, info = res, None
+                        if info and info.get('reason') == 'time_guard':
+                            logger.info(f'FS-scan (tv fullsync) skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s) (run_id={run.run_id})', extra={'emoji_type': 'info'})
+                        else:
+                            logger.info(f'FS-scan (tv fullsync) seeded {count} placeholders at startup (run_id={run.run_id})', extra={'emoji_type': 'info'})
+                        _startup_scan_performed = True
+                    except Exception as e:
+                        logger.error(f'FS-scan during tv fullsync failed: {e}', extra={'emoji_type': 'error'})
                 except Exception as e:
                     logger.error(f"TV list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
                 else:
@@ -155,12 +191,33 @@ async def lifespan(app: FastAPI):
                     getattr(settings, 'SONARR_SYNC_ON_STARTUP', False),
                     getattr(settings, 'SONARR_4K_SYNC_ON_STARTUP', False)
                 ])
-                if radarr_flags or sonarr_flags:
-                    try:
-                        count = scan_once_if_needed()
-                        logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
-                    except Exception as e:
-                        logger.error(f'FS-scan at startup failed: {e}', extra={'emoji_type': 'error'})
+
+                # Log diagnostic info so operators can see why a scan will/won't run
+                try:
+                    movie_root = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
+                    tv_root = getattr(settings, 'TV_LIBRARY_FOLDER', None)
+                    logger.debug(f"Startup FS-scan flags: radarr={radarr_flags} sonarr={sonarr_flags} movie_root={movie_root} tv_root={tv_root}", extra={'emoji_type': 'debug'})
+                except Exception:
+                    logger.debug('Failed to read FS-scan roots for diagnostics', extra={'emoji_type': 'debug'})
+
+                if _startup_scan_performed:
+                    logger.info('Startup FS-scan already performed as part of list-capture seeding; skipping additional scan', extra={'emoji_type': 'info'})
+                else:
+                    if radarr_flags or sonarr_flags:
+                        try:
+                            res = scan_once_if_needed()
+                            if isinstance(res, tuple):
+                                count, info = res
+                            else:
+                                count, info = res, None
+                            if info and info.get('reason') == 'time_guard':
+                                logger.info(f'FS-scan skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s)', extra={'emoji_type': 'info'})
+                            else:
+                                logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
+                        except Exception as e:
+                            logger.error(f'FS-scan at startup failed: {e}', extra={'emoji_type': 'error'})
+                    else:
+                        logger.debug('No startup fullsync flags set; skipping FS-scan', extra={'emoji_type': 'debug'})
             except Exception:
                 logger.debug('services.fs_scan not available; skipping startup FS-scan', extra={'emoji_type': 'debug'})
 

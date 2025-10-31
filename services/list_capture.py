@@ -8,6 +8,138 @@ import os
 from typing import List
 from core.config import settings
 from core.logger import logger
+import time
+import threading
+import atexit
+
+# Aggregated series-summary logger to reduce noisy per-series INFO messages.
+# Emits an INFO-level summary every _SERIES_SUMMARY_COUNT_THRESHOLD series
+# or every _SERIES_SUMMARY_TIME_THRESHOLD seconds.
+_SERIES_SUMMARY_COUNT_THRESHOLD = 50
+_SERIES_SUMMARY_TIME_THRESHOLD = 10
+
+_series_summary_lock = threading.Lock()
+_series_summary_count = 0
+# Each entry is a tuple: (series_id:int, created_subflows:int, description:str)
+_series_summary_items = []
+_series_summary_last_flush = time.time()
+# (expected total removed) — we use DB count as authoritative for expected totals
+_series_summary_processed_total = 0
+_series_summary_subflows_total = 0
+
+
+
+
+
+def _maybe_flush_series_summary(force: bool = False):
+    """Flush the aggregated series summary at INFO level when thresholds are met.
+
+    force=True forces an immediate flush regardless of thresholds.
+    """
+    global _series_summary_count, _series_summary_items, _series_summary_last_flush, _series_summary_processed_total, _series_summary_subflows_total
+    with _series_summary_lock:
+        now = time.time()
+        if not _series_summary_items:
+            # nothing to flush
+            return
+        if not force and _series_summary_count < _SERIES_SUMMARY_COUNT_THRESHOLD and (now - _series_summary_last_flush) < _SERIES_SUMMARY_TIME_THRESHOLD:
+            return
+        items = _series_summary_items[:]
+        _series_summary_items = []
+        _series_summary_count = 0
+        _series_summary_last_flush = now
+
+    # Compute totals and prepare messages for this flush
+    total_series = len(items)
+    total_subflows = 0
+    # Build descriptions for DEBUG output
+    descriptions = []
+    for it in items:
+        try:
+            # expect tuple (series_id, created_subflows, description)
+            sid, created, desc = it
+            total_subflows += int(created or 0)
+            descriptions.append(desc or f"series:{sid} created {created} subflows")
+        except Exception:
+            # backward-compat: if stored as plain string, include it in debug list but cannot sum
+            try:
+                descriptions.append(str(it))
+            except Exception:
+                descriptions.append('<unserializable>')
+
+    # Update cumulative totals and prepare compact INFO summary (no long list)
+    # Update cumulative totals in a threadsafe manner
+    try:
+        with _series_summary_lock:
+            _series_summary_processed_total += total_series
+            _series_summary_subflows_total += total_subflows
+            processed_cumulative = _series_summary_processed_total
+            subflows_cumulative = _series_summary_subflows_total
+    except Exception:
+        # Fallback to per-flush totals if anything goes wrong
+        processed_cumulative = total_series
+        subflows_cumulative = total_subflows
+
+    # Determine authoritative expected total from the DB. We prefer the DB
+    # count of Series as the source of truth so the INFO summary is stable and
+    # not sensitive to import-order or transient fetch behavior.
+    try:
+        ses = get_session()
+        try:
+            expected = int(ses.query(Series).count())
+        finally:
+            try:
+                ses.close()
+            except Exception:
+                pass
+    except Exception:
+        expected = None
+
+    # Build informative message: show cumulative processed out of expected, the
+    # number of series processed in this flush, subflows created in this flush,
+    # and the cumulative subflows created so far.
+    if expected is not None:
+        info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative}/{expected} series"
+    else:
+        info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative} series"
+    try:
+        # total_series is number processed in this flush; total_subflows is subflows created in this flush
+        info_msg = (info_msg +
+                    f" (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})")
+    except Exception:
+        pass
+
+    # DEBUG: include the long list/detail
+    max_show = 200
+    shown_list = descriptions[:max_show]
+    long_summary = ", ".join(shown_list)
+    if len(descriptions) > max_show:
+        long_summary = f"(showing first {max_show} of {len(descriptions)}) " + long_summary
+
+    logger.debug(f"{info_msg}: {long_summary}")
+    # INFO: only the compact summary
+    logger.info(info_msg)
+
+
+def _record_series_processed(series_id: int, created_subflows: int, description: str = None):
+    """Record a processed series; triggers aggregated flush when needed."""
+    global _series_summary_count, _series_summary_items, _series_summary_last_flush
+    with _series_summary_lock:
+        _series_summary_count += 1
+        # store a structured tuple so we can compute totals at flush time
+        desc = description if description else f"series:{series_id} created {created_subflows} subflows"
+        try:
+            created_val = int(created_subflows or 0)
+        except Exception:
+            created_val = 0
+        _series_summary_items.append((series_id, created_val, desc))
+        need_flush = _series_summary_count >= _SERIES_SUMMARY_COUNT_THRESHOLD or (time.time() - _series_summary_last_flush) >= _SERIES_SUMMARY_TIME_THRESHOLD
+    if need_flush:
+        _maybe_flush_series_summary()
+
+
+# Ensure we flush on process exit
+atexit.register(lambda: _maybe_flush_series_summary(force=True))
 
 
 def _extract_year(val):
@@ -773,6 +905,10 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
 
 def capture_series_fullsync_and_create_run(run_note: str = None) -> OrchestratorRun:
     entries = fetch_sonarr_series()
+    # NOTE: we no longer rely on setting an in-memory expected total here. The
+    # aggregator will read the authoritative Series.count() from the DB when
+    # emitting INFO summaries so the expected total is stable across process
+    # restarts and import-order variations.
     session = get_session()
     try:
         series_ids = []
@@ -785,6 +921,9 @@ def capture_series_fullsync_and_create_run(run_note: str = None) -> Orchestrator
                 continue
     finally:
         session.close()
+
+    # We do not set an in-memory expected total; the aggregator will query the DB
+    # for the authoritative expected total when it flushes summaries.
 
     # Use DB clock for run timestamp
     session = get_session()
@@ -887,12 +1026,17 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
 
     - include_specials: when False, excludes seasonNumber == 0 episodes.
     - batch_size: number of episodes to create per DB transaction.
+    
+    NOTE: This function records per-series activity into a summary aggregator which
+    emits an INFO-level summary every _SERIES_SUMMARY_COUNT_THRESHOLD series or
+    _SERIES_SUMMARY_TIME_THRESHOLD seconds. Individual per-series messages are
+    logged at VERBOSE level to reduce noise.
     """
     # Resolve include_specials default from settings
     if include_specials is None:
         include_specials = bool(settings.INCLUDE_SPECIALS)
 
-    logger.info(f"Creating episode subflows for series {series_id} (include_specials={include_specials})")
+    logger.verbose(f"Creating episode subflows for series {series_id} (include_specials={include_specials})")
     # Resolve DB series -> Sonarr external id before fetching episodes
     session = get_session()
     try:
@@ -982,8 +1126,13 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
 
                 episode_ids.append(ep.id)
 
-            # Create subflows for the episodes that don't already have one
-            existing = session.query(SubFlow.episode_id).filter(SubFlow.episode_id.in_(episode_ids)).all()
+            # Create subflows for the episodes that don't already have one.
+            # Treat SubFlows as 'existing' only when they are not in a terminal status
+            TERMINAL_STATUSES = ('DONE', 'CANCELLED', 'FAILED')
+            existing = session.query(SubFlow.episode_id).filter(
+                SubFlow.episode_id.in_(episode_ids),
+                SubFlow.status.notin_(TERMINAL_STATUSES)
+            ).all()
             existing_ids = {r[0] for r in existing}
             grp = f"{run_id}:enrich_base"
             from services.jobs import insert_job_with_session
@@ -1017,7 +1166,24 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
     if batch:
         _process_batch(batch)
 
-    logger.info(f"Created {created_subflows} episode subflows for series {series_id}")
+    # Build a compact description for summaries and record it.
+    try:
+        desc = None
+        session = get_session()
+        try:
+            sr = session.query(Series.id, Series.title, Series.year).filter(Series.id == series_id).first()
+            if sr:
+                desc = f"{sr.title} ({sr.year}) created {created_subflows} subflows"
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+    except Exception:
+        desc = f"series:{series_id} created {created_subflows} subflows"
+
+    _record_series_processed(series_id, created_subflows, desc)
+    logger.verbose(f"Created {created_subflows} episode subflows for series {series_id}")
     return created_subflows
 
 
@@ -1029,7 +1195,7 @@ def create_episode_subflows_for_season(series_id: int, season_number: int, run_i
     if include_specials is None:
         include_specials = bool(settings.INCLUDE_SPECIALS)
 
-    logger.info(f"Creating episode subflows for series {series_id} season {season_number} (include_specials={include_specials})")
+    logger.verbose(f"Creating episode subflows for series {series_id} season {season_number} (include_specials={include_specials})")
     # Resolve DB series -> Sonarr external id before fetching episodes
     session = get_session()
     try:
@@ -1076,7 +1242,9 @@ def create_episode_subflows_for_season(series_id: int, season_number: int, run_i
     if batch:
         created += create_episode_subflows_for_series_batch_helper(batch, series_id, run_id)
 
-    logger.info(f"Created {created} episode subflows for series {series_id} season {season_number}")
+    # Record this series-level activity in the aggregated summary and log at VERBOSE
+    _record_series_processed(series_id, created, f"series:{series_id} season:{season_number} created {created} subflows")
+    logger.verbose(f"Created {created} episode subflows for series {series_id} season {season_number}")
     return created
 
 
@@ -1295,11 +1463,29 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                     except Exception:
                         pass
                     session.add(ep)
+                    # If an existing episode was updated, enqueue a deduped re-enrich job
+                    try:
+                        from services.jobs import insert_job_with_session
+                        # group_id prevents duplicate re-enrich jobs for the same episode
+                        group_id = f"episode:{ep.id}:reenrich"
+                        payload = {'episode_id': ep.id, 'run_id': run_id}
+                        insert_job_with_session(session, 'reenrich:episode', payload, group_id=group_id)
+                    except Exception:
+                        # best-effort: don't fail the batch if job enqueue fails
+                        try:
+                            logger.exception(f"Failed to enqueue re-enrich job for episode {ep.id}")
+                        except Exception:
+                            pass
 
             episode_ids.append(ep.id)
 
-        # Create subflows for the episodes that don't already have one
-        existing = session.query(SubFlow.episode_id).filter(SubFlow.episode_id.in_(episode_ids)).all()
+        # Create subflows for the episodes that don't already have one.
+        # Treat SubFlows as 'existing' only when they are not in a terminal status
+        TERMINAL_STATUSES = ('DONE', 'CANCELLED', 'FAILED')
+        existing = session.query(SubFlow.episode_id).filter(
+            SubFlow.episode_id.in_(episode_ids),
+            SubFlow.status.notin_(TERMINAL_STATUSES)
+        ).all()
         existing_ids = {r[0] for r in existing}
         grp = f"{run_id}:enrich_base"
         from services.jobs import insert_job_with_session

@@ -251,8 +251,9 @@ def scan_once_if_needed(run_id: Optional[str] = None) -> int:
                 try:
                     delta = (now - row).total_seconds()
                     if delta is not None and delta < int(threshold):
+                        # Log the skip (still return an informative payload so callers can explain why a scan wasn't run)
                         logger.info(f'FS-scan skipped: last placeholder observation {int(delta)}s ago (<{int(threshold)}s)', extra={'emoji_type': 'placeholder'})
-                        return 0
+                        return 0, {'reason': 'time_guard', 'delta': int(delta), 'threshold': int(threshold)}
                 except Exception:
                     pass
         finally:

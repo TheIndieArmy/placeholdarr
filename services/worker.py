@@ -303,13 +303,22 @@ def _handle_claimed_job(job):
                     # Fullsync: call the global idempotent scanner (it will no-op if already run)
                     logger.info(f"Job {job_id}: triggering idempotent fullsync FS-scan (no-op if already run)")
                     # Request observed paths so we can run centralized enrichment exactly once for the run
+                    observed = None
                     try:
                         observed = scan_once_if_needed(run_id)
-                    except TypeError:
-                        # backwards-compatible: older scan_once_if_needed returned int
-                        observed = scan_once_if_needed(run_id)
-                    # If the scanner returned a list of paths, run centralized enrichment for them once
+                    except Exception:
+                        # In case older/newer signatures raise unexpected errors, keep trying to call it in a best-effort way
+                        try:
+                            observed = scan_once_if_needed(run_id)
+                        except Exception:
+                            logger.exception('scan_once_if_needed raised an unexpected exception')
+
+                    # Normalize and handle the scanner's possible return shapes:
+                    # - list of paths -> run process_placeholders(paths=...)
+                    # - int (legacy) -> nothing to enrich here
+                    # - (count, info) tuple -> may indicate a skipped scan with info
                     try:
+                        # Case: list of paths
                         if isinstance(observed, list) and observed:
                             from services.enrich_and_merge import process_placeholders
                             try:
@@ -317,8 +326,26 @@ def _handle_claimed_job(job):
                                 logger.info(f"Triggered enrichment for {res.get('processed',0)} placeholders after FS-scan (fullsync)", extra={'emoji_type': 'placeholder'})
                             except Exception:
                                 logger.exception('Failed to trigger process_placeholders after fullsync fs_scan')
+                        # Case: tuple (count, info)
+                        elif isinstance(observed, tuple) and len(observed) == 2:
+                            count, info = observed
+                            # If the scanner explicitly skipped due to time guard, log that at INFO
+                            try:
+                                reason = info.get('reason') if isinstance(info, dict) else None
+                            except Exception:
+                                reason = None
+                            if reason == 'time_guard':
+                                delta = info.get('delta') if isinstance(info, dict) else None
+                                threshold = info.get('threshold') if isinstance(info, dict) else None
+                                logger.info(f"FS-scan (fullsync) skipped by time guard: last observation {delta}s (<{threshold}s); run_id={run_id}")
+                            else:
+                                logger.info(f"FS-scan (fullsync) completed with count={count}; info={info}; run_id={run_id}")
+                        # Case: legacy int or None -> nothing to do
+                        else:
+                            # observed may be an int (legacy) or None; log debug for visibility
+                            logger.debug(f"FS-scan returned: {observed} (no placeholders paths to trigger centralized enrichment)")
                     except Exception:
-                        pass
+                        logger.exception('Unexpected error handling scan_once_if_needed result')
                 else:
                     # Non-fullsync: attempt a targeted scan
                     # Prefer explicit 'paths' in the payload
