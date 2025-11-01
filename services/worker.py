@@ -97,7 +97,7 @@ def _handle_claimed_job(job):
                 return False
 
             # Execute the current phase handler
-            ok = process_enrich_base_subflow(subflow_id)
+            ok = process_enrich_base_subflow(subflow_id, payload.get('run_id'))
             if ok:
                 # Advance the SubFlow.step_index and enqueue next-phase job if any
                 session = get_session()

@@ -8,7 +8,8 @@ from core.logger import logger
 from core.config import settings
 from services.postgres.utils import check_db
 from services.postgres.db import get_engine, init_db, get_session
-from services.postgres.models import Movie
+from services.postgres.models import Movie, Series, Episode, Job
+import sqlalchemy as sa
 from services.sync import schedule_all_syncs
 import asyncio
 import threading
@@ -92,12 +93,53 @@ async def lifespan(app: FastAPI):
 
         session = get_session()
         try:
+            # Reset queued content to PENDING so startup seeding doesn't leave items stranded
+            # Movies, Series, and Episodes may be queued from previous runs; migrate them to PENDING.
             session.query(Movie).filter(Movie.status == 'QUEUED').update(
                 {Movie.status: 'PENDING'},
                 synchronize_session=False
             )
+            try:
+                session.query(Series).filter(Series.status == 'QUEUED').update(
+                    {Series.status: 'PENDING'},
+                    synchronize_session=False
+                )
+            except Exception:
+                # Series table may not exist in some minimal environments; ignore failures here
+                pass
+            try:
+                session.query(Episode).filter(Episode.status == 'QUEUED').update(
+                    {Episode.status: 'PENDING'},
+                    synchronize_session=False
+                )
+            except Exception:
+                # Episode table may not exist in some minimal environments; ignore failures here
+                pass
             session.commit()
-            logger.info("Reset QUEUED movies to PENDING", extra={'emoji_type': 'info'})
+            logger.info("Reset QUEUED movies/series/episodes to PENDING", extra={'emoji_type': 'info'})
+
+            # Reset stale CLAIMED jobs back to PENDING so crashed/stalled workers don't block progress.
+            # Use a configurable threshold (seconds) via settings.CLAIMED_RESET_THRESHOLD_SECONDS (default 300s).
+            try:
+                threshold_seconds = int(getattr(settings, 'CLAIMED_RESET_THRESHOLD_SECONDS', 300) or 300)
+            except Exception:
+                threshold_seconds = 300
+            try:
+                cutoff_expr = sa.func.now() - sa.text(f"interval '{int(threshold_seconds)} seconds'")
+                claimed_q = session.query(Job).filter(Job.status == 'CLAIMED', Job.updated_at <= cutoff_expr)
+                claimed_count = claimed_q.count()
+                if claimed_count:
+                    claimed_q.update({Job.status: 'PENDING', Job.updated_at: sa.func.now()}, synchronize_session=False)
+                    session.commit()
+                    logger.info(f"Reset {claimed_count} stale CLAIMED jobs -> PENDING (older than {threshold_seconds}s)", extra={'emoji_type': 'info'})
+                else:
+                    session.rollback()
+            except Exception as e:
+                # Do not fail startup because of requeue logic; log and continue
+                try:
+                    logger.debug(f"Failed to reset stale CLAIMED jobs: {e}", extra={'emoji_type': 'debug'})
+                except Exception:
+                    pass
         finally:
             session.close()
 

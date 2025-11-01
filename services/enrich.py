@@ -15,6 +15,147 @@ _ENRICH_COUNT_THRESHOLD = 1000
 _ENRICH_TIME_THRESHOLD = 10.0
 
 
+# Per-run aggregation: counts for movie/tv (4k split)
+_run_enrich_lock = threading.Lock()
+_run_enrich_counters = {}  # run_id -> {'movie':int,'movie4k':int,'tv':int,'tv4k':int,'last_flush':float}
+
+
+def _ensure_run_counter(run_id: str):
+    with _run_enrich_lock:
+        if run_id not in _run_enrich_counters:
+            # last_emitted_total tracks how many items we've already emitted in an INFO
+            # so we only emit when delta >= threshold. last_flush controls time-based flush.
+            _run_enrich_counters[run_id] = {
+                'movie': 0,
+                'movie4k': 0,
+                'tv': 0,
+                'tv4k': 0,
+                'last_flush': time.time(),
+                'last_emitted_total': 0,
+            }
+
+
+def _record_enrich_processed(run_id: str, category: str, pk: int = None):
+    """Record one processed enrichment for a given run and category.
+
+    category: one of 'movie','movie4k','tv','tv4k'
+    """
+    try:
+        _ensure_run_counter(run_id)
+        with _run_enrich_lock:
+            if category not in _run_enrich_counters[run_id]:
+                return
+            _run_enrich_counters[run_id][category] += 1
+            # time-based / count-based flush: consider total across categories (so we don't flush per-category)
+            now = time.time()
+            last = _run_enrich_counters[run_id].get('last_flush', now)
+            total = (_run_enrich_counters[run_id].get('movie', 0) +
+                     _run_enrich_counters[run_id].get('movie4k', 0) +
+                     _run_enrich_counters[run_id].get('tv', 0) +
+                     _run_enrich_counters[run_id].get('tv4k', 0))
+            # Only emit if we've processed at least _ENRICH_COUNT_THRESHOLD new items
+            # since the last emitted total, or if enough time has passed.
+            last_emitted = _run_enrich_counters[run_id].get('last_emitted_total', 0)
+            delta = total - last_emitted
+            if delta >= _ENRICH_COUNT_THRESHOLD or (now - last) >= _ENRICH_TIME_THRESHOLD:
+                # emit a compact INFO summary with progress bar and per-category counts
+                try:
+                    # Query DB to compute totals per category for this run_id
+                    session = get_session()
+                    try:
+                        sql = text("""
+                        SELECT
+                          COALESCE(SUM(CASE WHEN sf.movie_id IS NOT NULL THEN 1 ELSE 0 END),0) AS movies_total,
+                          COALESCE(SUM(CASE WHEN sf.movie_id IS NOT NULL AND m.is_4k THEN 1 ELSE 0 END),0) AS movies4k_total,
+                          COALESCE(SUM(CASE WHEN sf.episode_id IS NOT NULL THEN 1 ELSE 0 END),0) AS episodes_total,
+                          COALESCE(SUM(CASE WHEN sf.episode_id IS NOT NULL AND s.is_4k THEN 1 ELSE 0 END),0) AS episodes4k_total
+                        FROM job j
+                        LEFT JOIN subflow sf ON ((j.payload->>'subflow_id')::int = sf.id)
+                        LEFT JOIN movie m ON sf.movie_id = m.id
+                        LEFT JOIN episode e ON sf.episode_id = e.id
+                        LEFT JOIN season se ON e.season_id = se.id
+                        LEFT JOIN series s ON se.series_id = s.id
+                        WHERE j.job_type = 'subjob:enrich_base' AND (j.payload->>'run_id') = :rid
+                        """)
+                        row = session.execute(sql, {'rid': run_id}).fetchone()
+                        if row:
+                            movies_total, movies4k_total, episodes_total, episodes4k_total = row[0], row[1], row[2], row[3]
+                        else:
+                            movies_total = movies4k_total = episodes_total = episodes4k_total = 0
+                    finally:
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
+
+                    done = total
+                    grand_total = (movies_total or 0) + (movies4k_total or 0) + (episodes_total or 0) + (episodes4k_total or 0)
+                    # Build progress bar
+                    if grand_total and grand_total > 0:
+                        pct = (done / float(grand_total)) * 100.0
+                        bar_width = 10
+                        filled = int((pct / 100.0) * bar_width)
+                        if filled < 0:
+                            filled = 0
+                        if filled > bar_width:
+                            filled = bar_width
+                        bar = '█' * filled + '-' * (bar_width - filled)
+                        pct_str = f"{pct:.1f}%"
+                        bar_part = f"[{bar}] {pct_str}"
+                    else:
+                        bar_part = "[----------] N/A"
+
+                    # Format per-category display: include only categories that have a non-zero total
+                    m_done = _run_enrich_counters[run_id].get('movie', 0)
+                    m4k_done = _run_enrich_counters[run_id].get('movie4k', 0)
+                    tv_done = _run_enrich_counters[run_id].get('tv', 0)
+                    tv4k_done = _run_enrich_counters[run_id].get('tv4k', 0)
+
+                    msg_parts = [bar_part]
+                    # Only include categories that actually exist in this run (total > 0)
+                    if (movies_total or 0) > 0:
+                        msg_parts.append(f"{m_done}/{movies_total} movies")
+                    if (movies4k_total or 0) > 0:
+                        msg_parts.append(f"{m4k_done}/{movies4k_total} 4K movies")
+                    if (episodes_total or 0) > 0:
+                        msg_parts.append(f"{tv_done}/{episodes_total} episodes")
+                    if (episodes4k_total or 0) > 0:
+                        msg_parts.append(f"{tv4k_done}/{episodes4k_total} 4K episodes")
+
+                    # If for some reason no category totals exist (grand_total == 0), show a minimal message
+                    if not msg_parts:
+                        msg_parts = [bar_part, f"{done}/? processed"]
+
+                    msg = f"➡️ Enrich run {run_id}: " + " — ".join(msg_parts)
+                    logger.info(msg)
+                except Exception:
+                    pass
+                # record that we've emitted up to `total` and update last flush time
+                _run_enrich_counters[run_id]['last_emitted_total'] = total
+                _run_enrich_counters[run_id]['last_flush'] = now
+
+                # If we've reached or exceeded the grand total, emit a final 100% message
+                try:
+                    if grand_total and grand_total > 0 and total >= grand_total:
+                        # Force a final 100% line (ensure category filtering as above)
+                        final_bar = '[' + '█' * 10 + '] 100.0%'
+                        final_parts = [final_bar]
+                        if (movies_total or 0) > 0:
+                            final_parts.append(f"{m_done}/{movies_total} movies")
+                        if (movies4k_total or 0) > 0:
+                            final_parts.append(f"{m4k_done}/{movies4k_total} 4K movies")
+                        if (episodes_total or 0) > 0:
+                            final_parts.append(f"{tv_done}/{episodes_total} episodes")
+                        if (episodes4k_total or 0) > 0:
+                            final_parts.append(f"{tv4k_done}/{episodes4k_total} 4K episodes")
+                        final_msg = f"➡️ Enrich run {run_id}: " + " — ".join(final_parts)
+                        logger.info(final_msg)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def _maybe_flush_enrich_summary(force: bool = False):
     global _enrich_count, _enrich_since, _enrich_ids
     now = time.time()
@@ -40,6 +181,36 @@ try:
     atexit.register(lambda: _maybe_flush_enrich_summary(force=True))
 except Exception:
     pass
+
+
+def _flush_all_run_counters(force: bool = False):
+    """Emit INFO summaries for all run counters if thresholds are met or when forced."""
+    now = time.time()
+    with _run_enrich_lock:
+        for run_id, counters in list(_run_enrich_counters.items()):
+            last = counters.get('last_flush', 0)
+            total = counters.get('movie', 0) + counters.get('movie4k', 0) + counters.get('tv', 0) + counters.get('tv4k', 0)
+            if force or total >= _ENRICH_COUNT_THRESHOLD or (now - last) >= _ENRICH_TIME_THRESHOLD:
+                try:
+                    # Only show non-zero counters to avoid long lines of zeros
+                    parts = []
+                    for k in ('movie', 'movie4k', 'tv', 'tv4k'):
+                        v = counters.get(k, 0)
+                        if v:
+                            parts.append(f"{k}={v}")
+                    if not parts:
+                        parts = [f"movie={counters.get('movie',0)}"]
+                    msg = (f"➡️ ➡️ Enrich summary for run {run_id}: " + " ".join(parts))
+                    logger.info(msg)
+                except Exception:
+                    pass
+                counters['last_flush'] = now
+
+try:
+    import atexit as _atexit
+    _atexit.register(lambda: _flush_all_run_counters(force=True))
+except Exception:
+    pass
 from sqlalchemy import text
 from datetime import datetime
 from core.config import settings
@@ -62,7 +233,7 @@ def _pg_advisory_unlock(conn, key: int) -> None:
         pass
 
 
-def process_enrich_base_subflow(subflow_id: int) -> bool:
+def process_enrich_base_subflow(subflow_id: int, run_id: str = None) -> bool:
     """Process the 'enrich_base' step for an Episode-level SubFlow.
 
     Steps:
@@ -241,17 +412,9 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                                 logger.verbose(f"Enriched Movie SubFlow {sf.id} from Radarr (movie_id={sf.movie_id})")
                             except Exception:
                                 pass
-                            # Update aggregated counters and maybe flush
+                            # Update aggregated counters and maybe flush (per-run)
                             try:
-                                with _enrich_lock:
-                                    _enrich_count += 1
-                                    _enrich_ids.append(int(sf.movie_id) if sf.movie_id else int(sf.id))
-                                    if _enrich_count >= _ENRICH_COUNT_THRESHOLD:
-                                        # flush from background context
-                                        _maybe_flush_enrich_summary(force=True)
-                                    else:
-                                        # time-based flush handled by checking in call
-                                        _maybe_flush_enrich_summary()
+                                _record_enrich_processed(run_id or 'global', 'movie', sf.movie_id)
                             except Exception:
                                 pass
                             return True
@@ -443,6 +606,12 @@ def process_enrich_base_subflow(subflow_id: int) -> bool:
                         sf.status = 'DONE'
                         sf.retry_count = 0
                         session.add(sf)
+                        # Update per-run TV enrich counters (tv vs tv4k)
+                        try:
+                            cat = 'tv4k' if (series_obj and getattr(series_obj, 'is_4k', False)) else 'tv'
+                            _record_enrich_processed(run_id or 'global', cat, episode.id)
+                        except Exception:
+                            pass
                         session.commit()
                         return True
                     else:

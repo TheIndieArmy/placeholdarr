@@ -1,7 +1,15 @@
 import os
 from pathlib import Path
 from typing import Literal, Optional
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:
+    # Fallback shim when python-dotenv isn't installed in the runtime.
+    # The real project normally depends on python-dotenv; this no-op
+    # implementation allows lightweight maintenance scripts to import
+    # the config module without requiring the external package.
+    def load_dotenv(path=None, **kwargs):
+        return False
 from pydantic_settings import BaseSettings
 from pydantic import validator, root_validator
 import urllib.parse

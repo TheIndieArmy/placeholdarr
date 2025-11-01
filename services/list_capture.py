@@ -97,17 +97,32 @@ def _maybe_flush_series_summary(force: bool = False):
 
     # Build informative message: show cumulative processed out of expected, the
     # number of series processed in this flush, subflows created in this flush,
-    # and the cumulative subflows created so far.
-    if expected is not None:
-        info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative}/{expected} series"
-    else:
-        info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative} series"
+    # and the cumulative subflows created so far. Include a compact progress bar
+    # and percent using the same style as enrich summaries.
     try:
-        # total_series is number processed in this flush; total_subflows is subflows created in this flush
+        if expected is not None and expected > 0:
+            pct = (processed_cumulative / float(expected)) * 100.0
+            bar_width = 10
+            filled = int((pct / 100.0) * bar_width)
+            if filled < 0:
+                filled = 0
+            if filled > bar_width:
+                filled = bar_width
+            bar = '█' * filled + '-' * (bar_width - filled)
+            pct_str = f"{pct:.1f}%"
+            bar_part = f"[{bar}] {pct_str}"
+            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: {bar_part} — processed {processed_cumulative}/{expected} series"
+        else:
+            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: processed {processed_cumulative} series"
+        # append per-flush and cumulative subflow info
         info_msg = (info_msg +
                     f" (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})")
     except Exception:
-        pass
+        # Fallback to the original compact message
+        if expected is not None:
+            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: processed {processed_cumulative}/{expected} series (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})"
+        else:
+            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: processed {processed_cumulative} series (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})"
 
     # DEBUG: include the long list/detail
     max_show = 200
@@ -885,12 +900,12 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                             changed_ep = True
                     except Exception:
                         pass
-                    if changed_ep:
-                        try:
-                            ep.last_found_in_sonarr = func.now()
-                        except Exception:
-                            pass
-                        session.add(ep)
+                    # Always mark episode observed now, even if no other fields changed
+                    try:
+                        ep.last_found_in_sonarr = func.now()
+                    except Exception:
+                        pass
+                    session.add(ep)
             except Exception:
                 # Non-fatal for a single episode in the payload
                 continue
@@ -1457,7 +1472,7 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                 if ep.air_date != ep_air:
                     ep.air_date = ep_air
                     changed_ep = True
-                if changed_ep:
+                    # Always mark episode observed now, even if no other fields changed
                     try:
                         ep.last_found_in_sonarr = func.now()
                     except Exception:
