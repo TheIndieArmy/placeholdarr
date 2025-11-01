@@ -200,7 +200,7 @@ def _flush_all_run_counters(force: bool = False):
                             parts.append(f"{k}={v}")
                     if not parts:
                         parts = [f"movie={counters.get('movie',0)}"]
-                    msg = (f"➡️ ➡️ Enrich summary for run {run_id}: " + " ".join(parts))
+                    msg = (f"➡️ Enrich summary for run {run_id}: " + " ".join(parts))
                     logger.info(msg)
                 except Exception:
                     pass
