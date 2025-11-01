@@ -20,6 +20,41 @@ _run_enrich_lock = threading.Lock()
 _run_enrich_counters = {}  # run_id -> {'movie':int,'movie4k':int,'tv':int,'tv4k':int,'last_flush':float}
 
 
+# Determine-phase aggregation (compact INFO summaries)
+_determine_lock = threading.Lock()
+_determine_count = 0
+_determine_since = 0.0
+_determine_ids = []
+_DETERMINE_COUNT_THRESHOLD = 1000
+_DETERMINE_TIME_THRESHOLD = 10.0
+
+
+def _maybe_flush_determine_summary(force: bool = False):
+    global _determine_count, _determine_since, _determine_ids
+    now = time.time()
+    with _determine_lock:
+        if not force and _determine_count < _DETERMINE_COUNT_THRESHOLD and (now - _determine_since) < _DETERMINE_TIME_THRESHOLD:
+            return
+        if _determine_count == 0:
+            _determine_since = now
+            return
+        try:
+            logger.info(f"Processed {_determine_count} determinations; sample ids={_determine_ids[:10]}")
+        except Exception:
+            pass
+        # reset
+        _determine_count = 0
+        _determine_ids = []
+        _determine_since = now
+
+
+try:
+    import atexit as _determine_atexit
+    _determine_atexit.register(lambda: _maybe_flush_determine_summary(force=True))
+except Exception:
+    pass
+
+
 def _ensure_run_counter(run_id: str):
     with _run_enrich_lock:
         if run_id not in _run_enrich_counters:
@@ -149,6 +184,136 @@ def _record_enrich_processed(run_id: str, category: str, pk: int = None):
                         if (episodes4k_total or 0) > 0:
                             final_parts.append(f"{tv4k_done}/{episodes4k_total} 4K episodes")
                         final_msg = f"➡️ Enrich run {run_id}: " + " — ".join(final_parts)
+                        logger.info(final_msg)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+# Per-run determine aggregation (progress-bar style like enrich)
+_run_determine_lock = threading.Lock()
+_run_determine_counters = {}  # run_id -> {'movie':int,'movie4k':int,'tv':int,'tv4k':int,'last_flush':float,'last_emitted_total':0}
+
+
+def _ensure_determine_run_counter(run_id: str):
+    with _run_determine_lock:
+        if run_id not in _run_determine_counters:
+            _run_determine_counters[run_id] = {
+                'movie': 0,
+                'movie4k': 0,
+                'tv': 0,
+                'tv4k': 0,
+                'last_flush': time.time(),
+                'last_emitted_total': 0,
+            }
+
+
+def _record_determine_processed(run_id: str, category: str, pk: int = None):
+    """Record one determination processed for a given run and category.
+
+    Emits a compact progress-bar INFO summary (matching enrich behavior) when
+    thresholds are hit or time has elapsed.
+    """
+    try:
+        _ensure_determine_run_counter(run_id)
+        with _run_determine_lock:
+            if category not in _run_determine_counters[run_id]:
+                return
+            _run_determine_counters[run_id][category] += 1
+            now = time.time()
+            last = _run_determine_counters[run_id].get('last_flush', now)
+            total = (_run_determine_counters[run_id].get('movie', 0) +
+                     _run_determine_counters[run_id].get('movie4k', 0) +
+                     _run_determine_counters[run_id].get('tv', 0) +
+                     _run_determine_counters[run_id].get('tv4k', 0))
+            last_emitted = _run_determine_counters[run_id].get('last_emitted_total', 0)
+            delta = total - last_emitted
+            if delta >= _ENRICH_COUNT_THRESHOLD or (now - last) >= _ENRICH_TIME_THRESHOLD:
+                # Build grand total from DB for this run (mirror enrich logic)
+                try:
+                    session = get_session()
+                    try:
+                        sql = text("""
+                        SELECT
+                          COALESCE(SUM(CASE WHEN sf.movie_id IS NOT NULL THEN 1 ELSE 0 END),0) AS movies_total,
+                          COALESCE(SUM(CASE WHEN sf.movie_id IS NOT NULL AND m.is_4k THEN 1 ELSE 0 END),0) AS movies4k_total,
+                          COALESCE(SUM(CASE WHEN sf.episode_id IS NOT NULL THEN 1 ELSE 0 END),0) AS episodes_total,
+                          COALESCE(SUM(CASE WHEN sf.episode_id IS NOT NULL AND s.is_4k THEN 1 ELSE 0 END),0) AS episodes4k_total
+                        FROM job j
+                        LEFT JOIN subflow sf ON ((j.payload->>'subflow_id')::int = sf.id)
+                        LEFT JOIN movie m ON sf.movie_id = m.id
+                        LEFT JOIN episode e ON sf.episode_id = e.id
+                        LEFT JOIN season se ON e.season_id = se.id
+                        LEFT JOIN series s ON se.series_id = s.id
+                        WHERE j.job_type = 'subjob:determine' AND (j.payload->>'run_id') = :rid
+                        """)
+                        row = session.execute(sql, {'rid': run_id}).fetchone()
+                        if row:
+                            movies_total, movies4k_total, episodes_total, episodes4k_total = row[0], row[1], row[2], row[3]
+                        else:
+                            movies_total = movies4k_total = episodes_total = episodes4k_total = 0
+                    finally:
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
+
+                    done = total
+                    grand_total = (movies_total or 0) + (movies4k_total or 0) + (episodes_total or 0) + (episodes4k_total or 0)
+                    # Build progress bar same as enrich
+                    if grand_total and grand_total > 0:
+                        pct = (done / float(grand_total)) * 100.0
+                        bar_width = 10
+                        filled = int((pct / 100.0) * bar_width)
+                        if filled < 0:
+                            filled = 0
+                        if filled > bar_width:
+                            filled = bar_width
+                        bar = '█' * filled + '-' * (bar_width - filled)
+                        pct_str = f"{pct:.1f}%"
+                        bar_part = f"[{bar}] {pct_str}"
+                    else:
+                        bar_part = "[----------] N/A"
+
+                    m_done = _run_determine_counters[run_id].get('movie', 0)
+                    m4k_done = _run_determine_counters[run_id].get('movie4k', 0)
+                    tv_done = _run_determine_counters[run_id].get('tv', 0)
+                    tv4k_done = _run_determine_counters[run_id].get('tv4k', 0)
+
+                    msg_parts = [bar_part]
+                    if (movies_total or 0) > 0:
+                        msg_parts.append(f"{m_done}/{movies_total} movies")
+                    if (movies4k_total or 0) > 0:
+                        msg_parts.append(f"{m4k_done}/{movies4k_total} 4K movies")
+                    if (episodes_total or 0) > 0:
+                        msg_parts.append(f"{tv_done}/{episodes_total} episodes")
+                    if (episodes4k_total or 0) > 0:
+                        msg_parts.append(f"{tv4k_done}/{episodes4k_total} 4K episodes")
+
+                    if not msg_parts:
+                        msg_parts = [bar_part, f"{done}/? processed"]
+
+                    msg = f"➡️ Determine run {run_id}: " + " — ".join(msg_parts)
+                    logger.info(msg)
+                except Exception:
+                    pass
+                _run_determine_counters[run_id]['last_emitted_total'] = total
+                _run_determine_counters[run_id]['last_flush'] = now
+
+                try:
+                    if grand_total and grand_total > 0 and total >= grand_total:
+                        final_bar = '[' + '█' * 10 + '] 100.0%'
+                        final_parts = [final_bar]
+                        if (movies_total or 0) > 0:
+                            final_parts.append(f"{m_done}/{movies_total} movies")
+                        if (movies4k_total or 0) > 0:
+                            final_parts.append(f"{m4k_done}/{movies4k_total} 4K movies")
+                        if (episodes_total or 0) > 0:
+                            final_parts.append(f"{tv_done}/{episodes_total} episodes")
+                        if (episodes4k_total or 0) > 0:
+                            final_parts.append(f"{tv4k_done}/{episodes4k_total} 4K episodes")
+                        final_msg = f"➡️ Determine run {run_id}: " + " — ".join(final_parts)
                         logger.info(final_msg)
                 except Exception:
                     pass
@@ -812,3 +977,167 @@ def enrich_episode(episode_id: int) -> bool:
                 _pg_advisory_unlock(conn, int(episode_id))
     finally:
         session.close()
+
+
+def process_determine_subflow(subflow_id: int, run_id: str = None) -> bool:
+    """Compute authoritative determination for the content referenced by SubFlow.
+
+    Rules (authoritative, consult only content-table flags):
+      - delete: has_placeholder == True AND (has_file == True OR is_deleted == True)
+      - create: has_placeholder == False AND has_file == False AND is_deleted == False
+      - no-op: otherwise
+
+    Persist the decision into the content row's `determination` and
+    `determination_updated_at` using DB server now(). If decision != 'no-op',
+    enqueue a materialize job (non-blocking) with payload {
+        'content_type': 'movie|movie4k|tv|tv4k', 'content_id': <id>, 'decision': 'create'|'delete'
+    }
+    Returns True on success, False on transient failure.
+    """
+    from services.postgres.models import SubFlow as SFModel, Episode as EpisodeModel, Movie as MovieModel, Season as SeasonModel, Series as SeriesModel
+    from services.jobs import insert_job
+    session = get_session()
+    try:
+        sf = session.query(SFModel).filter(SFModel.id == subflow_id).first()
+        if not sf:
+            logger.info(f"SubFlow id {subflow_id} not found for determine phase")
+            return True
+
+        # Determine whether this is episode-level or movie-level
+        if getattr(sf, 'episode_id', None):
+            try:
+                ep = session.query(EpisodeModel).filter(EpisodeModel.id == int(sf.episode_id)).first()
+            except Exception:
+                ep = None
+            if not ep:
+                logger.info(f"Episode {getattr(sf, 'episode_id', None)} not found for determine")
+                sf.status = 'FAILED'
+                session.add(sf)
+                session.commit()
+                return False
+
+            has_placeholder = bool(ep.has_placeholder)
+            has_file = bool(ep.has_file)
+            is_deleted = bool(ep.is_deleted)
+
+            # Decision
+            if has_placeholder and (has_file or is_deleted):
+                decision = 'delete'
+            elif (not has_placeholder) and (not has_file) and (not is_deleted):
+                decision = 'create'
+            else:
+                decision = 'no-op'
+
+            # Persist authoritative decision using DB now()
+            try:
+                session.execute(text("UPDATE episode SET determination = :d, determination_updated_at = now() WHERE id = :id"), {'d': decision, 'id': ep.id})
+                session.commit()
+            except Exception:
+                try:
+                    ep.determination = decision
+                    ep.determination_updated_at = func.now()
+                    session.add(ep)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception(f"Failed to persist determination for episode {ep.id}")
+                    return False
+
+            # If non-no-op, enqueue materialize job
+            if decision != 'no-op':
+                try:
+                    # Determine tv vs tv4k using related series.is_4k if available
+                    is_4k = False
+                    try:
+                        if getattr(ep, 'season_id', None):
+                            srow = session.execute(text("SELECT series_id FROM season WHERE id = :id"), {'id': ep.season_id}).fetchone()
+                            if srow:
+                                series_id = srow[0]
+                                s2 = session.execute(text("SELECT is_4k FROM series WHERE id = :id"), {'id': series_id}).fetchone()
+                                if s2 and s2[0]:
+                                    is_4k = True
+                    except Exception:
+                        pass
+                    content_type = 'tv4k' if is_4k else 'tv'
+                    payload = {'content_type': content_type, 'content_id': ep.id, 'decision': decision}
+                    group_id = f"materialize:{content_type}:{ep.id}"
+                    insert_job('materialize:placeholder', payload, group_id=group_id)
+                except Exception:
+                    logger.exception(f"Failed to enqueue materialize job for episode {ep.id}")
+
+            # Record in per-run determine counters (progress-bar style)
+            try:
+                cat = 'tv4k' if is_4k else 'tv'
+                _record_determine_processed(run_id or 'global', cat, ep.id)
+            except Exception:
+                pass
+
+            return True
+
+        elif getattr(sf, 'movie_id', None):
+            try:
+                mv = session.query(MovieModel).filter(MovieModel.id == int(sf.movie_id)).first()
+            except Exception:
+                mv = None
+            if not mv:
+                logger.info(f"Movie {getattr(sf, 'movie_id', None)} not found for determine")
+                sf.status = 'FAILED'
+                session.add(sf)
+                session.commit()
+                return False
+
+            has_placeholder = bool(mv.has_placeholder)
+            has_file = bool(mv.has_file)
+            is_deleted = bool(mv.is_deleted)
+
+            if has_placeholder and (has_file or is_deleted):
+                decision = 'delete'
+            elif (not has_placeholder) and (not has_file) and (not is_deleted):
+                decision = 'create'
+            else:
+                decision = 'no-op'
+
+            # Persist authoritative decision
+            try:
+                session.execute(text("UPDATE movie SET determination = :d, determination_updated_at = now() WHERE id = :id"), {'d': decision, 'id': mv.id})
+                session.commit()
+            except Exception:
+                try:
+                    mv.determination = decision
+                    mv.determination_updated_at = func.now()
+                    session.add(mv)
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    logger.exception(f"Failed to persist determination for movie {mv.id}")
+                    return False
+
+            if decision != 'no-op':
+                try:
+                    content_type = 'movie4k' if getattr(mv, 'is_4k', False) else 'movie'
+                    payload = {'content_type': content_type, 'content_id': mv.id, 'decision': decision}
+                    group_id = f"materialize:{content_type}:{mv.id}"
+                    insert_job('materialize:placeholder', payload, group_id=group_id)
+                except Exception:
+                    logger.exception(f"Failed to enqueue materialize job for movie {mv.id}")
+
+            # Record in per-run determine counters (progress-bar style)
+            try:
+                cat = 'movie4k' if getattr(mv, 'is_4k', False) else 'movie'
+                _record_determine_processed(run_id or 'global', cat, mv.id)
+            except Exception:
+                pass
+
+            return True
+
+        else:
+            logger.info(f"SubFlow {subflow_id} is neither episode nor movie for determine")
+            sf.status = 'FAILED'
+            session.add(sf)
+            session.commit()
+            return False
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass

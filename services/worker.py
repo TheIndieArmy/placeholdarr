@@ -1,6 +1,6 @@
 import time
 from services.jobs import claim_jobs, requeue_job, job_done
-from services.enrich import process_enrich_base_subflow, enrich_episode
+from services.enrich import process_enrich_base_subflow, enrich_episode, process_determine_subflow
 from services.enrich_and_merge import process_enrich_and_merge
 from services.list_capture import create_episode_subflows_for_series
 from services.postgres.db import get_session
@@ -432,6 +432,77 @@ def _handle_claimed_job(job):
 
             job_done(job_id, success=True)
             return True
+        elif job_type == 'subjob:determine':
+            # Expect payload to include subflow_id
+            subflow_id = payload.get('subflow_id')
+            if not subflow_id:
+                logger.info(f"Job {job_id} missing subflow_id; marking FAILED")
+                job_done(job_id, success=False, error_message='missing_subflow_id')
+                return False
+
+            # Guard: ensure the SubFlow is at the expected step_index and phase
+            session = get_session()
+            try:
+                sf = session.query(SubFlow).filter(SubFlow.id == int(subflow_id)).first()
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+            if not sf:
+                logger.info(f"Job {job_id} references missing SubFlow {subflow_id}; marking DONE to avoid retries")
+                job_done(job_id, success=True)
+                return True
+
+            try:
+                steps = (sf.steps or '').split(',')
+                expected_step_index = int(payload.get('step_index', 0))
+                expected_phase = payload.get('phase')
+                actual_phase = steps[sf.step_index] if 0 <= sf.step_index < len(steps) else None
+            except Exception:
+                actual_phase = None
+                expected_phase = payload.get('phase')
+
+            if actual_phase != expected_phase or sf.step_index != expected_step_index:
+                logger.info(f"Job {job_id} (phase={expected_phase} idx={expected_step_index}) is not ready: subflow {sf.id} is at phase={actual_phase} idx={sf.step_index}; requeueing")
+                requeue_job(job_id, delay_seconds=3)
+                return False
+
+            ok = process_determine_subflow(subflow_id, payload.get('run_id'))
+            if ok:
+                # Advance the SubFlow.step_index and enqueue next-phase job if any (transactional)
+                session = get_session()
+                try:
+                    sfrow = session.query(SubFlow).filter(SubFlow.id == int(subflow_id)).with_for_update().first()
+                    if sfrow:
+                        try:
+                            steps = (sfrow.steps or '').split(',')
+                            prev_idx = int(sfrow.step_index or 0)
+                            if prev_idx + 1 < len(steps):
+                                new_idx = prev_idx + 1
+                                sfrow.step_index = new_idx
+                                next_phase = steps[new_idx]
+                                payload_next = {'run_id': payload.get('run_id'), 'phase': next_phase, 'subflow_id': sfrow.id, 'step_index': new_idx}
+                                group_id = f"subflow:{sfrow.id}:{next_phase}"
+                                session.add(sfrow)
+                                insert_job_with_session(session, f'subjob:{next_phase}', payload_next, group_id=group_id)
+                                session.commit()
+                            else:
+                                session.commit()
+                        except Exception:
+                            session.rollback()
+                finally:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+
+                job_done(job_id, success=True)
+                return True
+            else:
+                requeue_job(job_id, delay_seconds=15)
+                return False
         elif job_type == 'subjob:enrich_and_merge':
             # Expect payload to include subflow_id (and optionally placeholder_ids or paths)
             subflow_id = payload.get('subflow_id')
