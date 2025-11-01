@@ -252,7 +252,10 @@ def scan_once_if_needed(run_id: Optional[str] = None) -> int:
                     delta = (now - row).total_seconds()
                     if delta is not None and delta < int(threshold):
                         # Log the skip (still return an informative payload so callers can explain why a scan wasn't run)
-                        logger.info(f'FS-scan skipped: last placeholder observation {int(delta)}s ago (<{int(threshold)}s)', extra={'emoji_type': 'placeholder'})
+                        if run_id:
+                            logger.info(f'FS-scan skipped for run {run_id}: last placeholder observation {int(delta)}s ago (<{int(threshold)}s)', extra={'emoji_type': 'placeholder'})
+                        else:
+                            logger.info(f'FS-scan skipped: last placeholder observation {int(delta)}s ago (<{int(threshold)}s)', extra={'emoji_type': 'placeholder'})
                         return 0, {'reason': 'time_guard', 'delta': int(delta), 'threshold': int(threshold)}
                 except Exception:
                     pass
@@ -282,7 +285,8 @@ def scan_once_if_needed(run_id: Optional[str] = None) -> int:
                         res = conn.execute(claim_sql, {'run_id': run_id_local, 'claimed_by': 'fs_scan'})
                         row = res.fetchone()
                         if not row:
-                            logger.info(f'FS-scan run {run_id_local} already claimed; skipping', extra={'emoji_type': 'placeholder'})
+                            # No row returned -> someone else claimed this run already
+                            logger.info(f'FS-scan run {run_id_local} already claimed (no fs_scan_run row inserted); skipping', extra={'emoji_type': 'placeholder'})
                             return [] if return_paths else 0
                 except Exception as e:
                     # If claiming fails due to transient DB problems, log and proceed to scanning

@@ -111,18 +111,18 @@ def _maybe_flush_series_summary(force: bool = False):
             bar = '█' * filled + '-' * (bar_width - filled)
             pct_str = f"{pct:.1f}%"
             bar_part = f"[{bar}] {pct_str}"
-            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: {bar_part} — processed {processed_cumulative}/{expected} series"
+            info_msg = f"➡️ Series episode-subflow creation summary: {bar_part} — processed {processed_cumulative}/{expected} series"
         else:
-            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: processed {processed_cumulative} series"
+            info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative} series"
         # append per-flush and cumulative subflow info
         info_msg = (info_msg +
                     f" (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})")
     except Exception:
         # Fallback to the original compact message
         if expected is not None:
-            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: processed {processed_cumulative}/{expected} series (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})"
+            info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative}/{expected} series (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})"
         else:
-            info_msg = f"➡️ ➡️ Series episode-subflow creation summary: processed {processed_cumulative} series (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})"
+            info_msg = f"➡️ Series episode-subflow creation summary: processed {processed_cumulative} series (this summary: {total_series} series, {total_subflows} subflows created; total subflows so far: {subflows_cumulative})"
 
     # DEBUG: include the long list/detail
     max_show = 200
@@ -740,15 +740,15 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                             sonarrid=ep_sonarrid,
                             created_at=func.now(),
                         )
-                        # mark episode observed and persist
-                        try:
-                            ep.last_found_in_sonarr = func.now()
-                        except Exception:
-                            pass
+                        # mark episode observed and persist. We intentionally do
+                        # NOT set Episode.last_found_in_sonarr here; the canonical
+                        # time of last-observation is recorded during the
+                        # 'enrich_base' phase where we ping Sonarr and can
+                        # reliably persist the DB-server timestamp.
                         session.add(ep)
                         session.flush()
                     else:
-                        # Update a few stable fields if changed and mark observed
+                        # Update a few stable fields if changed and always mark observed
                         changed_ep = False
                         title_e = ent.get('title') or ep.title
                         if ep.title != title_e:
@@ -760,12 +760,15 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                                 changed_ep = True
                         except Exception:
                             pass
-                        if changed_ep:
-                            try:
-                                ep.last_found_in_sonarr = func.now()
-                            except Exception:
-                                pass
-                            session.add(ep)
+                        # Always mark episode observed now when present in payload.
+                        # If this Episode already exists in the DB (has an id) use a
+                        # direct UPDATE so the authoritative DB clock (now()) is
+                        # applied immediately. For newly-created objects (no id)
+                        # assign func.now() and let the INSERT carry the server
+                        # timestamp on commit.
+                        # Do not update episode.last_found_in_sonarr during discovery
+                        # — this will be performed in the enrich phase instead.
+                        session.add(ep)
                 except Exception:
                     # Non-fatal for a single episode in the payload
                     continue
@@ -880,11 +883,9 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                         sonarrid=ep_sonarrid,
                         created_at=func.now(),
                     )
-                    # mark episode observed and persist
-                    try:
-                        ep.last_found_in_sonarr = func.now()
-                    except Exception:
-                        pass
+                    # Do NOT set Episode.last_found_in_sonarr during discovery. The
+                    # canonical last-seen timestamp is recorded during the
+                    # 'enrich_base' phase where we interact with Sonarr.
                     session.add(ep)
                     session.flush()
                 else:
@@ -900,11 +901,8 @@ def upsert_series_from_sonarr_entry(session, entry: dict):
                             changed_ep = True
                     except Exception:
                         pass
-                    # Always mark episode observed now, even if no other fields changed
-                    try:
-                        ep.last_found_in_sonarr = func.now()
-                    except Exception:
-                        pass
+                    # Do NOT update Episode.last_found_in_sonarr during discovery.
+                    # This will be updated during the enrich phase instead.
                     session.add(ep)
             except Exception:
                 # Non-fatal for a single episode in the payload
@@ -1127,11 +1125,9 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
                         sonarrid=ent.get('id'),
                         created_at=func.now(),
                     )
-                    # mark episode observed and persist
-                    try:
-                        ep.last_found_in_sonarr = func.now()
-                    except Exception:
-                        pass
+                    # mark episode observed and persist (new row). Do NOT set
+                    # Episode.last_found_in_sonarr here; the enrich phase will
+                    # record the authoritative last-seen timestamp.
                     session.add(ep)
                     session.flush()
                     try:
@@ -1424,11 +1420,9 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                     air_date=ep_air,
                     created_at=func.now(),
                 )
-                # mark episode observed and persist
-                try:
-                    ep.last_found_in_sonarr = func.now()
-                except Exception:
-                    pass
+                # Do NOT set Episode.last_found_in_sonarr during discovery; it
+                # will be recorded during the enrich phase where we contact
+                # Sonarr and can persist the DB-server timestamp.
                 session.add(ep)
                 session.flush()
             else:
@@ -1472,25 +1466,23 @@ def create_episode_subflows_for_series_batch_helper(batch_entries: list, series_
                 if ep.air_date != ep_air:
                     ep.air_date = ep_air
                     changed_ep = True
-                    # Always mark episode observed now, even if no other fields changed
+                    # Do NOT update Episode.last_found_in_sonarr here; the
+                    # enrich phase will set the authoritative last-seen
+                    # timestamp using the DB server clock.
+                    session.add(ep)
+                # If an existing episode was updated, enqueue a deduped re-enrich job
+                try:
+                    from services.jobs import insert_job_with_session
+                    # group_id prevents duplicate re-enrich jobs for the same episode
+                    group_id = f"episode:{ep.id}:reenrich"
+                    payload = {'episode_id': ep.id, 'run_id': run_id}
+                    insert_job_with_session(session, 'reenrich:episode', payload, group_id=group_id)
+                except Exception:
+                    # best-effort: don't fail the batch if job enqueue fails
                     try:
-                        ep.last_found_in_sonarr = func.now()
+                        logger.exception(f"Failed to enqueue re-enrich job for episode {ep.id}")
                     except Exception:
                         pass
-                    session.add(ep)
-                    # If an existing episode was updated, enqueue a deduped re-enrich job
-                    try:
-                        from services.jobs import insert_job_with_session
-                        # group_id prevents duplicate re-enrich jobs for the same episode
-                        group_id = f"episode:{ep.id}:reenrich"
-                        payload = {'episode_id': ep.id, 'run_id': run_id}
-                        insert_job_with_session(session, 'reenrich:episode', payload, group_id=group_id)
-                    except Exception:
-                        # best-effort: don't fail the batch if job enqueue fails
-                        try:
-                            logger.exception(f"Failed to enqueue re-enrich job for episode {ep.id}")
-                        except Exception:
-                            pass
 
             episode_ids.append(ep.id)
 

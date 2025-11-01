@@ -161,28 +161,18 @@ async def lifespan(app: FastAPI):
         try:
             from services.list_capture import capture_movies_fullsync_and_create_run, capture_series_fullsync_and_create_run
             # Track whether we've invoked an FS-scan as part of the list-capture seeding
+            # and collect run_ids that requested a startup scan so we can perform
+            # a single combined FS-scan for all startup fullsync runs.
             _startup_scan_performed = False
+            _startup_scan_run_ids = []
 
             if getattr(settings, 'RADARR_SYNC_ON_STARTUP', False):
                 try:
                     run = capture_movies_fullsync_and_create_run(run_note='startup movie fullsync')
                     logger.info(f"Created startup movie fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
-                    # Immediately perform an FS-scan and claim an fs_scan_run row for auditing
-                    try:
-                        from services.fs_scan import scan_once_if_needed
-                        res = scan_once_if_needed(run.run_id)
-                        # scan_once_if_needed may return (count, info) when a skip reason is provided
-                        if isinstance(res, tuple):
-                            count, info = res
-                        else:
-                            count, info = res, None
-                        if info and info.get('reason') == 'time_guard':
-                            logger.info(f'FS-scan (movie fullsync) skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s) (run_id={run.run_id})', extra={'emoji_type': 'info'})
-                        else:
-                            logger.info(f'FS-scan (movie fullsync) seeded {count} placeholders at startup (run_id={run.run_id})', extra={'emoji_type': 'info'})
-                        _startup_scan_performed = True
-                    except Exception as e:
-                        logger.error(f'FS-scan during movie fullsync failed: {e}', extra={'emoji_type': 'error'})
+                    # Defer the actual FS-scan until after all startup fullsync runs
+                    # have been created. We only need one combined scan for all runs.
+                    _startup_scan_run_ids.append(run.run_id)
                 except Exception as e:
                     logger.error(f"Movie list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
                 else:
@@ -196,21 +186,9 @@ async def lifespan(app: FastAPI):
                 try:
                     run = capture_series_fullsync_and_create_run(run_note='startup tv fullsync')
                     logger.info(f"Created startup tv fullsync run: {run.run_id}", extra={'emoji_type': 'info'})
-                    # Immediately perform an FS-scan and claim an fs_scan_run row for auditing
-                    try:
-                        from services.fs_scan import scan_once_if_needed
-                        res = scan_once_if_needed(run.run_id)
-                        if isinstance(res, tuple):
-                            count, info = res
-                        else:
-                            count, info = res, None
-                        if info and info.get('reason') == 'time_guard':
-                            logger.info(f'FS-scan (tv fullsync) skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s) (run_id={run.run_id})', extra={'emoji_type': 'info'})
-                        else:
-                            logger.info(f'FS-scan (tv fullsync) seeded {count} placeholders at startup (run_id={run.run_id})', extra={'emoji_type': 'info'})
-                        _startup_scan_performed = True
-                    except Exception as e:
-                        logger.error(f'FS-scan during tv fullsync failed: {e}', extra={'emoji_type': 'error'})
+                    # Defer the actual FS-scan until after all startup fullsync runs
+                    # have been created. We only need one combined scan for all runs.
+                    _startup_scan_run_ids.append(run.run_id)
                 except Exception as e:
                     logger.error(f"TV list-capture at startup failed: {e}", extra={'emoji_type': 'error'})
                 else:
@@ -247,15 +225,29 @@ async def lifespan(app: FastAPI):
                 else:
                     if radarr_flags or sonarr_flags:
                         try:
-                            res = scan_once_if_needed()
+                            # If one or more startup runs requested a scan, perform a
+                            # single combined FS-scan using the first run_id to claim
+                            # the fs_scan_run row. This ensures we only walk the FS
+                            # once for all startup fullsyncs.
+                            if _startup_scan_run_ids:
+                                combined_run_id = _startup_scan_run_ids[0]
+                                res = scan_once_if_needed(combined_run_id)
+                            else:
+                                res = scan_once_if_needed()
+
                             if isinstance(res, tuple):
                                 count, info = res
                             else:
                                 count, info = res, None
+
                             if info and info.get('reason') == 'time_guard':
                                 logger.info(f'FS-scan skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s)', extra={'emoji_type': 'info'})
                             else:
-                                logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
+                                if _startup_scan_run_ids:
+                                    logger.info(f'FS-scan seeded {count} placeholders at startup (run_ids={_startup_scan_run_ids})', extra={'emoji_type': 'info'})
+                                else:
+                                    logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
+                            _startup_scan_performed = True
                         except Exception as e:
                             logger.error(f'FS-scan at startup failed: {e}', extra={'emoji_type': 'error'})
                     else:

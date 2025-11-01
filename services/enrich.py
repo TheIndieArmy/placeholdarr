@@ -211,7 +211,7 @@ try:
     _atexit.register(lambda: _flush_all_run_counters(force=True))
 except Exception:
     pass
-from sqlalchemy import text
+from sqlalchemy import text, func
 from datetime import datetime
 from core.config import settings
 from services.orchestrator import OrchestratorRun
@@ -606,6 +606,18 @@ def process_enrich_base_subflow(subflow_id: int, run_id: str = None) -> bool:
                         sf.status = 'DONE'
                         sf.retry_count = 0
                         session.add(sf)
+                        # Record authoritative DB-server time for last-seen in Sonarr
+                        try:
+                            session.execute(text("UPDATE episode SET last_found_in_sonarr = now() WHERE id = :id"), {'id': episode.id})
+                            try:
+                                session.refresh(episode)
+                            except Exception:
+                                pass
+                        except Exception:
+                            try:
+                                episode.last_found_in_sonarr = func.now()
+                            except Exception:
+                                pass
                         # Update per-run TV enrich counters (tv vs tv4k)
                         try:
                             cat = 'tv4k' if (series_obj and getattr(series_obj, 'is_4k', False)) else 'tv'
@@ -778,7 +790,20 @@ def enrich_episode(episode_id: int) -> bool:
                     except Exception:
                         pass
 
-                    session.commit()
+                        # Record authoritative DB-server time for last-seen in Sonarr
+                        try:
+                            session.execute(text("UPDATE episode SET last_found_in_sonarr = now() WHERE id = :id"), {'id': episode.id})
+                            try:
+                                session.refresh(episode)
+                            except Exception:
+                                pass
+                        except Exception:
+                            try:
+                                episode.last_found_in_sonarr = func.now()
+                            except Exception:
+                                pass
+
+                        session.commit()
                     return True
                 else:
                     logger.info(f"Could not find episode data for episode id {episode_id} from Sonarr")
