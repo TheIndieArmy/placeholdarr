@@ -424,6 +424,35 @@ def process_enrich_base_subflow(subflow_id: int, run_id: str = None) -> bool:
             # job so that dedupe/gating/batching remains centralized in the
             # job pipeline.
             if getattr(sf, 'series_id', None):
+                # For series-level SubFlows, create episode SubFlows inline here so
+                # that episode rows and their initial `enrich_base` jobs exist
+                # immediately. This avoids a separate run-phase and ensures
+                # episodes are available for the subsequent phases without
+                # relying on FAR_FUTURE job scheduling.
+                try:
+                    from services.list_capture import create_episode_subflows_for_series
+                    created = create_episode_subflows_for_series(sf.series_id, run_id)
+                    try:
+                        logger.info(f"Series SubFlow {sf.id}: created {created} episode subflows")
+                    except Exception:
+                        pass
+                except Exception as ex:
+                    # Treat failures here as transient so the worker will requeue
+                    logger.exception(f"Failed to create episode subflows inline for series {getattr(sf, 'series_id', None)}: {ex}")
+                    return False
+
+                # Mark the series SubFlow as DONE (we only used it to trigger
+                # episode creation); episode SubFlows are independent and will
+                # continue through their own PHASES.
+                try:
+                    sf.status = 'DONE'
+                    session.add(sf)
+                    session.commit()
+                except Exception:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
                 return True
             # If this is a movie-level SubFlow, perform minimal movie enrichment
             if getattr(sf, 'movie_id', None):

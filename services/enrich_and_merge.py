@@ -10,6 +10,8 @@ from typing import List, Optional
 from sqlalchemy import or_, and_
 import threading
 import time as _time
+from services.jobs import insert_job_with_session
+from services.postgres.models import SubFlow as SubFlowModel
 
 # Aggregator for noisy "no placeholders to process" events.
 # We move per-occurrence messages to VERBOSE and emit an INFO summary
@@ -174,6 +176,9 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
             processed = 0
             for ph in phs:
                 try:
+                    # record previous linkage so we can detect newly-linked placeholders
+                    prev_movie = getattr(ph, 'movie_id', None)
+                    prev_episode = getattr(ph, 'episode_id', None)
                     sig = compute_signature(ph)
                     # Quick skip
                     if ph.enriched_signature == sig and ph.last_enriched_at and ph.last_enriched_at >= ph.last_observed_at:
@@ -475,6 +480,42 @@ def process_enrich_and_merge(subflow_id: int, payload: dict) -> bool:
                     # Persist placeholder enrichment metadata
                     ph.enriched_signature = sig
                     session.add(ph)
+
+                    # If this placeholder was newly linked to a movie/episode, enqueue
+                    # a deduped determine job for the corresponding SubFlow so the
+                    # authoritative decision is re-evaluated.
+                    try:
+                        TERMINAL_STATUSES = ('DONE', 'CANCELLED', 'FAILED')
+                        if prev_movie is None and getattr(ph, 'movie_id', None):
+                            try:
+                                sfrow = session.query(SubFlowModel).filter(SubFlowModel.movie_id == int(ph.movie_id)).first()
+                                if sfrow:
+                                    steps = (sfrow.steps or '').split(',')
+                                    try:
+                                        det_idx = steps.index('determine')
+                                    except Exception:
+                                        det_idx = 0
+                                    payload_det = {'run_id': None, 'phase': 'determine', 'subflow_id': sfrow.id, 'step_index': det_idx}
+                                    insert_job_with_session(session, 'subjob:determine', payload_det, group_id=f"subflow:{sfrow.id}:determine")
+                            except Exception:
+                                pass
+
+                        if prev_episode is None and getattr(ph, 'episode_id', None):
+                            try:
+                                sfrow = session.query(SubFlowModel).filter(SubFlowModel.episode_id == int(ph.episode_id)).first()
+                                if sfrow:
+                                    steps = (sfrow.steps or '').split(',')
+                                    try:
+                                        det_idx = steps.index('determine')
+                                    except Exception:
+                                        det_idx = 0
+                                    payload_det = {'run_id': None, 'phase': 'determine', 'subflow_id': sfrow.id, 'step_index': det_idx}
+                                    insert_job_with_session(session, 'subjob:determine', payload_det, group_id=f"subflow:{sfrow.id}:determine")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
                     # write DB now() as last_enriched_at using a DB-side now() to ensure DB-authoritative timestamp
                     try:
                         session.flush()
@@ -538,6 +579,10 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
             processed = 0
             for ph in phs:
                 try:
+                    # record previous linkage so we can detect newly-linked placeholders
+                    prev_movie = getattr(ph, 'movie_id', None)
+                    prev_episode = getattr(ph, 'episode_id', None)
+
                     sig = compute_signature(ph)
                     if ph.enriched_signature == sig and ph.last_enriched_at and ph.last_enriched_at >= ph.last_observed_at:
                         continue
@@ -818,6 +863,38 @@ def process_placeholders(placeholder_ids: Optional[List[int]] = None, paths: Opt
 
                     ph.enriched_signature = sig
                     session.add(ph)
+
+                    # If this placeholder was newly linked to a movie/episode, enqueue a deduped determine job
+                    try:
+                        if prev_movie is None and getattr(ph, 'movie_id', None):
+                            try:
+                                sfrow = session.query(SubFlowModel).filter(SubFlowModel.movie_id == int(ph.movie_id)).first()
+                                if sfrow:
+                                    steps = (sfrow.steps or '').split(',')
+                                    try:
+                                        det_idx = steps.index('determine')
+                                    except Exception:
+                                        det_idx = 0
+                                    payload_det = {'run_id': None, 'phase': 'determine', 'subflow_id': sfrow.id, 'step_index': det_idx}
+                                    insert_job_with_session(session, 'subjob:determine', payload_det, group_id=f"subflow:{sfrow.id}:determine")
+                            except Exception:
+                                pass
+                        if prev_episode is None and getattr(ph, 'episode_id', None):
+                            try:
+                                sfrow = session.query(SubFlowModel).filter(SubFlowModel.episode_id == int(ph.episode_id)).first()
+                                if sfrow:
+                                    steps = (sfrow.steps or '').split(',')
+                                    try:
+                                        det_idx = steps.index('determine')
+                                    except Exception:
+                                        det_idx = 0
+                                    payload_det = {'run_id': None, 'phase': 'determine', 'subflow_id': sfrow.id, 'step_index': det_idx}
+                                    insert_job_with_session(session, 'subjob:determine', payload_det, group_id=f"subflow:{sfrow.id}:determine")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
                     try:
                         session.flush()
                         session.execute(text("UPDATE placeholder SET last_enriched_at = now(), enriched_signature = :sig WHERE id = :id"), {'sig': sig, 'id': ph.id})

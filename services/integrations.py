@@ -1,6 +1,7 @@
 import os
 import shutil
 import logging
+import re
 from typing import List, Optional
 from core.config import settings
 
@@ -15,25 +16,137 @@ def _safe_join(root: str, *parts: str) -> str:
     return path
 
 
-def place_dummy_file(media_type: str, title: str, year: int, media_id: int, library_root: str) -> Optional[str]:
-    """Create a simple placeholder file and return its path. Safe, local-only.
+def place_dummy_file(media_type: str, title: str, year: int = None, media_id: int = None, library_root: str = None,
+                     season_number: int = None, episode_number: int = None, episode_title: str = None,
+                     dummy_file_override: str = None) -> Optional[str]:
+    """Create a placeholder file using the legacy folder/name conventions.
 
-    Tests patch os.makedirs/shutil.copy2 so this function will be test-friendly.
+    Uses the resolver in services.services_old.utils to build the final folder path.
+    Attempts to hardlink the configured DUMMY_FILE_PATH, falling back to copy on
+    cross-device link errors. Writes .nfo sidecar when possible.
     """
     try:
+        # Determine base library if not provided
         if not library_root:
-            logger.debug('No library root configured for dummy placement')
+            library_root = settings.MOVIE_LIBRARY_FOLDER if media_type == 'movie' else settings.TV_LIBRARY_FOLDER
+        # Lazy import of legacy helpers
+        try:
+            from services.services_old.utils import resolve_final_folder, sanitize_filename, write_nfo_for_placeholder, render_episode_nfo, render_movie_nfo
+        except Exception:
+            # if legacy utils not present, fall back to a very conservative behavior
+            def sanitize_filename(n):
+                return re.sub(r'[<>:\"/\\|?*]', '', str(n or '')).strip()
+
+            def resolve_final_folder(media_type, title=None, year=None, media_id=None, season_number=None, **kwargs):
+                base = library_root
+                folder = f"{sanitize_filename(title)}{(' ('+str(year)+')') if year else ''} {{tmdb-{media_id}}}" if media_type == 'movie' else f"{sanitize_filename(title)}{(' ('+str(year)+')') if year else ''} {{tvdb-{media_id}}}"
+                if media_type != 'movie' and season_number is not None:
+                    return os.path.join(base, folder, f"Season {int(season_number):02d}")
+                return os.path.join(base, folder)
+
+            def write_nfo_for_placeholder(path, meta, media_type='tv', status='Request'):
+                return False
+
+        # Clean title
+        clean_title = sanitize_filename(title or 'unknown')
+        clean_title = re.sub(r'\s*\(\d{4}\)', '', clean_title).strip()
+        year_str = f" ({year})" if year else ""
+
+        dummy_source = dummy_file_override or getattr(settings, 'DUMMY_FILE_PATH', None)
+        if not dummy_source or not os.path.exists(dummy_source):
+            logger.error(f"Dummy video source not found at {dummy_source}", extra={'emoji_type': 'error'})
             return None
-        folder = _safe_join(library_root, str(media_id))
-        os.makedirs(folder, exist_ok=True)
-        filename = f"{title.replace(' ', '_')}_{media_id}.dummy"
-        path = os.path.join(folder, filename)
-        # create an empty file if it doesn't exist
-        if not os.path.exists(path):
-            with open(path, 'wb') as fh:
-                fh.write(b'')
-        logger.info(f"Placed dummy file at {path}", extra={'emoji_type': 'create'})
-        return path
+
+        def create_placeholder_file(src, dst):
+            if getattr(settings, 'PLACEHOLDER_STRATEGY', 'link') == 'copy':
+                shutil.copy2(src, dst)
+                logger.debug(f"Copied dummy file to {dst}", extra={'emoji_type': 'copy'})
+            else:
+                try:
+                    os.link(src, dst)
+                    logger.debug(f"Hardlinked dummy file to {dst}", extra={'emoji_type': 'link'})
+                except OSError as e:
+                    # cross-device link or other
+                    try:
+                        if getattr(e, 'errno', None) == 18:
+                            shutil.copy2(src, dst)
+                            logger.warning(f"Hardlink failed (cross-device); copied dummy file instead: {dst}", extra={'emoji_type': 'warning'})
+                        else:
+                            raise
+                    except Exception:
+                        raise
+
+        # Resolve final folder
+        final_folder = resolve_final_folder(media_type=media_type, title=title, year=year, media_id=media_id, season_number=season_number)
+        if not final_folder:
+            logger.error(f"No valid folder path for dummy file creation for {title}", extra={'emoji_type': 'error'})
+            return None
+
+        os.makedirs(final_folder, exist_ok=True)
+        try:
+            # Match legacy behavior: chmod season folder and its parent series folder to be permissive
+            os.chmod(final_folder, 0o777)
+            parent = os.path.dirname(final_folder)
+            if parent:
+                try:
+                    os.chmod(parent, 0o777)
+                except Exception:
+                    pass
+        except Exception:
+            # non-fatal
+            pass
+
+        if media_type == 'tv' and season_number is not None and episode_number is not None:
+            file_name = f"{clean_title}{year_str} - s{int(season_number):02d}e{int(episode_number):02d} - {episode_title or ('Episode '+str(episode_number))}.mp4"
+            file_path = os.path.join(final_folder, sanitize_filename(file_name))
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            try:
+                create_placeholder_file(dummy_source, file_path)
+            except Exception as e:
+                logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+                return None
+
+            # Attempt to write episode-level nfo
+            try:
+                meta = {'title': episode_title or '', 'season': season_number, 'episode': episode_number, 'aired': None, 'sonarr_episode_overview': None, 'tvdb': media_id}
+                ok = write_nfo_for_placeholder(file_path, meta, media_type='tv', status='Request')
+                if ok:
+                    logger.debug(f"Wrote episode NFO for {file_path}", extra={'emoji_type': 'create'})
+            except Exception:
+                pass
+
+            return file_path
+
+        else:
+            # movie
+            file_name = f"{clean_title}{year_str} (dummy).mp4"
+            file_path = os.path.join(final_folder, sanitize_filename(file_name))
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            try:
+                create_placeholder_file(dummy_source, file_path)
+            except Exception as e:
+                logger.error(f"Error creating dummy file: {str(e)}", extra={'emoji_type': 'error'})
+                return None
+
+            # Attempt to write movie nfo
+            try:
+                meta = {'title': title, 'year': year, 'tmdbid': media_id, 'imdbid': None, 'radarr_overview': None}
+                ok = write_nfo_for_placeholder(file_path, meta, media_type='movie', status='Request')
+                if ok:
+                    logger.debug(f"Wrote movie NFO for {file_path}", extra={'emoji_type': 'create'})
+            except Exception:
+                pass
+
+            return file_path
+
     except Exception as e:
         logger.error(f"place_dummy_file failed: {e}", extra={'emoji_type': 'error'})
         return None
@@ -42,12 +155,174 @@ def place_dummy_file(media_type: str, title: str, year: int, media_id: int, libr
 def delete_dummy_file(path: str) -> bool:
     try:
         if path and os.path.exists(path):
-            os.remove(path)
-            logger.info(f"Deleted dummy file {path}")
+            # if it's a file, remove it; if path is a folder, attempt rmtree
+            if os.path.isfile(path):
+                os.remove(path)
+                logger.info(f"Deleted dummy file {path}")
+            else:
+                try:
+                    shutil.rmtree(path)
+                    logger.info(f"Deleted dummy folder {path}")
+                except Exception:
+                    # fallback to removing file-like
+                    try:
+                        os.remove(path)
+                        logger.info(f"Deleted dummy file {path}")
+                    except Exception:
+                        logger.debug(f"Failed to delete path {path}")
             return True
         return False
     except Exception as e:
         logger.error(f"delete_dummy_file failed: {e}")
+        return False
+
+
+def delete_dummy_files(media_type: str,
+                       title: str = None,
+                       year: int = None,
+                       tvdb_id: int = None,
+                       library_path: str = None,
+                       season_number: int = None,
+                       episode_number: int = None,
+                       folder_path: str = None,
+                       arr_root_folder: str = None,
+                       season_folder_name: str = None,
+                       session=None) -> bool:
+    """Delete placeholders by metadata (legacy behavior).
+
+    If `session` (SQLAlchemy session) is provided, also attempt to update DB rows
+    (mark deleted / remove placeholder rows) similarly to the legacy flow. This
+    function is defensive and best-effort: it will return True even if some
+    non-critical operations fail.
+    """
+    import shutil
+    try:
+        # Build the folder name using legacy convention where possible
+        try:
+            from services.services_old.utils import sanitize_filename
+        except Exception:
+            def sanitize_filename(n):
+                return re.sub(r'[<>:\"/\\|?*]', '', str(n or '')).strip()
+
+        folder_name = sanitize_filename(title) if title else None
+        if year and folder_name:
+            folder_name = f"{folder_name} ({year})"
+
+        if media_type == 'tv' and tvdb_id:
+            folder_name = (folder_name or '') + f" {{tvdb-{tvdb_id}}} (dummy)"
+        elif media_type == 'movie' and tvdb_id:
+            folder_name = (folder_name or '') + f" {{tmdb-{tvdb_id}}}{{edition-Dummy}}"
+
+        dummy_folder = None
+        if library_path and folder_name:
+            dummy_folder = os.path.join(library_path, folder_name)
+        elif folder_path:
+            dummy_folder = folder_path
+
+        if not dummy_folder:
+            logger.debug(f"delete_dummy_files: no folder computed for media_type={media_type} title={title} id={tvdb_id}")
+            return True
+
+        # If TV and specific season/episode provided, attempt to delete the episode file
+        if media_type == 'tv' and season_number is not None and episode_number is not None:
+            season_dir = os.path.join(dummy_folder, f"Season {int(season_number):02d}")
+            if os.path.exists(season_dir):
+                files_found = False
+                for fname in os.listdir(season_dir):
+                    patterns = [f"s{int(season_number):02d}e{int(episode_number):02d}", f"S{int(season_number):02d}E{int(episode_number):02d}"]
+                    if any(pat in fname for pat in patterns):
+                        fp = os.path.join(season_dir, fname)
+                        try:
+                            os.remove(fp)
+                            logger.info(f"Deleted placeholder file: {fp}", extra={'emoji_type': 'delete'})
+                            files_found = True
+                        except Exception as e:
+                            logger.debug(f"Failed to delete {fp}: {e}")
+                # cleanup empty season folder
+                try:
+                    if os.path.exists(season_dir) and not os.listdir(season_dir):
+                        os.rmdir(season_dir)
+                        logger.info(f"Deleted empty season folder: {season_dir}", extra={'emoji_type': 'delete'})
+                except Exception:
+                    pass
+
+                # DB updates when session provided
+                if session:
+                    try:
+                        from services.postgres.models import Series, Season, Episode, Movie
+                        # find series by tvdb tag if possible
+                        series = None
+                        try:
+                            if tvdb_id is not None:
+                                series = session.query(Series).filter(Series.tvdbid == int(tvdb_id)).first()
+                        except Exception:
+                            series = None
+                        if series:
+                            season_row = session.query(Season).filter(Season.series_id == series.id, Season.season_number == int(season_number)).first()
+                            if season_row:
+                                ep = session.query(Episode).filter(Episode.season_id == season_row.id, Episode.episode_number == int(episode_number)).first()
+                                if ep:
+                                    ep.is_deleted = True
+                                    ep.placeholder_exists = False
+                                    session.add(ep)
+                                    session.commit()
+                    except Exception:
+                        try:
+                            session.rollback()
+                        except Exception:
+                            pass
+                return True
+
+        # Otherwise remove the whole dummy folder
+        try:
+            if os.path.exists(dummy_folder):
+                shutil.rmtree(dummy_folder)
+                logger.info(f"Deleted placeholder folder: {dummy_folder}", extra={'emoji_type': 'delete'})
+        except Exception as e:
+            logger.debug(f"Failed to delete placeholder folder {dummy_folder}: {e}")
+
+        # DB updates when session provided
+        if session:
+            try:
+                from services.postgres.models import Movie, Series, Season, Episode
+                if media_type == 'movie':
+                    try:
+                        movie = session.query(Movie).filter(Movie.tmdbid == int(tvdb_id)).first() if tvdb_id is not None else None
+                    except Exception:
+                        movie = session.query(Movie).filter(Movie.tmdbid == tvdb_id).first() if tvdb_id is not None else None
+                    if movie:
+                        movie.is_deleted = True
+                        movie.placeholder_exists = False
+                        session.add(movie)
+                        session.commit()
+                elif media_type == 'tv':
+                    try:
+                        series = session.query(Series).filter(Series.tvdbid == int(tvdb_id)).first() if tvdb_id is not None else None
+                    except Exception:
+                        series = session.query(Series).filter(Series.tvdbid == tvdb_id).first() if tvdb_id is not None else None
+                    if series:
+                        series.is_deleted = True
+                        series.placeholder_exists = False
+                        session.add(series)
+                        seasons = session.query(Season).filter(Season.series_id == series.id).all()
+                        for s in seasons:
+                            s.is_deleted = True
+                            s.placeholder_exists = False
+                            session.add(s)
+                            eps = session.query(Episode).filter(Episode.season_id == s.id).all()
+                            for ep in eps:
+                                ep.is_deleted = True
+                                ep.placeholder_exists = False
+                                session.add(ep)
+                        session.commit()
+            except Exception as e:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+        return True
+    except Exception as e:
+        logger.error(f"delete_dummy_files failed: {e}", extra={'emoji_type': 'error'})
         return False
 
 

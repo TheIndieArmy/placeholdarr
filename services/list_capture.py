@@ -191,7 +191,7 @@ def _extract_year(val):
 # Batch size when creating episode subflows/jobs from a series
 EPISODE_BATCH_SIZE = 500
 # Series-specific phase list: series should perform base enrichment then create episode subflows
-SERIES_PHASES = ['enrich_base', 'create_episode_subflows']
+SERIES_PHASES = ['enrich_base']
 # Movie-specific phases: use combined 'enrich_and_merge' phase (replaces enrich_files + merge_scan)
 MOVIE_PHASES = ['enrich_base', 'enrich_and_merge', 'determine', 'materialize']
 
@@ -538,28 +538,38 @@ def capture_movies_fullsync_and_create_run(run_note: str = None) -> Orchestrator
             session.add(sf)
         session.commit()
 
-        # Collect the created SubFlow ids and create first-step jobs
+        # Collect the created SubFlow ids
         for sf in session.query(SubFlow).filter(SubFlow.movie_id.in_(movie_ids)).all():
             subflow_ids.append(sf.id)
 
-        # Create one job per SubFlow for the first actionable step (enrich_base)
-        created = 0
-        from datetime import datetime as _dt
-        # Batch-create Job rows in the same session for speed and atomicity
-        # Use session-aware insert helper so the database clock (now()) is used
-        # for run_after and to avoid application/DB clock skew preventing claims.
-        from services.jobs import insert_job_with_session
-        for sfid in subflow_ids:
-            payload = {'run_id': run.run_id, 'phase': 'enrich_base', 'subflow_id': sfid, 'step_index': 0}
-            group_id = f"subflow:{sfid}:enrich_base"
-            insert_job_with_session(session, 'subjob:enrich_base', payload, group_id=group_id)
-            created += 1
-        session.commit()
+        # Create phase jobs for the run using the orchestrator. Jobs will be
+        # created with a FAR_FUTURE run_after and unlocked by the run coordinator.
+        try:
+            for phase in PHASES:
+                # create_phase_subjobs will dedupe by group_id
+                run.create_phase_subjobs(phase, movie_ids)
+        except Exception:
+            try:
+                logger.exception("Failed to create phase subjobs via orchestrator")
+            except Exception:
+                pass
 
         # Fetch movie titles for nicer logging
         movie_rows = session.query(Movie.id, Movie.title, Movie.year).filter(Movie.id.in_(movie_ids)).all()
         movie_descriptions = [f"{r.title} ({r.year})" for r in movie_rows]
-        logger.info(f"Movie fullsync run {run.run_id}: created {len(movie_ids)} movie subflows and {created} initial jobs")
+        logger.info(f"Movie fullsync run {run.run_id}: created {len(movie_ids)} movie subflows and orchestrated phase jobs")
+
+        # Start the run coordinator in the background to unlock phases sequentially.
+        try:
+            from services.run_coordinator import coordinate_run
+            t = threading.Thread(target=coordinate_run, args=(run.run_id,), daemon=True, name=f"run-coord-{run.run_id}")
+            t.start()
+            logger.info(f"Started run coordinator thread for run {run.run_id}")
+        except Exception:
+            try:
+                logger.exception(f"Failed to start run coordinator for run {run.run_id}")
+            except Exception:
+                pass
         logger.verbose(f"Movies captured: {movie_descriptions}")
     finally:
         session.close()
@@ -1009,19 +1019,35 @@ def capture_series_fullsync_and_create_run(run_note: str = None) -> Orchestrator
             session.add(sf)
         session.commit()
 
-        # For series we create only the series-level subflow and DO NOT create
-        # episode subflows here. Episode subflow creation is performed later by
-        # the series-step 'create_episode_subflows' to allow batching, dedupe and
-        # gating of specials.
+    # For series we create only the series-level subflow and DO NOT create
+    # episode subflows here. Episode subflow creation is performed later by
+    # the series-step 'create_episode_subflows' to allow batching, dedupe and
+    # gating of specials.
         created = 0
-        from datetime import datetime as _dt
-        from services.jobs import insert_job_with_session
-        for sf in session.query(SubFlow).filter(SubFlow.series_id.in_(series_ids)).all():
-            payload = {'run_id': run.run_id, 'phase': 'enrich_base', 'subflow_id': sf.id, 'step_index': 0}
-            group_id = f"subflow:{sf.id}:enrich_base"
-            insert_job_with_session(session, 'subjob:enrich_base', payload, group_id=group_id)
-            created += 1
-        session.commit()
+        # Create series-level phase jobs via orchestrator so they remain pending
+        # until the run coordinator unlocks phases. Use the series-specific
+        # phase list so the jobs align with the SubFlow.steps we assigned above.
+        try:
+            for phase in SERIES_PHASES:
+                run.create_phase_subjobs(phase, series_ids)
+            # Immediately unlock the series `enrich_base` phase so the
+            # series-level `subjob:enrich_base` jobs are claimable and will
+            # run now. This guarantees that episode subflow creation (which
+            # runs inline during series enrich_base) executes in the same
+            # phase as it is created.
+            try:
+                run.unlock_phase('enrich_base')
+            except Exception:
+                # best-effort: log and continue if unlocking fails
+                try:
+                    logger.exception('Failed to unlock enrich_base phase immediately')
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                logger.exception("Failed to create phase subjobs for series run via orchestrator")
+            except Exception:
+                pass
 
         # Fetch series titles for nicer logging
         series_rows = session.query(Series.id, Series.title, Series.year).filter(Series.id.in_(series_ids)).all()
@@ -1065,6 +1091,30 @@ def create_episode_subflows_for_series(series_id: int, run_id: str, include_spec
         return 0
 
     sonarr_series_id = getattr(series_row, 'sonarrid', None)
+    # If we don't have a Sonarr id, attempt a best-effort enrichment/lookup by TVDB
+    if not sonarr_series_id:
+        try:
+            tvdb = getattr(series_row, 'tvdbid', None)
+            if tvdb:
+                # call legacy enrichment which will lookup Sonarr by TVDB and persist sonarrid if found
+                try:
+                    from services.services_old.integrations import enrich_series_from_sonarr
+                    enrich_series_from_sonarr(tvdb_id=int(tvdb))
+                    # refresh local view
+                    session = get_session()
+                    try:
+                        series_row = session.query(Series).filter(Series.id == int(series_id)).first()
+                        sonarr_series_id = getattr(series_row, 'sonarrid', None)
+                    finally:
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    logger.debug(f"Sonarr lookup by TVDB failed for series {series_id}")
+        except Exception:
+            pass
+
     if not sonarr_series_id:
         logger.info(f"Series {series_id} has no Sonarr id (sonarrid); skipping episode fetch")
         return 0

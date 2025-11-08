@@ -200,60 +200,60 @@ async def lifespan(app: FastAPI):
             logger.debug('List-capture modules not available or failed to import', extra={'emoji_type': 'debug'})
 
         # Perform a single filesystem placeholder scan at startup when a fullsync was requested.
+        try:
+            from services.fs_scan import scan_once_if_needed
+            # Consider 4K variants as well when deciding to run a startup fullsync scan
+            radarr_flags = any([
+                getattr(settings, 'RADARR_SYNC_ON_STARTUP', False),
+                getattr(settings, 'RADARR_4K_SYNC_ON_STARTUP', False)
+            ])
+            sonarr_flags = any([
+                getattr(settings, 'SONARR_SYNC_ON_STARTUP', False),
+                getattr(settings, 'SONARR_4K_SYNC_ON_STARTUP', False)
+            ])
+
+            # Log diagnostic info so operators can see why a scan will/won't run
             try:
-                from services.fs_scan import scan_once_if_needed
-                # Consider 4K variants as well when deciding to run a startup fullsync scan
-                radarr_flags = any([
-                    getattr(settings, 'RADARR_SYNC_ON_STARTUP', False),
-                    getattr(settings, 'RADARR_4K_SYNC_ON_STARTUP', False)
-                ])
-                sonarr_flags = any([
-                    getattr(settings, 'SONARR_SYNC_ON_STARTUP', False),
-                    getattr(settings, 'SONARR_4K_SYNC_ON_STARTUP', False)
-                ])
-
-                # Log diagnostic info so operators can see why a scan will/won't run
-                try:
-                    movie_root = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
-                    tv_root = getattr(settings, 'TV_LIBRARY_FOLDER', None)
-                    logger.debug(f"Startup FS-scan flags: radarr={radarr_flags} sonarr={sonarr_flags} movie_root={movie_root} tv_root={tv_root}", extra={'emoji_type': 'debug'})
-                except Exception:
-                    logger.debug('Failed to read FS-scan roots for diagnostics', extra={'emoji_type': 'debug'})
-
-                if _startup_scan_performed:
-                    logger.info('Startup FS-scan already performed as part of list-capture seeding; skipping additional scan', extra={'emoji_type': 'info'})
-                else:
-                    if radarr_flags or sonarr_flags:
-                        try:
-                            # If one or more startup runs requested a scan, perform a
-                            # single combined FS-scan using the first run_id to claim
-                            # the fs_scan_run row. This ensures we only walk the FS
-                            # once for all startup fullsyncs.
-                            if _startup_scan_run_ids:
-                                combined_run_id = _startup_scan_run_ids[0]
-                                res = scan_once_if_needed(combined_run_id)
-                            else:
-                                res = scan_once_if_needed()
-
-                            if isinstance(res, tuple):
-                                count, info = res
-                            else:
-                                count, info = res, None
-
-                            if info and info.get('reason') == 'time_guard':
-                                logger.info(f'FS-scan skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s)', extra={'emoji_type': 'info'})
-                            else:
-                                if _startup_scan_run_ids:
-                                    logger.info(f'FS-scan seeded {count} placeholders at startup (run_ids={_startup_scan_run_ids})', extra={'emoji_type': 'info'})
-                                else:
-                                    logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
-                            _startup_scan_performed = True
-                        except Exception as e:
-                            logger.error(f'FS-scan at startup failed: {e}', extra={'emoji_type': 'error'})
-                    else:
-                        logger.debug('No startup fullsync flags set; skipping FS-scan', extra={'emoji_type': 'debug'})
+                movie_root = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
+                tv_root = getattr(settings, 'TV_LIBRARY_FOLDER', None)
+                logger.debug(f"Startup FS-scan flags: radarr={radarr_flags} sonarr={sonarr_flags} movie_root={movie_root} tv_root={tv_root}", extra={'emoji_type': 'debug'})
             except Exception:
-                logger.debug('services.fs_scan not available; skipping startup FS-scan', extra={'emoji_type': 'debug'})
+                logger.debug('Failed to read FS-scan roots for diagnostics', extra={'emoji_type': 'debug'})
+
+            if _startup_scan_performed:
+                logger.info('Startup FS-scan already performed as part of list-capture seeding; skipping additional scan', extra={'emoji_type': 'info'})
+            else:
+                if radarr_flags or sonarr_flags:
+                    try:
+                        # If one or more startup runs requested a scan, perform a
+                        # single combined FS-scan using the first run_id to claim
+                        # the fs_scan_run row. This ensures we only walk the FS
+                        # once for all startup fullsyncs.
+                        if _startup_scan_run_ids:
+                            combined_run_id = _startup_scan_run_ids[0]
+                            res = scan_once_if_needed(combined_run_id)
+                        else:
+                            res = scan_once_if_needed()
+
+                        if isinstance(res, tuple):
+                            count, info = res
+                        else:
+                            count, info = res, None
+
+                        if info and info.get('reason') == 'time_guard':
+                            logger.info(f'FS-scan skipped due to recent placeholder observation {info.get("delta")}s (<{info.get("threshold")}s)', extra={'emoji_type': 'info'})
+                        else:
+                            if _startup_scan_run_ids:
+                                logger.info(f'FS-scan seeded {count} placeholders at startup (run_ids={_startup_scan_run_ids})', extra={'emoji_type': 'info'})
+                            else:
+                                logger.info(f'FS-scan seeded {count} placeholders at startup', extra={'emoji_type': 'info'})
+                        _startup_scan_performed = True
+                    except Exception as e:
+                        logger.error(f'FS-scan at startup failed: {e}', extra={'emoji_type': 'error'})
+                else:
+                    logger.debug('No startup fullsync flags set; skipping FS-scan', extra={'emoji_type': 'debug'})
+        except Exception:
+            logger.debug('services.fs_scan not available; skipping startup FS-scan', extra={'emoji_type': 'debug'})
 
         # Startup syncs are scheduled via services.sync.schedule_all_syncs()
     
