@@ -932,16 +932,46 @@ def save_jellyfin_arr_id(dbsession, model, ent_id, match: dict):
         Season:  'jellyfin_id',
         Episode: 'jellyfin_id'
     }[model]
-    
+    # Title & overview field mapping (ensure these columns exist)
+    title_field = {
+        Movie:   'jellyfin_title',
+        Series:  'jellyfin_title',
+        Season:  'jellyfin_title',
+        Episode: 'jellyfin_title'
+    }[model]
+    overview_field = {
+        Movie:   'jellyfin_overview',
+        Series:  'jellyfin_overview',
+        Season:  'jellyfin_overview',
+        Episode: 'jellyfin_overview'
+    }[model]
+
+    changed = False
     # Update ID
     jf_id = match.get('Id')
     if getattr(obj, id_field) != jf_id:
         setattr(obj, id_field, jf_id)
+        changed = True
+        logger.debug(f"Updated {model.__name__} {ent_id} arr ID: {jf_id}", extra={'emoji_type': 'update'})
+    # Update title
+    name = match.get('Name')
+    if name and getattr(obj, title_field) != name:
+        setattr(obj, title_field, name)
+        changed = True
+        logger.debug(f"Updated {model.__name__} {ent_id} title: {name}", extra={'emoji_type': 'update'})
+    # Update overview
+    overview = match.get('Overview')
+    if overview and getattr(obj, overview_field) != overview:
+        setattr(obj, overview_field, overview)
+        changed = True
+        logger.debug(f"Updated {model.__name__} {ent_id} overview", extra={'emoji_type': 'update'})
+
+    if changed:
         dbsession.add(obj)
         dbsession.commit()
-        logger.info(f"Updated {model.__name__} {ent_id} with Jellyfin ID: {jf_id}", extra={'emoji_type': 'update'})
+        logger.info(f"Saved arr data for {model.__name__} {ent_id}", extra={'emoji_type': 'success'})
     else:
-        logger.debug(f"{model.__name__} {ent_id} already has Jellyfin ID: {jf_id}", extra={'emoji_type': 'debug'})
+        logger.debug(f"No changes needed for {model.__name__} {ent_id} arr data", extra={'emoji_type': 'debug'})
     return jf_id
 
 def save_jellyfin_dummy_id(dbsession, model, ent_id, match: dict):
@@ -2535,39 +2565,41 @@ def verify_title_status_jellyfin(
     if not entity:
         logger.warning(f"{entity_type} {ent_id} not found in database", extra={'emoji_type': 'warning'})
         return False
-    
+
+    title_ok = False
+    expected_prefix = f"[{entity.placeholder_status}]"
     # If no placeholder_status or it's empty, nothing to verify
     if not entity.placeholder_status or entity.placeholder_status.strip() == '':
         logger.debug(f"{entity_type} {ent_id} has no placeholder_status, skipping verification", extra={'emoji_type': 'debug'})
-        return True
-    
-    # Check if status is in square brackets at the beginning
-    expected_prefix = f"[{entity.placeholder_status}]"
-    
-    # Check jellyfin_title
-    title_ok = False
-    if entity.jellyfin_title and entity.jellyfin_title.startswith(expected_prefix):
-        title_ok = True
-        logger.debug(f"{entity_type} {ent_id} jellyfin_title has correct status prefix", extra={'emoji_type': 'success'})
+        if not entity.jellyfin_title.startswith('['):
+            return True
+        else:
+            title_ok = False
+            logger.debug(f"{entity_type} {ent_id} jellyfin_title has incorrect status prefix", extra={'emoji_type': 'debug'})
+
     else:
-        logger.warning(
-            f"{entity_type} {ent_id} jellyfin_title missing status prefix. "
-            f"Expected: '{expected_prefix}...', Got: '{entity.jellyfin_title}'",
-            extra={'emoji_type': 'warning'}
-        )
-    
-    # Check jellyfin_overview
-    overview_ok = False
-    if entity.jellyfin_overview and entity.jellyfin_overview.startswith(expected_prefix):
-        overview_ok = True
-        logger.debug(f"{entity_type} {ent_id} jellyfin_overview has correct status prefix", extra={'emoji_type': 'success'})
-    else:
-        logger.warning(
-            f"{entity_type} {ent_id} jellyfin_overview missing status prefix. "
-            f"Expected: '{expected_prefix}...', Got: '{entity.jellyfin_overview}'",
-            extra={'emoji_type': 'warning'}
-        )
-    
+        if entity.jellyfin_title and entity.jellyfin_title.startswith(expected_prefix):
+            title_ok = True
+            logger.debug(f"{entity_type} {ent_id} jellyfin_title has correct status prefix", extra={'emoji_type': 'success'})
+        else:
+            logger.warning(
+                f"{entity_type} {ent_id} jellyfin_title missing status prefix. "
+                f"Expected: '{expected_prefix}...', Got: '{entity.jellyfin_title}'",
+                extra={'emoji_type': 'warning'}
+            )
+        
+        # Check jellyfin_overview
+        overview_ok = False
+        if entity.jellyfin_overview and entity.jellyfin_overview.startswith(expected_prefix):
+            overview_ok = True
+            logger.debug(f"{entity_type} {ent_id} jellyfin_overview has correct status prefix", extra={'emoji_type': 'success'})
+        else:
+            logger.warning(
+                f"{entity_type} {ent_id} jellyfin_overview missing status prefix. "
+                f"Expected: '{expected_prefix}...', Got: '{entity.jellyfin_overview}'",
+                extra={'emoji_type': 'warning'}
+            )
+        
     # If both are OK, we're done
     if title_ok and overview_ok:
         logger.info(f"{entity_type} {ent_id} has properly embedded status in Jellyfin metadata", extra={'emoji_type': 'success'})
@@ -2593,7 +2625,7 @@ def verify_title_status_jellyfin(
     
     for sf in all_subflows:
         steps = sf.steps.split(',')
-        if 'refresh_jellyfin_dummy' in steps:
+        if 'refresh_jellyfin_dummy' in steps and 'import' not in action:
             try:
                 refresh_idx = steps.index('refresh_jellyfin_dummy')
                 subflow_to_reset = sf
@@ -2604,7 +2636,18 @@ def verify_title_status_jellyfin(
                 break
             except ValueError:
                 continue
-    
+        elif 'refresh_jellyfin_arr_path' in steps and 'import' in action:
+            try:
+                refresh_idx = steps.index('refresh_jellyfin_arr_path')
+                subflow_to_reset = sf
+                logger.debug(
+                    f"Found SubFlow {sf.id} with refresh_jellyfin_arr_path at index {refresh_idx}",
+                    extra={'emoji_type': 'debug'}
+                )
+                break
+            except ValueError:
+                continue
+
     if not subflow_to_reset:
         logger.error(
             f"No SubFlow found for {entity_type} {ent_id} action {action} containing 'refresh_jellyfin_dummy' step",

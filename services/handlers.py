@@ -282,6 +282,10 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                 series.filepath = series_path
                 session.commit()
                 logger.info(f"Updated series filepath from {old_path} to {series_path}", extra={'emoji_type': 'update'})
+            if series.jellyfin_dummy_id != None:
+                series.jellyfin_dimmy_id = None
+                series.jellyfin_id = None
+                session.commit()
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})

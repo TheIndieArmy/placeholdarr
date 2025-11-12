@@ -9,9 +9,7 @@ placeholdarr_original/
 reference/
 
 # Python
-services/__pycache__
-core/__pycache__
-__pycache__/
+/__pycache__/
 *.py[cod]
 *$py.class
 *.so

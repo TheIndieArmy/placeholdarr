@@ -228,7 +228,11 @@ class SeriesRepository:
                 series_id=series.id,
                 season_number=season_num 
             )
-            
+            if season.jellyfin_dummy_id:
+                season.jellyfin_dummy_id = None
+                season.jellyfin_id = None
+                self.session.add(season)
+                self.session.commit()
             # 3) within that season, upsert episodes
             for ep in eps:
                 # episode number may be missing or string - be defensive
@@ -261,6 +265,13 @@ class SeriesRepository:
                         existing_episode.action = 'handle_seriesadd'
                         self.session.add(existing_episode)
                         logger.info(f"Reset Episode S{season_num}E{ep_num} status to PENDING for reprocessing")
+                    if existing_episode.jellyfin_dummy_id:
+                        existing_episode.jellyfin_dummy_id = None
+                        existing_episode.jellyfin_id = None
+                        existing_episode.filepath = None
+                        self.session.add(existing_episode)
+                        logger.info(f"Cleared jellyfin_dummy_id for Episode S{season_num}E{ep_num}")
+                    self.session.commit()
                 else:
                     logger.info(f"Creating new Episode S{season_num}E{ep_num}")
                     # Create new episode with all the defaults
