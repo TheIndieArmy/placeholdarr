@@ -1126,6 +1126,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
         logger.info(f"Completed placeholder processing for series '{series.title}'", extra={'emoji_type': 'success'})
         return True
 
+
     elif model is Episode:
         # Look up the current episode, season, and series to determine the series_id
         current_ep = session.query(Episode).get(ent_id)
@@ -1138,11 +1139,31 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             logger.error(f"Season for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
 
+        # If INCLUDE_SPECIALS is False, skip and remove specials
+        include_specials = getattr(settings, 'INCLUDE_SPECIALS', False)
+        if not include_specials:
+            # Remove specials (season 0) and their episodes from DB
+            specials_seasons = session.query(Season).filter(Season.series_id == seas.series_id, Season.season_number == 0).all()
+            for special_season in specials_seasons:
+                # Delete all episodes in this season
+                special_episodes = session.query(Episode).filter(Episode.season_id == special_season.id).all()
+                for special_ep in special_episodes:
+                    logger.info(f"Deleting special episode {special_ep.id} (season 0)", extra={'emoji_type': 'delete'})
+                    session.delete(special_ep)
+                logger.info(f"Deleting special season {special_season.id} (season 0)", extra={'emoji_type': 'delete'})
+                session.delete(special_season)
+            session.commit()
+            # If this episode is a special, skip placeholder creation
+            if seas.season_number == 0:
+                logger.info(f"Skipping placeholder for special episode {current_ep.id} (season 0) due to INCLUDE_SPECIALS=False", extra={'emoji_type': 'skip'})
+                return True
+
         series = session.query(Series).get(seas.series_id)
         if not series:
             logger.error(f"Series for episode {ent_id} not found", extra={'emoji_type': 'error'})
             return False
 
+        # --- Begin restored episode placeholder logic ---
         # Query all SubFlow rows for this series that are waiting on delayed_placeholders
         sf_eps = session.query(SubFlow).filter(
             SubFlow.steps == "delayed_placeholders",
@@ -1363,7 +1384,6 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             logger.info(f"No placeholders needed for '{series.title}'", extra={'emoji_type': 'info'})
         
         return True
-
     else:
         logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
         return False

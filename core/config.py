@@ -22,6 +22,8 @@ else:
     logger.info(f"No .env file at {dotenv_path}, using process environment")
 
 class Settings(BaseSettings):
+    # Whether to include specials (from .env)
+    INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").strip().lower() == "true"
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
     SCHEDULED_TIME_FAILED: Optional[str] = None  # Add this line to avoid AttributeError
