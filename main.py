@@ -65,30 +65,68 @@ async def lifespan(app: FastAPI):
 
         session = get_session()
         try:
-            # Reset QUEUED entities to PENDING for all entity types
-            movie_reset = session.query(Movie).filter(Movie.status == 'QUEUED').update(
-                {Movie.status: 'PENDING'},
-                synchronize_session=False
-            )
+            # Parse comma-separated statuses from config
+            reset_statuses = [s.strip().upper() for s in settings.RESET_SUBFLOWS_ON_STARTUP.split(',') if s.strip()]
             
-            series_reset = session.query(Series).filter(Series.status == 'QUEUED').update(
-                {Series.status: 'PENDING'},
-                synchronize_session=False
-            )
+            # Reset entities (Movie, Series, Episode) if QUEUED is in reset list
+            entity_reset_counts = {}
+            if 'QUEUED' in reset_statuses:
+                movie_reset = session.query(Movie).filter(Movie.status == 'QUEUED').update(
+                    {Movie.status: 'PENDING'},
+                    synchronize_session=False
+                )
+                entity_reset_counts['movies'] = movie_reset
+                
+                series_reset = session.query(Series).filter(Series.status == 'QUEUED').update(
+                    {Series.status: 'PENDING'},
+                    synchronize_session=False
+                )
+                entity_reset_counts['series'] = series_reset
+                
+                episode_reset = session.query(Episode).filter(Episode.status == 'QUEUED').update(
+                    {Episode.status: 'PENDING'},
+                    synchronize_session=False
+                )
+                entity_reset_counts['episodes'] = episode_reset
+                
+                logger.info(f"Reset QUEUED entities to PENDING: {movie_reset} movies, {series_reset} series, {episode_reset} episodes", extra={'emoji_type': 'info'})
+            else:
+                logger.info("Skipping entity reset (QUEUED not in RESET_SUBFLOWS_ON_STARTUP)", extra={'emoji_type': 'info'})
             
-            episode_reset = session.query(Episode).filter(Episode.status == 'QUEUED').update(
-                {Episode.status: 'PENDING'},
-                synchronize_session=False
-            )
-            
-            # Reset QUEUED SubFlows to PENDING
-            subflow_reset = session.query(SubFlow).filter(SubFlow.status == 'QUEUED').update(
-                {SubFlow.status: 'PENDING'},
-                synchronize_session=False
-            )
+            # Reset SubFlows based on RESET_SUBFLOWS_ON_STARTUP setting
+            subflow_reset_counts = {}
+            for status in reset_statuses:
+                if status in ['QUEUED', 'FAILED']:
+                    # For FAILED SubFlows, also reset retry_count and error_message so they can be retried
+                    if status == 'FAILED':
+                        failed_subflows = session.query(SubFlow).filter(SubFlow.status == status).all()
+                        for sf in failed_subflows:
+                            sf.status = 'PENDING'
+                            sf.retry_count = 0
+                            sf.error_message = None
+                            sf.step_index = 0
+                            session.add(sf)
+                        count = len(failed_subflows)
+                        logger.info(f"Reset {count} SubFlows from FAILED to PENDING (cleared retry_count and error_message)", extra={'emoji_type': 'info'})
+                    else:
+                        # For QUEUED, just change status
+                        count = session.query(SubFlow).filter(SubFlow.status == status).update(
+                            {SubFlow.status: 'PENDING'},
+                            synchronize_session=False
+                        )
+                        logger.info(f"Reset {count} SubFlows from {status} to PENDING", extra={'emoji_type': 'info'})
+                    
+                    subflow_reset_counts[status] = count
+                else:
+                    logger.warning(f"Invalid status '{status}' in RESET_SUBFLOWS_ON_STARTUP - skipping", extra={'emoji_type': 'warning'})
             
             session.commit()
-            logger.info(f"Reset to PENDING: {movie_reset} movies, {series_reset} series, {episode_reset} episodes, {subflow_reset} subflows", extra={'emoji_type': 'info'})
+            
+            if subflow_reset_counts:
+                reset_summary = ', '.join([f"{count} {status}" for status, count in subflow_reset_counts.items()])
+                logger.info(f"SubFlow resets: {reset_summary}", extra={'emoji_type': 'info'})
+            else:
+                logger.info("No SubFlow resets configured (RESET_SUBFLOWS_ON_STARTUP is empty)", extra={'emoji_type': 'info'})
         finally:
             session.close()
 

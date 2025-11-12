@@ -41,7 +41,7 @@ def sync_movies_with_radarr(instance_name=None):
                 "name": "standard",
                 "url": settings.RADARR_URL,
                 "api_key": settings.RADARR_API_KEY,
-                "library_folder": getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
+                "library_folder": getattr(settings, 'DUMMY_MOVIE_LIBRARY_FOLDER', None)
             })
     if instance_name is None or instance_name == "4k":
         if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
@@ -49,7 +49,7 @@ def sync_movies_with_radarr(instance_name=None):
                 "name": "4k",
                 "url": settings.RADARR_4K_URL,
                 "api_key": settings.RADARR_4K_API_KEY,
-                "library_folder": getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None)
+                "library_folder": getattr(settings, 'DUMMY_MOVIE_LIBRARY_4K_FOLDER', None)
             })
 
     session = get_session()
@@ -74,9 +74,9 @@ def sync_movies_with_radarr(instance_name=None):
                 moviefile_size = movie_file.get('size') or movie_file.get('sizeInBytes')
 
                 # Radarr configured library path (folder) - present even if no file
-                radarrpath = movie.get('path') or ''
+                filepath = movie.get('path') or ''
                 # Prefer file path from movieFile when deciding 4k and actual file presence
-                file_to_check = moviefile_path or radarrpath
+                file_to_check = moviefile_path or filepath
                 is_4k = is_4k_request(file_to_check)
                 key = (tmdbid, is_4k)
                 db_movie = existing_movies.get(key)
@@ -103,7 +103,7 @@ def sync_movies_with_radarr(instance_name=None):
                         'title': movie.get('title'),
                         'year': movie.get('year'),
                         'radarrid': movie.get('id'),
-                        'radarrpath': radarrpath,
+                        'filepath': filepath,
                         'moviefile_path': moviefile_path,
                         'moviefile_size': moviefile_size,
                         'has_file': has_file,
@@ -127,7 +127,7 @@ def sync_movies_with_radarr(instance_name=None):
                         title=movie.get('title'),
                         year=movie.get('year'),
                         radarrid=movie.get('id'),
-                        radarrpath=radarrpath,
+                        filepath=filepath,
                         moviefile_path=moviefile_path,
                         moviefile_size=moviefile_size,
                         has_file=has_file,

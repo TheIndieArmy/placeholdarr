@@ -43,7 +43,7 @@ def _map_keys_to_allowed(payload: dict, allowed: set) -> dict:
         if found:
             mapped[found] = v
         else:
-            # also allow exact underscore removal mapping: e.g. sonarr_path -> sonarrpath
+            # also allow exact underscore removal mapping: e.g. sonarr_path -> filepath
             no_underscore = k.replace('_', '').replace('-', '')
             for c in _camel_candidates(no_underscore):
                 if c in allowed:

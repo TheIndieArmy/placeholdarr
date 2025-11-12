@@ -18,10 +18,10 @@ except Exception as ex:
         print('The following path validations failed:', file=sys.stderr)
         for l in missing_lines:
             print('  -', l, file=sys.stderr)
-        print('\nLikely causes:\n  * The folder locations have not been created\n  * A typo in your .env for MOVIE_LIBRARY_FOLDER / TV_LIBRARY_FOLDER\n ', file=sys.stderr)
+        print('\nLikely causes:\n  * The folder locations have not been created\n  * A typo in your .env for DUMMY_MOVIE_LIBRARY_FOLDER / DUMMY_TV_LIBRARY_FOLDER\n ', file=sys.stderr)
         print('\nSuggested actions:', file=sys.stderr)
         print('  1) Ensure folder locations exist and create them if not.', file=sys.stderr)
-        print('  2) Verify the paths in your .env or environment variables (MOVIE_LIBRARY_FOLDER, TV_LIBRARY_FOLDER, MOVIE_LIBRARY_4K_FOLDER, TV_LIBRARY_4K_FOLDER).', file=sys.stderr)
+        print('  2) Verify the paths in your .env or environment variables (DUMMY_MOVIE_LIBRARY_FOLDER, DUMMY_TV_LIBRARY_FOLDER, DUMMY_MOVIE_LIBRARY_4K_FOLDER, DUMMY_TV_LIBRARY_4K_FOLDER).', file=sys.stderr)
         print('\nOnce fixed, restart Placeholdarr.', file=sys.stderr)
         sys.exit(1)
     else:
@@ -65,25 +65,40 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
         # Get emoji and build message
         emoji = LOG_EMOJIS.get(record.__dict__.get('emoji_type', ''), '➡️')
         
-        # Add SubFlow context if available
+        # Add SubFlow context if available - but check if already added to avoid duplication
         subflow_context = ""
-        if hasattr(record, 'subflow_id'):
+        original_msg = record.getMessage()
+        
+        # Only add context if not already in the message
+        if hasattr(record, 'subflow_id') and f"[SF:{record.subflow_id}]" not in original_msg:
             subflow_context += f"[SF:{record.subflow_id}]"
-        if hasattr(record, 'entity_id'):
+        if hasattr(record, 'entity_id') and f"[ID:{record.entity_id}]" not in original_msg:
             subflow_context += f"[ID:{record.entity_id}]"
-        if hasattr(record, 'entity_type'):
+        if hasattr(record, 'entity_type') and f"[{record.entity_type.upper()}]" not in original_msg:
             subflow_context += f"[{record.entity_type.upper()}]"
         
+        # Check if emoji already in message
+        has_emoji = any(emoji_char in original_msg for emoji_char in LOG_EMOJIS.values())
+        
+        # Build final message WITHOUT mutating record.msg (to prevent double-formatting by multiple handlers)
         if subflow_context:
-            record.msg = f"{emoji} {subflow_context} {record.msg}"
+            formatted_msg = f"{emoji if not has_emoji else ''} {subflow_context} {original_msg}".strip()
         else:
-            record.msg = f"{emoji} {record.msg}"
+            formatted_msg = f"{emoji if not has_emoji else ''} {original_msg}".strip()
+        
+        # Temporarily replace msg for formatting, then restore
+        original_record_msg = record.msg
+        record.msg = formatted_msg
+        record.message = formatted_msg
         
         # Replace the name field with actual file:line
         old_format = self._style._fmt
         self._style._fmt = old_format.replace('%(name)s', f'{filename}:{line_num}')
         formatted = super().format(record)
         self._style._fmt = old_format
+        
+        # Restore original msg to prevent mutation issues
+        record.msg = original_record_msg
         
         if not formatted.endswith("\n"):
             formatted += "\n"
@@ -93,25 +108,83 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
 import threading
 _context = threading.local()
 
-def set_subflow_context(subflow_id=None, entity_id=None, entity_type=None):
+def set_subflow_context(subflow_id=None, entity_id=None, entity_type=None, action=None):
     """Set SubFlow context for current thread's log messages"""
     _context.subflow_id = subflow_id
     _context.entity_id = entity_id
     _context.entity_type = entity_type
+    _context.action = action
+    
+    # Automatically set up handler-specific file logging if action is provided
+    if action:
+        _ensure_handler_file_logging(action)
 
 def clear_subflow_context():
     """Clear SubFlow context for current thread"""
+    # Remove handler-specific file logging if it was added
+    if hasattr(_context, 'action') and _context.action:
+        _remove_handler_file_logging(_context.action)
+    
     _context.subflow_id = None
     _context.entity_id = None
     _context.entity_type = None
+    _context.action = None
 
 def get_subflow_context():
     """Get current SubFlow context"""
     return {
         'subflow_id': getattr(_context, 'subflow_id', None),
         'entity_id': getattr(_context, 'entity_id', None),
-        'entity_type': getattr(_context, 'entity_type', None)
+        'entity_type': getattr(_context, 'entity_type', None),
+        'action': getattr(_context, 'action', None)
     }
+
+# Thread-local storage for handler file handlers
+_handler_file_handlers = {}
+
+def _ensure_handler_file_logging(action: str):
+    """Ensure that logs for this action go to the handler-specific log.txt file"""
+    from pathlib import Path
+    
+    # Determine handler folder name
+    handler_name = action if action.startswith('handle_') else f'handle_{action}'
+    
+    # Check if we already have a file handler for this action in this thread
+    thread_id = threading.current_thread().ident
+    handler_key = f"{thread_id}_{handler_name}"
+    
+    if handler_key in _handler_file_handlers:
+        return  # Already set up
+    
+    # Create log directory and file path
+    log_dir = Path("logs") / handler_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "log.txt"
+    
+    # Create file handler (append mode to preserve logs from current session)
+    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    file_handler.setLevel(VERBOSE_LEVEL_NUM)  # Capture everything including VERBOSE
+    
+    # Use the same EnhancedEmojiLogFormatter as console (not double-formatting)
+    file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(source_location)s - %(levelname)s - %(message)s'))
+    
+    # Add to base logger
+    base_logger.addHandler(file_handler)
+    
+    # Store reference so we can remove it later
+    _handler_file_handlers[handler_key] = file_handler
+
+def _remove_handler_file_logging(action: str):
+    """Remove the handler-specific file logging for this thread"""
+    handler_name = action if action.startswith('handle_') else f'handle_{action}'
+    thread_id = threading.current_thread().ident
+    handler_key = f"{thread_id}_{handler_name}"
+    
+    if handler_key in _handler_file_handlers:
+        file_handler = _handler_file_handlers[handler_key]
+        base_logger.removeHandler(file_handler)
+        file_handler.close()
+        del _handler_file_handlers[handler_key]
 
 class ContextAwareLogger:
     """Logger wrapper that automatically adds SubFlow context and fixes source location"""

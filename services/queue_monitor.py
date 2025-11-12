@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 import logging
 import threading
 import requests
-from services.jellyfin_client import update_jellyfin_title_status
 from services.plex_client import update_plex_title_status
 from sqlalchemy.orm import Session
 from core.config import settings
@@ -262,8 +261,8 @@ class ProgressMonitor:
                     sf.status = 'IN_QUEUE'
                     session.add(sf)
             else:
-                # Not in queue - check timeout
-                elapsed = (now - sf.started_at).total_seconds()
+                # Not in queue - check timeout based on when SubFlow was created
+                elapsed = (now - sf.created_time.replace(tzinfo=timezone.utc)).total_seconds()
                 timeout = getattr(settings, 'QUEUE_TIMEOUT_SECONDS', 200)
                 
                 if elapsed > timeout:

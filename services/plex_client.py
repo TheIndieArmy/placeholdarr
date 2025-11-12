@@ -70,9 +70,9 @@ def refresh_plex_item(path: Union[str, List[str]], update_type: str = 'Created')
         
         # Determine section ID from path
         section_id = None
-        if any(target.startswith(folder) for folder in [settings.MOVIE_LIBRARY_FOLDER, settings.MOVIE_LIBRARY_4K_FOLDER] if folder):
+        if any(target.startswith(folder) for folder in [settings.DUMMY_MOVIE_LIBRARY_FOLDER, settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER] if folder):
             section_id = settings.PLEX_MOVIE_SECTION_ID
-        elif any(target.startswith(folder) for folder in [settings.TV_LIBRARY_FOLDER, settings.TV_LIBRARY_4K_FOLDER] if folder):
+        elif any(target.startswith(folder) for folder in [settings.DUMMY_TV_LIBRARY_FOLDER, settings.DUMMY_TV_LIBRARY_4K_FOLDER] if folder):
             section_id = settings.PLEX_TV_SECTION_ID
         
         if not section_id:

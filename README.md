@@ -108,7 +108,7 @@ Required settings in `.env`:
 - `PLEX_URL`, `PLEX_TOKEN`: Your Plex server details
 - `RADARR_URL`, `RADARR_API_KEY`: Radarr connection details
 - `SONARR_URL`, `SONARR_API_KEY`: Sonarr connection details
-- `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin
+- `DUMMY_MOVIE_LIBRARY_FOLDER`, `DUMMY_TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin
 - `DUMMY_FILE_PATH`: Path to your dummy.mp4 file
 
 Optional settings:

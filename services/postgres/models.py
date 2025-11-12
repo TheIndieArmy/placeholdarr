@@ -15,8 +15,6 @@ class Movie(Base):
     tmdbid = Column(Integer, unique=True, nullable=False)
     is_4k  = Column(Boolean, default=False)
     dummypath = Column(String, nullable=True)
-    # Radarr configured library path (the folder configured in Radarr for the movie)
-    radarrpath = Column(String, nullable=True)
     # Exact path to the actual movie file when Radarr has imported one (movieFile.path)
     moviefile_path = Column(String, nullable=True)
     # Size in bytes reported for the movie file (if available)
@@ -92,7 +90,8 @@ class SubFlow(Base):
     status = Column(String, default='PENDING')
     retry_count = Column(Integer, default=0)
     error_message = Column(String, nullable=True)
-    # trigger_id = Column(Integer, default=None, nullable=True)
+    trigger_id = Column(Integer, default=None, nullable=True)  # Identifies which trigger/action run this SubFlow belongs to
+    barrier_released = Column(Boolean, default=False)  # Flag to track if this SubFlow was released from a barrier
 
     movie = relationship('Movie', back_populates='subflows')
     series = relationship('Series', back_populates='subflows')
@@ -109,7 +108,7 @@ class Series(Base):
     tvdbid = Column(Integer, unique=True, nullable=False)
     is_4k  = Column(Boolean, default=False)
     dummypath = Column(String, nullable=True)
-    sonarrpath = Column(String, nullable=True)
+    filepath = Column(String, nullable=True)
     # Aggregate flags for files under this series
     has_files = Column(Boolean, default=False)
     seriesfile_count = Column(BigInteger, nullable=True)
@@ -164,7 +163,7 @@ class Season(Base):
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
-    sonarrpath = Column(String, nullable=True)
+    filepath = Column(String, nullable=True)
     # Aggregate per-season file info
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)
@@ -210,7 +209,6 @@ class Episode(Base):
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
-    sonarrpath = Column(String, nullable=True)
     # Exact path to the episode file when Sonarr has it
     episodefile_path = Column(String, nullable=True)
     episodefile_size = Column(BigInteger, nullable=True)

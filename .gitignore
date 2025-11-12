@@ -9,6 +9,8 @@ placeholdarr_original/
 reference/
 
 # Python
+services/__pycache__
+core/__pycache__
 __pycache__/
 *.py[cod]
 *$py.class
@@ -44,3 +46,12 @@ media_handler.log
 # OS
 .DS_Store
 Thumbs.db
+
+# AI slob
+BARRIER_FIX_BRANCH_AND_STEPNAME.md
+SCHEDULER_CONCURRENCY_FIX.md
+TEST_SUITE_README.md
+
+# dev config
+docker-compose.dev.yml
+docker-compose.override.yml

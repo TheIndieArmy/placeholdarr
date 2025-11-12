@@ -76,97 +76,267 @@ def lookup_and_monitor(session: Session,
         logger.info(f"Movie monitoring result for {m.title}: {success}")
         return bool(success)
 
-    # Episode flow
+    # Episode flow - use season-based monitoring
     ep: Episode = session.query(Episode).get(ent_id)
     logger.debug(f"Processing episode: S{ep.season.season_number}E{ep.episode_number} (ID: {ep.id})")
-    series_id = ep.season.series_id
+    series = ep.season.series
+    series_id = series.id
     play_mode = settings.TV_PLAY_MODE.lower()
     logger.debug(f"Play mode: {play_mode}, series ID: {series_id}")
-    ep_ids: List[int] = []
 
+    from services.integrations import monitor_seasons_and_episodes
+    
     if play_mode == 'episode':
-        eps = db_get_episodes(
+        # Episode mode: Monitor current + lookahead episodes
+        lookahead_eps = db_get_episodes(
             session,
             series_id,
             ep.season.season_number,
             ep.episode_number,
             lookahead=settings.EPISODES_LOOKAHEAD
         )
-        ep_ids = [e.sonarrid for e in eps if e.sonarrid]
-        logger.debug(f"Episode mode: Found {len(ep_ids)} episodes to monitor")
+        
+        # Determine which seasons these episodes span
+        season_nums = list(set([e.season.season_number for e in lookahead_eps]))
+        
+        # Episodes to mark for search
+        eps_to_search = lookahead_eps
+        
+        # Call season-based monitoring with episode restrictions
+        # This will monitor only the lookahead episodes and unmonitor others in same seasons
+        monitor_result = monitor_seasons_and_episodes(
+            series.sonarrid,
+            season_numbers=season_nums,
+            monitor_episodes=[e.sonarrid for e in lookahead_eps if e.sonarrid],
+            is_4k=series.is_4k
+        )
+        
+        logger.debug(f"Episode mode: Monitored seasons {season_nums}, {len(lookahead_eps)} episodes with lookahead={settings.EPISODES_LOOKAHEAD}")
 
     elif play_mode == 'season':
+        # Season mode: Monitor current season + lookahead episodes
         S = ep.season.season_number
-        eps = (session.query(Episode)
-                   .filter_by(season_id=ep.season_id)
-                   .order_by(Episode.episode_number)
-                   .all())
-        ep_ids = [e.sonarrid for e in eps if e.sonarrid]
-        # if last ep, include next season
-        if ep.episode_number == eps[-1].episode_number:
-            next_eps = (
-                session.query(Episode)
-                    .join(Season)
-                    .filter(
-                        Season.series_id == series_id,
-                        Season.season_number == S+1
-                    )
-                    .all()
-            )
-            ep_ids += [e.sonarrid for e in next_eps if e.sonarrid]
-            eps.extend(next_eps)
-        logger.debug(f"Season mode: Found {len(ep_ids)} episodes to monitor")
+        
+        # Get current season episodes
+        current_season_eps = (session.query(Episode)
+                               .filter_by(season_id=ep.season_id)
+                               .order_by(Episode.episode_number)
+                               .all())
+        
+        # Start with current season
+        season_nums = [S]
+        eps_to_search = current_season_eps.copy()
+        
+        # Check if lookahead goes into next season
+        lookahead_eps = db_get_episodes(
+            session,
+            series_id,
+            ep.season.season_number,
+            ep.episode_number,
+            lookahead=settings.EPISODES_LOOKAHEAD
+        )
+        
+        # If any lookahead episode is in next season, include that season
+        lookahead_seasons = set([e.season.season_number for e in lookahead_eps])
+        for season_num in lookahead_seasons:
+            if season_num not in season_nums:
+                season_nums.append(season_num)
+                # Add episodes from that season to search list
+                next_season = (session.query(Season)
+                              .filter(Season.series_id == series_id, Season.season_number == season_num)
+                              .first())
+                if next_season:
+                    next_eps = (session.query(Episode)
+                               .filter_by(season_id=next_season.id)
+                               .all())
+                    eps_to_search.extend(next_eps)
+        
+        # Monitor all specified seasons (no episode restrictions)
+        monitor_result = monitor_seasons_and_episodes(
+            series.sonarrid,
+            season_numbers=season_nums,
+            monitor_episodes=None,  # Monitor all episodes in these seasons
+            is_4k=series.is_4k
+        )
+        
+        logger.debug(f"Season mode: Monitored seasons {season_nums}, {len(eps_to_search)} episodes (lookahead={settings.EPISODES_LOOKAHEAD})")
 
     elif play_mode == 'series':
-        eps = (
-            session.query(Episode)
-                .join(Episode.season)
-                .filter(Season.series_id == series_id)
-                .all()
+        # Series mode: Monitor all seasons
+        all_seasons = (session.query(Season)
+                      .filter(Season.series_id == series_id)
+                      .all())
+        season_nums = [s.season_number for s in all_seasons]
+        eps_to_search = (session.query(Episode)
+                        .join(Season)
+                        .filter(Season.series_id == series_id)
+                        .all())
+        
+        # Monitor all seasons (no episode restrictions)
+        monitor_result = monitor_seasons_and_episodes(
+            series.sonarrid,
+            season_numbers=season_nums,
+            monitor_episodes=None,  # Monitor all episodes in series
+            is_4k=series.is_4k
         )
-        ep_ids = [e.sonarrid for e in eps if e.sonarrid]
-        logger.debug(f"Series mode: Found {len(ep_ids)} episodes to monitor")
+        
+        logger.debug(f"Series mode: Monitored all {len(season_nums)} seasons, {len(eps_to_search)} episodes")
 
     else:
         logger.warning(f"Unknown TV_PLAY_MODE '{play_mode}'")
-        ep_ids = [ep.sonarrid] if ep.sonarrid else []
+        eps_to_search = [ep]
+        monitor_result = monitor_seasons_and_episodes(
+            series.sonarrid,
+            season_numbers=[ep.season.season_number],
+            monitor_episodes=[ep.sonarrid] if ep.sonarrid else [],
+            is_4k=series.is_4k
+        )
 
-    if not ep_ids:
-        logger.warning(f"No episode IDs found for {model.__name__} {ent_id}")
+    if not eps_to_search:
+        logger.warning(f"No episodes found to search for {model.__name__} {ent_id}")
         return False
 
-    series = ep.season.series
-    sonarr_id = series.sonarrid
-    logger.debug(f"Calling api_monitor_episodes for series {series.title} (Sonarr ID: {sonarr_id}), episodes: {ep_ids}")
-    # call actual API to mark monitored
-    api_monitor_episodes(sonarr_id, ep_ids, is_4k=series.is_4k)
-
-    for e in eps:
+    # Mark episodes for search
+    for e in eps_to_search:
         e.placeholder_status = "Search"
         session.add(e)
-    logger.info(f"Updated placeholder_status to 'Search' for {len(eps)} episodes in series {series.title}")
+    
+    logger.info(f"Updated placeholder_status to 'Search' for {len(eps_to_search)} episodes in series {series.title}")
     logger.info(f"Completed lookup_and_monitor for {model.__name__} {ent_id}")
-    return True
+    return monitor_result
 
 
 def trigger_search(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
+    # First log with basic print to ensure it's executed
+    print(f"[TRIGGER_SEARCH] Function called for {model.__name__} {ent_id}")
+    logger.info(f"Starting trigger_search for {model.__name__} {ent_id}, action: {action}")
+    
     if model is Movie:
         m = session.query(Movie).get(ent_id)
+        logger.debug(f"Triggering Radarr search for movie: {m.title} (Radarr ID: {m.radarrid})")
         success = trigger_radarr_search(m.radarrid, m.title)
+        if success:
+            logger.info(f"✅ Successfully triggered Radarr search for {m.title}")
+        else:
+            logger.error(f"❌ Failed to trigger Radarr search for {m.title}")
         return bool(success)
 
-    series = session.query(Episode).get(ent_id).season.series
-    eps = session.query(Episode).join(Season).filter(Season.series_id == series.id).all()
-    ep_ids = [e.sonarrid for e in eps if e.sonarrid and e.placeholder_status == "Search" and e.status not in ["IN_QUEUE", "IN_PROGRESS"]]
-    if not ep_ids:
-        return False
-
-    return trigger_sonarr_search(
-        series.sonarrid,
-        episode_ids=ep_ids,
-        series_title=None,
-        is_4k=series.is_4k
-    )
+    # Get the episode and series
+    ep = session.query(Episode).get(ent_id)
+    series = ep.season.series
+    play_mode = settings.TV_PLAY_MODE.lower()
+    
+    logger.info(f"Triggering Sonarr search for series: {series.title} (Sonarr ID: {series.sonarrid}), mode: {play_mode}")
+    
+    # Get episodes marked for search based on play mode
+    if play_mode == 'episode':
+        # Only search episodes marked with "Search" status
+        eps = session.query(Episode).join(Season).filter(
+            Season.series_id == series.id,
+            Episode.placeholder_status == "Search",
+            Episode.status.notin_(["IN_QUEUE", "IN_PROGRESS"])
+        ).all()
+        ep_ids = [e.sonarrid for e in eps if e.sonarrid]
+        
+        if not ep_ids:
+            logger.warning(f"No episodes ready for search in episode mode for series {series.title}")
+            return False
+            
+        logger.info(f"📺 Episode mode: Triggering search for {len(ep_ids)} episodes")
+        logger.debug(f"Episode IDs to search: {ep_ids}")
+        
+        success = trigger_sonarr_search(
+            series.sonarrid,
+            episode_ids=ep_ids,
+            series_title=series.title,
+            is_4k=series.is_4k
+        )
+        
+        if success:
+            logger.info(f"✅ Successfully triggered episode search for {len(ep_ids)} episodes in {series.title}")
+        else:
+            logger.error(f"❌ Failed to trigger episode search for {series.title}")
+        return success
+    
+    elif play_mode == 'season':
+        # Search all seasons marked for search
+        eps = session.query(Episode).join(Season).filter(
+            Season.series_id == series.id,
+            Episode.placeholder_status == "Search",
+            Episode.status.notin_(["IN_QUEUE", "IN_PROGRESS"])
+        ).all()
+        
+        # Get unique seasons
+        season_nums = list(set([e.season.season_number for e in eps]))
+        
+        if not season_nums:
+            logger.warning(f"No seasons ready for search in season mode for series {series.title}")
+            return False
+        
+        logger.info(f"🎬 Season mode: Triggering season search for seasons {season_nums} in {series.title}")
+        
+        # Trigger search for each season
+        success = True
+        for season_num in season_nums:
+            logger.debug(f"Triggering season search for S{season_num:02d}")
+            result = trigger_sonarr_search(
+                series.sonarrid,
+                season_number=season_num,
+                series_title=series.title,
+                is_4k=series.is_4k
+            )
+            if not result:
+                logger.error(f"❌ Failed to trigger search for season {season_num}")
+            success = success and result
+        
+        if success:
+            logger.info(f"✅ Successfully triggered season search for {len(season_nums)} season(s) in {series.title}")
+        else:
+            logger.error(f"❌ Some season searches failed for {series.title}")
+        return success
+    
+    elif play_mode == 'series':
+        # Search entire series
+        logger.info(f"📚 Series mode: Triggering series-wide search for {series.title}")
+        
+        success = trigger_sonarr_search(
+            series.sonarrid,
+            series_title=series.title,
+            is_4k=series.is_4k
+        )
+        
+        if success:
+            logger.info(f"✅ Successfully triggered series search for {series.title}")
+        else:
+            logger.error(f"❌ Failed to trigger series search for {series.title}")
+        return success
+    
+    else:
+        # Fallback to episode search
+        logger.warning(f"Unknown play mode '{play_mode}', falling back to episode search")
+        eps = session.query(Episode).join(Season).filter(
+            Season.series_id == series.id,
+            Episode.placeholder_status == "Search"
+        ).all()
+        ep_ids = [e.sonarrid for e in eps if e.sonarrid]
+        
+        if not ep_ids:
+            logger.warning(f"No episodes found for fallback search")
+            return False
+            
+        logger.debug(f"Fallback episode search: {len(ep_ids)} episodes")
+        success = trigger_sonarr_search(
+            series.sonarrid,
+            episode_ids=ep_ids,
+            series_title=series.title,
+            is_4k=series.is_4k
+        )
+        
+        if success:
+            logger.info(f"✅ Successfully triggered fallback search for {len(ep_ids)} episodes")
+        else:
+            logger.error(f"❌ Failed to trigger fallback search")
+        return success
 
 
 def mark_done(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
@@ -250,11 +420,40 @@ def enqueue_monitor(session: Session, ent_id: int, model: Type, action: str = No
         from services.queue_monitor import trigger_monitoring
         trigger_monitoring()
         
+        # End the handler logging session for playback
+        from core.handler_logging import get_handler_session_for_entity, end_handler_logging
+        if model == Movie:
+            session_id = get_handler_session_for_entity('handle_playback', ent_id)
+        elif model == Episode:
+            # For episodes, use the first episode's ID or 0 since we don't track individual sessions
+            session_id = get_handler_session_for_entity('handle_playback', 0)
+        else:
+            session_id = None
+            
+        if session_id:
+            end_handler_logging(session_id, success=True, 
+                               summary=f"Playback flow completed for {model.__name__} {ent_id}")
+            logger.info(f"Closed handler logging session for playback", extra={'emoji_type': 'success'})
+        
         return True
         
     except Exception as e:
         logger.error(f"Failed to enqueue {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
         session.rollback()
+        
+        # Try to end logging session even on failure
+        from core.handler_logging import get_handler_session_for_entity, end_handler_logging
+        if model == Movie:
+            session_id = get_handler_session_for_entity('handle_playback', ent_id)
+        elif model == Episode:
+            session_id = get_handler_session_for_entity('handle_playback', 0)
+        else:
+            session_id = None
+            
+        if session_id:
+            end_handler_logging(session_id, success=False, 
+                               summary=f"Playback flow failed: {e}")
+        
         return False
 
 

@@ -59,8 +59,14 @@ class Settings(BaseSettings):
     SONARR_4K_SYNC_CRON: str = os.getenv("SONARR_4K_SYNC_CRON", "")
 
     # Library Paths
-    MOVIE_LIBRARY_FOLDER: str
-    TV_LIBRARY_FOLDER: str
+    DUMMY_MOVIE_LIBRARY_FOLDER: str
+    DUMMY_TV_LIBRARY_FOLDER: str
+    DUMMY_MOVIE_LIBRARY_4K_FOLDER: str = ""
+    DUMMY_TV_LIBRARY_4K_FOLDER: str = ""
+    
+    # Real library paths (optional - used for folder extraction when not using dummy libraries)
+    MOVIE_LIBRARY_FOLDER: str = ""
+    TV_LIBRARY_FOLDER: str = ""
     MOVIE_LIBRARY_4K_FOLDER: str = ""
     TV_LIBRARY_4K_FOLDER: str = ""
 
@@ -77,11 +83,18 @@ class Settings(BaseSettings):
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
+    EPISODES_LOOKAHEAD: int = int(os.getenv("EPISODES_LOOKAHEAD", "5").split('#')[0].strip())
     TITLE_UPDATES: str = os.getenv("TITLE_UPDATES", "ALL")  # Options: OFF, REQUEST, ALL
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
 
     # Migration settings
     MIGRATION: bool = False
+    
+    # SubFlow reset settings on startup
+    # Comma-separated list of SubFlow statuses to reset to PENDING on startup
+    # Valid values: QUEUED, FAILED
+    # Example: "QUEUED,FAILED" or "FAILED" or "" (empty to disable)
+    RESET_SUBFLOWS_ON_STARTUP: str = os.getenv("RESET_SUBFLOWS_ON_STARTUP", "QUEUED,FAILED").split('#')[0].strip()
       
     # Calendar-based status update settings
     CALENDAR_LOOKAHEAD_DAYS: int = int(os.getenv("CALENDAR_LOOKAHEAD_DAYS", "30").split('#')[0].strip())
@@ -115,7 +128,7 @@ class Settings(BaseSettings):
                 v = v.strip()
         return v
     
-    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
+    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'DUMMY_MOVIE_LIBRARY_FOLDER', 'DUMMY_TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):
         if not v:
             return v
@@ -170,7 +183,7 @@ class Settings(BaseSettings):
 
     @property
     def has_4k_support(self) -> bool:
-        return bool(self.RADARR_4K_URL and self.MOVIE_LIBRARY_4K_FOLDER) or bool(self.SONARR_4K_URL and self.TV_LIBRARY_4K_FOLDER)
+        return bool(self.RADARR_4K_URL and self.DUMMY_MOVIE_LIBRARY_4K_FOLDER) or bool(self.SONARR_4K_URL and self.DUMMY_TV_LIBRARY_4K_FOLDER)
 
     @property
     def plex_4k_movie_section_id(self) -> int:

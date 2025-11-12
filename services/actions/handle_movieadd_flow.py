@@ -1,16 +1,11 @@
 import time
-from core.logger import logger
-from services.plex_client import update_plex_title_status, refresh_plex_item
+from services.plex_client import update_plex_title_status
 from services.jellyfin_client import (
-    update_jellyfin_nfo_status, update_jellyfin_title_status, 
     refresh_jellyfin_dummy, verify_dummy_scan_jellyfin, 
-    retry_failed_jellyfin_title_updates, create_jellyfin_nfo
+     create_jellyfin_nfo
 )
-from services.queue_monitor import check_movie_has_file
-from services.utils import get_movie_by_id
-from services.integrations import place_dummy_file, update_placeholder_status, delayed_placeholders, enrich_movie_metadata
+from services.integrations import  update_placeholder_status, delayed_placeholders, enrich_movie_metadata
 from services.plex_client import refresh_plex_dummy, verify_dummy_scan_plex, retry_failed_plex_title_updates
-from core.config import settings
 from services.postgres.models import Movie
 
 
@@ -49,7 +44,7 @@ def steps():
 #     if has_file:
 #         logger.info(f"Skipping placeholder for movie '{movie.title}' (real file exists)", extra={'emoji_type': 'skip'})
 #         return True
-#     dummy_path = place_dummy_file("movie", movie.title, movie.year, movie.tmdbid, settings.MOVIE_LIBRARY_FOLDER)
+#     dummy_path = place_dummy_file("movie", movie.title, movie.year, movie.tmdbid, settings.DUMMY_MOVIE_LIBRARY_FOLDER)
 #     if dummy_path:
 #         movie.dummypath = dummy_path
 #         movie.commit()

@@ -75,35 +75,41 @@ class FlowManager:
                             if pos < len(funcs):
                                 return funcs[pos]
                             else:
-                                # End of branch, return None to terminate
-                                return None
+                                # End of branch, move to next entry in main flow
+                                return steps[idx + 1] if idx + 1 < len(steps) else None
                         else:
                             # Fallback: use first occurrence
                             pos = names.index(last_step_id) + 1
                             if pos < len(funcs):
                                 return funcs[pos]
                             else:
-                                return None
+                                # End of branch, move to next entry in main flow
+                                return steps[idx + 1] if idx + 1 < len(steps) else None
                 elif branch is None or branch not in entry:
                     # No branch specified or branch doesn't exist - check all branches for last_step_id
+                    found_in_branch = False
                     for branch_name, funcs in entry.items():
                         names = [f.__name__ for f in funcs]
                         if last_step_id in names:
+                            found_in_branch = True
                             if step_index is not None and 0 <= step_index < len(funcs):
                                 pos = step_index + 1
                                 if pos < len(funcs):
                                     return funcs[pos]
                                 else:
-                                    return None
+                                    # Last step in branch completed - move to next entry in main flow
+                                    return steps[idx + 1] if idx + 1 < len(steps) else None
                             else:
                                 pos = names.index(last_step_id) + 1
                                 if pos < len(funcs):
                                     return funcs[pos]
                                 else:
-                                    return None
-                    # If last_step_id not found in any branch but we're at a dict entry,
-                    # it means we're transitioning into branching - return the dict itself
-                    if last_step_id is not None:
+                                    # Last step in branch completed - move to next entry in main flow
+                                    return steps[idx + 1] if idx + 1 < len(steps) else None
+                    # If last_step_id WAS found in a branch and we returned None above,
+                    # it means the branch is complete - don't return the dict again
+                    # Only return dict if we're transitioning INTO branching (last_step_id not in any branch)
+                    if not found_in_branch and last_step_id is not None:
                         return entry
             elif isinstance(entry, list):
                 names = [f.__name__ for f in entry]
@@ -114,18 +120,52 @@ class FlowManager:
                         if pos < len(entry):
                             return entry[pos]
                         else:
-                            return None
+                            # End of list, move to next entry in main flow
+                            return steps[idx + 1] if idx + 1 < len(steps) else None
                     else:
                         pos = names.index(last_step_id) + 1
                         if pos < len(entry):
                             return entry[pos]
                         else:
-                            return None
+                            # End of list, move to next entry in main flow
+                            return steps[idx + 1] if idx + 1 < len(steps) else None
                 elif last_step_id is None:
                     return entry
             else:
                 if entry.__name__ == last_step_id:
                     return steps[idx+1] if idx+1 < len(steps) else None
         return None
+    
+    def get_flow(self, action: str) -> Optional[List[Entry]]:
+        """Get the complete flow definition for an action."""
+        return self.flows.get(action)
+    
+    def get_last_step_name(self, flow_def: List[Entry]) -> Optional[str]:
+        """
+        Get the name of the last step in a flow definition.
+        Handles branching by returning the last step of the first branch.
+        """
+        if not flow_def:
+            return None
+        
+        last_entry = flow_def[-1]
+        
+        # If last entry is a dict (branching), get the first branch's last step
+        if isinstance(last_entry, dict):
+            # Get first branch
+            first_branch_key = next(iter(last_entry.keys()))
+            branch_funcs = last_entry[first_branch_key]
+            if isinstance(branch_funcs, list) and branch_funcs:
+                return branch_funcs[-1].__name__
+            return None
+        
+        # If last entry is a list (parallel steps)
+        if isinstance(last_entry, list):
+            if last_entry:
+                return last_entry[-1].__name__
+            return None
+        
+        # Single callable
+        return last_entry.__name__
 
 flow_manager = FlowManager()

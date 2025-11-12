@@ -6,13 +6,13 @@ services:
       - .env
     volumes:
       # Update these paths to match your actual placeholder library locations and dummy files
-      # Mount your movie placeholder folder (MOVIE_LIBRARY_FOLDER)
+      # Mount your movie placeholder folder (DUMMY_MOVIE_LIBRARY_FOLDER)
       - /path/to/your/movie-library:/movies
-      # Mount your TV placeholder folder (TV_LIBRARY_FOLDER)
+      # Mount your TV placeholder folder (DUMMY_TV_LIBRARY_FOLDER)
       - /path/to/your/tv-library:/tv
       # Uncomment the following lines if using 4K placeholder libraries:
-      # - /path/to/your/movie-library-4k:/movies-4k  # MOVIE_LIBRARY_4K_FOLDER
-      # - /path/to/your/tv-library-4k:/tv-4k        # TV_LIBRARY_4K_FOLDER
+      # - /path/to/your/movie-library-4k:/movies-4k  # DUMMY_MOVIE_LIBRARY_4K_FOLDER
+      # - /path/to/your/tv-library-4k:/tv-4k        # DUMMY_TV_LIBRARY_4K_FOLDER
       # Mount your standard dummy file
       - ./dummy.mp4:/app/dummy.mp4
       # Mount your "coming soon" dummy file (optional)
@@ -24,5 +24,5 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
-# Note: Update the /path/to/your/movie-library and /path/to/your/tv-library to match your MOVIE_LIBRARY_FOLDER and TV_LIBRARY_FOLDER settings in .env.
+# Note: Update the /path/to/your/movie-library and /path/to/your/tv-library to match your DUMMY_MOVIE_LIBRARY_FOLDER and DUMMY_TV_LIBRARY_FOLDER settings in .env.
 # Dummy file paths should match DUMMY_FILE_PATH and COMING_SOON_DUMMY_FILE_PATH in .env.

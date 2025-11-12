@@ -95,9 +95,9 @@ def is_4k_request(file_path: str, source_port: int = None) -> bool:
         return False
 
     # Check if path is in 4K library
-    if settings.MOVIE_LIBRARY_4K_FOLDER and file_path.startswith(settings.MOVIE_LIBRARY_4K_FOLDER):
+    if settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER and file_path.startswith(settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER):
         return True
-    if settings.TV_LIBRARY_4K_FOLDER and file_path.startswith(settings.TV_LIBRARY_4K_FOLDER):
+    if settings.DUMMY_TV_LIBRARY_4K_FOLDER and file_path.startswith(settings.DUMMY_TV_LIBRARY_4K_FOLDER):
         return True
     
     # Check if request came from 4K instance
@@ -113,7 +113,7 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
         return {
             "url": settings.RADARR_4K_URL if is_4k else settings.RADARR_URL,
             "api_key": settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY,
-            "library_folder": settings.MOVIE_LIBRARY_4K_FOLDER if is_4k else settings.MOVIE_LIBRARY_FOLDER,
+            "library_folder": settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER if is_4k else settings.DUMMY_MOVIE_LIBRARY_FOLDER,
             "section_id": settings.PLEX_MOVIE_SECTION_ID,
             "id_type": "tmdbId",
             "queue_id_field": "movieId",
@@ -123,7 +123,7 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
         return {
             "url": settings.SONARR_4K_URL if is_4k else settings.SONARR_URL,
             "api_key": settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY,
-            "library_folder": settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER,
+            "library_folder": settings.DUMMY_TV_LIBRARY_4K_FOLDER if is_4k else settings.DUMMY_TV_LIBRARY_FOLDER,
             "section_id": settings.PLEX_TV_SECTION_ID,
             "id_type": "tvdbId",
             "queue_id_field": "episodeId",
@@ -162,9 +162,9 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
         arr_season_folder = payload.get('seasonFolder') or payload.get('season_folder') or season_folder_name
     # Determine base path
     if media_type == "movie":
-        env_base = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
+        env_base = getattr(settings, "DUMMY_MOVIE_LIBRARY_FOLDER", None)
     else:
-        env_base = getattr(settings, "TV_LIBRARY_FOLDER", None)
+        env_base = getattr(settings, "DUMMY_TV_LIBRARY_FOLDER", None)
     base_folder = None
     if env_base and str(env_base).strip():
         # ENV is set: use ENV as base, append *arrs folder name

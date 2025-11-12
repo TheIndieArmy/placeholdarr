@@ -22,7 +22,7 @@ class HandlerLogManager:
         handlers = [
             'handle_seriesadd', 'handle_seriesdelete', 'handle_episodefiledelete',
             'handle_movieadd', 'handle_movie_delete', 'handle_moviefiledelete',
-            'handle_import_event', 'playback'
+            'handle_import_event', 'handle_playback', 'playback'
         ]
         
         for handler in handlers:
@@ -240,3 +240,54 @@ def end_handler_logging(session_id: str, success: bool = True, summary: str = No
 def get_handler_session_for_entity(handler_name: str, entity_id: int) -> Optional[str]:
     """Find the active logging session for a handler and entity"""
     return handler_log_manager.find_session_for_entity(handler_name, entity_id)
+
+def use_handler_session(func):
+    """
+    Decorator for SubFlow step functions to ensure they log to the correct handler folder.
+    
+    The function must have signature: (dbsession, ent_id, model, action, **kwargs)
+    The action parameter contains the handler name (e.g., 'handle_episodefiledelete')
+    
+    Usage:
+        @use_handler_session
+        def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: str, status: str = None) -> bool:
+            logger.info("Creating NFO file")
+            ...
+    """
+    from functools import wraps
+    
+    @wraps(func)
+    def wrapper(dbsession, ent_id: int, model, action: str, *args, **kwargs):
+        # Determine handler name from action
+        handler_name = action if action.startswith('handle_') else f'handle_{action}'
+        
+        # Determine entity type from model
+        entity_type = model.__name__.lower() if hasattr(model, '__name__') else str(model).lower()
+        
+        # Check if there's already an active session for this handler+entity
+        session_id = get_handler_session_for_entity(handler_name, ent_id)
+        
+        if session_id:
+            # Use existing session - just call the function
+            return func(dbsession, ent_id, model, action, *args, **kwargs)
+        else:
+            # No active session - create a temporary one for this step
+            session_id = start_handler_logging(
+                handler_name, 
+                ent_id, 
+                entity_type,
+                step_function=func.__name__
+            )
+            
+            try:
+                result = func(dbsession, ent_id, model, action, *args, **kwargs)
+                end_handler_logging(session_id, success=True, summary=f"Step {func.__name__} completed")
+                return result
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error in {func.__name__}: {e}", extra={'emoji_type': 'error'})
+                end_handler_logging(session_id, success=False, summary=f"Step {func.__name__} failed: {e}")
+                raise
+    
+    return wrapper

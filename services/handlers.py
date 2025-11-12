@@ -52,8 +52,8 @@ def handle_webhook(data: dict, source_port: int = None):
     event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
     
-    # Handle import events directly for cleanup
-    if event_type in ['download', 'moviefileimported', 'episodefileimported']:
+    # Handle import events directly for cleanup (includes upgrades)
+    if event_type in ['download', 'moviefileimported', 'episodefileimported', 'upgrade', 'moviefileupgraded', 'episodefileupgraded']:
         # Add this line to update the queue monitoring
         handle_download_webhook(data)
         # Then continue with the normal handling
@@ -90,11 +90,14 @@ def handle_import_event(data: dict, is_4k: bool = False):
         data_keys=list(data.keys())
     )
     
+    logger.info(f"📥 Processing Import webhook - Type: {'movie' if 'movie' in data else 'series'}, 4K: {is_4k}", extra={'emoji_type': 'webhook'})
+    
     try:
         if 'movie' in data:
             # Movie import handling
             movie = data['movie']
             tmdb_id = movie.get('tmdbId')
+            radarr_id = movie.get('id')  # Get Radarr movie ID
             title = movie.get('title', 'Unknown Movie')
             year = movie.get('year')
             
@@ -114,11 +117,22 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 logger.warning(f"Movie {title} not found in database for import event", extra={'emoji_type': 'warning'})
                 return JSONResponse({"status": "success", "message": "Movie not tracked, no cleanup needed"})
             
+            # Update radarrid if it changed
+            if radarr_id and movie.radarrid != radarr_id:
+                old_id = movie.radarrid
+                movie.radarrid = radarr_id
+                logger.info(f"Updated movie Radarr ID from {old_id} to {radarr_id}", extra={'emoji_type': 'update'})
+            
+            if 'movieFile' not in data or not data.get('movieFile') or 'path' not in data.get('movieFile'):
+                logger.warning(f"Missing movie file path in import data for {title}", extra={'emoji_type': 'warning'})
+                return JSONResponse({"status": "error", "message": "Missing movie file path"}, status_code=400)
+            else:
+                movie.filepath = data.get('movieFile').get('path')
             # Don't change the movie's action - it should keep its original action (e.g., handle_movieadd)
             # Only reset status to PENDING if it's not already being processed
             if movie.status not in ['PENDING', 'QUEUED']:
                 movie.status = 'PENDING'
-                session.commit()
+            session.commit()
             
             job_scheduled = handle_import_event_scheduler.enqueue(movie)
             if job_scheduled:
@@ -138,6 +152,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             episode = data['episodes'][0]  # Handle first episode in the list
             
             tvdb_id = series.get('tvdbId')
+            series_id = series.get('id')  # Get Sonarr series ID
             season_num = episode.get('seasonNumber')
             episode_num = episode.get('episodeNumber')
             series_title = series.get('title', 'Unknown Series')
@@ -158,8 +173,21 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 end_handler_logging(session_id, success=True, 
                                    summary="Series not tracked, no cleanup needed")
                 return JSONResponse({"status": "success", "message": "Series not tracked, no cleanup needed"})
+            
+            # Update sonarrid if it changed
+            if series_id and series_entity.sonarrid != series_id:
+                old_id = series_entity.sonarrid
+                series_entity.sonarrid = series_id
+                session.commit()
+                logger.info(f"Updated series Sonarr ID from {old_id} to {series_id}", extra={'emoji_type': 'update'})
+            
             ep = repo.get_ep_by_series(series_entity, season_num, episode_num)
             if ep:
+                if 'episodeFile' not in data or not data.get('episodeFile') or 'path' not in data.get('episodeFile'):
+                    logger.warning(f"Missing episode file path in import data for {full_title}", extra={'emoji_type': 'warning'})
+                    return JSONResponse({"status": "error", "message": "Missing episode file path"}, status_code=400)
+                else:
+                    ep.filepath = data.get('episodeFile').get('path')
                 ep.status = 'PENDING'
                 session.commit()
 
@@ -214,6 +242,8 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         episode_count=len(episodes)
     )
     
+    logger.info(f"📺 Processing SeriesAdd webhook for '{series_title}' ({series_year}) - TVDB: {tvdb_id}, Episodes: {len(episodes)}", extra={'emoji_type': 'webhook'})
+    
     try:
         session = get_session()
         repo = SeriesRepository(session)
@@ -228,7 +258,7 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                     tvdbid=tvdb_id,
                     is_4k=is_4k,
                     dummypath="",
-                    sonarrpath=series_path,
+                    filepath=series_path,
                     sonarrid=series_id,
                     status="PENDING"
                 )
@@ -241,6 +271,17 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         else:
             logger.info("Series already present", extra={'emoji_type':'warning'})
             repo.is_deleted(series, False)
+            # Update sonarrid if it changed (Sonarr IDs can change if series was deleted and re-added)
+            if series.sonarrid != series_id:
+                old_id = series.sonarrid
+                series.sonarrid = series_id
+                session.commit()
+                logger.info(f"Updated series Sonarr ID from {old_id} to {series_id}", extra={'emoji_type': 'update'})
+            if series.filepath != series_path:
+                old_path = series.filepath
+                series.filepath = series_path
+                session.commit()
+                logger.info(f"Updated series filepath from {old_path} to {series_path}", extra={'emoji_type': 'update'})
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
@@ -280,6 +321,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     series_title = series.get('title', 'Unknown Series')
     series_year = series.get('year')
     tvdb_id = series.get('tvdbId')
+    series_id = series.get('id')  # Get Sonarr series ID
     episode_file_path = data.get("episodeFile", {}).get("path")
     
     # Start handler logging session
@@ -294,6 +336,8 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
         episode_count=len(episodes),
         episode_file_path=episode_file_path
     )
+    
+    logger.info(f"🗑️ Processing EpisodeFileDelete webhook for '{series_title}' - TVDB: {tvdb_id}, File: {episode_file_path}", extra={'emoji_type': 'webhook'})
 
     # season_num = next(ep.get('seasonNumber'))
     # episode_num = next(ep.get('episodeNumber'))
@@ -308,6 +352,14 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
             end_handler_logging(session_id, success=False, 
                                summary="Series not found in database")
             return JSONResponse({"status": "error", "message": "Series not found"}, status_code=404)
+        
+        # Update sonarrid if it changed
+        if series_id and series.sonarrid != series_id:
+            old_id = series.sonarrid
+            series.sonarrid = series_id
+            session.commit()
+            logger.info(f"Updated series Sonarr ID from {old_id} to {series_id}", extra={'emoji_type': 'update'})
+        
         repo.delete_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data updated in db for series {series_title}", extra={'emoji_type':'success'})
         job_scheduled = handle_episodefiledelete_scheduler.enqueue(series)
@@ -338,6 +390,7 @@ def handle_moviefiledelete(data: dict, is_4k):
     if 'movie' in data:
         movie = data.get('movie', {})
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
+        radarr_id = movie.get('id')  # Get Radarr movie ID
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie file delete", extra={'emoji_type': 'error'})
             return JSONResponse({"status": "error"}, status_code=400)
@@ -356,12 +409,21 @@ def handle_moviefiledelete(data: dict, is_4k):
             is_4k=is_4k,
             movie_file_path=movie_file_path
         )
+        
+        logger.info(f"🗑️ Processing MovieFileDelete webhook for '{title}' ({year}) - TMDB: {tmdb_id}, File: {movie_file_path}", extra={'emoji_type': 'webhook'})
 
         try:
             session = get_session()
             repo = MovieRepository(session)
             movie = repo.get_by_tmdbid(tmdb_id, is_4k)
             if movie:
+                # Update radarrid if it changed
+                if radarr_id and movie.radarrid != radarr_id:
+                    old_id = movie.radarrid
+                    movie.radarrid = radarr_id
+                    session.commit()
+                    logger.info(f"Updated movie Radarr ID from {old_id} to {radarr_id}", extra={'emoji_type': 'update'})
+                
                 job_scheduled = handle_moviefiledelete_scheduler.enqueue(movie)
                 if job_scheduled:
                     logger.info(f"Enqueued 'handle_moviefiledelete' action for TMDB ID {movie.tmdbid}")
@@ -396,6 +458,7 @@ def handle_movie_delete(data: dict, is_4k: bool = False):
     if 'movie' in data:
         movie = data.get('movie', {})
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
+        radarr_id = movie.get('id')  # Get Radarr movie ID
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie delete", extra={'emoji_type': 'error'})
             return JSONResponse({"status": "error"}, status_code=400)
@@ -412,12 +475,21 @@ def handle_movie_delete(data: dict, is_4k: bool = False):
             tmdb_id=tmdb_id,
             is_4k=is_4k
         )
+        
+        logger.info(f"🗑️ Processing MovieDelete webhook for '{title}' ({year}) - TMDB: {tmdb_id}", extra={'emoji_type': 'webhook'})
 
         try:
             session = get_session()
             repo = MovieRepository(session)
             movie = repo.get_by_tmdbid(tmdb_id, is_4k)
             if movie:
+                # Update radarrid if it changed
+                if radarr_id and movie.radarrid != radarr_id:
+                    old_id = movie.radarrid
+                    movie.radarrid = radarr_id
+                    session.commit()
+                    logger.info(f"Updated movie Radarr ID from {old_id} to {radarr_id}", extra={'emoji_type': 'update'})
+                
                 job_scheduled = handle_movie_delete_scheduler.enqueue(movie)
                 if job_scheduled:
                     logger.info(f"Enqueued 'handle_movie_delete' action for TMDB ID {movie.tmdbid}")
@@ -471,6 +543,8 @@ def handle_movieadd(data: dict, is_4k: bool = False):
             is_4k=is_4k,
             radarr_id=radarr_id
         )
+        
+        logger.info(f"➕ Processing MovieAdd webhook for '{title}' ({year}) - TMDB: {tmdb_id}, Radarr ID: {radarr_id}", extra={'emoji_type': 'webhook'})
 
         # Extract movieFile / hasFile / quality information when present in the webhook
         movie_file = movie.get('movieFile') or data.get('movieFile') or {}
@@ -498,7 +572,7 @@ def handle_movieadd(data: dict, is_4k: bool = False):
                 year=year,
                 tmdbid=tmdb_id,
                 dummypath="",
-                radarrpath=movie_path,
+                filepath=movie_path,
                 radarrid=radarr_id,
                 status="PENDING",
                 is_4k=is_4k,
@@ -515,7 +589,7 @@ def handle_movieadd(data: dict, is_4k: bool = False):
             updated_fields = {
                 'title': title,
                 'year': year,
-                'radarrpath': movie_path,
+                'filepath': movie_path,
                 'radarrid': radarr_id,
                 'moviefile_path': moviefile_path,
                 'moviefile_size': moviefile_size,
@@ -606,6 +680,8 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
             is_4k=is_4k
         )
         
+        logger.info(f"🗑️ Processing SeriesDelete webhook for '{title}' ({year}) - TVDB: {tvdb_id}", extra={'emoji_type': 'webhook'})
+        
         if tvdb_id:
             try:
                 # Construct folder path using get_folder_path for consistency
@@ -665,17 +741,19 @@ def handle_playback(data: dict):
 
     # Start handler logging session
     session_id = start_handler_logging(
-        'handle_playback',
+        'handle_playback',  # Keep as handle_playback to match your existing directory
         0,  # No specific ID available at this point
         'playback',
         file_path=file_path,
         notification_type=notification
     )
+    
+    logger.info(f"▶️ Processing Playback webhook - File: {file_path}, Type: {notification}", extra={'emoji_type': 'webhook'})
 
     # 2) Ignore if not in placeholder folders
-    folders = [settings.MOVIE_LIBRARY_FOLDER, settings.TV_LIBRARY_FOLDER]
-    if settings.MOVIE_LIBRARY_4K_FOLDER: folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
-    if settings.TV_LIBRARY_4K_FOLDER:    folders.append(settings.TV_LIBRARY_4K_FOLDER)
+    folders = [settings.DUMMY_MOVIE_LIBRARY_FOLDER, settings.DUMMY_TV_LIBRARY_FOLDER]
+    if settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER: folders.append(settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER)
+    if settings.DUMMY_TV_LIBRARY_4K_FOLDER:    folders.append(settings.DUMMY_TV_LIBRARY_4K_FOLDER)
     if not any(file_path.startswith(f) for f in folders if f):
         logger.info(f"Ignored real playback: {file_path}", extra={"emoji_type": "info"})
         end_handler_logging(session_id, success=True, 
@@ -701,7 +779,7 @@ def handle_playback(data: dict):
             job_scheduled = playback_scheduler.enqueue(movie)
             if job_scheduled:
                 logger.info(f"Enqueued playback for movie {movie.title}")
-                # Note: Don't end logging session here - scheduler will continue processing
+                # Keep logging session open - it will be closed when playback flow completes
                 return JSONResponse({"status": "scheduled", "message": "Movie playback enqueued"})
             else:
                 end_handler_logging(session_id, success=False, 
@@ -740,7 +818,7 @@ def handle_playback(data: dict):
             job_scheduled = playback_scheduler.enqueue(ep)
             if job_scheduled:
                 logger.info(f"Enqueued playback for episode {ep.title}")
-                # Note: Don't end logging session here - scheduler will continue processing
+                # Keep logging session open - it will be closed when playback flow completes
                 return JSONResponse({"status": "scheduled", "message": "Episode playback enqueued"})
             else:
                 end_handler_logging(session_id, success=False, 

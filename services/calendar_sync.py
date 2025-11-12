@@ -104,7 +104,7 @@ def sync_calendar_episodes():
                 dummy_file = settings.DUMMY_FILE_PATH
             dummy_path = place_dummy_file(
                 "tv", series_title, series_year, tvdb_id,
-                settings.TV_LIBRARY_FOLDER,
+                settings.DUMMY_TV_LIBRARY_FOLDER,
                 season_number=season_num,
                 episode_range=(episode_num, episode_num),
                 episode_title=episode_title,
@@ -154,7 +154,7 @@ def sync_calendar_episodes():
                 status = "Request"
                 dummy_file = settings.DUMMY_FILE_PATH
             dummy_path = place_dummy_file(
-                "movie", title, year, tmdb_id, settings.MOVIE_LIBRARY_FOLDER,
+                "movie", title, year, tmdb_id, settings.DUMMY_MOVIE_LIBRARY_FOLDER,
                 dummy_file_override=dummy_file
             )
             movies_to_update.append({
@@ -171,11 +171,11 @@ def sync_calendar_episodes():
     try:
         logger.info("Refreshing Plex/Jellyfin TV and Movie library folders for batch placeholder update...", extra={'emoji_type': 'refresh'})
         if settings.plex_enabled:
-            refresh_plex_item(settings.TV_LIBRARY_FOLDER)
-            refresh_plex_item(settings.MOVIE_LIBRARY_FOLDER)
+            refresh_plex_item(settings.DUMMY_TV_LIBRARY_FOLDER)
+            refresh_plex_item(settings.DUMMY_MOVIE_LIBRARY_FOLDER)
         if settings.jellyfin_enabled:
-            refresh_jellyfin_item(settings.TV_LIBRARY_FOLDER)
-            refresh_jellyfin_item(settings.MOVIE_LIBRARY_FOLDER)
+            refresh_jellyfin_item(settings.DUMMY_TV_LIBRARY_FOLDER)
+            refresh_jellyfin_item(settings.DUMMY_MOVIE_LIBRARY_FOLDER)
         logger.info("Waiting 30 seconds for Plex/Jellyfin to scan new placeholders...", extra={'emoji_type': 'refresh'})
         time.sleep(30)
     except Exception as e:

@@ -1,9 +1,9 @@
 from services.jellyfin_client import (
-    verify_dummy_scan_jellyfin,
     refresh_jellyfin_arr_path,
     refresh_jellyfin_dummy,
     verify_arr_scan_jellyfin,
-    delete_jellyfin_nfo
+    delete_jellyfin_nfo,
+    verify_title_status_jellyfin
 )
 from services.plex_client import (
     refresh_plex_arr_path,
@@ -24,7 +24,7 @@ def steps():
         },
         delete_dummy_file,
         {
-            'jellyfin': [delete_jellyfin_nfo, refresh_jellyfin_dummy],
+            'jellyfin': [delete_jellyfin_nfo, refresh_jellyfin_dummy, verify_title_status_jellyfin],
             'plex': [refresh_plex_dummy, verify_dummy_scan_plex]
         }
     ]
