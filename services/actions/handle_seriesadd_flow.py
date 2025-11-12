@@ -1,4 +1,4 @@
-from services.integrations import update_placeholder_status, delayed_placeholders, enrich_series_from_sonarr, enrich_comprehensive_metadata, check_series_ready_for_enrichment
+from services.integrations import update_placeholder_status, delayed_placeholders, flow_enrich_series
 from services.plex_client import update_plex_title_status, refresh_plex_dummy, verify_dummy_scan_plex, retry_failed_plex_title_updates
 from services.jellyfin_client import (
     update_jellyfin_nfo_status, 
@@ -11,6 +11,7 @@ from services.postgres.models import Series
 
 def steps():
     return [
+        flow_enrich_series,
         delayed_placeholders,
         check_series_ready_for_enrichment,  # Combined: waits for all eps, creates enrichment, waits for enrichment DONE
         # enrich_comprehensive_metadata runs separately as a series-level SubFlow

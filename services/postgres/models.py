@@ -1,9 +1,10 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Date, BigInteger, DateTime, JSON, Index, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.sql import func
 from services.postgres.db import Base
+from datetime import datetime
 
 class Movie(Base):
     __tablename__ = "movie"
@@ -17,6 +18,8 @@ class Movie(Base):
     dummypath = Column(String, nullable=True)
     # Exact path to the actual movie file when Radarr has imported one (movieFile.path)
     moviefile_path = Column(String, nullable=True)
+    # ARR-provided synopsis/overview for NFO/metadata generation
+    radarr_overview = Column(String, nullable=True)
     # Size in bytes reported for the movie file (if available)
     moviefile_size = Column(BigInteger, nullable=True)
     # boolean indicating Radarr reports a movie file exists for this movie
@@ -98,6 +101,36 @@ class SubFlow(Base):
     season = relationship('Season', back_populates='subflows')
     episode = relationship('Episode', back_populates='subflows')
 
+# New Job table: simple durable queue for batch/import jobs
+class Job(Base):
+    __tablename__ = 'job'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_type = Column(String, nullable=False)               # e.g. 'import_list', 'process_series_add', 'file_import'
+    payload = Column(JSON, nullable=True)                   # arbitrary JSON payload for the worker
+    status = Column(String, default='PENDING')              # PENDING / CLAIMED / DONE / FAILED
+    run_after = Column(DateTime, nullable=True)             # optional delay for scheduling
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=5)
+    group_id = Column(String, nullable=True)                # optional grouping id for coalescing
+    expected_counts = Column(JSON, nullable=True)          # optional per-series expected counts {series_id: count}
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    error_message = Column(String, nullable=True)
+
+    __table_args__ = (
+        # index to speed up claiming
+        Index('ix_job_status_run_after', 'status', 'run_after'),
+        # index for lookup/dedupe by group
+        Index('ix_job_groupid', 'group_id'),
+        # Partial unique index to prevent multiple active combined_refresh jobs with same group_id
+        Index('ux_job_combined_refresh_groupid', 'group_id', unique=True, postgresql_where=text("job_type='combined_refresh' AND status IN ('PENDING','CLAIMED','WORKING')")),
+        # Partial unique index to prevent multiple active enrichment jobs with same group_id
+        Index('ux_job_enrichment_groupid', 'group_id', unique=True, postgresql_where=text("job_type='enrichment' AND status IN ('PENDING','CLAIMED','WORKING')")),
+    )
+
+    def __repr__(self):
+        return f"<Job(id={self.id}, type={self.job_type!r}, status={self.status})>"
+
 class Series(Base):
     __tablename__ = "series"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -108,7 +141,9 @@ class Series(Base):
     tvdbid = Column(Integer, unique=True, nullable=False)
     is_4k  = Column(Boolean, default=False)
     dummypath = Column(String, nullable=True)
-    filepath = Column(String, nullable=True)
+    sonarrpath = Column(String, nullable=True)
+    # ARR-provided synopsis/overview for series-level metadata
+    sonarr_series_overview = Column(String, nullable=True)
     # Aggregate flags for files under this series
     has_files = Column(Boolean, default=False)
     seriesfile_count = Column(BigInteger, nullable=True)
@@ -163,7 +198,9 @@ class Season(Base):
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     dummypath = Column(String, nullable=True)
-    filepath = Column(String, nullable=True)
+    sonarrpath = Column(String, nullable=True)
+    # ARR-provided synopsis/overview for series-level metadata
+    sonarr_season_overview = Column(String, nullable=True)
     # Aggregate per-season file info
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)
@@ -212,6 +249,8 @@ class Episode(Base):
     # Exact path to the episode file when Sonarr has it
     episodefile_path = Column(String, nullable=True)
     episodefile_size = Column(BigInteger, nullable=True)
+    # Episode-level overview (if provided by Sonarr)
+    sonarr_episode_overview = Column(String, nullable=True)
     # boolean indicating Sonarr reports a file exists for this episode
     has_file = Column(Boolean, default=False)
     sonarr_quality = Column(String, nullable=True)
@@ -280,5 +319,68 @@ class Episode(Base):
     def __repr__(self):
         return (
            f"<Episode(id={self.id}, title={self.title!r}, year={self.year}, "
-            f"episode_number={self.episode_number})>"
+            f"tvdbid={self.tvdbid})>"
         )
+
+
+class Placeholder(Base):
+    """Central table representing a placeholder file and its lifecycle/presentation.
+
+    A single row represents the intended placeholder for either a Movie OR a
+    Series/Season/Episode combination. Only one of movie_id OR series/season/episode
+    should be populated for a given row.
+    """
+    __tablename__ = 'placeholder'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Content linkage (one-of semantics)
+    movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
+    series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
+    season_id = Column(Integer, ForeignKey('season.id'), nullable=True)
+    episode_id = Column(Integer, ForeignKey('episode.id'), nullable=True)
+
+    # Filesystem path we intend to create/manage for this placeholder
+    path = Column(String, nullable=False)
+    # Whether the placeholder file currently exists on disk (best-effort)
+    exists = Column(Boolean, default=False)
+
+    # Internal lifecycle status (PENDING / CREATING / ACTIVE / DELETING / DELETED / ERROR)
+    lifecycle_status = Column(String, default='PENDING')
+
+    # Presentation fields (end-user facing)
+    display_status = Column(String, nullable=True)
+    display_progress = Column(Integer, nullable=True)
+    display_reason = Column(String, nullable=True)
+    format_hint = Column(String, nullable=True)
+
+    # Optional free-form metadata for integrations (NFO hints, source tags, etc.)
+    # NOTE: cannot name this attribute `metadata` because SQLAlchemy Declarative
+    # reserves the name. Use `extra` instead.
+    extra = Column(JSON, nullable=True)
+
+    created_by = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships to parent content rows. Use backrefs to make access convenient
+    movie = relationship('Movie', backref='placeholders')
+    series = relationship('Series', backref='placeholders')
+    season = relationship('Season', backref='placeholders')
+    episode = relationship('Episode', backref='placeholders')
+
+    __table_args__ = (
+        # Fast lookup by path
+        Index('ix_placeholder_path', 'path'),
+        # Ensure a single placeholder row per content tuple (movie|series+season+episode)
+        Index('ux_placeholder_content', 'movie_id', 'series_id', 'season_id', 'episode_id', unique=True),
+    )
+
+    def __repr__(self):
+        target = None
+        if self.movie_id:
+            target = f"movie_id={self.movie_id}"
+        elif self.episode_id:
+            target = f"series_id={self.series_id} season={self.season_id} ep={self.episode_id}"
+        elif self.series_id:
+            target = f"series_id={self.series_id}"
+        return f"<Placeholder(id={self.id}, {target}, path={self.path!r}, status={self.lifecycle_status!r})>"

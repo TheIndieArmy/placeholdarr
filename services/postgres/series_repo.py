@@ -207,7 +207,7 @@ class SeriesRepository:
             except Exception:
                 sn = 0
             by_season.setdefault(sn, []).append(ep)
-         
+        created_count = 0
         for season_num, eps in by_season.items():
             # 2) get or create the Season row
             # Use a friendly title for specials (season 0)
@@ -228,11 +228,7 @@ class SeriesRepository:
                 series_id=series.id,
                 season_number=season_num 
             )
-            if season.jellyfin_dummy_id:
-                season.jellyfin_dummy_id = None
-                season.jellyfin_id = None
-                self.session.add(season)
-                self.session.commit()
+
             # 3) within that season, upsert episodes
             for ep in eps:
                 # episode number may be missing or string - be defensive
@@ -249,53 +245,26 @@ class SeriesRepository:
                     'status': 'PENDING',
                     'action': 'handle_seriesadd',
                 }
-                # Check if episode already exists (by season_id and episode_number only)
-                existing_episode = self.session.query(Episode).filter_by(
+                # Ensure transient/process fields (status/action) are provided as defaults
+                # to avoid them being used in the lookup filter and causing duplicate rows.
+                ep_defaults_with_process = dict(episode_defaults)
+                ep_defaults_with_process.update({
+                    'status': 'PENDING',
+                    'action': 'handle_seriesadd'
+                })
+
+                ep_instance, ep_created = self.get_or_create(
+                    Episode,
+                    self.session,
+                    defaults=ep_defaults_with_process,
                     season_id=season.id,
                     episode_number=ep_num
-                ).first()
-                
-                if existing_episode:
-                    logger.info(f"Found existing Episode S{season_num}E{ep_num}: {existing_episode.id} ({existing_episode.status})")
-                    ep_instance, ep_created = existing_episode, False
-                    
-                    # Reset episode to PENDING for reprocessing if it was DONE/FAILED
-                    if existing_episode.status in ['DONE', 'FAILED']:
-                        existing_episode.status = 'PENDING'
-                        existing_episode.action = 'handle_seriesadd'
-                        self.session.add(existing_episode)
-                        logger.info(f"Reset Episode S{season_num}E{ep_num} status to PENDING for reprocessing")
-                    if existing_episode.jellyfin_dummy_id:
-                        existing_episode.jellyfin_dummy_id = None
-                        existing_episode.jellyfin_id = None
-                        existing_episode.filepath = None
-                        self.session.add(existing_episode)
-                        logger.info(f"Cleared jellyfin_dummy_id for Episode S{season_num}E{ep_num}")
-                    self.session.commit()
-                else:
-                    logger.info(f"Creating new Episode S{season_num}E{ep_num}")
-                    # Create new episode with all the defaults
-                    ep_instance = Episode(
-                        season_id=season.id,
-                        episode_number=ep_num,
-                        title=ep.get('title', f"Ep {ep_num}"),
-                        year=series.year,
-                        tvdbid=ep.get('tvdbid', None),
-                        status='PENDING',
-                        action='handle_seriesadd',
-                    )
-                    self.session.add(ep_instance)
-                    self.session.commit()
-                    ep_created = True
+                )
                 if ep_created:
                     logger.info(f"Added Episode S{season_num}E{ep_num} and queued for processing")
-                else:
-                    # Episode exists, but reset status to PENDING for reprocessing if needed
-                    if ep_instance.status in ['DONE', 'FAILED']:
-                        ep_instance.status = 'PENDING'
-                        ep_instance.action = 'handle_seriesadd'
-                        self.session.add(ep_instance)
-                        logger.info(f"Reset Episode S{season_num}E{ep_num} status to PENDING for reprocessing")
+                    created_count += 1
+
+        return created_count
 
     def get_ep_by_series(self, series, season_num, episode_num):
         """

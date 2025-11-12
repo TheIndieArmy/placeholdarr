@@ -1,4 +1,4 @@
-import os, re, threading, time, shutil, requests
+import os, re, threading, time, shutil, requests, json
 from fastapi.responses import JSONResponse
 from core.config import settings
 from core.logger import logger
@@ -22,7 +22,10 @@ from services.scheduler import (
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
-from services.integrations import enrich_movie_from_radarr
+from services.integrations import enrich_movie_from_radarr, enrich_series_from_sonarr, enrich_from_arr
+from datetime import datetime, timedelta
+from services.postgres.models import Job
+from services.jobs import start_worker_once
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -52,8 +55,15 @@ def handle_webhook(data: dict, source_port: int = None):
     event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
     
-    # Handle import events directly for cleanup (includes upgrades)
-    if event_type in ['download', 'moviefileimported', 'episodefileimported', 'upgrade', 'moviefileupgraded', 'episodefileupgraded']:
+    # Opportunistically enrich DB from ARR when a series/movie object is present
+    # (skip on the explicit add events since their handlers also start enrichment)
+    # Opportunistic background enrichment threads were removed to centralize
+    # enrichment under the scheduler/subflow system. Enrichment will run as
+    # scheduler steps when flows require it. This avoids races, duplication,
+    # and uncontrolled background threads.
+    
+    # Handle import events directly for cleanup
+    if event_type in ['download', 'moviefileimported', 'episodefileimported']:
         # Add this line to update the queue monitoring
         handle_download_webhook(data)
         # Then continue with the normal handling
@@ -287,36 +297,32 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                 series.jellyfin_id = None
                 session.commit()
         # Ensure we pass the Series instance (newly created or existing) to season/episode logic
+        # Persist season/episode rows
         repo.add_missing_seasons_and_episodes(series, episodes)
         logger.info(f"Episode data inserted to db for series {series_title}", extra={'emoji_type':'success'})
         
-        # Pass the model instance so the scheduler can infer model type and create subflows
-        job_scheduled = handle_seriesadd_scheduler.enqueue(series)
-        
-        session.close()
-        
-        if job_scheduled:
-            logger.info(f"Enqueued 'handle_seriesadd' action for TVDB ID {tvdb_id}")
-            # Note: We don't end the logging session here because the scheduler will continue processing
-            # The scheduler should end the session when all episodes are done
-            return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
-        else:
-            logger.warning(f"Failed to enqueue 'handle_seriesadd' action for TVDB ID {tvdb_id}")
-            end_handler_logging(temp_session_id, success=False, 
-                               summary="Failed to enqueue handler")
-            return JSONResponse({"status": "error", "message": "Failed to schedule processing"})
-            
-    except Exception as e:
-        logger.error(f"handle_seriesadd failed: {e}", extra={'emoji_type': 'error'})
-        end_handler_logging(temp_session_id, success=False, 
-                           summary=f"Handler failed: {e}")
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        # Create SubFlows for the series-add workflow (scheduler-owned execution)
+        try:
+            job_scheduled = handle_seriesadd_scheduler.enqueue(series)
+            if job_scheduled:
+                logger.info(f"Enqueued 'handle_seriesadd' action for TVDB ID {tvdb_id}", extra={'emoji_type': 'queue'})
+            else:
+                logger.warning(f"Failed to enqueue 'handle_seriesadd' action for TVDB ID {tvdb_id}", extra={'emoji_type': 'warning'})
+        except Exception as e:
+            logger.error(f"Failed to enqueue series flow: {e}", extra={'emoji_type': 'error'})
     finally:
         try:
             if 'session' in locals():
                 session.close()
         except Exception:
             pass
+    
+    if job_scheduled:
+        logger.info(f"Enqueued 'handle_seriesadd' flow for TVDB ID {tvdb_id}")
+    else:
+        logger.warning(f"Failed to enqueue 'handle_seriesadd' flow for TVDB ID {tvdb_id}")
+    
+    return JSONResponse({"status": "success", "message": "SeriesAdd scheduled"})
 
 def handle_episodefiledelete(data: dict, is_4k: bool = False):
     # Similar to seriesadd: recreate dummy for episode deletion.
@@ -640,20 +646,15 @@ def handle_movieadd(data: dict, is_4k: bool = False):
             elif cleared_any:
                 logger.debug(f"Cleared stale placeholder metadata for movie {m.tmdbid}", extra={'emoji_type': 'debug'})
 
-        # Start enrichment in background to fetch authoritative data from Radarr
+        # Create SubFlows for the movie-add workflow (scheduler-owned execution)
         try:
-            threading.Thread(
-                target=enrich_movie_from_radarr,
-                args=(tmdb_id, radarr_id, is_4k),
-                daemon=True
-            ).start()
-            logger.debug(f"Enrichment started for TMDB {tmdb_id} radarr {radarr_id}", extra={'emoji_type': 'debug'})
+            job_scheduled = handle_movieadd_scheduler.enqueue(m)
+            if job_scheduled:
+                logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}", extra={'emoji_type': 'queue'})
+            else:
+                logger.warning(f"Failed to enqueue 'handle_movieadd' action for TMDB ID {m.tmdbid}", extra={'emoji_type': 'warning'})
         except Exception as e:
-            logger.error(f"Failed to start enrichment thread: {e}", extra={'emoji_type': 'error'})
-
-        job_scheduled = handle_movieadd_scheduler.enqueue(m)
-        session.close()
-        
+            logger.error(f"Failed to enqueue movie flow: {e}", extra={'emoji_type': 'error'})
         if job_scheduled:
             logger.info(f"Enqueued 'handle_movieadd' action for TMDB ID {m.tmdbid}")
             # Note: Session will be ended by scheduler when movie processing completes
@@ -840,5 +841,52 @@ def handle_playback(data: dict):
         end_handler_logging(session_id, success=False, 
                            summary=f"Handler failed: {e}")
         return JSONResponse({"status": "error", "message": "Internal error"}, status_code=500)
+    finally:
+        session.close()
+
+    return JSONResponse({"status": "scheduled", "message": f"{media_type} playback enqueued"})
+
+# Use centralized worker start from services.jobs (start_worker_once). The handlers
+# no longer manage the worker lifetime directly; enqueue functions will ensure
+# the worker is started when jobs are created.
+
+
+def enqueue_import_list_job(tvdb_id, is_4k=False):
+    """Coalesce series TVDB ids into a single debounced import_list Job.
+    Returns the job id if scheduled, or None on failure.
+    """
+    session = get_session()
+    try:
+        group = f"import_list-4k" if is_4k else "import_list"
+        debounce = getattr(settings, 'JOB_DEBOUNCE_SECONDS', 3)
+        run_after = datetime.utcnow() + timedelta(seconds=debounce)
+
+        # Try to find an existing pending job for this group
+        existing = session.query(Job).filter_by(job_type='import_list', group_id=group, status='PENDING').order_by(Job.id.desc()).first()
+        if existing:
+            payload = existing.payload or {}
+            series_list = payload.get('series_tvdb', [])
+            if str(tvdb_id) not in list(map(str, series_list)):
+                series_list.append(tvdb_id)
+                payload['series_tvdb'] = series_list
+                existing.payload = payload
+            existing.run_after = run_after
+            session.add(existing)
+            session.commit()
+            job_id = existing.id
+        else:
+            payload = {'series_tvdb': [tvdb_id]}
+            job = Job(job_type='import_list', payload=payload, status='PENDING', run_after=run_after, group_id=group)
+            session.add(job)
+            session.commit()
+            job_id = job.id
+
+        # Ensure worker is running to pick up jobs
+        start_worker_once()
+        return job_id
+    except Exception as e:
+        logger.error(f"Failed to enqueue import_list job: {e}", extra={'emoji_type': 'error'})
+        session.rollback()
+        return None
     finally:
         session.close()

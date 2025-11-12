@@ -1283,14 +1283,28 @@ class ActionScheduler:
         ).first()
         
         if not sf:
-            logger.verbose(f"No existing SubFlow found, creating new one for {target_model.__name__} {target_ent_id}", extra={'emoji_type': 'new'})
-            
-            # Use the trigger_id passed from enqueue() to group all SubFlows from the same handler trigger
-            # This allows barrier synchronization to distinguish between different handler invocations
+            logger.verbose(f"No existing SubFlow found, creating new one for {self.model.__name__} {ent_id}", extra={'emoji_type': 'new'})
+            # Resolve series_id for episode contexts so consumers can easily
+            # query SubFlows by series without joining Episode->Season->Series.
+            resolved_series_id = None
+            try:
+                if self.model is Series:
+                    resolved_series_id = ent_id
+                elif context is not None:
+                    # context is an episode id; attempt to resolve its season -> series
+                    ep_row = session.query(Episode).get(context)
+                    if ep_row and getattr(ep_row, 'season_id', None):
+                        season_row = session.query(Season).get(ep_row.season_id)
+                        if season_row:
+                            resolved_series_id = season_row.series_id
+            except Exception:
+                # Be defensive: if resolution fails, leave resolved_series_id as None
+                resolved_series_id = None
+
             sf = SubFlow(
-                movie_id=movie_id_for_subflow,
-                series_id=series_id_for_subflow,
-                episode_id=episode_id_for_subflow,
+                movie_id=ent_id if self.model is Movie else None,
+                series_id=resolved_series_id,
+                episode_id=context,
                 action=self.action,
                 branch=branch,
                 steps=steps,

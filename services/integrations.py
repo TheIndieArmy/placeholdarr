@@ -1,11 +1,12 @@
 import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
+from datetime import datetime, date
 from typing import Type
 from core.config import settings
 from core.logger import logger
 from services.postgres.models import Episode, Movie, Season, Series, SubFlow
 from services.utils import (
     resolve_final_folder, sanitize_filename, strip_status_markers, get_series_folder,
-    get_arr_config
+    get_arr_config, write_nfo_for_placeholder, render_episode_nfo
 )
 from services.plex_client import plex
 from services.utils import get_movie_by_id
@@ -1057,6 +1058,39 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             session.add(movie)
             session.commit()
             logger.info(f"Created placeholder file for '{movie.title}'", extra={'emoji_type': 'success'})
+            # Attempt to write an .nfo next to the placeholder using authoritative DB fields
+            try:
+                try:
+                    # Refresh the ORM object to make sure we have committed values
+                    session.refresh(movie)
+                except Exception:
+                    # Fallback to re-querying if refresh is not possible
+                    movie = session.query(Movie).get(movie.id)
+
+                overview = getattr(movie, 'radarr_overview', None)
+                tmdbid = getattr(movie, 'tmdbid', None)
+                imdbid = getattr(movie, 'imdbid', None) if hasattr(movie, 'imdbid') else None
+
+                meta = {
+                    'title': movie.title,
+                    'year': movie.year,
+                    'tmdbid': tmdbid,
+                    'imdbid': imdbid,
+                    'radarr_overview': overview
+                }
+
+                logger.debug(
+                    f"Rendering movie NFO: title={movie.title!r} tmdb={tmdbid} imdb={imdbid} overview_len={len(overview) if overview else 0}",
+                    extra={'emoji_type': 'debug'}
+                )
+
+                ok = write_nfo_for_placeholder(dummy_path, meta, media_type='movie', status='Request')
+                if ok:
+                    logger.debug(f"Wrote movie NFO for {dummy_path}", extra={'emoji_type': 'create'})
+                else:
+                    logger.debug(f"Failed to write movie NFO for {dummy_path}", extra={'emoji_type': 'warning'})
+            except Exception as e:
+                logger.debug(f"Exception writing movie NFO: {e}", extra={'emoji_type': 'debug'})
             return True
         else:
             logger.error(f"Failed to create placeholder file for movie '{movie.title}'", extra={'emoji_type': 'error'})
@@ -1165,11 +1199,22 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
 
         # --- Begin restored episode placeholder logic ---
         # Query all SubFlow rows for this series that are waiting on delayed_placeholders
-        sf_eps = session.query(SubFlow).filter(
-            SubFlow.steps == "delayed_placeholders",
-            SubFlow.series_id == series.id,
-            SubFlow.status != "DONE"
-        ).order_by(SubFlow.id).all()
+        # NOTE: scheduler creates per-episode SubFlows with episode_id populated and
+        # series_id sometimes left NULL. Include both cases so episode-level subflows
+        # are processed by this batch placeholder creator.
+        episode_ids = [e.id for e in session.query(Episode.id).join(Season).filter(Season.series_id == series.id).all()]
+        sf_eps = (
+            session.query(SubFlow)
+            .filter(
+                SubFlow.steps == "delayed_placeholders",
+                SubFlow.status != "DONE"
+            )
+            .filter(
+                (SubFlow.series_id == series.id) | (SubFlow.episode_id.in_(episode_ids))
+            )
+            .order_by(SubFlow.id)
+            .all()
+        )
 
         # If no pending SubFlows but episodes have dummypath without actual files, 
         # find episodes that need placeholder files recreated
@@ -1328,6 +1373,27 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             except Exception:
                 logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
 
+            # Ensure Sonarr enrichment has been performed so episode-level overviews are available.
+            # We only run enrichment when we don't already have an episode overview for this episode
+            # and we have a normalized TVDB id to look up.
+            try:
+                ep_has_overview = getattr(ep, 'sonarr_episode_overview', None)
+                if not ep_has_overview and normalized_tvdb:
+                    logger.debug(f"Fetching Sonarr enrichment for TVDB {normalized_tvdb} to populate episode overview", extra={'emoji_type': 'debug'})
+                    try:
+                        # Call the existing enrichment routine which will persist episode overviews
+                        enrich_series_from_sonarr(tvdb_id=int(normalized_tvdb) if normalized_tvdb else None, sonarr_id=getattr(series, 'sonarrid', None), is_4k=is_4k)
+                    except Exception as e:
+                        logger.debug(f"Sonarr enrichment call failed: {e}", extra={'emoji_type': 'debug'})
+
+                    # Refresh the episode row so any persisted sonarr_episode_overview is available
+                    try:
+                        session.refresh(ep)
+                    except Exception:
+                        ep = session.query(Episode).get(ep.id)
+            except Exception:
+                logger.debug("Failed while attempting to enrich/refresh episode overview from Sonarr", extra={'emoji_type': 'debug'})
+
             # Create the placeholder file for this episode
             dummy_path = None
             try:
@@ -1354,20 +1420,63 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 session.commit()
                 placeholder_count += 1
                 logger.debug(f"Persisted placeholder for {series.title} S{season_num}E{episode_num}", extra={'emoji_type': 'debug'})
-                
-                # Only mark this subflow entry DONE if the dummy file was successfully created
-                subflow.status = "DONE"
-                session.add(subflow)
-                session.commit()
-            else:
-                failed_count += 1
-                logger.error(f"Failed to create dummy file for {series.title} S{season_num}E{episode_num} - keeping SubFlow as PENDING for scheduler retry", extra={'emoji_type': 'error'})
-                # Don't mark SubFlow as DONE - let scheduler retry it later
-                
-                # If this is the current episode that triggered the workflow, fail immediately
-                if ep.id == current_ep.id:
-                    logger.error(f"Current episode {current_ep.id} failed to create dummy file - failing workflow immediately", extra={'emoji_type': 'error'})
-                    return False
+
+                # Write episode-level NFO next to placeholder using authoritative DB values
+                try:
+                    try:
+                        session.refresh(ep)
+                    except Exception:
+                        ep = session.query(Episode).get(ep.id)
+
+                    # Re-load season and series to ensure we have latest overviews
+                    season_row = session.query(Season).get(ep.season_id) if ep.season_id else None
+                    series_row = session.query(Series).get(season_row.series_id) if season_row and season_row.series_id else None
+
+                    ep_overview = getattr(ep, 'sonarr_episode_overview', None)
+                    series_tvdb = getattr(series_row, 'tvdbid', None) if series_row else None
+
+                    # DEBUG: log exact overview value and length to diagnose missing overview in NFO
+                    try:
+                        logger.debug(f"Episode overview (repr) for ep.id={ep.id}: {ep_overview!r} (len={len(ep_overview) if ep_overview else 0})", extra={'emoji_type': 'debug'})
+                    except Exception:
+                        logger.debug(f"Episode overview logging failed for ep.id={ep.id}", extra={'emoji_type': 'debug'})
+
+                    ep_meta = {
+                        'title': ep.title,
+                        'season': season_num,
+                        'episode': episode_num,
+                        'aired': getattr(ep, 'air_date', None),
+                        'sonarr_episode_overview': ep_overview,
+                        'tvdb': series_tvdb
+                    }
+
+                    logger.debug(
+                        f"Rendering episode NFO: title={ep.title!r} S{season_num}E{episode_num} tvdb={series_tvdb} overview_len={len(ep_overview) if ep_overview else 0}",
+                        extra={'emoji_type': 'debug'}
+                    )
+
+                    # DEBUG: render the XML here and log it so we can see whether the overview is present
+                    try:
+                        try:
+                            rendered_xml = render_episode_nfo(ep_meta, status='Request')
+                            logger.debug(f"Rendered episode XML for ep.id={ep.id} (len={len(rendered_xml)}): {rendered_xml[:500]!r}", extra={'emoji_type': 'debug'})
+                        except Exception as e:
+                            logger.debug(f"Failed to render episode XML for debug: {e}", extra={'emoji_type': 'debug'})
+                    except Exception:
+                        pass
+
+                    ok = write_nfo_for_placeholder(dummy_path, ep_meta, media_type='tv', status='Request')
+                    if ok:
+                        logger.debug(f"Wrote episode NFO for {dummy_path}", extra={'emoji_type': 'create'})
+                    else:
+                        logger.debug(f"Failed to write episode NFO for {dummy_path}", extra={'emoji_type': 'warning'})
+                except Exception as e:
+                    logger.debug(f"Exception writing episode NFO: {e}", extra={'emoji_type': 'debug'})
+
+            # Mark this subflow entry DONE and commit so it's not reprocessed
+            subflow.status = "DONE"
+            session.add(subflow)
+            session.commit()
 
         if placeholder_count > 0:
             logger.info(
@@ -1690,6 +1799,14 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
             logger.error("Radarr config missing for enrichment", extra={'emoji_type': 'error'})
             return None
 
+        # Optional operator-configurable short delay to avoid races where Radarr
+        # hasn't yet recorded a just-added file. Default 0 (no delay) to match
+        # non-DB behavior. Operators can set ENRICHMENT_DELAY_SECONDS in settings.
+        delay_seconds = getattr(settings, 'ENRICHMENT_DELAY_SECONDS', 0)
+        if delay_seconds:
+            logger.debug(f"Delaying {delay_seconds}s before Radarr enrichment for tmdb={tmdb_id} radarr={radarr_id}", extra={'emoji_type': 'debug'})
+            time.sleep(delay_seconds)
+
         headers = {'X-Api-Key': config['api_key']}
         base_url = config['url']
         movie_data = None
@@ -1762,6 +1879,9 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
             monitored = bool(movie_data.get('monitored', False))
             release_status = movie_data.get('status')
 
+            # also capture overview/plot from Radarr for NFO generation
+            overview = movie_data.get('overview') or movie_data.get('plot') or movie_data.get('description') or None
+
             # Update DB fields conservatively
             changed = False
             if file_path and m.moviefile_path != file_path:
@@ -1781,6 +1901,11 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
                 changed = True
             if release_status and m.radarr_release_status != release_status:
                 m.radarr_release_status = release_status
+                changed = True
+
+            # persist overview if present
+            if overview and getattr(m, 'radarr_overview', None) != overview:
+                m.radarr_overview = overview
                 changed = True
 
             # also update radarrid if missing
@@ -1908,6 +2033,7 @@ def enrich_movie_from_radarr(tmdb_id=None, radarr_id=None, is_4k=False):
         logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
         return None
 
+
 def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
     """
     Fetch authoritative series data from Sonarr and update local DB record.
@@ -1916,11 +2042,19 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
     """
     try:
         from services.postgres.db import get_session
-        from services.postgres.models import Series as SeriesModel
+        from services.postgres.models import Series as SeriesModel, Season as SeasonModel, Episode as EpisodeModel
         config = get_arr_config('tv', is_4k)
         if not config:
             logger.error("Sonarr config missing for enrichment", extra={'emoji_type': 'error'})
             return None
+
+        # Optional operator-configurable short delay to avoid races where Sonarr
+        # hasn't yet recorded a just-added file. Default 0 (no delay) to match
+        # non-DB behavior. Operators can set ENRICHMENT_DELAY_SECONDS in settings.
+        delay_seconds = getattr(settings, 'ENRICHMENT_DELAY_SECONDS', 0)
+        if delay_seconds:
+            logger.debug(f"Delaying {delay_seconds}s before Sonarr enrichment for tvdb={tvdb_id} sonarr={sonarr_id}", extra={'emoji_type': 'debug'})
+            time.sleep(delay_seconds)
 
         headers = {'X-Api-Key': config['api_key']}
         base_url = config['url']
@@ -1934,6 +2068,9 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                     series_data = r.json()
                 else:
                     logger.debug(f"Sonarr series fetch by id {sonarr_id} returned {r.status_code}")
+                    # If Sonarr explicitly returned 404, record that so we can mark local series deleted later
+                    if r.status_code == 404:
+                        series_not_found = True
             except Exception as e:
                 logger.error(f"Sonarr direct fetch failed: {e}", extra={'emoji_type': 'error'})
 
@@ -1954,12 +2091,39 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
                                 series_data = r2.json()
                         except Exception:
                             pass
+                else:
+                    # Lookup returned empty list -> the series is not present in Sonarr (for this TVDB)
+                    lookup_no_results = True
             except Exception as e:
                 logger.error(f"Sonarr lookup by tvdb failed: {e}", extra={'emoji_type': 'error'})
 
         if not series_data:
             logger.debug("No Sonarr series data found during enrichment", extra={'emoji_type': 'debug'})
-            return None
+            # If Sonarr explicitly returned 404 for the series id, or the lookup returned no results
+            # and we have a local Series that previously had a sonarrid, mark it deleted to keep DB consistent.
+            session = get_session()
+            try:
+                s = None
+                if tvdb_id is not None:
+                    try:
+                        s = session.query(SeriesModel).filter_by(tvdbid=int(tvdb_id)).first()
+                    except Exception:
+                        s = session.query(SeriesModel).filter_by(tvdbid=str(tvdb_id)).first()
+                # If we found a local Series and Sonarr confirmed it is missing, mark deleted
+                if s and (('series_not_found' in locals() and series_not_found) or ('lookup_no_results' in locals() and lookup_no_results)):
+                    try:
+                        if getattr(s, 'sonarrid', None):
+                            s.is_deleted = True
+                            s.has_files = False
+                            session.add(s)
+                            session.commit()
+                            logger.info(f"Marked Series TVDB {s.tvdbid} as deleted because Sonarr returned no record", extra={'emoji_type': 'delete'})
+                    except Exception:
+                        session.rollback()
+                # Close session and return since there's nothing to enrich
+                return None
+            finally:
+                session.close()
 
         # Map fields into DB
         session = get_session()
@@ -1980,20 +2144,69 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
             changed = False
             # Sonarr fields
             path = series_data.get('path') or series_data.get('folderPath') or series_data.get('folder')
-            has_files = bool(series_data.get('hasFile', False) or series_data.get('seasons'))
+            # Determine whether Sonarr reports any files for this series.
+            # Sonarr's `hasFile` is authoritative; otherwise inspect per-season flags
+            has_files = bool(series_data.get('hasFile', False))
+            seasons_info = series_data.get('seasons') or []
+            if not has_files and seasons_info:
+                # Inspect seasons for indicators of files: Sonarr may include per-season 'hasFile' or 'statistics'.
+                for sd in seasons_info:
+                    try:
+                        if sd.get('hasFile'):
+                            has_files = True
+                            break
+                        stats = sd.get('statistics') or {}
+                        if int(stats.get('episodeFileCount', 0)) > 0:
+                            has_files = True
+                            break
+                    except Exception:
+                        continue
+
             monitored = bool(series_data.get('monitored', False))
-            if series_data.get('id') and s.sonarrid != series_data.get('id'):
+            if s.sonarrid != series_data.get('id'):
                 s.sonarrid = series_data.get('id')
                 changed = True
             if path and s.filepath != path:
                 s.filepath = path
                 changed = True
+            # Sonarr is the source of truth for monitored/has_files flags.
+            # Update DB to match Sonarr's report (allow setting to False when Sonarr says no files).
             if s.sonarr_monitored != monitored:
                 s.sonarr_monitored = monitored
                 changed = True
             if s.has_files != has_files:
                 s.has_files = has_files
                 changed = True
+                logger.debug(f"Set series.has_files={has_files} for series {s.tvdbid} based on Sonarr data", extra={'emoji_type': 'debug'})
+
+            # If this series was previously marked deleted but Sonarr returned a record, unmark it
+            try:
+                if getattr(s, 'is_deleted', False):
+                    s.is_deleted = False
+                    changed = True
+                    logger.info(f"Unmarked is_deleted for Series TVDB {s.tvdbid} because Sonarr returned a record", extra={'emoji_type': 'update'})
+            except Exception:
+                pass
+
+            # capture series-level overview if present
+            series_overview = series_data.get('overview') or series_data.get('description') or None
+            if series_overview and getattr(s, 'sonarr_series_overview', None) != series_overview:
+                s.sonarr_series_overview = series_overview
+                changed = True
+
+            # capture season-level overview if present in series_data['seasons']
+            for sd in seasons_info:
+                try:
+                    sn = sd.get('seasonNumber')
+                    so = sd.get('overview') or sd.get('description') or None
+                    if sn is not None and so:
+                        season_row = session.query(SeasonModel).filter_by(series_id=s.id, season_number=int(sn)).first()
+                        if season_row and getattr(season_row, 'sonarr_season_overview', None) != so:
+                            season_row.sonarr_season_overview = so
+                            session.add(season_row)
+                            # don't mark changed here for series-level commit; we'll commit after episode updates
+                except Exception:
+                    pass
 
             # Update NFO metadata fields from Sonarr data
             overview = series_data.get('overview')
@@ -2087,6 +2300,195 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
             else:
                 logger.debug(f"Enrichment for series {s.tvdbid} found no changes", extra={'emoji_type': 'debug'})
 
+            # Attempt to fetch episode-level overviews and persist them
+            # Prefer the Sonarr series quality profile name when available. Fall back
+            # to deriving a representative series quality from episode file qualities
+            # only when the profile name cannot be obtained.
+            quality_list = []
+            profile_name = None
+            try:
+                # Sonarr exposes the series quality profile as an id on the series
+                qp_id = series_data.get('qualityProfileId') or (series_data.get('qualityProfile') or {}).get('id')
+                if qp_id:
+                    try:
+                        qp_resp = requests.get(f"{base_url}/qualityProfile/{qp_id}", headers=headers, timeout=10)
+                        if qp_resp.ok:
+                            qp = qp_resp.json()
+                            profile_name = qp.get('name') or None
+                            if profile_name and getattr(s, 'sonarr_quality', None) != profile_name:
+                                s.sonarr_quality = profile_name
+                                session.add(s)
+                                session.commit()
+                                logger.info(f"Set series.sonarr_quality={profile_name} from Sonarr quality profile for series {s.tvdbid}", extra={'emoji_type': 'update'})
+                    except Exception:
+                        # Non-fatal: if quality profile fetch fails, continue and fall back later
+                        profile_name = None
+            except Exception:
+                profile_name = None
+            try:
+                eps_resp = requests.get(f"{base_url}/episode", params={'seriesId': series_data.get('id')}, headers=headers, timeout=10)
+                if eps_resp.ok:
+                    eps = eps_resp.json()
+                    for ep in eps:
+                        try:
+                            season_num = ep.get('seasonNumber')
+                            ep_num = ep.get('episodeNumber')
+                            ep_overview = ep.get('overview') or ep.get('description') or None
+                            if not ep_overview:
+                                # even if overview missing, still consider persisting other fields like file info
+                                pass
+                            # find season/episode rows
+                            season_row = session.query(SeasonModel).filter_by(series_id=s.id, season_number=int(season_num)).first()
+                            if not season_row:
+                                continue
+                            episode_row = session.query(EpisodeModel).filter_by(season_id=season_row.id, episode_number=int(ep_num)).first()
+                            if episode_row:
+                                # persist overview if provided (don't clear existing overview with None)
+                                if ep_overview and getattr(episode_row, 'sonarr_episode_overview', None) != ep_overview:
+                                    episode_row.sonarr_episode_overview = ep_overview
+                                    session.add(episode_row)
+
+                                # Also persist episodeFile details when Sonarr provides them
+                                try:
+                                    ef = ep.get('episodeFile') or {}
+                                    # Determine has_file from Sonarr's flags or presence of episodeFile
+                                    has_file = bool(ep.get('hasFile', False) or ef)
+
+                                    # Path - prefer absolute path, fall back to relativePath
+                                    ef_path = ef.get('path') or ef.get('relativePath') or None
+
+                                    # Size: Sonarr may use 'size' or 'sizeInBytes'
+                                    ef_size = ef.get('size') or ef.get('sizeInBytes')
+                                    try:
+                                        if ef_size is not None:
+                                            ef_size = int(ef_size)
+                                    except Exception:
+                                        ef_size = None
+
+                                    # Quality: nested object or simple value
+                                    ef_quality = None
+                                    q = ef.get('quality') or ep.get('quality') or {}
+                                    if isinstance(q, dict):
+                                        ef_quality = q.get('name') or (q.get('quality') or {}).get('name')
+                                    elif q:
+                                        ef_quality = str(q)
+
+                                    if ef_quality:
+                                        quality_list.append(ef_quality)
+
+                                    # Sonarr path - useful for Jellyfin matching (store absolute file path when available)
+                                    sonarrpath_val = ef_path or getattr(season_row, 'sonarrpath', None) or getattr(s, 'sonarrpath', None)
+
+                                    # Initialize updated flag for this episode row
+                                    updated = False
+
+                                    # Persist Sonarr episode id if present
+                                    try:
+                                        sonarr_episode_id = ep.get('id')
+                                        if sonarr_episode_id and getattr(episode_row, 'sonarrid', None) != sonarr_episode_id:
+                                            episode_row.sonarrid = sonarr_episode_id
+                                            updated = True
+                                    except Exception:
+                                        pass
+
+                                    # Persist sonarr_status if present on the episode object
+                                    try:
+                                        sonarr_episode_status = ep.get('status') or ep.get('episodeFile', {}).get('status') if ep else None
+                                        if sonarr_episode_status and getattr(episode_row, 'sonarr_status', None) != sonarr_episode_status:
+                                            episode_row.sonarr_status = sonarr_episode_status
+                                            updated = True
+                                    except Exception:
+                                        pass
+
+                                    # Persist air date if available (airDate or airDateUtc)
+                                    try:
+                                        air_date_val = ep.get('airDate') or ep.get('airDateUtc')
+                                        if air_date_val:
+                                            # Normalize to date if possible
+                                            try:
+                                                # Sonarr returns 'YYYY-MM-DD' or ISO datetime
+                                                d = None
+                                                if 'T' in air_date_val:
+                                                    d = datetime.fromisoformat(air_date_val.replace('Z', '+00:00')).date()
+                                                else:
+                                                    d = datetime.strptime(air_date_val, '%Y-%m-%d').date()
+                                                if d and getattr(episode_row, 'air_date', None) != d:
+                                                    episode_row.air_date = d
+                                                    updated = True
+                                            except Exception:
+                                                # ignore parse errors
+                                                pass
+                                    except Exception:
+                                        pass
+
+                                    # Update episode file metadata to match Sonarr (source of truth).
+                                    # Set has_file to Sonarr's value and set/clear file fields accordingly.
+                                    if getattr(episode_row, 'has_file', None) != has_file:
+                                        episode_row.has_file = has_file
+                                        updated = True
+
+                                    if has_file:
+                                        if ef_path and getattr(episode_row, 'episodefile_path', None) != ef_path:
+                                            episode_row.episodefile_path = ef_path
+                                            updated = True
+                                        if ef_size is not None and getattr(episode_row, 'episodefile_size', None) != ef_size:
+                                            episode_row.episodefile_size = ef_size
+                                            updated = True
+                                        if ef_quality and getattr(episode_row, 'sonarr_quality', None) != ef_quality:
+                                            episode_row.sonarr_quality = ef_quality
+                                            updated = True
+                                        if sonarrpath_val and getattr(episode_row, 'sonarrpath', None) != sonarrpath_val:
+                                            episode_row.sonarrpath = sonarrpath_val
+                                            updated = True
+                                    else:
+                                        # Sonarr reports no file for this episode: clear file-specific fields
+                                        if getattr(episode_row, 'episodefile_path', None) is not None:
+                                            episode_row.episodefile_path = None
+                                            updated = True
+                                        if getattr(episode_row, 'episodefile_size', None) is not None:
+                                            episode_row.episodefile_size = None
+                                            updated = True
+                                        if getattr(episode_row, 'sonarr_quality', None) is not None:
+                                            episode_row.sonarr_quality = None
+                                            updated = True
+                                        if getattr(episode_row, 'sonarrpath', None) is not None:
+                                            episode_row.sonarrpath = None
+                                            updated = True
+
+                                    if updated:
+                                        session.add(episode_row)
+                                        session.commit()
+                                        logger.debug(f"Enriched episode row id={episode_row.id}: sonarrid={getattr(episode_row,'sonarrid',None)} air_date={getattr(episode_row,'air_date',None)} sonarr_status={getattr(episode_row,'sonarr_status',None)}", extra={'emoji_type':'debug'})
+                                except Exception:
+                                    # Be resilient: don't fail enrichment if episodeFile parsing fails
+                                    logger.debug("Episode file parsing failed during enrichment", extra={'emoji_type':'debug'})
+                                    pass
+                        except Exception:
+                            continue
+                    # commit any episode/season overview changes
+                    session.commit()
+                    # NOTE: per-episode SubFlow creation was intentionally removed here
+                    # to keep SubFlow creation owned by the scheduler/webhook path.
+                    # Enrichment should only persist authoritative DB fields. The
+                    # scheduler will run the configured flow steps (which include
+                    # enrichment as a step) and handle placeholder creation.
+                    # Derive a representative series-level quality from episode qualities
+                    # only if we couldn't obtain a Sonarr quality profile name above.
+                    try:
+                        if quality_list and not profile_name:
+                            from collections import Counter
+                            most_common = Counter(quality_list).most_common(1)[0][0]
+                            if getattr(s, 'sonarr_quality', None) != most_common:
+                                s.sonarr_quality = most_common
+                                session.add(s)
+                                session.commit()
+                                logger.info(f"Set series.sonarr_quality={most_common} for series {s.tvdbid}", extra={'emoji_type': 'update'})
+                    except Exception:
+                        # non-fatal if computing series quality fails
+                        pass
+            except Exception:
+                logger.debug("Failed to fetch/persist Sonarr episode overviews", extra={'emoji_type': 'debug'})
+
             return series_data
         finally:
             session.close()
@@ -2095,626 +2497,115 @@ def enrich_series_from_sonarr(tvdb_id=None, sonarr_id=None, is_4k=False):
         logger.error(f"Enrichment failed: {e}", extra={'emoji_type': 'error'})
         return None
 
-def enrich_movie_metadata(session, ent_id, model, action):
-    """Enrich movie with metadata from Radarr before creating NFO"""
-    if model != Movie:
-        logger.info(f"Skipping enrichment for non-Movie entity: {model.__name__}", extra={'emoji_type': 'skip'})
-        return True
-    
+def enrich_from_arr(payload: dict = None, media_type: str = None, tvdb_id: int = None, tmdb_id: int = None, arr_id: int = None, is_4k: bool = False):
+    """
+    Generic dispatcher that inspects provided payload or explicit ids and calls the
+    appropriate ARR-specific enrichment function. Returns a normalized dict with
+    canonical fields so callers can treat Radarr and Sonarr the same.
+    """
     try:
-        movie = session.query(Movie).get(ent_id)
+        # Determine media type
+        mt = media_type
+        if not mt and isinstance(payload, dict):
+            if 'series' in payload:
+                mt = 'tv'
+            elif 'movie' in payload:
+                mt = 'movie'
+
+        # Use explicit ids if provided, otherwise extract from payload
+        if not tvdb_id and isinstance(payload, dict):
+            tvdb_id = payload.get('series', {}).get('tvdbId') if payload.get('series') else None
+        if not tmdb_id and isinstance(payload, dict):
+            tmdb_id = payload.get('movie', {}).get('tmdbId') if payload.get('movie') else None
+        if not arr_id and isinstance(payload, dict):
+            arr_id = (payload.get('series') or {}).get('id') or (payload.get('movie') or {}).get('id')
+
+        if mt == 'tv':
+            resp = enrich_series_from_sonarr(tvdb_id=tvdb_id, sonarr_id=arr_id, is_4k=is_4k)
+            # Normalize result
+            if resp is None:
+                return {'type': 'tv', 'tvdb': tvdb_id, 'sonarr_id': arr_id, 'overview': None, 'changed': False}
+            overview = resp.get('overview') or resp.get('description')
+            return {'type': 'tv', 'tvdb': tvdb_id, 'sonarr_id': resp.get('id') or arr_id, 'overview': overview, 'changed': True}
+
+        elif mt == 'movie':
+            resp = enrich_movie_from_radarr(tmdb_id=tmdb_id, radarr_id=arr_id, is_4k=is_4k)
+            if resp is None:
+                return {'type': 'movie', 'tmdb': tmdb_id, 'radarr_id': arr_id, 'overview': None, 'changed': False}
+            overview = resp.get('overview') or resp.get('plot') or resp.get('description')
+            return {'type': 'movie', 'tmdb': tmdb_id, 'radarr_id': resp.get('id') or arr_id, 'overview': overview, 'changed': True}
+
+        else:
+            logger.debug("enrich_from_arr could not determine media type", extra={'emoji_type': 'debug'})
+            return None
+
+    except Exception as e:
+        logger.error(f"enrich_from_arr dispatcher error: {e}", extra={'emoji_type': 'error'})
+        return None
+
+
+# Legacy background enrichment helper removed. Enrichment should be scheduled
+# and executed by the ActionScheduler (use flow_enrich_series/flow_enrich_movie
+# or the job worker enqueue_enrichment_job for manual/test invocation).
+
+def flow_enrich_series(session, ent_id: int, model: Type, action: str) -> bool:
+    """Scheduler-compatible step to run Sonarr enrichment for a series.
+
+    This adapter matches the signature expected by ActionScheduler step functions
+    (session, ent_id, model, action). It looks up the series' TVDB id from the
+    DB and calls the existing enrichment routine. Return True on success.
+    """
+    try:
+        # Lazy import of models to avoid top-level circular imports
+        from services.postgres.models import Series as SeriesModel, Episode as EpisodeModel, Season as SeasonModel
+
+        series = None
+
+        # If scheduler passed an Episode context (common when creating per-episode SubFlows),
+        # resolve the Episode -> Season -> Series chain to find the correct Series id.
+        if model is not None and getattr(model, '__name__', '').lower() == 'episode':
+            ep = session.query(EpisodeModel).get(ent_id)
+            if not ep:
+                logger.error(f"flow_enrich_series: Episode id {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
+            season = session.query(SeasonModel).get(ep.season_id) if getattr(ep, 'season_id', None) else None
+            series_id = season.series_id if season else None
+            if not series_id:
+                logger.error(f"flow_enrich_series: Could not resolve Series for Episode id {ent_id}", extra={'emoji_type': 'error'})
+                return False
+            series = session.query(SeriesModel).get(series_id)
+        else:
+            # Default: ent_id is a Series id
+            series = session.query(SeriesModel).get(ent_id)
+
+        if not series:
+            logger.error(f"flow_enrich_series: Series id {ent_id if series is None else series.id} not found", extra={'emoji_type': 'error'})
+            return False
+
+        tvdb = getattr(series, 'tvdbid', None) or getattr(series, 'tvdb_id', None)
+        sonarr_id = getattr(series, 'sonarrid', None)
+        is_4k = bool(getattr(series, 'is_4k', False))
+        enrich_series_from_sonarr(tvdb_id=tvdb, sonarr_id=sonarr_id, is_4k=is_4k)
+        return True
+    except Exception as e:
+        logger.error(f"flow_enrich_series failed: {e}", extra={'emoji_type': 'error'})
+        return False
+
+
+def flow_enrich_movie(session, ent_id: int, model: Type, action: str) -> bool:
+    """Scheduler-compatible step to run Radarr enrichment for a movie."""
+    try:
+        from services.postgres.models import Movie as MovieModel
+        movie = session.query(MovieModel).get(ent_id)
         if not movie:
-            logger.error(f"Movie {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
+            logger.error(f"flow_enrich_movie: Movie id {ent_id} not found", extra={'emoji_type': 'error'})
             return False
-        
-        logger.info(f"Enriching movie metadata from Radarr: {movie.title}", extra={'emoji_type': 'update'})
-        
-        # Call enrichment with movie's TMDB ID and 4K status
-        radarr_data = enrich_movie_from_radarr(
-            tmdb_id=movie.tmdbid,
-            radarr_id=movie.radarrid,
-            is_4k=movie.is_4k
-        )
-        
-        if radarr_data:
-            logger.info(f"Successfully enriched movie {movie.title} with Radarr metadata", extra={'emoji_type': 'success'})
-            return True
-        else:
-            logger.warning(f"Failed to enrich movie {movie.title} - continuing anyway", extra={'emoji_type': 'warning'})
-            # Don't fail the entire flow if enrichment fails
-            return True
-            
-    except Exception as e:
-        logger.error(f"Error during movie enrichment: {e}", extra={'emoji_type': 'error'})
-        # Don't fail the entire flow if enrichment fails
+
+        tmdb = getattr(movie, 'tmdbid', None)
+        radarr_id = getattr(movie, 'radarrid', None)
+        is_4k = bool(getattr(movie, 'is_4k', False))
+        enrich_movie_from_radarr(tmdb_id=tmdb, radarr_id=radarr_id, is_4k=is_4k)
         return True
-
-def enrich_series_metadata(session, ent_id, model, action):
-    """Enrich series with metadata from Sonarr before creating NFO"""
-    try:
-        # Handle both direct Series calls and Episode-based SubFlows
-        if model == Series:
-            series = session.query(Series).get(ent_id)
-        elif model == Episode:
-            # When called from Episode SubFlow, get the series through episode->season->series
-            episode = session.query(Episode).get(ent_id)
-            if not episode or not episode.season:
-                logger.error(f"Episode {ent_id} or its season not found for series enrichment", extra={'emoji_type': 'error'})
-                return False
-            series = episode.season.series
-        else:
-            logger.info(f"Skipping series enrichment for unsupported entity: {model.__name__}", extra={'emoji_type': 'skip'})
-            return True
-        
-        if not series:
-            logger.error(f"Series not found for enrichment", extra={'emoji_type': 'error'})
-            return False
-        
-        logger.info(f"Enriching series metadata from Sonarr: {series.title}", extra={'emoji_type': 'update'})
-        
-        # Call enrichment with series' TVDB ID and 4K status
-        sonarr_data = enrich_series_from_sonarr(
-            tvdb_id=series.tvdbid,
-            sonarr_id=series.sonarrid,
-            is_4k=series.is_4k
-        )
-        
-        if sonarr_data:
-            logger.info(f"Successfully enriched series {series.title} with Sonarr metadata", extra={'emoji_type': 'success'})
-            return True
-        else:
-            logger.error(f"Failed to enrich series {series.title} - no data from Sonarr", extra={'emoji_type': 'error'})
-            return False
-            
     except Exception as e:
-        logger.error(f"Error during series enrichment: {e}", extra={'emoji_type': 'error'})
-        return False
-
-def enrich_season_metadata(session, ent_id, model, action):
-    """Enrich season with metadata from Sonarr before creating NFO"""
-    try:
-        from services.postgres.models import Season
-        
-        # Handle both direct Season calls and Episode-based SubFlows
-        if model.__name__ == 'Season':
-            season = session.query(Season).get(ent_id)
-        elif model == Episode:
-            # When called from Episode SubFlow, get the season through episode->season
-            episode = session.query(Episode).get(ent_id)
-            if not episode or not episode.season:
-                logger.error(f"Episode {ent_id} or its season not found for season enrichment", extra={'emoji_type': 'error'})
-                return False
-            season = episode.season
-        else:
-            logger.info(f"Skipping season enrichment for unsupported entity: {model.__name__}", extra={'emoji_type': 'skip'})
-            return True
-        
-        if not season:
-            logger.error(f"Season not found for enrichment", extra={'emoji_type': 'error'})
-            return False
-        
-        logger.info(f"Enriching season metadata from Sonarr: {season.title} S{season.season_number}", extra={'emoji_type': 'update'})
-        
-        # Get the parent series
-        series = season.series
-        if not series:
-            logger.error(f"No parent series found for season {season.id}", extra={'emoji_type': 'error'})
-            return False
-        
-        # Call series enrichment to get complete data including seasons
-        sonarr_data = enrich_series_from_sonarr(
-            tvdb_id=series.tvdbid,
-            sonarr_id=series.sonarrid,
-            is_4k=series.is_4k
-        )
-        
-        if not sonarr_data:
-            logger.error(f"Failed to get series data from Sonarr for season enrichment", extra={'emoji_type': 'error'})
-            return False
-        
-        if sonarr_data and 'seasons' in sonarr_data:
-            # Find matching season in Sonarr data
-            seasons_data = sonarr_data.get('seasons', [])
-            matching_season = None
-            for season_data in seasons_data:
-                if season_data.get('seasonNumber') == season.season_number:
-                    matching_season = season_data
-                    break
-            
-            if matching_season:
-                changed = False
-                
-                # Update season-specific metadata
-                if matching_season.get('monitored') is not None:
-                    monitored = bool(matching_season.get('monitored'))
-                    if season.sonarr_monitored != monitored:
-                        season.sonarr_monitored = monitored
-                        changed = True
-                
-                # Season typically doesn't have separate TVDB/IMDb IDs in Sonarr
-                # but some do, so let's check
-                season_tvdb_id = matching_season.get('tvdbId')
-                if season_tvdb_id and season.tvdbid != season_tvdb_id:
-                    season.tvdbid = season_tvdb_id
-                    changed = True
-                
-                # Season images
-                images = matching_season.get('images', [])
-                if images:
-                    for image in images:
-                        if isinstance(image, dict):
-                            cover_type = image.get('coverType')
-                            url = image.get('remoteUrl')
-                            if url:
-                                config = get_arr_config('tv', series.is_4k)
-                                if config and url.startswith('/'):
-                                    url = config['url'].replace('/api/v3', '') + url
-                                
-                                if cover_type == 'poster' and season.poster_url != url:
-                                    season.poster_url = url
-                                    changed = True
-                                elif cover_type == 'fanart' and season.fanart_url != url:
-                                    season.fanart_url = url
-                                    changed = True
-                
-                if changed:
-                    session.add(season)
-                    session.commit()
-                    logger.info(f"Successfully enriched season {season.title} S{season.season_number}", extra={'emoji_type': 'success'})
-                else:
-                    logger.debug(f"No changes needed for season {season.title} S{season.season_number}", extra={'emoji_type': 'debug'})
-            else:
-                logger.error(f"Season {season.season_number} not found in Sonarr data", extra={'emoji_type': 'error'})
-                return False
-        else:
-            logger.error(f"No seasons data in Sonarr response", extra={'emoji_type': 'error'})
-            return False
-        
-        return True
-            
-    except Exception as e:
-        logger.error(f"Error during season enrichment: {e}", extra={'emoji_type': 'error'})
-        return False
-
-def enrich_episode_metadata(session, ent_id, model, action):
-    """Enrich episode with metadata from Sonarr before creating NFO"""
-    try:
-        # Handle both direct Episode calls and Episode-based SubFlows  
-        if model == Episode:
-            episode = session.query(Episode).get(ent_id)
-        else:
-            logger.info(f"Skipping episode enrichment for non-Episode entity: {model.__name__}", extra={'emoji_type': 'skip'})
-            return True
-        
-        if not episode:
-            logger.error(f"Episode {ent_id} not found for enrichment", extra={'emoji_type': 'error'})
-            return False
-        
-        logger.info(f"Enriching episode metadata from Sonarr: {episode.title} S{episode.season.season_number if episode.season else '?'}E{episode.episode_number}", extra={'emoji_type': 'update'})
-        
-        # Get the parent series through season
-        series = episode.season.series if episode.season else None
-        if not series:
-            logger.error(f"No parent series found for episode {episode.id}", extra={'emoji_type': 'error'})
-            return False
-        
-        # Get episode data from Sonarr
-        config = get_arr_config('tv', series.is_4k)
-        if not config:
-            logger.error(f"No Sonarr config for episode enrichment", extra={'emoji_type': 'error'})
-            return False
-        
-        # Check if series has sonarrid
-        if not series.sonarrid:
-            logger.error(f"Series {series.title} has no sonarrid - cannot enrich episodes", extra={'emoji_type': 'error'})
-            return False
-        
-        headers = {'X-Api-Key': config['api_key']}
-        base_url = config['url']
-        
-        try:
-            # Get episodes for the series
-            r = requests.get(f"{base_url}/episode", params={'seriesId': series.sonarrid}, headers=headers, timeout=10)
-            if r.status_code == 200:
-                episodes_data = r.json()
-                
-                # Find matching episode
-                matching_episode = None
-                for ep_data in episodes_data:
-                    if (ep_data.get('seasonNumber') == episode.season.season_number and 
-                        ep_data.get('episodeNumber') == episode.episode_number):
-                        matching_episode = ep_data
-                        break
-                
-                if matching_episode:
-                    changed = False
-                    
-                    # Update episode metadata
-                    overview = matching_episode.get('overview')
-                    if overview and episode.plot != overview:
-                        episode.plot = overview
-                        changed = True
-                    
-                    runtime = matching_episode.get('runtime')
-                    if runtime and episode.runtime != runtime:
-                        episode.runtime = runtime
-                        changed = True
-                    
-                    # Episode TVDB ID
-                    tvdb_id = matching_episode.get('tvdbId')
-                    if tvdb_id and episode.tvdbid != tvdb_id:
-                        episode.tvdbid = tvdb_id
-                        changed = True
-                    
-                    # Air date
-                    air_date = matching_episode.get('airDate')
-                    if air_date:
-                        try:
-                            from datetime import datetime
-                            parsed_date = datetime.strptime(air_date, '%Y-%m-%d').date()
-                            if episode.air_date != parsed_date:
-                                episode.air_date = parsed_date
-                                changed = True
-                        except (ValueError, TypeError):
-                            pass
-                    
-                    ep_sonarrid = matching_episode.get('id')
-                    if ep_sonarrid and episode.sonarrid != ep_sonarrid:
-                        episode.sonarrid = ep_sonarrid
-                        changed = True
-           
-                    # Episode thumbnail
-                    images = matching_episode.get('images', [])
-                    for image in images:
-                        if isinstance(image, dict) and image.get('coverType') == 'screenshot':
-                            url = image.get('remoteUrl')
-                            if url:
-                                if url.startswith('/'):
-                                    url = base_url.replace('/api/v3', '') + url
-                                if episode.thumb_url != url:
-                                    episode.thumb_url = url
-                                    changed = True
-                            break
-                    
-                    if changed:
-                        session.add(episode)
-                        session.commit()
-                        logger.info(f"Successfully enriched episode {episode.title}", extra={'emoji_type': 'success'})
-                    else:
-                        logger.debug(f"No changes needed for episode {episode.title}", extra={'emoji_type': 'debug'})
-                else:
-                    logger.error(f"Episode S{episode.season.season_number}E{episode.episode_number} not found in Sonarr data", extra={'emoji_type': 'error'})
-                    return False
-            else:
-                logger.error(f"Failed to get episodes from Sonarr: {r.status_code}", extra={'emoji_type': 'error'})
-                return False
-        
-        except Exception as e:
-            logger.error(f"Error fetching episode data from Sonarr: {e}", extra={'emoji_type': 'error'})
-            return False
-        
-        return True
-            
-    except Exception as e:
-        logger.error(f"Error during episode enrichment: {e}", extra={'emoji_type': 'error'})
-        return False
-
-
-def check_series_ready_for_enrichment(session, ent_id, model, action):
-    """
-    Check if all episodes in a series have completed delayed_placeholders.
-    If all are ready, create ONE series-level enrichment SubFlow.
-    Then wait for that enrichment to complete before returning True.
-    
-    Uses trigger_id to ensure each trigger group has its own enrichment cycle.
-    This allows multiple independent workflows for the same series.
-    
-    This is a barrier step that:
-    1. Waits for all episodes FROM THIS TRIGGER to finish placeholders
-    2. Creates series enrichment SubFlow (once per trigger)
-    3. Waits for enrichment to complete
-    4. Returns True when enrichment is DONE
-    """
-    from services.postgres.models import SubFlow, Episode, Season, Series
-    
-    # Get the series ID and trigger_id based on the model type
-    if model == Episode:
-        episode = session.query(Episode).get(ent_id)
-        if not episode or not episode.season:
-            logger.error(f"Episode {ent_id} not found or has no season", extra={'emoji_type': 'error'})
-            return False
-        series_id = episode.season.series_id
-        
-        logger.debug(f"🔍 Looking for SubFlow: episode_id={ent_id}, series_id={series_id}, action={action}", extra={'emoji_type': 'debug'})
-        
-        # Get trigger_id from the current episode SubFlow - filter by episode_id + action + status
-        # This avoids hardcoding step names
-        current_sf = session.query(SubFlow).filter(
-            SubFlow.episode_id == ent_id,
-            SubFlow.series_id == series_id,
-            SubFlow.action == action,
-            SubFlow.status.in_(['QUEUED'])  # Active SubFlows only
-        ).order_by(SubFlow.id.desc()).first()  # Get most recent if multiple
-        
-        if current_sf:
-            logger.debug(f"✅ Found SubFlow {current_sf.id}: trigger_id={current_sf.trigger_id}, status={current_sf.status}, steps={current_sf.steps}", extra={'emoji_type': 'debug'})
-            trigger_id = current_sf.trigger_id
-        else:
-            logger.warning(f"❌ No QUEUED SubFlow found for episode_id={ent_id}, series_id={series_id}, action={action}", extra={'emoji_type': 'warning'})
-            
-            # Try to find ANY SubFlow for this episode to debug
-            all_sfs = session.query(SubFlow).filter(
-                SubFlow.episode_id == ent_id,
-                SubFlow.action == action
-            ).all()
-            
-            if all_sfs:
-                logger.debug(f"🔍 Found {len(all_sfs)} SubFlow(s) for episode {ent_id} (any status):", extra={'emoji_type': 'debug'})
-                for sf in all_sfs:
-                    logger.debug(f"   SubFlow {sf.id}: status={sf.status}, trigger_id={sf.trigger_id}, steps={sf.steps}, step_index={sf.step_index}", extra={'emoji_type': 'debug'})
-            else:
-                logger.warning(f"❌ No SubFlows found at all for episode_id={ent_id}, action={action}", extra={'emoji_type': 'warning'})
-            
-            trigger_id = None
-        
-    elif model == Series:
-        series_id = ent_id
-        
-        logger.debug(f"🔍 Looking for SubFlow: series_id={series_id}, action={action}", extra={'emoji_type': 'debug'})
-        
-        # For series-level calls, get trigger_id from any active SubFlow for this series
-        current_sf = session.query(SubFlow).filter(
-            SubFlow.series_id == series_id,
-            SubFlow.action == action,
-            SubFlow.status.in_(['QUEUED'])
-        ).order_by(SubFlow.id.desc()).first()
-        
-        if current_sf:
-            logger.debug(f"✅ Found SubFlow {current_sf.id}: trigger_id={current_sf.trigger_id}, status={current_sf.status}", extra={'emoji_type': 'debug'})
-            trigger_id = current_sf.trigger_id
-        else:
-            logger.warning(f"❌ No PENDING/QUEUED SubFlow found for series_id={series_id}, action={action}", extra={'emoji_type': 'warning'})
-            trigger_id = None
-    else:
-        logger.error(f"check_series_ready_for_enrichment expects Episode or Series model, got {model.__name__}", extra={'emoji_type': 'error'})
-        return False
-    
-    if trigger_id is None:
-        logger.warning(f"⚠️ No trigger_id found for {model.__name__} {ent_id} - current_sf was {'None' if not current_sf else 'found but had None trigger_id'}", extra={'emoji_type': 'warning'})
-    
-    # STEP 1: Check if enrichment SubFlow already exists FOR THIS TRIGGER and handle its status
-    existing_enrichment = session.query(SubFlow).filter(
-        SubFlow.series_id == series_id,
-        SubFlow.steps == "enrich_comprehensive_metadata",
-        SubFlow.episode_id.is_(None),  # Series-level SubFlow
-        SubFlow.trigger_id == trigger_id  # CRITICAL: Same trigger group
-    ).first()
-    
-    if existing_enrichment:
-        # Enrichment SubFlow exists for this trigger - check its status
-        if existing_enrichment.status == 'DONE':
-            # Enrichment complete! Episode can proceed
-            logger.debug(f"Series {series_id} enrichment complete for trigger {trigger_id} (SubFlow {existing_enrichment.id})", extra={'emoji_type': 'success'})
-            return True
-        elif existing_enrichment.status in ['PENDING', 'QUEUED']:
-            # Enrichment in progress - wait for it
-            logger.debug(f"Waiting for series {series_id} enrichment (trigger {trigger_id}, SubFlow {existing_enrichment.id} status: {existing_enrichment.status})", extra={'emoji_type': 'wait'})
-            return False  # Keep episode SubFlow PENDING until enrichment is DONE
-        elif existing_enrichment.status == 'FAILED':
-            # Enrichment failed - proceed anyway with warning
-            logger.warning(f"Series {series_id} enrichment FAILED for trigger {trigger_id} - proceeding anyway", extra={'emoji_type': 'warning'})
-            return True
-        else:
-            # Unknown status - proceed with warning
-            logger.warning(f"Series {series_id} enrichment has status {existing_enrichment.status} (trigger {trigger_id}) - proceeding anyway", extra={'emoji_type': 'warning'})
-            return True
-    
-    # STEP 2: No enrichment SubFlow exists for this trigger yet - check if all episodes FROM THIS TRIGGER are ready
-    # Check how many episodes FROM THIS TRIGGER are still on delayed_placeholders (excluding current one if Episode)
-    query = session.query(SubFlow).filter(
-        SubFlow.series_id == series_id,
-        SubFlow.steps == "delayed_placeholders",
-        SubFlow.status != "DONE",
-        SubFlow.trigger_id == trigger_id  # CRITICAL: Only count SubFlows from THIS trigger
-    )
-    
-    # If this is being called from an Episode that just completed, exclude it from the count
-    if model == Episode:
-        query = query.filter(SubFlow.episode_id != ent_id)
-    
-    remaining_placeholders = query.count()
-    
-    logger.debug(f"Series {series_id} (trigger {trigger_id}): {remaining_placeholders} episodes still on delayed_placeholders (excluding current)", extra={'emoji_type': 'debug'})
-    
-    # Check if all episodes FROM THIS TRIGGER have completed their delayed_placeholders step
-    if remaining_placeholders > 0:
-        # Not all episodes from this trigger are ready yet - wait for them to complete
-        logger.verbose(f"Series {series_id} (trigger {trigger_id}) not ready: {remaining_placeholders} episodes still processing placeholders", extra={'emoji_type': 'wait'})
-        return False  # This episode waits
-    
-    # STEP 3: All episodes from this trigger ready! Create the series-level enrichment SubFlow for THIS TRIGGER
-    logger.info(f"🚀 All episodes ready for trigger {trigger_id}! Creating series-level enrichment for series {series_id}", extra={'emoji_type': 'success'})
-    
-    try:
-        # Double-check if series-level enrichment SubFlow was just created by another episode FROM THIS TRIGGER
-        existing_enrichment = session.query(SubFlow).filter(
-            SubFlow.series_id == series_id,
-            SubFlow.action == action,
-            SubFlow.steps == "enrich_comprehensive_metadata",
-            SubFlow.episode_id.is_(None),  # Series-level
-            SubFlow.trigger_id == trigger_id  # CRITICAL: Same trigger group
-        ).first()
-        
-        if existing_enrichment:
-            logger.debug(f"Series {series_id} enrichment SubFlow {existing_enrichment.id} already exists for trigger {trigger_id} (created by another episode)", extra={'emoji_type': 'debug'})
-            # Fall through to STEP 4 to wait for it
-        else:
-            # Create the series-level enrichment SubFlow FOR THIS TRIGGER
-            series_subflow = SubFlow(
-                series_id=series_id,
-                episode_id=None,  # Series-level, not episode-specific
-                action=action,
-                steps="enrich_comprehensive_metadata",
-                branch=str(series_id),
-                status="PENDING",  # PENDING so polling picks it up
-                trigger_id=trigger_id,  # CRITICAL: maintain trigger grouping
-                step_index=0
-            )
-            session.add(series_subflow)
-            session.commit()
-            
-            logger.info(f"✅ Created series-level enrichment SubFlow {series_subflow.id} for series {series_id} (trigger_id={trigger_id})", extra={'emoji_type': 'success'})
-            
-    except Exception as e:
-        logger.warning(f"Failed to create enrichment SubFlow for series {series_id} (trigger {trigger_id}): {e}", extra={'emoji_type': 'warning'})
-    
-    # STEP 4: Wait for enrichment to complete
-    # The enrichment SubFlow now exists (either we just created it or another episode did)
-    # Return False so this episode stays PENDING and will check again on next poll
-    logger.info(f"⏳ Episode {ent_id} waiting for series {series_id} enrichment (trigger {trigger_id}) to complete", extra={'emoji_type': 'wait'})
-    return False  # Episode waits for enrichment to finish
-
-
-def enrich_comprehensive_metadata(session, ent_id, model, action):
-    """Comprehensive enrichment: series, seasons, and episodes metadata from Sonarr
-    
-    This function is called by a SERIES-LEVEL SubFlow (not per episode).
-    It enriches the entire series, all seasons, and all episodes in one go.
-    """
-    try:
-        # Handle both direct Series calls and Episode-based SubFlows
-        if model == Series:
-            # For series-level SubFlows, ent_id should be the series_id
-            if ent_id is None:
-                logger.error(f"Series ID is None for comprehensive enrichment", extra={'emoji_type': 'error'})
-                return False
-            series = session.query(Series).get(ent_id)
-        elif model == Episode:
-            # When called from Episode SubFlow (shouldn't happen anymore), get the series
-            episode = session.query(Episode).get(ent_id)
-            if not episode or not episode.season:
-                logger.error(f"Episode {ent_id} or its season not found for comprehensive enrichment", extra={'emoji_type': 'error'})
-                return False
-            series = episode.season.series
-        else:
-            logger.info(f"Skipping comprehensive enrichment for unsupported entity: {model.__name__}", extra={'emoji_type': 'skip'})
-            return True
-        
-        if not series:
-            logger.error(f"Series not found for comprehensive enrichment (ent_id={ent_id})", extra={'emoji_type': 'error'})
-            return False
-        
-        logger.info(f"🔄 Starting comprehensive metadata enrichment for series: {series.title}", extra={'emoji_type': 'update'})
-        
-        # Step 1: Enrich Series metadata
-        logger.info(f"📺 Enriching series metadata...", extra={'emoji_type': 'update'})
-        series_success = enrich_series_metadata(session, ent_id, model, action)
-        if not series_success:
-            logger.warning(f"Series metadata enrichment failed, continuing with seasons/episodes", extra={'emoji_type': 'warning'})
-        
-        # Step 2: Enrich Season metadata for all seasons
-        seasons = session.query(Season).filter(Season.series_id == series.id).all()
-        
-        enriched_seasons = 0
-        for season in seasons:
-            try:
-                logger.info(f"📁 Enriching season {season.season_number} metadata...", extra={'emoji_type': 'update'})
-                # Call season enrichment with the season directly
-                season_success = enrich_season_metadata(session, season.id, Season, action)
-                if season_success:
-                    enriched_seasons += 1
-            except Exception as e:
-                logger.error(f"Failed to enrich season {season.id}: {e}", extra={'emoji_type': 'error'})
-                continue
-        
-        logger.info(f"✅ Enriched {enriched_seasons}/{len(seasons)} seasons", extra={'emoji_type': 'success'})
-        
-        # Step 3: Enrich Episode metadata for all episodes
-        episodes = session.query(Episode).join(Season).filter(
-            Season.series_id == series.id
-        ).all()
-        
-        if not episodes:
-            logger.info(f"No episodes found for series {series.title}", extra={'emoji_type': 'info'})
-            return True
-        
-        logger.info(f"🎬 Enriching metadata for {len(episodes)} episodes...", extra={'emoji_type': 'update'})
-        enriched_episodes = 0
-        failed_episodes = 0
-        for episode in episodes:
-            try:
-                # Call episode enrichment with the episode directly
-                episode_success = enrich_episode_metadata(session, episode.id, Episode, action)
-                if episode_success:
-                    enriched_episodes += 1
-                else:
-                    failed_episodes += 1
-            except Exception as e:
-                logger.error(f"Failed to enrich episode {episode.id}: {e}", extra={'emoji_type': 'error'})
-                failed_episodes += 1
-                continue
-        
-        logger.info(f"✅ Comprehensive enrichment completed: Series {'✓' if series_success else '✗'}, {enriched_seasons}/{len(seasons)} seasons, {enriched_episodes}/{len(episodes)} episodes", extra={'emoji_type': 'success'})
-        
-        # Check if enrichment failed for critical components
-        if not series_success:
-            logger.error(f"Series metadata enrichment failed - cannot proceed", extra={'emoji_type': 'error'})
-            return False
-        
-        if failed_episodes > 0:
-            logger.error(f"Failed to enrich {failed_episodes}/{len(episodes)} episodes - enrichment incomplete", extra={'emoji_type': 'error'})
-            return False
-        
-        # Mark series as enriched to prevent duplicate enrichment
-        if hasattr(series, 'metadata_enriched'):
-            series.metadata_enriched = True
-            session.add(series)
-            session.commit()
-        
-        # After series-level enrichment, create episode-level SubFlows for the next step in flow
-        if model == Series:
-            logger.info(f"🔄 Creating episode SubFlows for next step in flow", extra={'emoji_type': 'process'})
-            
-            # Get all episodes in this series that need to continue the flow
-            episodes_to_process = session.query(Episode).join(Season).filter(
-                Season.series_id == series.id
-            ).all()
-            
-            created_count = 0
-            for episode in episodes_to_process:
-                # Check if episode already has a SubFlow for the branching step
-                existing_branch_flow = session.query(SubFlow).filter(
-                    SubFlow.episode_id == episode.id,
-                    SubFlow.action == action,
-                    SubFlow.steps.like("%jellyfin%")  # Contains jellyfin branching
-                ).first()
-                
-                if not existing_branch_flow:
-                    # Create episode-level SubFlow that will hit the branching step in the flow
-                    # The flow manager will handle the jellyfin/plex branching automatically
-                    episode_subflow = SubFlow(
-                        series_id=series.id,
-                        episode_id=episode.id,
-                        action=action,
-                        steps="create_jellyfin_nfo,refresh_jellyfin_dummy,verify_dummy_scan_jellyfin,update_placeholder_status,verify_dummy_scan_jellyfin",
-                        branch="jellyfin",  # Default to jellyfin branch
-                        status="PENDING",
-                        step_index=0  # Start at first step in the branch
-                    )
-                    session.add(episode_subflow)
-                    
-                    # Update episode to reflect its new step
-                    episode.current_step_name = "create_jellyfin_nfo"
-                    episode.status = 'PENDING'
-                    session.add(episode)
-                    
-                    created_count += 1
-            
-            session.commit()
-            logger.info(f"✅ Created {created_count} episode SubFlows for platform processing", extra={'emoji_type': 'success'})
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error during comprehensive enrichment: {e}", exc_info=True, extra={'emoji_type': 'error'})
+        logger.error(f"flow_enrich_movie failed: {e}", extra={'emoji_type': 'error'})
         return False
