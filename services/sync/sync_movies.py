@@ -53,10 +53,12 @@ def sync_movies_with_radarr(instance_name=None):
             })
 
     session = get_session()
+    from services.handlers import handle_movieadd_scheduler
     try:
         existing_movies = {(m.tmdbid, m.is_4k): m for m in session.query(Movie).all()}
         added = 0
         updated = 0
+        enqueued = 0
         for instance in instances:
             logger.info(f"Fetching movies from Radarr instance '{instance.get('name')}' at {instance.get('url')}")
             try:
@@ -67,15 +69,10 @@ def sync_movies_with_radarr(instance_name=None):
 
             for movie in movies:
                 tmdbid = movie.get('tmdbId')
-
-                # Prefer movieFile details when present
                 movie_file = movie.get('movieFile') or {}
                 moviefile_path = movie_file.get('path') or ''
                 moviefile_size = movie_file.get('size') or movie_file.get('sizeInBytes')
-
-                # Radarr configured library path (folder) - present even if no file
                 filepath = movie.get('path') or ''
-                # Prefer file path from movieFile when deciding 4k and actual file presence
                 file_to_check = moviefile_path or filepath
                 is_4k = is_4k_request(file_to_check)
                 key = (tmdbid, is_4k)
@@ -86,12 +83,9 @@ def sync_movies_with_radarr(instance_name=None):
                 physical_release = movie.get('physicalRelease')
 
                 has_file = bool(movie.get('hasFile', False) or movie_file)
-                # Radarr release lifecycle status (announced / inCinemas / released)
                 radarr_release_status = movie.get('status') or movie_file.get('status')
-                # Whether Radarr is monitoring this movie
                 radarr_monitored = bool(movie.get('monitored', False))
 
-                # Try to extract a friendly quality label
                 radarr_quality = None
                 q = movie_file.get('quality') or movie.get('quality')
                 if isinstance(q, dict):
@@ -122,6 +116,32 @@ def sync_movies_with_radarr(instance_name=None):
                     if changed:
                         updated += 1
                 else:
+                    # If movie is unmonitored in Radarr and not present in DB, enqueue handle_movieadd
+                    if not radarr_monitored:
+                        # Prepare a minimal dict for the handler
+                        movie_data = {
+                            'movie': {
+                                'tmdbId': tmdbid,
+                                'title': movie.get('title'),
+                                'year': movie.get('year'),
+                                'id': movie.get('id'),
+                                'monitored': radarr_monitored,
+                                'folderPath': filepath,
+                                'movieFile': movie_file,
+                                'hasFile': has_file,
+                                'quality': radarr_quality,
+                                'status': radarr_release_status
+                            }
+                        }
+                        # Enqueue the scheduler action
+                        try:
+                            job_scheduled = handle_movieadd_scheduler.enqueue(movie_data['movie'])
+                            if job_scheduled:
+                                enqueued += 1
+                                logger.info(f"Enqueued 'handle_movieadd' for missing/unmonitored movie: {tmdbid}")
+                        except Exception as e:
+                            logger.error(f"Failed to enqueue 'handle_movieadd' for TMDB {tmdbid}: {e}")
+                    # Still add to DB for tracking
                     new_movie = Movie(
                         tmdbid=tmdbid,
                         title=movie.get('title'),
@@ -144,7 +164,7 @@ def sync_movies_with_radarr(instance_name=None):
                     added += 1
         session.commit()
         processed = added + updated
-        logger.info(f"Movie sync complete: {added} added, {updated} updated, {processed} total processed")
+        logger.info(f"Movie sync complete: {added} added, {updated} updated, {enqueued} enqueued, {processed} total processed")
     finally:
         session.close()
 
