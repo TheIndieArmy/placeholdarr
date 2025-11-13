@@ -201,15 +201,21 @@ class ActionScheduler:
                 # Process a batch of SubFlows per poll to increase throughput.
                 # Only poll for PENDING or FAILED (PAUSED is handled by _release_paused_barriers)
                 batch_size = getattr(settings, 'SCHEDULER_BATCH_SIZE', 8)
+                # Always pick up subflows with the stuck marker, regardless of status
                 sfs = (
                     session.query(SubFlow)
                     .with_for_update(skip_locked=True)
                     .filter(
-                        SubFlow.status.in_(["PENDING", "FAILED"]),
-                        func.coalesce(SubFlow.retry_count, 0) < self.max_retries,
-                        SubFlow.steps.isnot(None),
-                        SubFlow.steps != '',
-                        SubFlow.action == self.action,
+                        (
+                            (SubFlow.status.in_(["PENDING", "FAILED"]) &
+                             (func.coalesce(SubFlow.retry_count, 0) < self.max_retries) &
+                             SubFlow.steps.isnot(None) &
+                             (SubFlow.steps != '') &
+                             (SubFlow.action == self.action)
+                            )
+                            |
+                            ((SubFlow.error_message != None) & (SubFlow.error_message.contains('[STUCK_TOO_LONG_MARKER]')))
+                        )
                     )
                     .order_by(SubFlow.id)
                     .limit(batch_size)
@@ -231,13 +237,18 @@ class ActionScheduler:
                         logger.verbose(f"SubFlow {sf.id} marked as complete - all steps finished", extra={'emoji_type': 'success'})
                         continue
 
+                    # Check if this subflow was marked as STUCK_TOO_LONG in previous stall detection
+                    if sf.error_message and '[STUCK_TOO_LONG_MARKER]' in sf.error_message:
+                        logger.info(f"SubFlow {sf.id} was previously stuck too long (PENDING/PAUSED) and is now being force-picked up for scheduling in poll_and_enqueue", extra={'emoji_type': 'repair'})
+                        # Remove the marker after picking up
+                        sf.error_message = sf.error_message.replace(' [STUCK_TOO_LONG_MARKER]', '')
+
                     next_func_name = steps[sf.step_index]
                     logger.verbose(f"Next step for subflow {sf.id}: {next_func_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
                     # Don't mark as QUEUED yet - keep as PENDING until job actually starts
                     schedule_plan.append((sf.id, next_func_name, sf.episode_id))
 
                 # Don't bulk update status to QUEUED - leave as PENDING until job execution starts
-                
                 return schedule_plan
 
         try:
@@ -479,43 +490,18 @@ class ActionScheduler:
                             # Check if entity is still in a processing state when it should be advanced
                             # CRITICAL FIX: Only advance if the entity's current action matches this scheduler's action
                             # This prevents infinite loops where completed entities get re-advanced by wrong schedulers
-                            # Note: Check both PENDING and DONE - DONE entities might have been reset to PENDING by advancement bug fix
-                            if (hasattr(entity, 'status') and entity.status in ['PENDING', 'DONE'] and
+                            # Note: Removed QUEUED from check since entities in QUEUED are actively executing
+                            if (hasattr(entity, 'status') and entity.status in ['PENDING'] and
                                 hasattr(entity, 'action') and entity.action == self.action):
+                                logger.info(f"Detected stalled {entity_type} {entity_id} - all SubFlows done for action '{self.action}' but entity status is {entity.status}", extra={'emoji_type': 'repair'})
                                 
-                                # For DONE entities, verify they're actually at the last step
-                                should_advance = False
-                                if entity.status == 'DONE':
-                                    # Check if current_step_name matches the last step
-                                    try:
-                                        from services.flow_manager import flow_manager
-                                        flow_def = flow_manager.get_flow(self.action)
-                                        if flow_def:
-                                            last_step_name = flow_manager.get_last_step_name(flow_def)
-                                            if entity.current_step_name != last_step_name:
-                                                logger.warning(
-                                                    f"Detected DONE {entity_type} {entity_id} with incomplete progression - "
-                                                    f"current_step_name='{entity.current_step_name}' but should be '{last_step_name}'",
-                                                    extra={'emoji_type': 'repair'}
-                                                )
-                                                should_advance = True
-                                    except Exception as flow_error:
-                                        logger.debug(f"Could not check last step for {entity_type} {entity_id}: {flow_error}", extra={'emoji_type': 'debug'})
-                                else:
-                                    # PENDING entity with all SubFlows done should always advance
-                                    should_advance = True
-                                
-                                if should_advance:
-                                    logger.info(f"Detected stalled {entity_type} {entity_id} - all SubFlows done for action '{self.action}' but entity status is {entity.status}", extra={'emoji_type': 'repair'})
-                                    
-                                    # Try to advance the entity to next flow stage
-                                    try:
-                                        self._advance_entity(entity_id, entity_model)
-                                        stall_fixes += 1
-                                        logger.info(f"Fixed stalled {entity_type} {entity_id} by advancing to next stage", extra={'emoji_type': 'success'})
-                                    except Exception as advance_error:
-                                        logger.warning(f"Failed to advance stalled {entity_type} {entity_id}: {advance_error}", extra={'emoji_type': 'warning'})
-                            
+                                # Try to advance the entity to next flow stage
+                                try:
+                                    self._advance_entity(entity_id, entity_model)
+                                    stall_fixes += 1
+                                    logger.info(f"Fixed stalled {entity_type} {entity_id} by advancing to next stage", extra={'emoji_type': 'success'})
+                                except Exception as advance_error:
+                                    logger.warning(f"Failed to advance stalled {entity_type} {entity_id}: {advance_error}", extra={'emoji_type': 'warning'})
                             elif hasattr(entity, 'action') and entity.action != self.action:
                                 logger.verbose(f"{entity_type} {entity_id} has completed SubFlows for action '{self.action}' but entity is now on action '{entity.action}' - no advancement needed", extra={'emoji_type': 'debug'})
                             else:
@@ -545,9 +531,23 @@ class ActionScheduler:
                                     elif pending_sf.status == 'PENDING':
                                         # SubFlow has been pending too long - might be overlooked by scheduler
                                         logger.verbose(f"SubFlow {pending_sf.id} has been PENDING for over 5 minutes - will be picked up in next poll", extra={'emoji_type': 'info'})
+                                        # Mark as stuck for forced pickup
+                                        if not pending_sf.error_message or '[STUCK_TOO_LONG_MARKER]' not in pending_sf.error_message:
+                                            if pending_sf.error_message:
+                                                pending_sf.error_message += ' [STUCK_TOO_LONG_MARKER]'
+                                            else:
+                                                pending_sf.error_message = '[STUCK_TOO_LONG_MARKER]'
+                                            session.add(pending_sf)
                                     elif pending_sf.status == 'PAUSED':
                                         # SubFlow has been paused too long - barrier might be stuck
                                         logger.warning(f"SubFlow {pending_sf.id} has been PAUSED for over 5 minutes - barrier might be stuck.", extra={'emoji_type': 'warning'})
+                                        # Mark as stuck for forced pickup
+                                        if not pending_sf.error_message or '[STUCK_TOO_LONG_MARKER]' not in pending_sf.error_message:
+                                            if pending_sf.error_message:
+                                                pending_sf.error_message += ' [STUCK_TOO_LONG_MARKER]'
+                                            else:
+                                                pending_sf.error_message = '[STUCK_TOO_LONG_MARKER]'
+                                            session.add(pending_sf)
 
                     except Exception as entity_error:
                         logger.warning(f"Error checking {entity_type} {entity_id} for stalls: {entity_error}", extra={'emoji_type': 'warning'})
@@ -1210,8 +1210,10 @@ class ActionScheduler:
                     )
             elif old_sf.action == self.action and old_sf.status == 'FAILED':
                 # Only cancel failed SubFlows of the same action for retry
+                # When retrying, reset retry_count
+                old_sf.retry_count = 0
                 subflows_to_cancel.append(old_sf)
-                logger.verbose(f"Will cancel failed SubFlow {old_sf.id} for retry", extra={'emoji_type': 'warning'})
+                logger.verbose(f"Will cancel failed SubFlow {old_sf.id} for retry and reset retry_count", extra={'emoji_type': 'warning'})
             # Note: Do NOT cancel DONE or PENDING/QUEUED/PAUSED SubFlows of the same action
             
         if subflows_to_cancel:
