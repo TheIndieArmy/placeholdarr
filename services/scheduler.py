@@ -1928,18 +1928,18 @@ class ActionScheduler:
             if not entity_model:
                 logger.error(f"No model type available for advancing entity {ent_id}", extra={'emoji_type': 'error'})
                 return
-            
+
             ent = session.query(entity_model).get(ent_id)
             if not ent:
                 logger.error(f"{entity_model.__name__} {ent_id} not found", extra={'emoji_type': 'error'})
                 return
-                
+
             logger.debug(f"Current entity status: {ent.status}, current_step_name: {getattr(ent, 'current_step_name', 'None')}", extra={'emoji_type': 'debug'})
-            
+
             # Determine the correct branch from completed SubFlows
             current_branch = self._get_entity_branch(session, ent_id, entity_model)
             logger.verbose(f"Determined branch for {entity_model.__name__} {ent_id}: {current_branch}", extra={'emoji_type': 'debug'})
-            
+
             # Use step_index for correct advancement in repeated steps
             step_index = None
             if ent.current_step_name:
@@ -1966,7 +1966,7 @@ class ActionScheduler:
                     if ent.current_step_name in sf_steps:
                         step_index = max(i for i, s in enumerate(sf_steps) if s == ent.current_step_name)
             entry = flow_manager.next_entry(self.action, current_branch, ent.current_step_name, step_index)
-            
+
             # Get trigger_id from the last completed SubFlow to maintain barrier synchronization
             trigger_id = None
             if entity_model is Movie:
@@ -1978,38 +1978,31 @@ class ActionScheduler:
             else:
                 logger.error(f"Unknown entity model: {entity_model}", extra={'emoji_type': 'error'})
                 return
-            
+
             last_completed = session.query(SubFlow).filter(
                 id_filter,
                 SubFlow.action == self.action,
                 SubFlow.status == 'DONE'
             ).order_by(SubFlow.id.desc()).first()
-            
+
             if last_completed:
                 trigger_id = last_completed.trigger_id
                 logger.debug(f"Using trigger_id {trigger_id} from last completed SubFlow for advancement", extra={'emoji_type': 'debug'})
-            
+
             if entry:
                 new_step_name = flow_manager.get_entry_id(self.action, entry)
                 logger.verbose(f"Advancing {entity_model.__name__} {ent_id} from '{ent.current_step_name}' to '{new_step_name}'", extra={'emoji_type': 'step'})
-                
+
                 ent.current_step_name = new_step_name
-                ent.status = 'QUEUED'                       
+                ent.status = 'QUEUED'
                 session.add(ent)
                 session.commit()
-                
-                # Temporarily set the model for subflow creation
-                # old_model = self.model
-                # self.model = entity_model
-                
+
                 logger.debug(f"Creating subflows for next entry: {type(entry)}", extra={'emoji_type': 'debug'})
                 # now create SubFlows for the next entry
                 self._create_subflows(ent_id, entry, entity_model, trigger_id=trigger_id)
                 logger.info(f"Successfully advanced {entity_model.__name__} {ent_id} to next stage", extra={'emoji_type': 'success'})
-                
-                # Restore original model
-                # self.model = old_model
-                
+
             else:
                 # CRITICAL FIX: Verify we're actually at the last step before marking DONE
                 flow_def = flow_manager.get_flow(self.action)
@@ -2022,35 +2015,46 @@ class ActionScheduler:
                             f"flow_manager.next_entry() returned None prematurely! Branch={current_branch}, step_index={step_index}",
                             extra={'emoji_type': 'error'}
                         )
-                        
-                        # FIX: Manually advance to the next step by re-querying with corrected logic
-                        # The bug is in flow_manager, but we can work around it by trying again
+
                         logger.warning(
                             f"Setting {entity_model.__name__} {ent_id} to PENDING to trigger re-advancement",
                             extra={'emoji_type': 'repair'}
                         )
-                        
-                        # Set entity to PENDING so stall detection or next poll will pick it up
+
                         ent.status = 'PENDING'
                         session.add(ent)
                         session.commit()
-                        
-                        # The flow_manager bug should now be fixed, so next poll should work
+
                         logger.info(
                             f"Entity {entity_model.__name__} {ent_id} reset to PENDING - will be re-advanced on next poll",
                             extra={'emoji_type': 'retry'}
                         )
                         return
-                
+
                 logger.info(f"No more entries for {entity_model.__name__} {ent_id} - marking as DONE", extra={'emoji_type': 'success'})
                 ent.status = 'DONE'
                 session.add(ent)
                 session.commit()
                 logger.info(f"{entity_model.__name__} {ent_id} processing complete", extra={'emoji_type': 'success'})
-                
+
                 # End handler logging session if this completes the handler
                 self._check_and_end_handler_session(ent_id, entity_model, ent)
-                
+
+                # --- NEW LOGIC: If this is an Episode, also check and end the parent Series handler session ---
+                if entity_model.__name__ == 'Episode':
+                    # Get the parent series ID from the episode's season
+                    try:
+                        # Defensive: check for season and series_id
+                        season = getattr(ent, 'season', None)
+                        if season and hasattr(season, 'series_id'):
+                            parent_series_id = season.series_id
+                            # Query the parent series entity
+                            parent_series = session.query(Series).get(parent_series_id)
+                            if parent_series:
+                                self._check_and_end_handler_session(parent_series_id, Series, parent_series)
+                    except Exception as e:
+                        logger.warning(f"Failed to check/end parent Series handler session for Episode {ent_id}: {e}", extra={'emoji_type': 'warning'})
+
         except Exception as e:
             logger.error(f"Error advancing entity {ent_id}: {e}", extra={'emoji_type': 'error'})
             session.rollback()
@@ -2060,54 +2064,76 @@ class ActionScheduler:
     def _check_and_end_handler_session(self, ent_id: int, entity_model: Type, entity):
         """
         Check if handler processing is complete and end the logging session.
-        For series: Check if all episodes are DONE
-        For movies: Entity completion means handler is done
+        For series: End only if all episodes are DONE, or the series action changes, or status is CANCELLED.
+        For movies: End only if status is DONE, or the action changes, or status is CANCELLED.
         """
         try:
-            # Find active logging session for this handler and entity
             session_id = get_handler_session_for_entity(self.action, ent_id)
             if not session_id:
                 return  # No active logging session
-            
+
+            # Always end if action changes (series never gets CANCELLED status)
+            action_changed = hasattr(entity, 'action') and entity.action != self.action
+
             if entity_model.__name__ == 'Series':
-                # For series, check if all episodes are DONE
                 session = get_session()
                 try:
-                    # Count episodes that are not DONE for this series and action
                     pending_episodes = session.query(Episode).join(Season).filter(
                         Season.series_id == ent_id,
                         Episode.action == self.action,
                         Episode.status.in_(['PENDING', 'QUEUED', 'FAILED', 'PAUSED'])
                     ).count()
-                    
-                    if pending_episodes == 0:
-                        # All episodes are done, end the handler session
-                        total_episodes = session.query(Episode).join(Season).filter(
-                            Season.series_id == ent_id,
-                            Episode.action == self.action
-                        ).count()
-                        
+                    total_episodes = session.query(Episode).join(Season).filter(
+                        Season.series_id == ent_id,
+                        Episode.action == self.action
+                    ).count()
+
+                    if pending_episodes == 0 or action_changed:
+                        # All episodes are done, or action changed
                         end_handler_logging(
-                            session_id, 
-                            success=True,
-                            summary=f"Series processing complete - {total_episodes} episodes processed"
+                            session_id,
+                            success=(pending_episodes == 0),
+                            summary=(
+                                f"Series processing complete - {total_episodes} episodes processed"
+                                if pending_episodes == 0 else "Series action changed; logging session ended"
+                            )
                         )
-                        logger.info(f"🏁 Handler session ended for series {ent_id} - all {total_episodes} episodes complete", extra={'emoji_type': 'success'})
+                        logger.info(f"🏁 Handler session ended for series {ent_id} - reason: "
+                                    f"{'all episodes DONE' if pending_episodes == 0 else 'action changed'}",
+                                    extra={'emoji_type': 'success'})
                     else:
                         logger.debug(f"Series {ent_id} still has {pending_episodes} pending episodes", extra={'emoji_type': 'debug'})
-                        
                 finally:
                     session.close()
-                    
+
             elif entity_model.__name__ == 'Movie':
-                # For movies, entity completion means handler is done
-                end_handler_logging(
-                    session_id,
-                    success=(entity.status == 'DONE'),
-                    summary=f"Movie processing {'complete' if entity.status == 'DONE' else 'failed'}"
-                )
-                logger.info(f"🏁 Handler session ended for movie {ent_id}", extra={'emoji_type': 'success'})
-                
+                is_cancelled = hasattr(entity, 'status') and entity.status == 'CANCELLED'
+                if entity.status == 'DONE' or action_changed or is_cancelled:
+                    end_handler_logging(
+                        session_id,
+                        success=(entity.status == 'DONE' and not is_cancelled),
+                        summary=(
+                            "Movie processing complete" if entity.status == 'DONE' else
+                            ("Movie processing cancelled" if is_cancelled else "Movie action changed; logging session ended")
+                        )
+                    )
+                    logger.info(f"🏁 Handler session ended for movie {ent_id} - reason: "
+                                f"{'DONE' if entity.status == 'DONE' else ('CANCELLED' if is_cancelled else 'action changed')}",
+                                extra={'emoji_type': 'success'})
+            elif entity_model.__name__ == 'Episode':
+                is_cancelled = hasattr(entity, 'status') and entity.status == 'CANCELLED'
+                if entity.status == 'DONE' or action_changed or is_cancelled:
+                    end_handler_logging(
+                        session_id,
+                        success=(entity.status == 'DONE' and not is_cancelled),
+                        summary=(
+                            "Episode processing complete" if entity.status == 'DONE' else
+                            ("Episode processing cancelled" if is_cancelled else "Episode action changed; logging session ended")
+                        )
+                    )
+                    logger.info(f"🏁 Handler session ended for episode {ent_id} - reason: "
+                                f"{'DONE' if entity.status == 'DONE' else ('CANCELLED' if is_cancelled else 'action changed')}",
+                                extra={'emoji_type': 'success'})
         except Exception as e:
             logger.error(f"Error checking/ending handler session for {entity_model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
 
