@@ -1,6 +1,8 @@
 import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
+from typing import Type
 from core.config import settings
 from core.logger import logger
+from services.postgres.models import Episode, Movie, Season, Series, SubFlow
 from services.utils import (
     resolve_final_folder, sanitize_filename, strip_status_markers, get_arr_config
 )
@@ -234,138 +236,6 @@ def trigger_radarr_search(movie_id, movie_title=None):
         logger.error(f"Radarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None, year=None):
-    """Search for a movie in Radarr"""
-    config = get_arr_config('movie', is_4k)
-    # Validate tmdb_id is an integer
-    try:
-        tmdb_id_int = int(tmdb_id)
-    except (ValueError, TypeError):
-        logger.error(f"Invalid TMDB ID received: {tmdb_id}", extra={'emoji_type': 'error'})
-        return False
-    try:
-        movies_response = requests.get(f"{config['url']}/movie", headers={'X-Api-Key': config['api_key']})
-        movies_response.raise_for_status()
-        movies = movies_response.json()
-        if not isinstance(movies, list):
-            logger.error(f"Expected list from Radarr /movie endpoint but got {type(movies)}", extra={'emoji_type': 'error'})
-            return False
-        
-        existing = [m for m in movies if int(m.get("tmdbId", 0)) == tmdb_id_int]
-        if existing:
-            movie_data = existing[0]
-            logger.info(f"Movie already exists in Radarr: {movie_data['title']}", extra={'emoji_type': 'info'})
-            if not movie_data.get("monitored", False):
-                movie_data["monitored"] = True
-                put_response = requests.put(f"{config['url']}/movie/{movie_data['id']}", json=movie_data, headers={'X-Api-Key': config['api_key']})
-                put_response.raise_for_status()
-                logger.info(f"Movie {movie_data['title']} marked as monitored", extra={'emoji_type': 'monitored'})
-            now = time.time()
-            if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
-                LAST_RADARR_SEARCH[rating_key] = now
-                trigger_radarr_search(movie_data['id'], movie_data['title'])
-            else:
-                logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-            # Do not schedule further timer retries if TMDB ID is invalid
-            return movie_data['id']
-
-        lookup = requests.get(f"{config['url']}/movie/lookup", params={'term': f"tmdb:{tmdb_id_int}"}, headers={'X-Api-Key': config['api_key']})
-        lookup.raise_for_status()
-        movie_data = lookup.json()[0]
-        payload = {
-            'title': movie_data['title'],
-            'qualityProfileId': 7,
-            'tmdbId': int(movie_data['tmdbId']),
-            'year': int(movie_data['year']),
-            'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,  # Use .env value
-            'monitored': True,
-            'addOptions': {
-                'searchForMovie': True,
-                'addMethod': 'manual',
-                'monitor': 'movieOnly'
-            }
-        }
-        response = requests.post(f"{config['url']}/movie", json=payload, headers={'X-Api-Key': config['api_key']})
-        response.raise_for_status()
-        logger.info(f"Added movie: {movie_data['title']}", extra={'emoji_type': 'success'})
-        now = time.time()
-        if rating_key not in LAST_RADARR_SEARCH or (now - LAST_RADARR_SEARCH[rating_key] >= 30):
-            LAST_RADARR_SEARCH[rating_key] = now
-            trigger_radarr_search(response.json()['id'], movie_data['title'])
-        else:
-            logger.debug("Manual search already triggered recently; skipping duplicate search", extra={'emoji_type': 'debug'})
-        return True
-
-    except Exception as e:
-        logger.error(f"Radarr operation failed: {e}", extra={'emoji_type': 'error'})
-        return False
-
-# Sonarr integration functions would follow a similar pattern.
-def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, is_4k=False):
-    """Search for a series in Sonarr but don't automatically mark as monitored"""
-    try:
-        config = get_arr_config('tv', is_4k)
-        # First check if series exists
-        existing_response = requests.get(
-            f"{config['url']}/series", 
-            params={'tvdbId': tvdb_id}, 
-            headers={'X-Api-Key': config['api_key']}
-        )
-        existing_response.raise_for_status()
-        
-        if existing_response.status_code == 200 and existing_response.json():
-            series = existing_response.json()[0]
-            logger.info(f"Series already exists in Sonarr: {series['title']}", extra={'emoji_type': 'info'})
-            
-            return series['id']
-                
-            # Only trigger series-wide search if not in episode mode
-            trigger_sonarr_search(series['id'], series_title=series['title'], is_4k=is_4k)
-            return series['id']
-        
-        # If series doesn't exist, look it up and add it
-        lookup_response = requests.get(
-            f"{config['url']}/series/lookup", 
-            params={'term': f"tvdb:{tvdb_id}"},
-            headers={'X-Api-Key': config['api_key']}
-        )
-        lookup_response.raise_for_status()
-        series_data = lookup_response.json()[0]
-        
-        payload = {
-            'title': series_data['title'],
-            'qualityProfileId': 3,
-            'titleSlug': series_data['titleSlug'],
-            'tvdbId': series_data['tvdbId'],
-            'year': series_data['year'],
-            'rootFolderPath': settings.TV_LIBRARY_FOLDER,  # Use .env value
-            'monitored': True,
-            'addOptions': {'searchForMissingEpisodes': True},
-            'seasons': []
-        }
-        
-        # Add all seasons as monitored
-        for season in series_data.get('seasons', []):
-            if season.get('seasonNumber', 0) > 0:  # Skip season 0
-                payload['seasons'].append({
-                    'seasonNumber': season['seasonNumber'],
-                    'monitored': True
-                })
-        
-        add_response = requests.post(
-            f"{config['url']}/series",
-            json=payload,
-            headers={'X-Api-Key': config['api_key']}
-        )
-        add_response.raise_for_status()
-        added_series = add_response.json()
-        logger.info(f"Added series: {series_data['title']}", extra={'emoji_type': 'success'})
-        
-        return added_series['id']
-        
-    except Exception as e:
-        logger.error(f"Sonarr operation failed: {e}", extra={'emoji_type': 'error'})
-        return None
 
 def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, series_title="Unknown Series", is_4k=False):
     """Trigger a search in Sonarr for episodes"""
@@ -694,14 +564,19 @@ def get_radarr_queue(is_4k=False):
         logger.error(f"Error fetching Radarr queue: {e}", extra={'emoji_type': 'error'})
         return []
 
-def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, season_number=None, episode_number=None, is_4k=False, file_path=None):
+def delete_dummy_file(
+    session: Session,
+    ent_id: int,
+    model: Type,
+    action: str
+):
+    """Adapter for SubFlow worker signature.
+
+    Derive the human-readable fields (title/year/id/library/season/episode)
+    from the DB row and delegate the actual filesystem and DB updates to
+    delete_dummy_files(..., session=session).
     """
-    Find a TV series in Sonarr using multiple fallback methods:
-    1. Path-based ID matching (most reliable)
-    2. TVDB ID matching
-    3. Title matching
-    Returns the series ID if found, None otherwise
-    """
+    logger.info(f"🗑️ delete_dummy_file called for {model.__name__} ID {ent_id}, action: {action}", extra={'emoji_type': 'delete'})
     try:
         # Determine which Sonarr instance to use
         sonarr_url = settings.SONARR_URL_4K if is_4k else settings.SONARR_URL
@@ -716,72 +591,32 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         series_url = f"{sonarr_url}/series"
         series_response = requests.get(series_url, headers=headers)
         
-        if series_response.status_code != 200:
-            logger.error(f"Failed to get series from Sonarr: {series_response.text}", extra={'emoji_type': 'error'})
-            return None
+        elif model is Episode:
+            episode = dbSession.query(Episode).get(ent_id)
+            if not episode:
+                logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
+                return False
             
-        all_series = series_response.json()
+            episode.placeholder_status = status
+            dbSession.commit()
+            logger.info(f"Updated episode placeholder status to '{status}' for ID {ent_id}", extra={'emoji_type': 'update'})
+            return True
         
-        # METHOD 1: Try to match by filepath ID (most reliable)
-        if file_path:
-            # Extract ID using regex pattern matching
-            imdb_match = re.search(r'{imdb-([^}]+)}', file_path)
-            tvdb_match = re.search(r'{tvdb-(\d+)}', file_path)
-            tmdb_match = re.search(r'{tmdb-(\d+)}', file_path)
-            
-            if imdb_match:
-                path_id = imdb_match.group(1)
-                for series in all_series:
-                    if series.get('imdbId') == path_id:
-                        logger.info(f"Found series in Sonarr by path IMDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                        return series['id']
-            
-            if tvdb_match:
-                path_id = tvdb_match.group(1)
-                for series in all_series:
-                    if str(series.get('tvdbId')) == str(path_id):
-                        logger.info(f"Found series in Sonarr by path TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                        return series['id']
-            
-            if tmdb_match:
-                path_id = tmdb_match.group(1)
-                for series in all_series:
-                    if str(series.get('tmdbId')) == str(path_id):
-                        logger.info(f"Found series in Sonarr by path TMDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                        return series['id']
-                        
-            # Also try to match by series folder name in path
-            path_parts = file_path.split('/')
-            for idx, part in enumerate(path_parts):
-                if idx > 0 and idx < len(path_parts) - 1 and 'Season' in path_parts[idx+1]:
-                    series_folder = part
-                    for series in all_series:
-                        if series_folder in series.get('path', ''):
-                            logger.info(f"Found series in Sonarr by folder path match: {series['title']}", extra={'emoji_type': 'info'})
-                            return series['id']
-        
-        # METHOD 2: Try TVDB ID matching (next most reliable)
-        if tvdb_id:
-            for series in all_series:
-                if str(series.get('tvdbId')) == str(tvdb_id):
-                    logger.info(f"Found series in Sonarr by TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
-                    return series['id']
-        
-        # METHOD 3: Try title matching (least reliable but good fallback)
-        if title:
-            # Try exact match first
-            for series in all_series:
-                if series.get('title', '').lower() == title.lower():
-                    logger.info(f"Found series in Sonarr by title: {series['title']}", extra={'emoji_type': 'info'})
-                    return series['id']
-        
-        # If we get here, series wasn't found
-        logger.warning(f"Series not found in Sonarr: {'TVDB:'+str(tvdb_id) if tvdb_id else title}", extra={'emoji_type': 'warning'})
-        return None
-        
+        else:
+            logger.error(f'Unsupported model type for update_placeholder_status: {model}', extra={'emoji_type': 'error'})
+            return False
     except Exception as e:
-        logger.error(f"Error finding series in Sonarr: {e}", extra={'emoji_type': 'error'})
-        return None
+        logger.error(f"Error updating placeholder status for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
+        return False
+
+def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, session: Session = None):
+    """Delete placeholder files once real files are downloaded.
+
+    Accepts an explicit SQLAlchemy `session` via kwarg `session` when
+    invoked as a worker step. For backwards compatibility callers that don't
+    pass `session` will only have filesystem changes applied.
+    """
+    import os
 
 def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None, season_number=None, episode_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None):
     """

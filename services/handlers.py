@@ -11,47 +11,22 @@ from services.integrations import (
     mark_series_monitored, get_episodes_for_lookahead,
     monitor_season
 )
-from services.queue_monitor import add_to_monitor
-from services.utils import (
-    strip_movie_status, sanitize_filename, extract_episode_title, 
-    is_4k_request, strip_status_markers
+from services.postgres.db import get_session
+from services.postgres.movie_repo import MovieRepository
+from services.postgres.series_repo import SeriesRepository
+from services.scheduler import (
+    handle_import_event_scheduler,
+    handle_seriesadd_scheduler,
+    handle_episodefiledelete_scheduler,
+    handle_moviefiledelete_scheduler,
+    handle_movie_delete_scheduler,
+    handle_movieadd_scheduler,
+    handle_seriesdelete_scheduler,
+    playback_scheduler
 )
 from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
-
-# Series-based tracking for playback suppression
-RECENT_SERIES_PLAYBACKS = {}  # Format: {tvdb_id: timestamp}
-
-def should_process_playback(tvdb_id):
-    """
-    Determine if we should process this series playback or suppress it
-    Returns True if we should process, False if we should suppress
-    """
-    # If cooldown is disabled (0), always process
-    if getattr(settings, 'PLAYBACK_COOLDOWN', 30) <= 0:
-        return True
-        
-    now = time.time()
-    series_key = str(tvdb_id)
-    
-    # Check if this series was recently processed
-    if series_key in RECENT_SERIES_PLAYBACKS:
-        last_time = RECENT_SERIES_PLAYBACKS[series_key]
-        if now - last_time < settings.PLAYBACK_COOLDOWN:
-            # Within cooldown period - suppress this playback
-            logger.info(f"Suppressing duplicate playback for series {tvdb_id} (within {settings.PLAYBACK_COOLDOWN}s cooldown)", 
-                      extra={'emoji_type': 'skip'})
-            return False
-    
-    # Update timestamp for this series
-    RECENT_SERIES_PLAYBACKS[series_key] = now
-    
-    # Clean up old entries
-    for k in list(RECENT_SERIES_PLAYBACKS.keys()):
-        if now - RECENT_SERIES_PLAYBACKS[k] > settings.PLAYBACK_COOLDOWN:
-            del RECENT_SERIES_PLAYBACKS[k]
-    
-    return True
+from services.integrations import enrich_movie_from_radarr
 
 def handle_webhook(data: dict, source_port: int = None):
     """Handle webhook with quality awareness"""
@@ -63,20 +38,26 @@ def handle_webhook(data: dict, source_port: int = None):
     # Log incoming webhook but keep it brief
     logger.debug(f"{source} payload: {data}", extra={'emoji_type': 'debug'})
     
-    # Get file path for quality detection
+    # Get file path for quality detection. Only call Jellyfin lookup when ItemId is present.
     file_path = (data.get('media', {}).get('file_info', {}).get('path') or 
                  data.get('movie', {}).get('folderPath') or 
-                 data.get('file', '') or
-                 get_jellyfin_file_path(data.get("ItemId"), data.get("UserId")))
+                 data.get('file', ''))
+    if not file_path and data.get("ItemId"):
+        try:
+            file_path = get_jellyfin_file_path(data.get("ItemId"), data.get("UserId"))
+        except Exception:
+            # jellyfin lookup errors are non-fatal for quality detection
+            file_path = ''
     
     is_4k = is_4k_request(file_path, source_port)
-    logger.debug(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
+    # Quality determination is helpful when debugging but noisy in normal logs
+    logger.verbose(f"Quality determination: {'4K' if is_4k else 'Standard'}", extra={'emoji_type': 'debug'})
     
     event_type = (data.get('event') or data.get('eventType') or data.get('NotificationType') or 'unknown').lower()
     logger.info(f"Received webhook event: {event_type}", extra={'emoji_type': 'webhook'})
     
-    # Handle import events directly for cleanup
-    if event_type in ['download', 'moviefileimported', 'episodefileimported']:
+    # Handle import events directly for cleanup (includes upgrades)
+    if event_type in ['download', 'moviefileimported', 'episodefileimported', 'upgrade', 'moviefileupgraded', 'episodefileupgraded']:
         # Add this line to update the queue monitoring
         handle_download_webhook(data)
         # Then continue with the normal handling
@@ -88,11 +69,11 @@ def handle_webhook(data: dict, source_port: int = None):
     elif event_type == 'episodefiledelete':
         return handle_episodefiledelete(data, is_4k)
     elif event_type == 'moviefiledelete':
-        return handle_moviefiledelete(data)
+        return handle_moviefiledelete(data, is_4k)
     elif event_type == 'moviedelete':
-        return handle_movie_delete(data)
+        return handle_movie_delete(data, is_4k)
     elif event_type in ('movieadd', 'movieadded'):
-        return handle_movieadd(data)
+        return handle_movieadd(data, is_4k)
     elif event_type == 'seriesdelete':
         return handle_seriesdelete(data, is_4k)
     elif event_type in ['playback.start', 'playbackstart']:
@@ -103,13 +84,25 @@ def handle_webhook(data: dict, source_port: int = None):
         return JSONResponse({"status": "success", "message": "Import event processed"})
 
 def handle_import_event(data: dict, is_4k: bool = False):
-    """Handle media import events and clean up placeholders"""
+    """Handle media import events and clean up placeholders using scheduler"""
+    # Start handler logging session
+    session_id = start_handler_logging(
+        'handle_import_event',
+        0,  # Will be updated with actual ID once determined
+        'import',
+        is_4k=is_4k,
+        data_keys=list(data.keys())
+    )
+    
+    logger.info(f"📥 Processing Import webhook - Type: {'movie' if 'movie' in data else 'series'}, 4K: {is_4k}", extra={'emoji_type': 'webhook'})
+    
     try:
         from services.utils import resolve_final_folder
         if 'movie' in data:
             # Movie import handling
             movie = data['movie']
             tmdb_id = movie.get('tmdbId')
+            radarr_id = movie.get('id')  # Get Radarr movie ID
             title = movie.get('title', 'Unknown Movie')
             year = movie.get('year')
             movie_path = data.get("movieFile", {}).get("path")
@@ -161,12 +154,12 @@ def handle_import_event(data: dict, is_4k: bool = False):
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder, "Deleted")
         elif 'episodes' in data and 'series' in data:
-            # TV episode import handling
             series = data['series']
             episode = data['episodes'][0]  # Handle first episode in the list
             series_title = series.get('title', 'Unknown Series')
             series_year = series.get('year')
             tvdb_id = series.get('tvdbId')
+            series_id = series.get('id')  # Get Sonarr series ID
             season_num = episode.get('seasonNumber')
             episode_num = episode.get('episodeNumber')
             episode_title = episode.get('title', 'Unknown Episode')
@@ -221,9 +214,14 @@ def handle_import_event(data: dict, is_4k: bool = False):
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(dummy_folder, "Deleted")
     except Exception as e:
-        logger.error(f"Import cleanup failed: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Import event scheduling failed: {e}", extra={'emoji_type': 'error'})
+        end_handler_logging(session_id, success=False, 
+                           summary=f"Handler failed: {e}")
+        return JSONResponse({"status": "error", "message": f"Error: {str(e)}"}, status_code=500)
 
-    return JSONResponse({"status": "success", "message": "Import cleanup processed"})
+    end_handler_logging(session_id, success=True, 
+                       summary="Import cleanup completed")
+    return JSONResponse({"status": "success", "message": "Import cleanup scheduled"})
 
 def handle_seriesadd(data: dict, is_4k: bool = False):
     # Extract series info and episodes, create dummies and schedule updates in batch.
@@ -320,6 +318,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
     series_title = series.get('title', 'Unknown Series')
     series_year = series.get('year')
     tvdb_id = series.get('tvdbId')
+    series_id = series.get('id')  # Get Sonarr series ID
     episode_file_path = data.get("episodeFile", {}).get("path")
     library_path = getattr(settings, 'TV_LIBRARY_FOLDER', None)
     for ep in episodes:
@@ -353,22 +352,28 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
             if settings.jellyfin_enabled:
                 refresh_jellyfin_item(os.path.dirname(dummy_path), "Changed")
         else:
-            logger.error("Failed to create dummy file; skipping refresh.", extra={'emoji_type': 'error'})
-        # --- NEW: Always refresh parent folder ---
-        if episode_file_path:
-            parent_folder = os.path.dirname(episode_file_path)
-            if settings.plex_enabled:
-                refresh_plex_item(parent_folder)
-            if settings.jellyfin_enabled:
-                refresh_jellyfin_item(parent_folder)
-        schedule_episode_request_update(series_title, season_num, episode_num, tvdb_id, delay=10, retries=5)
-    logger.info(f"Re-created {len(episodes)} placeholder files for '{series_title}'", extra={'emoji_type': 'create'})
-    return JSONResponse({"status": "success", "message": "EpisodeFileDelete processed"})
+            logger.warning(f"Failed to enqueue 'handle_episodefiledelete' action for TVDB ID {tvdb_id}")
+            end_handler_logging(session_id, success=False, 
+                               summary="Failed to enqueue episodefiledelete processing")
+            return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
 
-def handle_moviefiledelete(data: dict):
+    except Exception as e:
+        logger.error(f"handle_episodefiledelete failed: {e}", extra={'emoji_type': 'error'})
+        end_handler_logging(session_id, success=False, 
+                           summary=f"Handler failed: {e}")
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+    finally:
+        try:
+            if 'session' in locals():
+                session.close()
+        except Exception:
+            pass
+
+def handle_moviefiledelete(data: dict, is_4k):
     if 'movie' in data:
         movie = data.get('movie', {})
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
+        radarr_id = movie.get('id')  # Get Radarr movie ID
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie file delete", extra={'emoji_type': 'error'})
             return JSONResponse({"status": "error"}, status_code=400)
@@ -391,10 +396,11 @@ def handle_moviefiledelete(data: dict):
         return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
     return JSONResponse({"status": "success", "message": "MovieFileDelete processed"})
 
-def handle_movie_delete(data: dict):
+def handle_movie_delete(data: dict, is_4k: bool = False):
     if 'movie' in data:
         movie = data.get('movie', {})
         tmdb_id = movie.get('tmdbId') or data.get('remoteMovie', {}).get('tmdbId')
+        radarr_id = movie.get('id')  # Get Radarr movie ID
         if not tmdb_id:
             logger.error("Missing TMDB ID for movie delete", extra={'emoji_type': 'error'})
             return JSONResponse({"status": "error"}, status_code=400)
@@ -417,7 +423,7 @@ def handle_movie_delete(data: dict):
         return JSONResponse({"status": "success", "message": "MovieDelete processed"})
     return JSONResponse({"status": "success", "message": "MovieDelete processed"})
 
-def handle_movieadd(data: dict):
+def handle_movieadd(data: dict, is_4k: bool = False):
     if 'movie' in data:
         movie = data.get('movie', {})
         movie_path = data.get("movie", {}).get("folderPath")
@@ -427,8 +433,122 @@ def handle_movieadd(data: dict):
             return JSONResponse({"status": "error"}, status_code=400)
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year', '')
-        from services.queue_monitor import check_movie_has_file
         radarr_id = movie.get('id')
+        
+        # Start handler logging session
+        session_id = start_handler_logging(
+            'handle_movieadd',
+            tmdb_id,
+            'movie',
+            title=title,
+            year=year,
+            tmdb_id=tmdb_id,
+            is_4k=is_4k,
+            radarr_id=radarr_id
+        )
+        
+        logger.info(f"➕ Processing MovieAdd webhook for '{title}' ({year}) - TMDB: {tmdb_id}, Radarr ID: {radarr_id}", extra={'emoji_type': 'webhook'})
+
+        # Extract movieFile / hasFile / quality information when present in the webhook
+        movie_file = movie.get('movieFile') or data.get('movieFile') or {}
+        moviefile_path = movie_file.get('path') or movie.get('folderPath') or movie_path or ''
+        moviefile_size = movie_file.get('size') or movie_file.get('sizeInBytes')
+        has_file = bool(movie.get('hasFile', False) or movie_file)
+        radarr_quality = None
+        q = movie_file.get('quality') or movie.get('quality')
+        if isinstance(q, dict):
+            radarr_quality = q.get('name') or (q.get('quality') or {}).get('name')
+
+        # Release lifecycle and monitored flag
+        radarr_release_status = movie.get('status')
+        radarr_monitored = bool(movie.get('monitored', False))
+
+        # Determine is_4k based on provided paths
+        is_4k = is_4k or is_4k_request(moviefile_path or movie_path or '')
+
+        session = get_session()
+        repo = MovieRepository(session)
+        m = repo.get_by_tmdbid(tmdb_id, is_4k)
+        if not m:
+            m = repo.add(
+                title=title,
+                year=year,
+                tmdbid=tmdb_id,
+                dummypath="",
+                filepath=movie_path,
+                radarrid=radarr_id,
+                status="PENDING",
+                is_4k=is_4k,
+                moviefile_path=moviefile_path,
+                moviefile_size=moviefile_size,
+                has_file=has_file,
+                radarr_quality=radarr_quality,
+                radarr_release_status=radarr_release_status,
+                radarr_monitored=radarr_monitored
+            )
+            logger.info(f"Added: {m}", extra={'emoji_type': 'success'})
+        else:
+            # Update existing record with any new fields provided by the webhook
+            updated_fields = {
+                'title': title,
+                'year': year,
+                'filepath': movie_path,
+                'radarrid': radarr_id,
+                'moviefile_path': moviefile_path,
+                'moviefile_size': moviefile_size,
+                'has_file': has_file,
+                'radarr_quality': radarr_quality,
+                'radarr_release_status': radarr_release_status,
+                'radarr_monitored': radarr_monitored,
+            }
+            for k, v in updated_fields.items():
+                if getattr(m, k, None) != v:
+                    setattr(m, k, v)
+
+            # If this movie was previously marked as deleted, resurrect it so it is
+            # treated the same as a fresh user add: reset deleted flag, status, and
+            # current step so the scheduler will process it again.
+            resurrected = False
+            if getattr(m, 'is_deleted', False):
+                m.is_deleted = False
+                resurrected = True
+
+            if getattr(m, 'status', None) != 'PENDING':
+                m.status = 'PENDING'
+                resurrected = True
+
+            # Reset step pointer so flow starts from the beginning
+            m.current_step_name = None
+
+            # Clear stale placeholder indicators so placeholder creation runs anew
+            cleared_any = False
+            if getattr(m, 'dummypath', None):
+                m.dummypath = None
+                cleared_any = True
+
+            for fld in ('plex_dummy_id', 'jellyfin_dummy_id', 'plex_title', 'jellyfin_title', 'plex_overview', 'jellyfin_overview'):
+                if getattr(m, fld, None):
+                    setattr(m, fld, None)
+                    cleared_any = True
+
+            session.commit()
+            logger.info("Updated existing movie with webhook data", extra={'emoji_type': 'update'})
+
+            if resurrected:
+                logger.info(f"Resurrected previously deleted movie {m.tmdbid} and reset status to PENDING", extra={'emoji_type': 'refresh'})
+            elif cleared_any:
+                logger.debug(f"Cleared stale placeholder metadata for movie {m.tmdbid}", extra={'emoji_type': 'debug'})
+
+        # Start enrichment in background to fetch authoritative data from Radarr
+        try:
+            threading.Thread(
+                target=enrich_movie_from_radarr,
+                args=(tmdb_id, radarr_id, is_4k),
+                daemon=True
+            ).start()
+            logger.debug(f"Enrichment started for TMDB {tmdb_id} radarr {radarr_id}", extra={'emoji_type': 'debug'})
+        except Exception as e:
+            logger.error(f"Failed to start enrichment thread: {e}", extra={'emoji_type': 'error'})
 
         def delayed_placeholder():
             delay_seconds = 3  # Adjust as needed
@@ -525,312 +645,74 @@ def handle_playback(data: dict):
         logger.debug(f"Is placeholder check result: {is_placeholder}", extra={'emoji_type': 'debug'})
         
         if media_type == "movie":
-            tmdb_id = media.get("ids", {}).get("tmdb") or data.get("Provider_tmdb")
-            imdb_id = media.get("ids", {}).get("imdb") or data.get("Provider_imdb")
-            year = media.get("year") or data.get("Year", "")
+            tmdb = media.get("ids", {}).get("tmdb") or data.get("Provider_tmdb")
+            repo = MovieRepository(session)
+            movie = repo.get_by_tmdbid(tmdb, is_4k) if tmdb else repo.get_by_path(file_path)
+            if not movie:
+                logger.error(f"No DB Movie for path {file_path}")
+                end_handler_logging(session_id, success=False, 
+                                   summary="Movie not found in database")
+                return JSONResponse({"status": "error", "message": "Movie not found"}, status_code=404)
             
-            logger.info(f"Processing movie playback for {title}", extra={'emoji_type': 'process'})
-            
-            radarr_id = search_in_radarr(title=title, tmdb_id=tmdb_id, imdb_id=imdb_id, 
-                                       year=year, rating_key=rating_key, is_4k=is_4k)
-            
-            if radarr_id:
-                # Movie exists in Radarr, add to our monitoring system
-                add_to_monitor({
-                    'media_type': 'movie',
-                    'tmdb_id': tmdb_id,
-                    'radarr_id': radarr_id,
-                    'title': title,
-                    'rating_key': rating_key,
-                    'is_4k': is_4k,
-                    'hasFile': False
-                })
-                return JSONResponse({"status": "success", "message": "Search triggered"})
-            return JSONResponse({"status": "error", "message": "Failed to find/add movie"}, status_code=400)
-            
-        elif media_type == "episode":
-            # Extract episode details from webhook
-            series_title   = media.get("show_name") or data.get("SeriesName", "Unknown Series")
-            episode_title  = media.get("episode_name") or data.get("Name", "Unknown Episode")
-            season_number  = int(media.get("season_num") or data.get("SeasonNumber", 0))
-            episode_number = int(media.get("episode_num") or data.get("EpisodeNumber", 0))
-            tvdb_id        = media.get("ids", {}).get("tvdb") or data.get("Provider_tvdb")
-            year = media.get("year", "")
-            
-            full_title = (
-                f"{series_title} - S{season_number:02d}E{episode_number:02d}"
-                if series_title and "{series_title}" not in series_title
-                else title
-            )
-
-            if not should_process_playback(tvdb_id):
-                return JSONResponse({"status": "skipped", "message": "Playback suppressed (cooldown active)"})
-
-            logger.info(f"Processing episode playback for {full_title}", extra={'emoji_type': 'process'})
-            series_id = search_in_sonarr(
-                tvdb_id=tvdb_id, title=series_title, rating_key=rating_key,
-                is_4k=is_4k, file_path=file_path
-            )
-            if not series_id:
-                return JSONResponse({"status": "error", "message": "Failed to get series ID"}, status_code=400)
-                
-            play_mode = settings.TV_PLAY_MODE.lower()
-            search_success = False
-            
-            if play_mode == "episode":
-                lookahead = getattr(settings, 'EPISODES_LOOKAHEAD', 5)
-                episodes_to_monitor, reached_end = get_episodes_for_lookahead(
-                    series_id, season_number, episode_number, lookahead
-                )
-                
-                if not episodes_to_monitor:
-                    logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
-                    return JSONResponse({"status": "warning", "message": "No episodes available"})
-                
-                episode_ids = [ep['id'] for ep in episodes_to_monitor]
-                monitor_episodes(series_id, episode_ids, monitor=True)
-                
-                if reached_end:
-                    mark_series_monitored(series_id, mark_seasons=False)
-                    
-                search_success = trigger_sonarr_search(
-                    series_id, episode_ids=episode_ids, series_title=full_title, is_4k=is_4k
-                )
-                
-                if search_success:
-                    # Add each episode to our monitoring system
-                    for episode in episodes_to_monitor:
-                        add_to_monitor({
-                            'media_type': 'episode',
-                            'tvdb_id': tvdb_id,
-                            'series_title': series_title,
-                            'title': f"{series_title} - S{episode['seasonNumber']:02d}E{episode['episodeNumber']:02d}",
-                            'rating_key': rating_key,
-                            'season_number': episode['seasonNumber'],
-                            'episode_number': episode['episodeNumber'],
-                            'episode_id': episode['id'],  # Make sure we include the episode ID
-                            'is_4k': is_4k,
-                            'hasFile': episode.get('hasFile', False)
-                        })
-            
-            elif play_mode == "season":
-                url = f"{settings.SONARR_URL}/episode"
-                params = {'seriesId': series_id}
-                headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                
-                try:
-                    response = requests.get(url, params=params, headers=headers)
-                    response.raise_for_status()
-                    all_episodes = response.json()
-                    
-                    season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == int(season_number)]
-                    season_episodes.sort(key=lambda x: x.get('episodeNumber', 0))
-                    
-                    is_last_episode_in_season = False
-                    next_season_exists = False
-                    next_season = int(season_number) + 1
-                    
-                    if season_episodes and season_episodes[-1].get('episodeNumber') == int(episode_number):
-                        is_last_episode_in_season = True
-                        next_season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == next_season]
-                        if next_season_episodes:
-                            next_season_exists = True
-                    
-                    monitor_season(series_id, season_number)
-                    
-                    if is_last_episode_in_season:
-                        if next_season_exists:
-                            # Current behavior - monitor the next season
-                            monitor_season(series_id, next_season)
-                            logger.info(f"Last episode of season {season_number} played, adding season {next_season}", 
-                                      extra={'emoji_type': 'info'})
-                        
-                            search_success = trigger_sonarr_search(
-                                series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
-                            )
-                            trigger_sonarr_search(
-                                series_id, season_number=next_season, series_title=full_title, is_4k=is_4k
-                            )
-                        else:
-                            # NEW: If no next season exists, mark the entire series for future monitoring
-                            mark_series_monitored(series_id, mark_seasons=False)
-                            logger.info(f"Last episode of final season {season_number} played, marking series for future monitoring", 
-                                      extra={'emoji_type': 'info'})
-                        
-                            search_success = trigger_sonarr_search(
-                                series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
-                            )
-                    else:
-                        search_success = trigger_sonarr_search(
-                            series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
-                        )
-                        
-                    if search_success:
-                        # Get all episodes for this season
-                        url = f"{settings.SONARR_URL}/episode"
-                        params = {'seriesId': series_id}
-                        headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                        try:
-                            response = requests.get(url, params=params, headers=headers)
-                            response.raise_for_status()
-                            
-                            # Filter for this season (and next season if applicable)
-                            season_to_monitor = [int(season_number)]
-                            if is_last_episode_in_season and next_season_exists:
-                                season_to_monitor.append(int(next_season))
-                            
-                            all_episodes = response.json()
-                            episodes_to_monitor = [ep for ep in all_episodes if ep.get('seasonNumber') in season_to_monitor]
-                            
-                            # Add each episode to monitoring if it doesn't have a file
-                            for ep in episodes_to_monitor:
-                                if not ep.get('hasFile', False):
-                                    add_to_monitor({
-                                        'media_type': 'episode',
-                                        'tvdb_id': tvdb_id,
-                                        'series_title': series_title,
-                                        'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
-                                        'rating_key': rating_key,
-                                        'season_number': ep['seasonNumber'],
-                                        'episode_number': ep['episodeNumber'],
-                                        'episode_id': ep['id'],
-                                        'is_4k': is_4k,
-                                        'hasFile': ep.get('hasFile', False)
-                                    })
-                        except Exception as e:
-                            logger.error(f"Error adding season episodes to monitoring: {e}", extra={'emoji_type': 'error'})
-                        
-                except Exception as e:
-                    logger.error(f"Error handling season mode: {str(e)}", extra={'emoji_type': 'error'})
-                    monitor_season(series_id, season_number)
-                    search_success = trigger_sonarr_search(
-                        series_id, season_number=season_number, series_title=full_title, is_4k=is_4k
-                    )
-                    
-                    if search_success:
-                        # Fallback to get episodes and add to batch monitoring
-                        try:
-                            url = f"{settings.SONARR_URL}/episode"
-                            params = {'seriesId': series_id}
-                            headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                            response = requests.get(url, params=params, headers=headers)
-                            response.raise_for_status()
-                            
-                            # Get episodes for this season
-                            all_episodes = response.json()
-                            season_episodes = [ep for ep in all_episodes if ep.get('seasonNumber') == int(season_number)]
-                            
-                            # Add episodes to monitoring
-                            for ep in season_episodes:
-                                if not ep.get('hasFile', False):
-                                    add_to_monitor({
-                                        'media_type': 'episode',
-                                        'tvdb_id': tvdb_id,
-                                        'series_title': series_title,
-                                        'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
-                                        'rating_key': rating_key,
-                                        'season_number': ep['seasonNumber'],
-                                        'episode_number': ep['episodeNumber'],
-                                        'episode_id': ep['id'],
-                                        'is_4k': is_4k,
-                                        'hasFile': ep.get('hasFile', False)
-                                    })
-                        except Exception as e2:
-                            logger.error(f"Error in fallback season monitoring: {e2}", extra={'emoji_type': 'error'})
-            
-            else:  # series mode
-                # First check if all episodes already have files
-                url = f"{settings.SONARR_URL}/episode"
-                params = {'seriesId': series_id}
-                headers = {'X-Api-Key': settings.SONARR_API_KEY}
-                
-                try:
-                    response = requests.get(url, params=params, headers=headers)
-                    response.raise_for_status()
-                    all_episodes = response.json()
-                    
-                    # For series mode, we might want to exclude specials or future episodes based on configuration
-                    include_specials = getattr(settings, 'INCLUDE_SPECIALS', False)
-                    episodes_to_check = all_episodes if include_specials else [ep for ep in all_episodes if ep.get('seasonNumber', 0) > 0]
-                    
-                    # Check if all episodes already have files
-                    missing_episodes = [ep for ep in episodes_to_check if not ep.get('hasFile', False)]
-                    
-                    if not missing_episodes:
-                        logger.info(f"All episodes of '{series_title}' already have files. Skipping search.", 
-                                  extra={'emoji_type': 'skip'})
-                        return JSONResponse({"status": "success", "message": "All files already available"})
-                        
-                    # Log the number of missing episodes
-                    logger.info(f"Found {len(missing_episodes)} episodes without files for '{series_title}'", 
-                              extra={'emoji_type': 'info'})
-                    
-                    # Now continue with normal flow - mark series as monitored
-                    mark_series_monitored(series_id, mark_seasons=True, include_specials=include_specials)
-                    
-                    # Trigger search only if we have missing episodes
-                    search_success = trigger_sonarr_search(
-                        series_id, series_title=full_title, is_4k=is_4k
-                    )
-                    
-                    if search_success:
-                        # Only monitor episodes that don't have files
-                        for ep in missing_episodes:
-                            add_to_monitor({
-                                'media_type': 'episode',
-                                'tvdb_id': tvdb_id,
-                                'series_title': series_title,
-                                'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
-                                'rating_key': rating_key,
-                                'season_number': ep['seasonNumber'],
-                                'episode_number': ep['episodeNumber'],
-                                'episode_id': ep['id'],
-                                'is_4k': is_4k,
-                                'hasFile': False
-                            })
-                except Exception as e:
-                    logger.error(f"Error checking series files: {e}", extra={'emoji_type': 'error'})
-                    # Fallback to original behavior on error
-                    mark_series_monitored(series_id, mark_seasons=True, include_specials=getattr(settings, 'INCLUDE_SPECIALS', False))
-                    
-                    search_success = trigger_sonarr_search(
-                        series_id, series_title=full_title, is_4k=is_4k
-                    )
-                    
-                    if search_success:
-                        # Fall back to getting all episodes
-                        try:
-                            response = requests.get(url, params=params, headers=headers)
-                            response.raise_for_status()
-                            all_episodes = response.json()
-                            
-                            # Add each episode to monitoring if it doesn't have a file
-                            for ep in all_episodes:
-                                if not ep.get('hasFile', False):
-                                    add_to_monitor({
-                                        'media_type': 'episode',
-                                        'tvdb_id': tvdb_id,
-                                        'series_title': series_title,
-                                        'title': f"{series_title} - S{ep['seasonNumber']:02d}E{ep['episodeNumber']:02d}",
-                                        'rating_key': rating_key,
-                                        'season_number': ep['seasonNumber'],
-                                        'episode_number': ep['episodeNumber'],
-                                        'episode_id': ep['id'],
-                                        'is_4k': is_4k,
-                                        'hasFile': False
-                                    })
-                        except Exception as e2:
-                            logger.error(f"Error in fallback episode monitoring: {e2}", extra={'emoji_type': 'error'})
-            
-            if search_success:
-                return JSONResponse({"status": "success", "message": "Search triggered"})
+            job_scheduled = playback_scheduler.enqueue(movie)
+            if job_scheduled:
+                logger.info(f"Enqueued playback for movie {movie.title}")
+                # Keep logging session open - it will be closed when playback flow completes
+                return JSONResponse({"status": "scheduled", "message": "Movie playback enqueued"})
             else:
-                return JSONResponse({"status": "error", "message": "Failed to trigger search"}, status_code=500)
-                
+                end_handler_logging(session_id, success=False, 
+                                   summary="Failed to enqueue movie playback processing")
+                return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
+
+        elif media_type == "episode":
+            # extract series, season & episode numbers
+            series_tvdb   = media.get("ids", {}).get("tvdb") or data.get("Provider_tvdb")
+            # item_id = None
+            # if "ServerName" in data and data.get("ServerName") == "jellyfin":
+            #     item_id = data.get("ItemId")
+            # else:
+            #     logger.debug("Non-Jellyfin playback event or missing ItemId", extra={"emoji_type": "debug"})
+            season_number = int(media.get("season_num")  or data.get("SeasonNumber", 0))
+            episode_number= int(media.get("episode_num") or data.get("EpisodeNumber", 0))
+            repo = SeriesRepository(session)
+            # if item_id:
+            #     series = repo.get_by_jellyfin_itemid(item_id, is_4k)
+            # else:
+            series = repo.get_by_ep_tvdbid(series_tvdb, is_4k)
+            if not series:
+                logger.error(f"No DB Series for TVDB {series_tvdb}")
+                end_handler_logging(session_id, success=False, 
+                                   summary="Series not found in database")
+                return JSONResponse({"status": "error", "message": "Series not found"}, status_code=404)
+
+            # find matching Episode under that series
+            ep = repo.get_ep_by_series(series, season_number, episode_number)
+            if not ep:
+                logger.error(f"No DB Episode for {series.title} S{season_number}E{episode_number}")
+                end_handler_logging(session_id, success=False, 
+                                   summary="Episode not found in database")
+                return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+
+            job_scheduled = playback_scheduler.enqueue(ep)
+            if job_scheduled:
+                logger.info(f"Enqueued playback for episode {ep.title}")
+                # Keep logging session open - it will be closed when playback flow completes
+                return JSONResponse({"status": "scheduled", "message": "Episode playback enqueued"})
+            else:
+                end_handler_logging(session_id, success=False, 
+                                   summary="Failed to enqueue episode playback processing")
+                return JSONResponse({"status": "error", "message": "Failed to schedule processing"}, status_code=500)
+
         else:
-            logger.warning(f"Unsupported media type: {media.get('type')}", extra={'emoji_type': 'warning'})
+            logger.warning(f"Unsupported media type: {media_type}")
+            end_handler_logging(session_id, success=False, 
+                               summary=f"Unsupported media type: {media_type}")
             return JSONResponse({"status": "error", "message": "Unsupported media type"}, status_code=400)
 
     except Exception as e:
-        logger.error(f"Playback handling error: {e}", extra={'emoji_type': 'error'})
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        logger.error(f"Error in handle_playback: {e}")
+        end_handler_logging(session_id, success=False, 
+                           summary=f"Handler failed: {e}")
+        return JSONResponse({"status": "error", "message": "Internal error"}, status_code=500)
+    finally:
+        session.close()

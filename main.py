@@ -3,50 +3,47 @@ import os
 import subprocess
 import time
 from dotenv import load_dotenv
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from fastapi import FastAPI, Request, BackgroundTasks
 from core.logger import logger
 from services.handlers import handle_webhook
 from services.migration import run_migration
 from core.config import settings
-from services.calendar_sync import start_calendar_sync
-from contextlib import asynccontextmanager
+from services.postgres.utils import check_db
+from services.postgres.db import get_engine, init_db, get_session
+from services.postgres.models import Movie, Series, Episode, SubFlow
+from services.scheduler import *
+from services.sync.sync_movies import schedule_all_syncs
 
-# Load environment variables
+# Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 def load_env_and_migrate():
     load_dotenv(override=True)
     run_migration()
 
 def clear_port(port: int, max_attempts: int = 3) -> bool:
-    """Clear a port if it's in use"""
     for attempt in range(max_attempts):
         try:
-            # Check if port is in use
             result = subprocess.run(['lsof', '-i', f':{port}'], capture_output=True, text=True)
             if result.stdout:
-                # Extract PID and kill process
-                for line in result.stdout.split('\n')[1:]:  # Skip header
+                for line in result.stdout.split('\n')[1:]:
                     if line:
                         pid = line.split()[1]
                         subprocess.run(['kill', '-9', pid])
                         logger.info(f"Killed process {pid} using port {port}", extra={'emoji_type': 'info'})
-                time.sleep(1)  # Wait for port to clear
+                time.sleep(1)
                 return True
-            return True  # Port wasn't in use
+            return True
         except Exception as e:
             logger.warning(f"Attempt {attempt + 1} to clear port {port} failed: {e}", extra={'emoji_type': 'warning'})
-            if attempt == max_attempts - 1:
-                return False
             time.sleep(1)
     return False
 
 def check_port(port: int) -> bool:
-    """Check if port is already in use"""
     try:
         result = subprocess.run(['lsof', '-i', f':{port}'], capture_output=True, text=True)
         if result.stdout:
-            logger.error(f"Port {port} is already in use. Please update PLACEHOLDARR_PORT in your .env file.", extra={'emoji_type': 'error'})
+            logger.error(f"Port {port} is already in use. Update PLACEHOLDARR_PORT in your .env file.", extra={'emoji_type': 'error'})
             return False
         return True
     except Exception as e:
@@ -56,14 +53,104 @@ def check_port(port: int) -> bool:
 app = FastAPI()
 
 async def lifespan(app: FastAPI):
-    # Load env and run migrations
     load_env_and_migrate()
     logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
+
+    # DB Initialization
+    if check_db():
+        logger.info("Database is reachable, initializing...", extra={'emoji_type': 'info'})
+
+        engine = get_engine()
+        init_db(engine)
+
+        session = get_session()
+        try:
+            # Parse comma-separated statuses from config
+            reset_statuses = [s.strip().upper() for s in settings.RESET_SUBFLOWS_ON_STARTUP.split(',') if s.strip()]
+            
+            # Reset entities (Movie, Series, Episode) if QUEUED is in reset list
+            entity_reset_counts = {}
+            if 'QUEUED' in reset_statuses:
+                movie_reset = session.query(Movie).filter(Movie.status == 'QUEUED').update(
+                    {Movie.status: 'PENDING'},
+                    synchronize_session=False
+                )
+                entity_reset_counts['movies'] = movie_reset
+                
+                series_reset = session.query(Series).filter(Series.status == 'QUEUED').update(
+                    {Series.status: 'PENDING'},
+                    synchronize_session=False
+                )
+                entity_reset_counts['series'] = series_reset
+                
+                episode_reset = session.query(Episode).filter(Episode.status == 'QUEUED').update(
+                    {Episode.status: 'PENDING'},
+                    synchronize_session=False
+                )
+                entity_reset_counts['episodes'] = episode_reset
+                
+                logger.info(f"Reset QUEUED entities to PENDING: {movie_reset} movies, {series_reset} series, {episode_reset} episodes", extra={'emoji_type': 'info'})
+            else:
+                logger.info("Skipping entity reset (QUEUED not in RESET_SUBFLOWS_ON_STARTUP)", extra={'emoji_type': 'info'})
+            
+            # Reset SubFlows based on RESET_SUBFLOWS_ON_STARTUP setting
+            subflow_reset_counts = {}
+            for status in reset_statuses:
+                if status in ['QUEUED', 'FAILED']:
+                    # For FAILED SubFlows, also reset retry_count and error_message so they can be retried
+                    if status == 'FAILED':
+                        failed_subflows = session.query(SubFlow).filter(SubFlow.status == status).all()
+                        for sf in failed_subflows:
+                            sf.status = 'PENDING'
+                            sf.retry_count = 0
+                            sf.error_message = None
+                            sf.step_index = 0
+                            session.add(sf)
+                        count = len(failed_subflows)
+                        logger.info(f"Reset {count} SubFlows from FAILED to PENDING (cleared retry_count and error_message)", extra={'emoji_type': 'info'})
+                    else:
+                        # For QUEUED, just change status
+                        count = session.query(SubFlow).filter(SubFlow.status == status).update(
+                            {SubFlow.status: 'PENDING'},
+                            synchronize_session=False
+                        )
+                        logger.info(f"Reset {count} SubFlows from {status} to PENDING", extra={'emoji_type': 'info'})
+                    
+                    subflow_reset_counts[status] = count
+                else:
+                    logger.warning(f"Invalid status '{status}' in RESET_SUBFLOWS_ON_STARTUP - skipping", extra={'emoji_type': 'warning'})
+            
+            session.commit()
+            
+            if subflow_reset_counts:
+                reset_summary = ', '.join([f"{count} {status}" for status, count in subflow_reset_counts.items()])
+                logger.info(f"SubFlow resets: {reset_summary}", extra={'emoji_type': 'info'})
+            else:
+                logger.info("No SubFlow resets configured (RESET_SUBFLOWS_ON_STARTUP is empty)", extra={'emoji_type': 'info'})
+        finally:
+            session.close()
+
+        for name, sched in globals().items():
+            if name.endswith('_scheduler') and hasattr(sched, 'start'):
+                sched.start()
+                logger.info(f"Started scheduler: {name}", extra={'emoji_type': 'gear'})
+
+        # --- Schedule all Radarr syncs (startup and cron) ---
+        schedule_all_syncs()
+
+        # --- Placeholder for future Sonarr sync entrypoint ---
+        # from services.sync import sync_series
+        # sync_series.schedule_all_syncs()
+        yield
+    else:
+        logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})
+
+    # Webhook Check Loop
     import asyncio
     from services.integrations import check_all_arr_webhooks
 
     async def arr_webhook_check_loop():
-        max_attempts = 10  # 10 minutes at 60s interval
+        max_attempts = 10
         interval = 60
         for attempt in range(max_attempts):
             all_configured = check_all_arr_webhooks()
@@ -71,28 +158,27 @@ async def lifespan(app: FastAPI):
                 logger.info("Calendar sync will begin in 10 seconds...", extra={'emoji_type': 'info'})
                 async def delayed_calendar_sync():
                     await asyncio.sleep(10)
-                    start_calendar_sync()
+                    # start_calendar_sync() -- Uncomment when implemented
                 asyncio.create_task(delayed_calendar_sync())
                 break
+
             if attempt == 0:
-                # Only log a warning if NO *arrs are configured at all (not just missing webhooks)
                 from core.config import settings
                 arrs_configured = any([
                     getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None),
                     getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None),
                     getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None),
-                    getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None)
+                    getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None),
                 ])
                 if not arrs_configured:
-                    logger.warning("No *arr services are configured. Please add at least one Radarr or Sonarr instance in your .env file.", extra={'emoji_type': 'warning'})
+                    logger.warning("No *arr services configured in .env", extra={'emoji_type': 'warning'})
+
             await asyncio.sleep(interval)
         else:
-            logger.warning("Timed out waiting for *arr webhooks to be configured after 10 minutes. Placeholdarr will stop checking automatically, but you can restart the service to try again.", extra={'emoji_type': 'warning'})
-            logger.warning("Calendar sync will not start because no *arr webhooks are configured or reachable.", extra={'emoji_type': 'warning'})
+            logger.warning("Timed out waiting for *arr webhooks. Calendar sync will not start.", extra={'emoji_type': 'warning'})
 
     asyncio.create_task(arr_webhook_check_loop())
     yield
-    # (Optional) Add shutdown logic here if needed
 
 app = FastAPI(lifespan=lifespan)
 
@@ -109,26 +195,24 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 if __name__ == '__main__':
     import uvicorn
+    load_dotenv(override=True)
 
-    # Force import of media server clients to trigger connection tests and endpoint checks
     if settings.plex_enabled:
         from services.plex_client import plex
     if settings.jellyfin_enabled:
         from services.jellyfin_client import test_jellyfin_connection
 
-    # Set port back to 8001 (your existing webhook port)
     port = int(os.getenv('PLACEHOLDARR_PORT', 8001))
     host = getattr(settings, "host", "0.0.0.0")
+
     logger.info(f"Using host {host} and port {port}", extra={'emoji_type': 'info'})
-    
-    # Check if port is in use, and try to clear it
+
     if not check_port(port):
         logger.info(f"Attempting to clear port {port}", extra={'emoji_type': 'info'})
         if clear_port(port):
             logger.info(f"Successfully cleared port {port}", extra={'emoji_type': 'info'})
         else:
-            logger.error(f"Failed to clear port {port}. Please choose a different port.", extra={'emoji_type': 'error'})
+            logger.error(f"Failed to clear port {port}. Please use a different port.", extra={'emoji_type': 'error'})
             sys.exit(1)
-    
-    # Start the server
+
     uvicorn.run(app, host=host, port=port, log_level=settings.LOG_LEVEL.lower())

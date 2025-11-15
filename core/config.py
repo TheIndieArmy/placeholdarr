@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 from pydantic import validator, root_validator
 import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Get the project root directory (where main.py is)
 ROOT_DIR = Path(__file__).parent.parent
@@ -12,15 +15,18 @@ ROOT_DIR = Path(__file__).parent.parent
 # Use project root for .env path
 dotenv_path = ROOT_DIR / ".env"
 
-if not dotenv_path.exists():
-    raise FileNotFoundError(f".env file does not exist at {dotenv_path}")
-
-# Preload the environment variables
-load_dotenv(dotenv_path)
+if dotenv_path.exists():
+    load_dotenv(dotenv_path)
+    logger.info(f"Loaded .env from {dotenv_path}")
+else:
+    logger.info(f"No .env file at {dotenv_path}, using process environment")
 
 class Settings(BaseSettings):
+    # Whether to include specials (from .env)
+    INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").strip().lower() == "true"
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
+    SCHEDULED_TIME_FAILED: Optional[str] = None  # Add this line to avoid AttributeError
 
     # Plex
     PLEX_URL: Optional[str] = None
@@ -44,9 +50,25 @@ class Settings(BaseSettings):
     SONARR_4K_URL: str = ""
     SONARR_4K_API_KEY: str = ""
 
+    # Sync Settings (grouped by instance)
+    RADARR_SYNC_ON_STARTUP: bool = os.getenv("RADARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    RADARR_SYNC_CRON: str = os.getenv("RADARR_SYNC_CRON", "")
+    RADARR_4K_SYNC_ON_STARTUP: bool = os.getenv("RADARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    RADARR_4K_SYNC_CRON: str = os.getenv("RADARR_4K_SYNC_CRON", "")
+    SONARR_SYNC_ON_STARTUP: bool = os.getenv("SONARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    SONARR_SYNC_CRON: str = os.getenv("SONARR_SYNC_CRON", "")
+    SONARR_4K_SYNC_ON_STARTUP: bool = os.getenv("SONARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    SONARR_4K_SYNC_CRON: str = os.getenv("SONARR_4K_SYNC_CRON", "")
+
     # Library Paths
-    MOVIE_LIBRARY_FOLDER: str
-    TV_LIBRARY_FOLDER: str
+    DUMMY_MOVIE_LIBRARY_FOLDER: str
+    DUMMY_TV_LIBRARY_FOLDER: str
+    DUMMY_MOVIE_LIBRARY_4K_FOLDER: str = ""
+    DUMMY_TV_LIBRARY_4K_FOLDER: str = ""
+    
+    # Real library paths (optional - used for folder extraction when not using dummy libraries)
+    MOVIE_LIBRARY_FOLDER: str = ""
+    TV_LIBRARY_FOLDER: str = ""
     MOVIE_LIBRARY_4K_FOLDER: str = ""
     TV_LIBRARY_4K_FOLDER: str = ""
 
@@ -63,11 +85,18 @@ class Settings(BaseSettings):
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
+    EPISODES_LOOKAHEAD: int = int(os.getenv("EPISODES_LOOKAHEAD", "5").split('#')[0].strip())
     TITLE_UPDATES: str = os.getenv("TITLE_UPDATES", "ALL")  # Options: OFF, REQUEST, ALL
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
 
     # Migration settings
     MIGRATION: bool = False
+    
+    # SubFlow reset settings on startup
+    # Comma-separated list of SubFlow statuses to reset to PENDING on startup
+    # Valid values: QUEUED, FAILED
+    # Example: "QUEUED,FAILED" or "FAILED" or "" (empty to disable)
+    RESET_SUBFLOWS_ON_STARTUP: str = os.getenv("RESET_SUBFLOWS_ON_STARTUP", "QUEUED,FAILED").split('#')[0].strip()
       
     # Calendar-based status update settings
     CALENDAR_LOOKAHEAD_DAYS: int = int(os.getenv("CALENDAR_LOOKAHEAD_DAYS", "30").split('#')[0].strip())
@@ -76,6 +105,13 @@ class Settings(BaseSettings):
     PREFERRED_MOVIE_DATE_TYPE: str = os.getenv("PREFERRED_MOVIE_DATE_TYPE", "inCinemas").split('#')[0].strip()
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
+
+    # Postgres
+    DB_HOST: str
+    DB_PORT: int
+    DB_USER: str
+    DB_PASS: str
+    DB_NAME: str
 
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
@@ -94,7 +130,7 @@ class Settings(BaseSettings):
                 v = v.strip()
         return v
     
-    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
+    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'DUMMY_MOVIE_LIBRARY_FOLDER', 'DUMMY_TV_LIBRARY_FOLDER')
     def validate_path_exists(cls, v):
         if not v:
             return v
@@ -149,7 +185,7 @@ class Settings(BaseSettings):
 
     @property
     def has_4k_support(self) -> bool:
-        return bool(self.RADARR_4K_URL and self.MOVIE_LIBRARY_4K_FOLDER) or bool(self.SONARR_4K_URL and self.TV_LIBRARY_4K_FOLDER)
+        return bool(self.RADARR_4K_URL and self.DUMMY_MOVIE_LIBRARY_4K_FOLDER) or bool(self.SONARR_4K_URL and self.DUMMY_TV_LIBRARY_4K_FOLDER)
 
     @property
     def plex_4k_movie_section_id(self) -> int:

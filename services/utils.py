@@ -1,6 +1,8 @@
 import re
 import os
 from core.config import settings
+from services.postgres.db import get_session
+from services.postgres.movie_repo import MovieRepository
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', name).strip()
@@ -32,15 +34,22 @@ def strip_movie_status(title: str) -> str:
     return title
 
 def strip_status_markers(title: str) -> str:
-    """Keep only the base title by removing everything after first dash or bracket"""
-    # First split on '[' and take the first part
-    title = title.split('[')[0].strip()
-    # Then split on '-' and take the first part
-    title = title.split('-')[0].strip()
+    """Remove status markers like [Request], [Status], etc. and trailing dash markers"""
+    if not title:
+        return ""
+    
+    # Remove markers in brackets like [Request], [Status], etc.
+    title = re.sub(r'\[.*?\]\s*', '', title)
+    
+    # Remove trailing dash markers like " - [Status]" or just trailing " -"
+    title = re.sub(r'\s*-\s*(\[.*?\])?\s*$', '', title)
+    
     # Clean up any extra whitespace
     title = re.sub(r'\s+', ' ', title).strip()
+    
     # Remove ellipsis if present
     title = title.replace('...', '')
+    
     return title
 
 def is_4k_request(file_path: str, source_port: int = None) -> bool:
@@ -53,9 +62,9 @@ def is_4k_request(file_path: str, source_port: int = None) -> bool:
         return False
 
     # Check if path is in 4K library
-    if settings.MOVIE_LIBRARY_4K_FOLDER and file_path.startswith(settings.MOVIE_LIBRARY_4K_FOLDER):
+    if settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER and file_path.startswith(settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER):
         return True
-    if settings.TV_LIBRARY_4K_FOLDER and file_path.startswith(settings.TV_LIBRARY_4K_FOLDER):
+    if settings.DUMMY_TV_LIBRARY_4K_FOLDER and file_path.startswith(settings.DUMMY_TV_LIBRARY_4K_FOLDER):
         return True
     
     # Check if request came from 4K instance
@@ -71,7 +80,7 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
         return {
             "url": settings.RADARR_4K_URL if is_4k else settings.RADARR_URL,
             "api_key": settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY,
-            "library_folder": settings.MOVIE_LIBRARY_4K_FOLDER if is_4k else settings.MOVIE_LIBRARY_FOLDER,
+            "library_folder": settings.DUMMY_MOVIE_LIBRARY_4K_FOLDER if is_4k else settings.DUMMY_MOVIE_LIBRARY_FOLDER,
             "section_id": settings.PLEX_MOVIE_SECTION_ID,
             "id_type": "tmdbId",
             "queue_id_field": "movieId",
@@ -81,7 +90,7 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
         return {
             "url": settings.SONARR_4K_URL if is_4k else settings.SONARR_URL,
             "api_key": settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY,
-            "library_folder": settings.TV_LIBRARY_4K_FOLDER if is_4k else settings.TV_LIBRARY_FOLDER,
+            "library_folder": settings.DUMMY_TV_LIBRARY_4K_FOLDER if is_4k else settings.DUMMY_TV_LIBRARY_FOLDER,
             "section_id": settings.PLEX_TV_SECTION_ID,
             "id_type": "tvdbId",
             "queue_id_field": "episodeId",

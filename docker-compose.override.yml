@@ -1,0 +1,43 @@
+services:
+  placeholdarr: 
+    container_name: placeholdarr-dev
+    image: !reset null
+    build: !override
+      context: .
+      dockerfile: dockerfile.dev
+    env_file:
+      - .env
+    volumes: !override
+      - debridmedia_mnt:/mnt
+      - /opt/placeholdarr/logs:/logs
+      # Mount current directory as /app for live code changes
+      - .:/app
+    ports: !override
+      - "127.0.0.1:18843:8000"
+    restart: !override always
+    # Add environment variable to enable auto-reload
+    environment:
+      - PYTHONPATH=/app
+      - WATCHDOG_ENABLED=true
+  
+  placeholdarr_postgres:
+    container_name: placeholdarr_postgres
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: "placeholdarr"
+      POSTGRES_PASSWORD: "placeholdarr"
+      POSTGRES_DB: "placeholdarr"
+    volumes:
+      - /opt/placeholdarr/data:/var/lib/postgresql/data
+    # ports:
+      # - "127.0.0.1:5432:5432"
+
+networks:
+  default:
+    name: shared_network
+    external: true
+
+volumes:
+  debridmedia_mnt:
+    external: true
