@@ -1511,3 +1511,187 @@ def find_movie_by_id(tmdb_id, title=None, year=None):
     except Exception as e:
         logger.error(f"Error finding movie by ID: {e}", extra={'emoji_type': 'error'})
         return None
+
+def _prepend_status_to_summary(summary, status):
+    """Prepend status to summary, replacing any previous status marker."""
+    import re
+    if not summary:
+        summary = ""
+    # Remove any existing status marker at the start
+    summary = re.sub(r"^\[.*?\]\s*", "", summary)
+    if status:
+        return f"[{status}] {summary}".strip()
+    else:
+        return summary.strip()
+
+def update_plex_title_status(media_type, media_id, title, status=None, year=None, season=None, episode=None):
+    if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL or not settings.PLEX_TOKEN:
+        return False
+    """
+    Update Plex summary with status or remove status markers.
+    Uses ID-based matching to find the item.
+    """
+    try:
+        if not plex:
+            logger.error("Plex server not available", extra={'emoji_type': 'error'})
+            return False
+
+        if media_type == 'tv':
+            show = find_show_by_id(media_id, title)
+            if not show:
+                logger.error(f"Could not find show with TVDB ID {media_id} for summary update", extra={'emoji_type': 'error'})
+                return False
+            # Update episode summary
+            if season is not None and episode is not None:
+                try:
+                    episode_obj = show.episode(season=season, episode=episode)
+                except Exception as e:
+                    logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping summary update. ({e})", extra={'emoji_type': 'skip'})
+                    return False
+                if not episode_obj:
+                    logger.warning(f"Episode S{season}E{episode} not found for '{show.title}' in Plex. Skipping summary update.", extra={'emoji_type': 'skip'})
+                    return False
+                current_summary = getattr(episode_obj, 'summary', '') or ''
+                new_summary = _prepend_status_to_summary(current_summary, status)
+                episode_obj.editSummary(new_summary)
+                episode_obj.reload()
+                logger.info(f"Updated episode summary for '{show.title}' S{season}E{episode} to: {new_summary}", extra={'emoji_type': 'update'})
+                return True
+            # Update season summary
+            elif season is not None and episode is None:
+                try:
+                    # Debug: log all available seasons
+                    all_seasons = list(show.seasons())
+                    logger.debug(f"Available seasons for '{show.title}': {[getattr(s, 'index', None) for s in all_seasons]} | Titles: {[getattr(s, 'title', None) for s in all_seasons]}")
+                    season_obj = None
+                    for s in all_seasons:
+                        if hasattr(s, 'index') and s.index == season:
+                            season_obj = s
+                            break
+                        # Try matching by title (e.g., 'Season 1')
+                        if hasattr(s, 'title') and s.title.strip().endswith(str(season)):
+                            season_obj = s
+                            break
+                    if not season_obj:
+                        raise Exception(f"Unable to find elem: cls=Season, attrs={{'index': {season}}}")
+                except Exception as e:
+                    logger.warning(f"Season S{season} not found for '{show.title}' in Plex. Skipping summary update. ({e})", extra={'emoji_type': 'skip'})
+                    return False
+                current_summary = getattr(season_obj, 'summary', '') or ''
+                new_summary = _prepend_status_to_summary(current_summary, status)
+                season_obj.editSummary(new_summary)
+                season_obj.reload()
+                logger.info(f"Updated season summary for '{show.title}' S{season} to: {new_summary}", extra={'emoji_type': 'update'})
+                return True
+            # Update series summary
+            elif season is None and episode is None:
+                current_summary = getattr(show, 'summary', '') or ''
+                new_summary = _prepend_status_to_summary(current_summary, status)
+                show.editSummary(new_summary)
+                show.reload()
+                logger.info(f"Updated series summary for '{show.title}' to: {new_summary}", extra={'emoji_type': 'update'})
+                return True
+            else:
+                return False
+
+        elif media_type == 'movie':
+            movie = find_movie_by_id(media_id, title, year)
+            if not movie:
+                logger.error(f"Could not find movie with TMDB ID {media_id} for summary update", extra={'emoji_type': 'error'})
+                return False
+            current_summary = getattr(movie, 'summary', '') or ''
+            new_summary = _prepend_status_to_summary(current_summary, status)
+            movie.editSummary(new_summary)
+            movie.reload()
+            logger.info(f"Updated movie summary for '{movie.title}' to: {new_summary}", extra={'emoji_type': 'update'})
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"Error updating summary status: {e}", extra={'emoji_type': 'error'})
+        return False
+
+def batch_update_plex_episode_status(tvdb_id, title, status_map, throttle=0.2):
+    """
+    Efficiently update episode summaries for a show in Plex in batch.
+    Args:
+        tvdb_id: TVDB ID of the show
+        title: Title of the show (fallback)
+        status_map: dict of (season, episode) -> status string (or None to clear)
+        throttle: seconds to wait between updates (default 0.2)
+    Returns:
+        dict of (season, episode) -> True/False for update success
+    """
+    import time
+    results = {}
+    show = find_show_by_id(tvdb_id, title)
+    if not show:
+        logger.error(f"[Batch] Could not find show with TVDB ID {tvdb_id}", extra={'emoji_type': 'error'})
+        return results
+    # Fetch all episodes once
+    try:
+        all_eps = list(show.episodes())
+        # Build mapping: (season, episode) -> episode_obj
+        ep_map = {}
+        for ep in all_eps:
+            try:
+                s = getattr(ep, 'seasonNumber', None) or getattr(ep, 'season', None)
+                e = getattr(ep, 'episodeNumber', None) or getattr(ep, 'index', None)
+                if s is not None and e is not None:
+                    ep_map[(int(s), int(e))] = ep
+            except Exception as ex:
+                logger.warning(f"[Batch] Error mapping episode: {ex}", extra={'emoji_type': 'skip'})
+        # Update only those in status_map
+        updated_count = 0
+        for (season, episode), status in status_map.items():
+            ep_obj = ep_map.get((int(season), int(episode)))
+            if not ep_obj:
+                logger.warning(f"[Batch] Episode S{season}E{episode} not found for '{show.title}'", extra={'emoji_type': 'skip'})
+                results[(season, episode)] = False
+                continue
+            current_summary = getattr(ep_obj, 'summary', '') or ''
+            new_summary = _prepend_status_to_summary(current_summary, status)
+            if current_summary.strip() == new_summary.strip():
+                logger.debug(f"[Batch] No summary change for S{season}E{episode}", extra={'emoji_type': 'skip'})
+                results[(season, episode)] = True
+                continue
+            try:
+                ep_obj.editSummary(new_summary)
+                ep_obj.reload()
+                logger.debug(f"[Batch] Updated summary for '{show.title}' S{season}E{episode} to: {new_summary}", extra={'emoji_type': 'update'})
+                results[(season, episode)] = True
+                updated_count += 1
+                time.sleep(throttle)
+            except Exception as e:
+                logger.error(f"[Batch] Failed to update summary for S{season}E{episode}: {e}", extra={'emoji_type': 'error'})
+                results[(season, episode)] = False
+        if updated_count > 0:
+            logger.info(f"[Batch] Updated summaries for {updated_count} episode(s) in '{show.title}'", extra={'emoji_type': 'update'})
+    except Exception as e:
+        logger.error(f"[Batch] Error fetching episodes for show {tvdb_id}: {e}", extra={'emoji_type': 'error'})
+    return results
+
+def test_plex_endpoints():
+    """Test key Plex API endpoints needed for operation."""
+    try:
+        url = f"{settings.PLEX_URL}/library/sections"
+        headers = {'X-Plex-Token': settings.PLEX_TOKEN}
+        import requests
+        resp = requests.get(url, headers=headers, timeout=5)
+        resp.raise_for_status()
+        logger.info("Plex /library/sections endpoint accessible", extra={'emoji_type': 'success'})
+    except Exception as ex:
+        logger.error(f"Plex /library/sections endpoint failed: {ex}", extra={'emoji_type': 'error'})
+
+# Run connection test at import time (same pattern as Jellyfin)
+if getattr(settings, "plex_enabled", False):
+    try:
+        plex = PlexServer(settings.PLEX_URL, settings.PLEX_TOKEN)
+        logger.info("Connected to Plex server", extra={'emoji_type': 'success'})
+        test_plex_endpoints()
+    except Exception as e:
+        logger.error(f"Failed to connect to Plex server: {e}", extra={'emoji_type': 'error'})
+        plex = None
+else:
+    plex = None

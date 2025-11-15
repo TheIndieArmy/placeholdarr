@@ -152,7 +152,7 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 
 ---
 
-### Tautulli Webhook Setup
+### Tautulli (Plex) Webhook Setup
 
 1. In Tautulli, go to Settings → Notification Agents
 2. Add a new Webhook notification agent
@@ -160,17 +160,7 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
    - Webhook URL: `http://your-server:8000/webhook`
    - Trigger: Playback Start
    - Payload Format: JSON
-   
-4. Add this condition to only trigger on dummy files:
-```
-{
-    "operator": "contains",
-    "condition": "filename",
-    "value": "dummy"
-}
-```
-
-5. Use this JSON payload:
+4. Put in this JSON payload under the Playback Start JSON in the Data tab:
 ```json
 {
     "event": "playback.start",
@@ -266,24 +256,31 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 
 ---
 
+
 ## Docker Usage Notes
 
-If you are running Placeholdarr in Docker, you **must provide a `dummy.mp4` file** on the host and mount it into the container.  
+**IMPORTANT:** For Plex/Tautulli compatibility, all path values in your `.env` file (such as `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`, `DUMMY_FILE_PATH`, etc.) **must match the absolute host path** (the left side of your Docker volume mounts), and you must mount the host path to the **same absolute path inside the container** (host path : host path). This is because Tautulli sends the host path in its webhook payload, and Placeholdarr must match it to identify placeholders.
+
+If you are running Placeholdarr in Docker, you **must provide a `dummy.mp4` file** on the host and mount it into the container at the same absolute path.
 You can use the sample `dummy.mp4` provided in this repository, or supply your own small/valid video file if you prefer.
 
 **Instructions:**
-1. **Download the sample dummy file:**  
-   - Download `dummy.mp4` from the Placeholdarr GitHub repository and save it to your host (e.g., `/path/to/dummy.mp4`).
+1. **Download the sample dummy files:**  
+  - Download both `dummy.mp4` and `coming_soon_dummy.mp4` from the Placeholdarr GitHub repository and save them to your host (e.g., `/mnt/plex/Movies/placeholders/dummy.mp4` and `/mnt/plex/Movies/placeholders/coming_soon_dummy.mp4`).
 2. **Or use your own:**  
-   - You may use any small/valid video file as a placeholder.
-3. **Mount it into the container:**  
-   - In your `docker-compose.yml` or `docker run` command, mount it to `/data/dummy.mp4` inside the container:
-     ```yaml
-     volumes:
-       - /path/to/dummy.mp4:/data/dummy.mp4
-     ```
-4. **Set the path in your `.env`:**  
-   - `DUMMY_FILE_PATH=/data/dummy.mp4`
+  - You may use any small/valid video files as placeholders.
+3. **Mount both files into the container at the same absolute path:**  
+  - In your `docker-compose.yml` or `docker run` command, mount them as:
+    ```yaml
+    volumes:
+     - /mnt/plex/Movies/placeholders:/mnt/plex/Movies/placeholders
+     - /mnt/plex/Movies/placeholders/dummy.mp4:/mnt/plex/Movies/placeholders/dummy.mp4
+     - /mnt/plex/Movies/placeholders/coming_soon_dummy.mp4:/mnt/plex/Movies/placeholders/coming_soon_dummy.mp4
+    ```
+4. **Set the paths in your `.env`:**  
+  - `DUMMY_FILE_PATH=/mnt/plex/Movies/placeholders/dummy.mp4`
+  - `COMING_SOON_DUMMY_FILE_PATH=/mnt/plex/Movies/placeholders/coming_soon_dummy.mp4`
+  - Both files must be present and mounted, but the `COMING_SOON_DUMMY_FILE_PATH` will only be used if the related setting is enabled in your `.env` (e.g., `ENABLE_COMING_SOON_PLACEHOLDERS=true`).
 
 ---
 
