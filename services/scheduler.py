@@ -2023,6 +2023,36 @@ class ActionScheduler:
 
                         ent.status = 'PENDING'
                         session.add(ent)
+                        
+                        # Also reset the subflow that was incorrectly marked DONE
+                        try:
+                            if entity_model is Episode:
+                                problematic_subflow = session.query(SubFlow).filter(
+                                    SubFlow.episode_id == ent_id,
+                                    SubFlow.action == self.action,
+                                    SubFlow.status == 'DONE',
+                                    SubFlow.step_index == step_index
+                                ).first()
+                            elif entity_model is Movie:
+                                problematic_subflow = session.query(SubFlow).filter(
+                                    SubFlow.movie_id == ent_id,
+                                    SubFlow.action == self.action,
+                                    SubFlow.status == 'DONE',
+                                    SubFlow.step_index == step_index
+                                ).first()
+                            else:
+                                problematic_subflow = None
+                            
+                            if problematic_subflow:
+                                logger.warning(
+                                    f"Resetting SubFlow {problematic_subflow.id} to PENDING at step {step_index}",
+                                    extra={'emoji_type': 'repair'}
+                                )
+                                problematic_subflow.status = 'PENDING'
+                                session.add(problematic_subflow)
+                        except Exception as sf_e:
+                            logger.warning(f"Failed to reset problematic subflow: {sf_e}", extra={'emoji_type': 'warning'})
+                        
                         session.commit()
 
                         logger.info(
