@@ -1665,11 +1665,17 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                 continue
             if it['Path'] == ep2.dummypath:
                 save_jellyfin_dummy_id(dbsession, Episode, ep2.id, it)
-                if steps.index('verify_dummy_scan_jellyfin') + 1 < len(steps):
-                    sf.step_index = steps.index('verify_dummy_scan_jellyfin')+1
+                if sf.step_index + 1 < len(steps):
+                    old_step = sf.step_index
+                    sf.step_index += 1
                     sf.status = 'PENDING'  # Set to PENDING so scheduler picks it up
+                    # Update entity's current_step_name to match new step_index
+                    ep2.current_step_name = steps[sf.step_index]
+                    logger.verbose(f"SubFlow {sf.id} for episode {ep2.id} advanced from step index {old_step} to {sf.step_index}", extra={'emoji_type': 'info'})
                 else:
                     sf.status = 'DONE'
+                    # Update entity's current_step_name to match final step
+                    ep2.current_step_name = steps[sf.step_index]
                 dbsession.add(sf)
                 if ep2.id == ent_id:
                     matched = True
