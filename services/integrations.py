@@ -11,6 +11,7 @@ from services.plex_client import plex
 from services.utils import get_movie_by_id
 from sqlalchemy.orm import Session
 from services.postgres.models import Series
+from services.postgres.utils import safe_commit
 
 
 # Global variables
@@ -503,8 +504,9 @@ def delete_dummy_file(
         if model is Movie:
             movie = session.query(Movie).get(ent_id)
             if not movie:
-                logger.error(f"Movie with ID {ent_id} not found", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Movie with ID {ent_id} not found"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
 
             logger.debug(f"Processing movie deletion: {movie.title} ({movie.year})", extra={'emoji_type': 'movie'})
             tmdb_id = getattr(movie, 'tmdbid', None) or getattr(movie, 'tmdb_id', None)
@@ -528,8 +530,9 @@ def delete_dummy_file(
         elif model is Episode:
             episode = session.query(Episode).get(ent_id)
             if not episode:
-                logger.error(f"Episode with ID {ent_id} not found", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Episode with ID {ent_id} not found"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
 
             season = session.query(Season).get(episode.season_id) if episode.season_id else None
             series = session.query(Series).get(season.series_id) if season and season.series_id else None
@@ -554,11 +557,12 @@ def delete_dummy_file(
             return result
 
         else:
-            logger.error(f'Unsupported model type for delete_dummy_file: {model}', extra={'emoji_type': 'error'})
-            return False
+            msg = f'Unsupported model type for delete_dummy_file: {model}'
+            logger.error(msg, extra={'emoji_type': 'error'})
+            raise Exception(msg)
     except Exception as e:
         logger.error(f"Error deleting dummy file for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
-        return False
+        raise e
 
 def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, action: str, status: str = None):
     """Update the status of a placeholder file"""
@@ -574,7 +578,7 @@ def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, acti
                 return False
             
             movie.placeholder_status = status
-            dbSession.commit()
+            safe_commit(dbSession, movie)
             logger.info(f"Updated movie placeholder status to '{status}' for ID {ent_id}", extra={'emoji_type': 'update'})
             return True
         
@@ -585,7 +589,7 @@ def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, acti
                 return False
             
             episode.placeholder_status = status
-            dbSession.commit()
+            safe_commit(dbSession, episode)
             logger.info(f"Updated episode placeholder status to '{status}' for ID {ent_id}", extra={'emoji_type': 'update'})
             return True
         
@@ -842,7 +846,7 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
                             movie.jellyfin_dummy_id = None
                             movie.placeholder_exists = False
                             db_sess.add(movie)
-                            db_sess.commit()
+                            safe_commit(db_sess, movie)
                             logger.debug(f"Marked DB Movie deleted: {movie.title}", extra={'emoji_type': 'debug'})
 
                     elif media_type == 'tv':
@@ -852,19 +856,21 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
                             series.jellyfin_dummy_id = None
                             series.placeholder_exists = False
                             db_sess.add(series)
+                            safe_commit(db_sess, series)
                             seasons = db_sess.query(Season).filter_by(series_id=series.id).all()
                             for s in seasons:
                                 s.is_deleted = True
                                 s.jellyfin_dummy_id = None
                                 s.placeholder_exists = False
                                 db_sess.add(s)
+                                safe_commit(db_sess, s)
                                 eps = db_sess.query(Episode).filter_by(season_id=s.id).all()
                                 for ep in eps:
                                     ep.is_deleted = True
                                     ep.jellyfin_dummy_id = None
                                     ep.placeholder_exists = False
                                     db_sess.add(ep)
-                            db_sess.commit()
+                                    safe_commit(db_sess, ep)
                             logger.debug(f"Marked DB Series, seasons, and episodes deleted for: {series.title}", extra={'emoji_type': 'debug'})
                 except Exception as e:
                     logger.error(f"Failed to mark DB records deleted: {e}", extra={'emoji_type': 'error'})
@@ -873,7 +879,7 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
 
     except Exception as e:
         logger.error(f"Error deleting placeholder: {e}", extra={'emoji_type': 'error'})
-        return False
+        raise e
 
 def check_arr_webhook(arr_name, arr_url, api_key, webhook_url):
     try:
@@ -1028,7 +1034,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     # Persist discovered radarr id for future checks
                     movie.radarrid = movie_data.get('id')
                     session.add(movie)
-                    session.commit()
+                    safe_commit(session, movie)
 
                     # If Radarr already reports a file, skip placeholder
                     mf = movie_data.get('movieFile') or {}
@@ -1055,7 +1061,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             movie.dummypath = dummy_path
             movie.placeholder_exists = True  # Mark that placeholder file exists
             session.add(movie)
-            session.commit()
+            safe_commit(session, movie)
             logger.info(f"Created placeholder file for '{movie.title}'", extra={'emoji_type': 'success'})
             return True
         else:
@@ -1109,7 +1115,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 series_path = '/'.join(episode.dummypath.split('/')[:-2])  # Remove 'Season XX/episode.mp4'
                 series.dummypath = series_path
                 session.add(series)
-                session.commit()
+                safe_commit(session, series)
                 logger.debug(f"Set series dummy path to: {series_path}", extra={'emoji_type': 'debug'})
 
         # After all episode subflows, update series current_step_name to latest completed step if possible
@@ -1122,7 +1128,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
             if last_done_subflow:
                 series.current_step_name = last_done_subflow.steps
                 session.add(series)
-                session.commit()
+                safe_commit(session, series)
         logger.info(f"Completed placeholder processing for series '{series.title}'", extra={'emoji_type': 'success'})
         return True
 
@@ -1150,9 +1156,10 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 for special_ep in special_episodes:
                     logger.info(f"Deleting special episode {special_ep.id} (season 0)", extra={'emoji_type': 'delete'})
                     session.delete(special_ep)
+                    safe_commit(session, special_ep)
                 logger.info(f"Deleting special season {special_season.id} (season 0)", extra={'emoji_type': 'delete'})
                 session.delete(special_season)
-            session.commit()
+                safe_commit(session, special_season)
             # If this episode is a special, skip placeholder creation
             if seas.season_number == 0:
                 logger.info(f"Skipping placeholder for special episode {current_ep.id} (season 0) due to INCLUDE_SPECIALS=False", extra={'emoji_type': 'skip'})
@@ -1201,8 +1208,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                         action="handle_seriesadd"
                     )
                     session.add(new_subflow)
-                    
-                session.commit()
+                    safe_commit(session, new_subflow)
                 
                 # Re-query SubFlows now that we've created new ones
                 sf_eps = session.query(SubFlow).filter(
@@ -1258,7 +1264,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     orphan_ep.current_step_name = subflow.steps
                     session.add(orphan_ep)
                 session.add(subflow)
-                session.commit()
+                safe_commit(session, subflow)
                 continue
 
             # Skip if real file exists or placeholder already set AND file actually exists
@@ -1273,7 +1279,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     ep.current_step_name = subflow.steps
                     session.add(ep)
                 session.add(subflow)
-                session.commit()
+                safe_commit(session, subflow)
                 continue
 
             # Ensure season info available
@@ -1282,7 +1288,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                 logger.error(f"Missing season for episode id {ep.id}", extra={'emoji_type': 'error'})
                 subflow.status = "DONE"
                 session.add(subflow)
-                session.commit()
+                safe_commit(session, subflow)
                 continue
 
             season_num = season_rec.season_number
@@ -1299,7 +1305,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     )
                     subflow.status = "DONE"
                     session.add(subflow)
-                    session.commit()
+                    safe_commit(session, subflow)
                     continue
             except Exception:
                 logger.debug("Episode file check failed, will continue with placeholder creation", extra={'emoji_type': 'debug'})
@@ -1324,7 +1330,7 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                                 if found.get('id'):
                                     series.sonarrid = found.get('id')
                                     session.add(series)
-                                    session.commit()
+                                    safe_commit(session, series)
             except Exception:
                 logger.debug("Sonarr lookup by TVDB failed or returned no data", extra={'emoji_type': 'debug'})
 
@@ -1351,14 +1357,14 @@ def delayed_placeholders(session: Session, ent_id: int, model: Type, action: str
                     ep.current_step_name = subflow.steps
                 session.add(ep)
                 # Commit immediately so external scanners and other workers see file presence
-                session.commit()
+                safe_commit(session, ep)
                 placeholder_count += 1
                 logger.debug(f"Persisted placeholder for {series.title} S{season_num}E{episode_num}", extra={'emoji_type': 'debug'})
                 
                 # Only mark this subflow entry DONE if the dummy file was successfully created
                 subflow.status = "DONE"
                 session.add(subflow)
-                session.commit()
+                safe_commit(session, subflow)
             else:
                 failed_count += 1
                 logger.error(f"Failed to create dummy file for {series.title} S{season_num}E{episode_num} - keeping SubFlow as PENDING for scheduler retry", extra={'emoji_type': 'error'})

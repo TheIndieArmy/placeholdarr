@@ -9,6 +9,7 @@ from core.logger import logger
 from core.handler_logging import use_handler_session
 from services.utils import strip_status_markers
 from services.postgres.models import Movie, Series, Season, Episode, SubFlow
+from services.postgres.utils import safe_commit
 from services.nfo_manager import (
     create_movie_nfo, create_series_nfo, create_season_nfo, create_episode_nfo,
     write_nfo_file, update_nfo_status, delete_nfo_file, get_nfo_path
@@ -83,8 +84,11 @@ def refresh_jellyfin_item(path: Union[str, List[str]], update_type: str = 'Creat
         bool: True if Jellyfin accepted request (HTTP 204), False otherwise.
     """
     if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
-        logger.warning("Jellyfin is not enabled or URL not configured", extra={'emoji_type': 'warning'})
-        return False
+        # If disabled, we probably shouldn't fail hard if it was just a stray call?
+        # But for RCA, if we called it, we expected it to work.
+        msg = "Jellyfin is not enabled or URL not configured"
+        logger.warning(msg, extra={'emoji_type': 'warning'})
+        raise Exception(msg)
 
     # Normalize input to list of targets
     if isinstance(path, str):
@@ -110,6 +114,7 @@ def refresh_jellyfin_item(path: Union[str, List[str]], update_type: str = 'Creat
         logger.error(f"Scan failed ({resp.status_code}): {resp.text}", extra={'emoji_type': 'error'})
     except Exception as ex:
         logger.error(f"Error during scan request: {ex}", extra={'emoji_type': 'error'})
+        raise ex
     return False
 
 def refresh_jellyfin_library(library_id: str,
@@ -140,6 +145,7 @@ def refresh_jellyfin_library(library_id: str,
         logger.error(f"Library refresh failed ({resp.status_code}): {resp.text}", extra={'emoji_type': 'error'})
     except Exception as ex:
         logger.error(f"Error during library refresh: {ex}", extra={'emoji_type': 'error'})
+        raise ex
     return False
 
 
@@ -250,8 +256,14 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
     try:
         entity = dbsession.query(model).get(ent_id)
         if not entity:
-            logger.error(f"{model.__name__} {ent_id} not found", extra={'emoji_type': 'error'})
-            return False
+            msg = f"{model.__name__} {ent_id} not found"
+            logger.error(msg, extra={'emoji_type': 'error'})
+            raise Exception(msg)
+
+        # Short-circuit for delete action if placeholder doesn't exist
+        if 'delete' in action.lower() and hasattr(entity, 'placeholder_exists') and not entity.placeholder_exists:
+            logger.info(f"Skipping NFO creation for {model.__name__} {ent_id} (delete action, no placeholder)", extra={'emoji_type': 'skip'})
+            return True
 
         request_status = status if status else entity.placeholder_status  # Default status prefix
 
@@ -263,24 +275,27 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                 logger.info(f"No placeholder path for Movie {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
             elif not placeholder_path and not filepath:
-                logger.error(f"No placeholder path found for Movie {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"No placeholder path found for Movie {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
 
             nfo_content = create_movie_nfo(entity, request_status)
             if not nfo_content:
-                logger.error(f"Failed to generate movie NFO content for {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Failed to generate movie NFO content for {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             nfo_path = get_nfo_path(placeholder_path)
             if not nfo_path:
-                logger.error(f"Could not determine NFO path for {placeholder_path}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Could not determine NFO path for {placeholder_path}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             success = write_nfo_file(nfo_content, nfo_path)
             if success:
                 entity.nfo_path = nfo_path
                 dbsession.add(entity)
-                dbsession.commit()
+                safe_commit(dbsession, entity)
                 logger.info(f"Successfully created movie NFO: {nfo_path}", extra={'emoji_type': 'success'})
             
             return success
@@ -292,13 +307,15 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
             # Get season and series
             season = dbsession.query(Season).get(episode.season_id)
             if not season:
-                logger.error(f"Season {episode.season_id} not found for episode {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Season {episode.season_id} not found for episode {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
                 
             series = dbsession.query(Series).get(season.series_id)
             if not series:
-                logger.error(f"Series {season.series_id} not found for season {episode.season_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Series {season.series_id} not found for season {episode.season_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             logger.info(f"Creating NFO hierarchy for episode {episode.episode_number} of '{series.title}' S{season.season_number}", extra={'emoji_type': 'tv'})
             
@@ -309,8 +326,9 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                 logger.info(f"No placeholder path found for Episode {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
             elif not episode_placeholder_path and not filepath:
-                logger.error(f"No placeholder path found for Episode {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"No placeholder path found for Episode {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             # Create series NFO if it doesn't exist
             if not series.nfo_path or not os.path.exists(series.nfo_path):
@@ -324,6 +342,7 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                     if write_nfo_file(series_nfo_content, series_nfo_path):
                         series.nfo_path = series_nfo_path
                         dbsession.add(series)
+                        safe_commit(dbsession, series)
                         logger.info(f"Created series NFO: {series_nfo_path}", extra={'emoji_type': 'success'})
                     else:
                         logger.error(f"Failed to write series NFO to {series_nfo_path}", extra={'emoji_type': 'error'})
@@ -342,6 +361,7 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                     if write_nfo_file(season_nfo_content, season_nfo_path):
                         season.nfo_path = season_nfo_path
                         dbsession.add(season)
+                        safe_commit(dbsession, season)
                         logger.info(f"Created season NFO: {season_nfo_path}", extra={'emoji_type': 'success'})
                     else:
                         logger.error(f"Failed to write season NFO to {season_nfo_path}", extra={'emoji_type': 'error'})
@@ -352,19 +372,21 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
             logger.info(f"Creating episode NFO for S{season.season_number}E{episode.episode_number}", extra={'emoji_type': 'file'})
             episode_nfo_content = create_episode_nfo(episode, request_status)
             if not episode_nfo_content:
-                logger.error(f"Failed to generate episode NFO content", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Failed to generate episode NFO content"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             episode_nfo_path = get_nfo_path(episode_placeholder_path)
             if not episode_nfo_path:
-                logger.error(f"Could not determine episode NFO path for {episode_placeholder_path}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Could not determine episode NFO path for {episode_placeholder_path}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             success = write_nfo_file(episode_nfo_content, episode_nfo_path)
             if success:
                 episode.nfo_path = episode_nfo_path
                 dbsession.add(episode)
-                dbsession.commit()
+                safe_commit(dbsession, episode)
                 logger.info(f"Successfully created episode NFO: {episode_nfo_path}", extra={'emoji_type': 'success'})
             
             return success
@@ -377,13 +399,15 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                 logger.info(f"No placeholder path for Series {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
             elif not placeholder_path and not filepath:
-                logger.error(f"No placeholder path found for Series {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"No placeholder path found for Series {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             nfo_content = create_series_nfo(entity, request_status)
             if not nfo_content:
-                logger.error(f"Failed to generate series NFO content for {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Failed to generate series NFO content for {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             # Series NFO goes in the series folder as tvshow.nfo
             series_folder = os.path.dirname(placeholder_path) if os.path.isfile(placeholder_path) else placeholder_path
@@ -393,7 +417,7 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
             if success:
                 entity.nfo_path = nfo_path
                 dbsession.add(entity)
-                dbsession.commit()
+                safe_commit(dbsession, entity)
                 logger.info(f"Successfully created series NFO: {nfo_path}", extra={'emoji_type': 'success'})
             
             return success
@@ -406,13 +430,15 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                 logger.info(f"No placeholder path for Season {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
             elif not placeholder_path:
-                logger.error(f"No placeholder path found for Season {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"No placeholder path found for Season {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             nfo_content = create_season_nfo(season, request_status)
             if not nfo_content:
-                logger.error(f"Failed to generate season NFO content for {ent_id}", extra={'emoji_type': 'error'})
-                return False
+                msg = f"Failed to generate season NFO content for {ent_id}"
+                logger.error(msg, extra={'emoji_type': 'error'})
+                raise Exception(msg)
             
             # Season NFO goes in the season folder as season.nfo
             season_folder = os.path.dirname(placeholder_path) if os.path.isfile(placeholder_path) else placeholder_path
@@ -422,19 +448,20 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
             if success:
                 entity.nfo_path = nfo_path
                 dbsession.add(entity)
-                dbsession.commit()
+                safe_commit(dbsession, entity)
                 logger.info(f"Successfully created season NFO: {nfo_path}", extra={'emoji_type': 'success'})
             
             return success
             
         else:
-            logger.error(f"Unsupported model type: {model.__name__}", extra={'emoji_type': 'error'})
-            return False
+            msg = f"Unsupported model type: {model.__name__}"
+            logger.error(msg, extra={'emoji_type': 'error'})
+            raise Exception(msg)
         
     except Exception as e:
         logger.error(f"Failed to create NFO for {model.__name__} {ent_id}: {e}", extra={'emoji_type': 'error'})
         dbsession.rollback()
-        return False
+        raise e
 
 
 def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action: str) -> bool:
@@ -457,18 +484,25 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
     try:
         entity = dbsession.query(model).get(ent_id)
         if not entity:
-            logger.error(f"{model.__name__} with ID {ent_id} not found", extra={'emoji_type': 'error'})
-            return False
+            msg = f"{model.__name__} with ID {ent_id} not found"
+            logger.error(msg, extra={'emoji_type': 'error'})
+            raise Exception(msg)
     except Exception as e:
         logger.error(f"Failed to query {model.__name__} with ID {ent_id}: {e}", extra={'emoji_type': 'error'})
-        return False
+        raise e
+
+    # Short-circuit for delete action if placeholder doesn't exist
+    if 'delete' in action.lower() and hasattr(entity, 'placeholder_exists') and not entity.placeholder_exists:
+        logger.info(f"Skipping dummy refresh for {model.__name__} {ent_id} (delete action, no placeholder)", extra={'emoji_type': 'skip'})
+        return True
 
     # Get the dummy path
     dummy_path = getattr(entity, 'dummypath', None)
     
     if not dummy_path:
-        logger.warning(f"No dummy path found for {model.__name__} ID {ent_id}. This should be retried.", extra={'emoji_type': 'warning'})
-        return False
+        msg = f"No dummy path found for {model.__name__} ID {ent_id}"
+        logger.warning(msg, extra={'emoji_type': 'warning'})
+        raise Exception(msg)
 
     logger.info(f"Found dummy path: {dummy_path}", extra={'emoji_type': 'dummy'})
 
@@ -487,7 +521,7 @@ def refresh_jellyfin_dummy(dbsession: Session, ent_id: int, model: type, action:
         if hasattr(entity, 'placeholder_exists'):
             entity.placeholder_exists = False
             dbsession.add(entity)
-            dbsession.commit()
+            safe_commit(dbsession, entity)
         # Continue to trigger scan regardless of file existence
     # else:
     #     # For non-delete actions, create dummy file if missing
@@ -776,28 +810,38 @@ def reset_jellyfin_id(dbsession: Session, ent_id: int, model: type, action:str) 
     try:
         entity = dbsession.query(model).get(ent_id)
         if not entity:
-            logger.error(f"{model.__name__} with ID {ent_id} not found", extra={'emoji_type': 'error'})
-            return False
+            msg = f"{model.__name__} {ent_id} not found"
+            logger.error(msg, extra={'emoji_type': 'error'})
+            raise Exception(msg)
 
-        entity.jellyfin_id = None
-        entity.jellyfin_dummy_id = None
-        entity.filepath = None
-        entity.sonarr_progress = None
-        entity.sonarr_status = None
-        
-        # For episodes, also clear the series filepath
-        if model == Episode:
-            entity.season.series.filepath = None
-            dbsession.add(entity.season.series)
+        # If delete action and placeholder is False, ONLY reset dummy ID
+        if 'delete' in action.lower() and hasattr(entity, 'placeholder_exists') and not entity.placeholder_exists:
+            logger.info(f"Partially resetting Jellyfin ID for {model.__name__} {ent_id} (delete action, no placeholder) - keeping real ID", extra={'emoji_type': 'reset'})
+            entity.jellyfin_dummy_id = None
+            entity.sonarr_progress = None
+            entity.sonarr_status = None 
+            # Do NOT reset jellyfin_id, filepath, or sonarr status
+        else:
+            # Full reset
+            entity.jellyfin_id = None
+            entity.jellyfin_dummy_id = None
+            entity.filepath = None
+            entity.sonarr_progress = None
+            entity.sonarr_status = None
+            
+            # For episodes, also clear the series filepath
+            if model == Episode:
+                entity.season.series.filepath = None
+                dbsession.add(entity.season.series)
         
         dbsession.add(entity)
-        dbsession.commit()
-        logger.info(f"Successfully reset Jellyfin ID for {model.__name__} ID {ent_id}", extra={'emoji_type': 'success'})
+        safe_commit(dbsession, entity)
+        logger.info(f"Successfully processed Jellyfin ID reset for {model.__name__} {ent_id}", extra={'emoji_type': 'success'})
         return True
     except Exception as e:
         logger.error(f"Failed to reset Jellyfin ID for {model.__name__} ID {ent_id}: {e}", extra={'emoji_type': 'error'})
         dbsession.rollback()
-        return False
+        raise e
 
 def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, action:str) -> bool:
     """
@@ -854,8 +898,9 @@ def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, acti
             logger.info(f"Successfully processed {len(matching)} delete action subflows (no file paths to refresh)", extra={'emoji_type': 'success'})
             return True
         else:
-            logger.warning("No file paths found to refresh", extra={'emoji_type': 'warning'})
-            return False
+            msg = "No file paths found to refresh"
+            logger.warning(msg, extra={'emoji_type': 'warning'})
+            raise Exception(msg)
 
     # 3) Determine update type from SubFlow action (not parent entity action)
     sf_action = matching[0].action.lower()
@@ -888,6 +933,7 @@ def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, acti
             # Keep as QUEUED so scheduler can pick up the next step
             sf.status = 'QUEUED'
             dbsession.add(sf)
+            safe_commit(dbsession, sf)
             advanced_count += 1
             
             logger.debug(f"Advanced SubFlow {sf.id} to step {sf.step_index}: {next_step}", extra={'emoji_type': 'step'})
@@ -895,6 +941,7 @@ def refresh_jellyfin_arr_path(dbsession: Session, ent_id: int, model: type, acti
             # This was the last step, mark as DONE
             sf.status = 'DONE'
             dbsession.add(sf)
+            safe_commit(dbsession, sf)
             logger.debug(f"SubFlow {sf.id} completed all steps", extra={'emoji_type': 'success'})
     
     # Commit all the SubFlow updates
@@ -945,6 +992,26 @@ def save_jellyfin_arr_id(dbsession, model, ent_id, match: dict):
         Season:  'jellyfin_overview',
         Episode: 'jellyfin_overview'
     }[model]
+    
+    # Check if this is a dummy path being saved to a real ID field
+    jf_path = match.get('Path', '')
+    if jf_path:
+        # Normalize paths for comparison
+        dummy_movie = (settings.DUMMY_MOVIE_LIBRARY_FOLDER or "").rstrip(os.sep)
+        dummy_tv = (settings.DUMMY_TV_LIBRARY_FOLDER or "").rstrip(os.sep)
+        
+        # Check for dummy path contamination
+        is_dummy = False
+        if dummy_movie and jf_path.startswith(dummy_movie):
+            is_dummy = True
+        elif dummy_tv and jf_path.startswith(dummy_tv):
+            is_dummy = True
+            
+        if is_dummy and id_field == 'jellyfin_id':
+            msg = f"❌ BLOCKED: Attempted to save dummy path '{jf_path}' to real {model.__name__}.jellyfin_id. Skipping ID update."
+            logger.warning(msg, extra={'emoji_type': 'warning'})
+            # RAISE EXCEPTION so this error is captured in last_error_message
+            raise Exception(msg)
 
     changed = False
     # Update ID
@@ -968,7 +1035,7 @@ def save_jellyfin_arr_id(dbsession, model, ent_id, match: dict):
 
     if changed:
         dbsession.add(obj)
-        dbsession.commit()
+        safe_commit(dbsession, obj)
         logger.info(f"Saved arr data for {model.__name__} {ent_id}", extra={'emoji_type': 'success'})
     else:
         logger.debug(f"No changes needed for {model.__name__} {ent_id} arr data", extra={'emoji_type': 'debug'})
@@ -1033,7 +1100,7 @@ def save_jellyfin_dummy_id(dbsession, model, ent_id, match: dict):
 
     if changed:
         dbsession.add(obj)
-        dbsession.commit()
+        safe_commit(dbsession, obj)
         logger.info(f"Saved dummy data for {model.__name__} {ent_id}", extra={'emoji_type': 'success'})
     else:
         logger.debug(f"No changes needed for {model.__name__} {ent_id} dummy data", extra={'emoji_type': 'debug'})
@@ -1062,9 +1129,26 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
     user_id = get_admin_user()
     if model is Movie:
         m = dbsession.query(Movie).get(ent_id)
-        if not m or not m.filepath:
-            logger.warning(f"Movie {ent_id} not found or missing filepath", extra={'emoji_type': 'warning'})
+        if not m:
+            logger.warning(f"Movie {ent_id} not found", extra={'emoji_type': 'warning'})
+            return False
+        
+        # For delete actions, check if arr file actually exists (filepath might be None for deleted movies)
+        if 'delete' in action.lower():
+            if not m.filepath or not os.path.exists(m.filepath):
+                logger.info(f"Arr file {'(no filepath)' if not m.filepath else m.filepath} already deleted - verification complete", extra={'emoji_type': 'success'})
+                # Update placeholder_exists status
+                if hasattr(m, 'placeholder_exists'):
+                    m.placeholder_exists = False
+                    dbsession.add(m)
+                    safe_commit(dbsession, m)
+                return True
+        
+        # For non-delete actions, filepath is required
+        if not m.filepath:
+            logger.warning(f"Movie {ent_id} missing filepath", extra={'emoji_type': 'warning'})
             return False # gotta add step to enrich filepath then retry
+        
         if m.jellyfin_id:
             logger.debug(f"Movie {ent_id} already has jellyfin_id: {m.jellyfin_id}", extra={'emoji_type': 'debug'})
             it = None
@@ -1088,17 +1172,31 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
                     success_condition=lambda res: success_movie(res)
                 ) or []
                 for candidate in items:
+                    c_path = candidate.get('Path', '')
                     if (
                         int(candidate.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and
-                        candidate.get('Path', '') == m.filepath and
+                        c_path == m.filepath and
                         (not m.year or int(candidate.get("ProductionYear", -1)) == m.year)
                     ):
                         it = candidate
                         break
+                    
+                    # Check if the existing ID points to a dummy path (Poisoned ID)
+                    dummy_movie = (settings.DUMMY_MOVIE_LIBRARY_FOLDER or "").rstrip(os.sep)
+                    if c_path and dummy_movie and c_path.startswith(dummy_movie):
+                        logger.warning(f"Detected poisoned Movie ID {m.jellyfin_id} pointing to dummy library. Resetting.", extra={'emoji_type': 'reset'})
+                        m.jellyfin_id = None
+                        dbsession.add(m)
+                        safe_commit(dbsession, m)
+                        # We don't break here, we continue looking for match or fall through to search
+                        
             except Exception as ex:
                 logger.error(f"Error fetching Jellyfin item by ID: {ex}", extra={'emoji_type': 'error'})
             if it:
                 save_jellyfin_arr_id(dbsession, Movie, m.id, it)
+                return True # If we matched existing ID, we are good
+            elif not m.jellyfin_id:
+                logger.info(f"Existing ID was invalid/poisoned, falling back to search", extra={'emoji_type': 'search'})
             return True
         clean_title = re.sub(r"\s*\(\d{4}\)$", "", m.title)
         url = build_jellyfin_url(
@@ -1111,10 +1209,13 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
             if res.status_code == 404:
                 return True
             response_items = res.json().get('Items', [])
+            dummy_movie_base = (settings.DUMMY_MOVIE_LIBRARY_FOLDER or "").rstrip(os.sep)
             return [
                 item for item in (response_items or [])
                 if (
-                    int(item.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and item.get('Path','') == m.filepath
+                    int(item.get("ProviderIds", {}).get("Tmdb", -1)) == m.tmdbid and 
+                    item.get('Path','') == m.filepath and
+                    (not dummy_movie_base or not item.get('Path', '').startswith(dummy_movie_base))
                 )
                 and (not m.year or int(item.get("ProductionYear", -1)) == m.year)
             ]
@@ -1134,9 +1235,27 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
 
     # EPISODE CASE
     ep = dbsession.query(Episode).get(ent_id)
-    if not ep or not ep.filepath:
-        logger.warning(f"Episode {ent_id} not found or missing filepath", extra={'emoji_type': 'warning'})
+    if not ep:
+        logger.warning(f"Episode {ent_id} not found", extra={'emoji_type': 'warning'})
         return False
+    
+    # For delete actions, check if arr file actually exists (filepath might be None for deleted episodes)
+    import os
+    if 'delete' in action.lower():
+        if not ep.filepath or not os.path.exists(ep.filepath):
+            logger.info(f"Arr file {'(no filepath)' if not ep.filepath else ep.filepath} already deleted - verification complete", extra={'emoji_type': 'success'})
+            # Update placeholder_exists status
+            if hasattr(ep, 'placeholder_exists'):
+                ep.placeholder_exists = False
+                dbsession.add(ep)
+                safe_commit(dbsession, ep)
+            return True
+    
+    # For non-delete actions, filepath is required
+    if not ep.filepath:
+        logger.warning(f"Episode {ent_id} missing filepath", extra={'emoji_type': 'warning'})
+        return False
+    
     seas = dbsession.query(Season).get(ep.season_id)
     series = dbsession.query(Series).get(seas.series_id)
     logger.info(f"Processing episode {ent_id} for series '{series.title}' S{ep.season_number}E{ep.episode_number}", extra={'emoji_type': 'tv'})
@@ -1164,6 +1283,8 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
         
         def pick_series(items: List[dict]) -> List[dict]:
             matched = []
+            dummy_tv_base = (settings.DUMMY_TV_LIBRARY_FOLDER or "").rstrip(os.sep)
+            
             for s in (items or []):
                 tvdb_match = (s.get("ProviderIds", {}).get("Tvdb") and 
                              str(s["ProviderIds"]["Tvdb"]) == str(series.tvdbid))
@@ -1175,19 +1296,27 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
                     continue
                 
                 # If we have a series_folder, also match on path
+                s_path = s.get('Path', '')
+                
+                # CRITICAL: Skip if this series is in the dummy matching folder
+                if dummy_tv_base and s_path and s_path.startswith(dummy_tv_base):
+                    logger.debug(f"Skipping series '{s.get('Name')}' - resides in dummy path: {s_path}", extra={'emoji_type': 'skip'})
+                    continue
+                    
                 if series_folder:
-                    if s.get('Path') == series_folder:
+                    if s_path == series_folder:
                         matched.append(s)
                 else:
                     # No folder to match, just use title + TVDB
                     matched.append(s)
             return matched
-        items = retry_call(
+        raw_items = retry_call(
             func=lambda: safe_get_json_items(url),
             on_error=lambda ex: logger.error(f"Series search error: {ex}", extra={'emoji_type': 'error'}),
             retry_interval=3, retry_timeout=9,  # 3 attempts max
             success_condition=lambda res: bool(pick_series(res))
         ) or []
+        items = pick_series(raw_items)
         
         logger.debug(f"Found {len(items)} series candidates from search", extra={'emoji_type': 'debug'})
         
@@ -1223,7 +1352,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
     # 2) Cache season IDs
     seas_url = build_jellyfin_url(
         f"Users/{user_id}/Items?ParentId={jf_series_id}"
-        "&includeItemTypes=Season&fields=IndexNumber,Id"
+        "&includeItemTypes=Season&fields=IndexNumber,Id,Path"
     )
     season = dbsession.query(Season).get(ep.season_id)
     logger.info(f"Looking for season {season.season_number} in Jellyfin series {jf_series_id}", extra={'emoji_type': 'search'})
@@ -1247,7 +1376,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
         logger.warning(f"No seasons found using jellyfin_id {jf_series_id}, clearing stale ID to force re-search", extra={'emoji_type': 'warning'})
         series.jellyfin_id = None
         dbsession.add(series)
-        dbsession.commit()
+        safe_commit(dbsession, series)
         return False
 
     season_map = {s['IndexNumber']: s for s in seasons if 'IndexNumber' in s}
@@ -1335,11 +1464,53 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
                 else:
                     sf.status = 'DONE'
                 dbsession.add(sf)
+                safe_commit(dbsession, sf)
                 if ep2.id == ent_id:
                     matched = True
                 break
     if not matched:
-        logger.warning(f"No matching Jellyfin episode found for {ep2.filepath} in season {1}", extra={'emoji_type': 'warning'})
+        # Generate detailed error info for debugging
+        candidates = []
+        dummy_found = False
+        dummy_base_tv = (settings.DUMMY_TV_LIBRARY_FOLDER or "").rstrip(os.sep)
+        
+        for it in eps:
+            c_path = it.get('Path', '')
+            candidates.append(f"(Idx: {it.get('IndexNumber')}, Path: {c_path})")
+            # detect if we are finding dummy items
+            if c_path and dummy_base_tv and c_path.startswith(dummy_base_tv):
+                dummy_found = True
+        
+        candidates_str = ", ".join(candidates) if candidates else "None"
+        msg = f"No matching Jellyfin episode found for {ep2.filepath if 'ep2' in locals() else 'unknown'} (Season {season.season_number}). Found candidates: {candidates_str}"
+        
+        logger.warning(msg, extra={'emoji_type': 'warning'})
+        
+        # Log variables for debugging
+        logger.debug(f"Poison check vars: existing={existing}, dummy_found={dummy_found}, eps_count={len(eps) if eps else 0}", extra={'emoji_type': 'debug'})
+        
+        # Aggressive POISONED ID check
+        if dummy_found or (existing and not eps):
+            logger.warning(f"Detected potential POISONED Series ID {jf_series_id} (found dummy items or empty result while expecting real). Resetting Series/Season IDs to force fresh search.", extra={'emoji_type': 'reset'})
+            
+            # Reset Series ID
+            series.jellyfin_id = None
+            dbsession.add(series)
+            
+            # Reset Season IDs - AGGRESSIVE CLEANUP
+            # If the Series is poisoned, likely ALL seasons are poisoned. Reset them all.
+            all_seasons = dbsession.query(Season).filter(Season.series_id == series.id).all()
+            for s in all_seasons:
+                s.jellyfin_id = None
+                dbsession.add(s)
+            
+            # Reset Episode ID just in case
+            ep.jellyfin_id = None
+            dbsession.add(ep)
+            
+            safe_commit(dbsession)
+            raise Exception(f"Reset stale/poisoned Series ID {jf_series_id} pointing to dummy library (and all {len(all_seasons)} seasons) - will retry search")
+
         if existing:
             logger.warning(f"Existing series ID {jf_series_id} may be stale - consider resetting to force re-search", extra={'emoji_type': 'warning'})
             for s in seasons:
@@ -1353,10 +1524,12 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
                     dbsession.add(db_seas)
             series.jellyfin_id = None
             dbsession.add(series)
-            dbsession.commit()
+            safe_commit(dbsession, series)
+
+        # CRITICAL: Raise exception so scheduler records the specific error
+        raise Exception(msg)
 
     logger.info(f"Episode matching completed for series {series.id}, matched: {matched}", extra={'emoji_type': 'success' if matched else 'warning'})
-    dbsession.commit()
     return matched
 
 def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, action) -> bool:
@@ -1384,22 +1557,28 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
         if not m:
             logger.warning(f"Movie {ent_id} not found", extra={'emoji_type': 'warning'})
             return False
+            
+        # Short-circuit for delete action if placeholder doesn't exist
+        if 'delete' in action.lower() and hasattr(m, 'placeholder_exists') and not m.placeholder_exists:
+            logger.info(f"Skipping dummy verify for Movie {ent_id} (delete action, no placeholder)", extra={'emoji_type': 'skip'})
+            return True
         
-        # Check if we should skip verification based on placeholder existence
+        # For delete actions, check if placeholder file actually exists (dummypath might be None for deleted movies)
+        import os
+        if 'delete' in action.lower():
+            if not m.dummypath or not os.path.exists(m.dummypath):
+                logger.info(f"Placeholder file {'(no dummypath)' if not m.dummypath else m.dummypath} already deleted - verification complete", extra={'emoji_type': 'success'})
+                # Update placeholder_exists status
+                if hasattr(m, 'placeholder_exists'):
+                    m.placeholder_exists = False
+                    dbsession.add(m)
+                    safe_commit(dbsession, m)
+                return True
+        
+        # For non-delete actions, dummypath is required
         if not m.dummypath:
             logger.warning(f"Movie {ent_id} missing dummypath", extra={'emoji_type': 'warning'})
             return False
-            
-        # For delete actions, check if placeholder file actually exists
-        import os
-        if 'delete' in action.lower() and not os.path.exists(m.dummypath):
-            logger.info(f"Placeholder file {m.dummypath} already deleted - verification complete", extra={'emoji_type': 'success'})
-            # Update placeholder_exists status
-            if hasattr(m, 'placeholder_exists'):
-                m.placeholder_exists = False
-                dbsession.add(m)
-                dbsession.commit()
-            return True
             
         logger.debug(f"Movie {m.id} has dummypath: {m.dummypath}", extra={'emoji_type': 'debug'})
         if m.jellyfin_dummy_id:
@@ -1454,7 +1633,7 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                 # Clear the old jellyfin_dummy_id so we can search by title/tmdb instead
                 m.jellyfin_dummy_id = None
                 dbsession.add(m)
-                dbsession.commit()
+                safe_commit(dbsession, m)
                 # Fall through to search by title
             
         logger.debug(f"Searching for new movie match: {m.title}", extra={'emoji_type': 'search'})
@@ -1496,15 +1675,50 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
             save_jellyfin_dummy_id(dbsession, Movie, m.id, it)
             return True
         
-        logger.warning(f"No matching movie found in Jellyfin for {m.title}", extra={'emoji_type': 'warning'})
+        # Prepare failure message if loop finishes without match
+        # Generate detailed error info for debugging
+        candidates = []
+        for it in items:
+            candidates.append(f"(Name: {it.get('Name')}, Id: {it.get('Id')}, Path: {it.get('Path')})")
+        
+        candidates_str = ", ".join(candidates) if candidates else "None"
+        msg = f"No matching movie found in Jellyfin for {m.title} (TVDB: {m.tmdbid}, Path: {m.dummypath}). Found candidates: {candidates_str}"
+        
+        logger.warning(msg, extra={'emoji_type': 'warning'})
+        # CRITICAL: Raise exception so scheduler records the specific error
+        raise Exception(msg)
+        
         return False
 
     # EPISODE CASE
     logger.debug("Processing episode case", extra={'emoji_type': 'tv'})
     ep = dbsession.query(Episode).get(ent_id)
-    if not ep or not ep.dummypath:
-        logger.warning(f"Episode {ent_id} not found or missing dummypath", extra={'emoji_type': 'warning'})
+    if not ep:
+        logger.warning(f"Episode {ent_id} not found", extra={'emoji_type': 'warning'})
         return False
+        
+    # Short-circuit for delete action if placeholder doesn't exist
+    if 'delete' in action.lower() and hasattr(ep, 'placeholder_exists') and not ep.placeholder_exists:
+        logger.info(f"Skipping dummy verify for Episode {ent_id} (delete action, no placeholder)", extra={'emoji_type': 'skip'})
+        return True
+    
+    # For delete actions, check if placeholder file actually exists (dummypath might be None for deleted episodes)
+    import os
+    if 'delete' in action.lower():
+        if not ep.dummypath or not os.path.exists(ep.dummypath):
+            logger.info(f"Placeholder file {'(no dummypath)' if not ep.dummypath else ep.dummypath} already deleted - verification complete", extra={'emoji_type': 'success'})
+            # Update placeholder_exists status
+            if hasattr(ep, 'placeholder_exists'):
+                ep.placeholder_exists = False
+                dbsession.add(ep)
+                safe_commit(dbsession, ep)
+            return True
+    
+    # For non-delete actions, dummypath is required
+    if not ep.dummypath:
+        logger.warning(f"Episode {ent_id} missing dummypath", extra={'emoji_type': 'warning'})
+        return False
+    
     logger.debug(f"Episode {ep.id} has dummypath: {ep.dummypath}", extra={'emoji_type': 'debug'})
     
     seas = dbsession.query(Season).get(ep.season_id)
@@ -1598,7 +1812,7 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
         logger.warning(f"No seasons found using jellyfin_dummy_id {jf_series_id}, clearing stale ID to force re-search", extra={'emoji_type': 'warning'})
         series.jellyfin_dummy_id = None
         dbsession.add(series)
-        dbsession.commit()
+        safe_commit(dbsession, series)
         return False
     
     season_map = {s['IndexNumber']: s for s in seasons if 'IndexNumber' in s}
@@ -1677,13 +1891,13 @@ def verify_dummy_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, act
                     # Update entity's current_step_name to match final step
                     ep2.current_step_name = steps[sf.step_index]
                 dbsession.add(sf)
+                safe_commit(dbsession, sf)
                 if ep2.id == ent_id:
                     matched = True
                 break
     if not matched:
         logger.warning(f"⚠️ No matching Jellyfin episode found for {ep2.dummypath} in season {jf_seas_id}")
 
-    dbsession.commit()
     return matched
 
 def get_admin_user():
@@ -2065,7 +2279,7 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                     verification_failed.append(f"episode NFO: {episode_nfo_path}")
             episode.nfo_path = None
             dbsession.add(episode)
-
+            safe_commit(dbsession, episode)
             
             # Check if we should delete season.nfo (if no other episodes remain)
             # Use SELECT FOR UPDATE to prevent race conditions with concurrent episode deletions
@@ -2108,6 +2322,7 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                                 verification_failed.append(f"season NFO: {season_nfo_path}")
                         season.nfo_path = None
                         dbsession.add(series)
+                        safe_commit(dbsession, season)
                 # Check if we should delete tvshow.nfo (if no seasons with episodes remain)
                 # Lock the series row to prevent concurrent checks
                 locked_series = dbsession.query(Series).filter(Series.id == series.id).with_for_update().first()
@@ -2147,7 +2362,7 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                                 verification_failed.append(f"series NFO: {tvshow_nfo_path}")
                         series.nfo_path = None
                         dbsession.add(series)
-                        
+                        safe_commit(dbsession, series)
                         # Clean up empty series folder structure
                         cleanup_empty_series_structure(series_folder, deleted_files)
                                 
@@ -2159,6 +2374,7 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                     deleted_files.append(f"movie NFO: {os.path.basename(movie_nfo_path)}")
                     entity.nfo_path = None
                     dbsession.add(entity)
+                    safe_commit(dbsession, entity)
                 else:
                     verification_failed.append(f"movie NFO: {movie_nfo_path}")
                     
@@ -2178,8 +2394,10 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                             verification_failed.append(f"episode NFO: {episode_nfo_path}")
                     episode.nfo_path = None
                     dbsession.add(episode)
+                    safe_commit(dbsession, episode)
                 season.nfo_path = None
                 dbsession.add(season)
+                safe_commit(dbsession, season)
             # Delete series NFO files (tvshow.nfo) if series has a dummy path
             if series.dummypath and os.path.exists(series.dummypath):
                 tvshow_nfo_path = os.path.join(series.dummypath, "tvshow.nfo")
@@ -2190,9 +2408,9 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
                         verification_failed.append(f"series NFO: {tvshow_nfo_path}")
             series.nfo_path = None
             dbsession.add(series)
+            safe_commit(dbsession, series)
         # Commit database changes
         if deleted_files:
-            dbsession.commit()
             logger.info(f"🗑️ NFO DELETION SUMMARY: Removed {len(deleted_files)} NFO files: {', '.join(deleted_files)}", extra={'emoji_type': 'delete'})
         
         # Clean up empty directories after NFO deletion
@@ -2218,247 +2436,15 @@ def delete_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
         return False
 
 
-# def update_jellyfin_title_status(
-#     dbsession: Session,
-#     ent_id: int,
-#     model: Type,
-#     action: str = "status_update",
-#     retry_interval: int = 30,
-#     retry_timeout: int = 120  # Reduced from 600 to 120 seconds (2 minutes)
-# ) -> bool:
-#     """
-#     Update title & overview in Jellyfin for a Movie or Episode hierarchy.
-
-#     Movie: patch its own item using placeholder status.
-#     Episode: patch Series, Season, and Episode items if needed.
-#     Returns True if any update succeeded.
-#     """
-#     logger.info(f"Updating Jellyfin title status for {model.__name__} {ent_id}", extra={'emoji_type': 'status'})
-    
-#     updated_any = False
-
-#     targets = []
-#     # prepare update DTOs based on current status fields
-#     if model is Movie:
-#         movie = dbsession.query(Movie).get(ent_id)
-#         if not movie:
-#             logger.warning(f"Movie {ent_id} not found", extra={'emoji_type': 'warning'})
-#             return False
-        
-#         # If movie is marked as deleted, skip updating title status (return success to avoid endless retries)
-#         if movie.is_deleted:
-#             logger.info(f"Movie {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
-#             return True
-            
-#         # Get Jellyfin ID - either from jellyfin_id or by finding via jellyfin_dummy_id
-#         jellyfin_item_id = movie.jellyfin_id
-#         if not jellyfin_item_id and movie.jellyfin_dummy_id:
-#             logger.info(f"Movie {ent_id} missing jellyfin_id, searching by dummy ID: {movie.jellyfin_dummy_id}", extra={'emoji_type': 'search'})
-#             # Find the movie in Jellyfin using the dummy path
-#             clean_title = re.sub(r"\s*\(\d{4}\)$", "", movie.title)
-#             search_url = build_jellyfin_url(
-#                 f"Items?searchTerm={quote_plus(clean_title)}"
-#                 "&includeItemTypes=Movie&recursive=true&fields=ProviderIds,Name,ProductionYear,Overview,Path"
-#             )
-#             try:
-#                 response = session.get(search_url, timeout=5)
-#                 response.raise_for_status()
-#                 items = response.json().get('Items', [])
-                
-#                 # Find item matching our dummy path
-#                 for item in items:
-#                     if (item.get('Path', '') == movie.dummypath and 
-#                         int(item.get("ProviderIds", {}).get("Tmdb", -1)) == movie.tmdbid):
-#                         jellyfin_item_id = item['Id']
-#                         # Update the movie with the found jellyfin_id
-#                         movie.jellyfin_id = jellyfin_item_id
-#                         dbsession.add(movie)
-#                         dbsession.commit()
-#                         logger.info(f"Found and set jellyfin_id {jellyfin_item_id} for movie {ent_id}", extra={'emoji_type': 'success'})
-#                         break
-#                 else:
-#                     logger.warning(f"Movie {ent_id} not found in Jellyfin with dummy path {movie.dummypath}", extra={'emoji_type': 'warning'})
-#                     return False
-#             except Exception as e:
-#                 logger.error(f"Failed to search Jellyfin for movie {ent_id}: {e}", extra={'emoji_type': 'error'})
-#                 return False
-#         elif not jellyfin_item_id:
-#             logger.warning(f"Movie {ent_id} missing both jellyfin_id and jellyfin_dummy_id, cannot update title status", extra={'emoji_type': 'warning'})
-#             return False
-        
-#         orig = strip_status_markers(movie.jellyfin_title)
-#         new_name = f"[Request] {orig}" if movie.placeholder_status == "Request" else f"{orig} - [{movie.placeholder_status}]" if movie.placeholder_status else orig
-#         new_ovr = _prepend_status_to_summary(movie.jellyfin_overview, movie.placeholder_status)
-#         targets.append((jellyfin_item_id, new_name, new_ovr))
-#         logger.debug(f"Preparing movie title update: '{new_name}'", extra={'emoji_type': 'debug'})
-#     else:
-#         ep = dbsession.query(Episode).get(ent_id)
-#         if not ep:
-#             logger.warning(f"Episode {ent_id} not found", extra={'emoji_type': 'warning'})
-#             return False
-            
-#         # If episode is marked as deleted, skip updating title status (return success to avoid endless retries)
-#         if ep.is_deleted:
-#             logger.info(f"Episode {ent_id} is deleted, skipping title status update", extra={'emoji_type': 'skip'})
-#             return True
-            
-#         if not ep.jellyfin_id:
-#             # If episode has no jellyfin_id, it may have been deleted from Jellyfin or not yet scanned
-#             # Return True to avoid endless retries (especially for partially deleted episodes)
-#             logger.warning(f"Episode {ent_id} missing jellyfin_id, skipping title status update", extra={'emoji_type': 'warning'})
-#             return True
-#         seas = dbsession.query(Season).get(ep.season_id)
-#         series = dbsession.query(Series).get(seas.series_id)
-#         # Series
-#         if series and series.jellyfin_id:
-#             orig = strip_status_markers(series.jellyfin_title)
-#             new_name = f"{orig} - [{series.placeholder_status}]" if series.placeholder_status else orig
-#             new_ovr = _prepend_status_to_summary(series.jellyfin_overview, series.placeholder_status)
-#             targets.append((series.jellyfin_id, new_name, new_ovr))
-#         # Season
-#         if seas and seas.jellyfin_id:
-#             orig = strip_status_markers(seas.jellyfin_title)
-#             new_name = f"{orig} - [{seas.placeholder_status}]" if seas.placeholder_status else orig
-#             new_ovr = _prepend_status_to_summary(seas.jellyfin_overview, seas.placeholder_status)
-#             targets.append((seas.jellyfin_id, new_name, new_ovr))
-#         # Episode
-#         orig = strip_status_markers(ep.jellyfin_title)
-#         new_name = f"{orig} - [{ep.placeholder_status}]" if ep.placeholder_status else orig
-#         new_ovr = _prepend_status_to_summary(ep.jellyfin_overview, ep.placeholder_status)
-#         targets.append((ep.jellyfin_id, new_name, new_ovr))
-#         logger.debug(f"Preparing episode title update: '{new_name}'", extra={'emoji_type': 'debug'})
-
-#     # Perform updates for all items (including dummy files)
-#     logger.info(f"Updating {len(targets)} Jellyfin items", extra={'emoji_type': 'update'})
-#     for item_id, name, overview in targets:
-#         dto = {"Name": name, "Overview": overview}
-#         url = build_jellyfin_url(f"Items/{item_id}/Fields?userId={get_admin_user()}")
-
-#         def do_patch():
-#             resp = session.patch(url, json=dto, timeout=5)
-#             return resp.status_code
-
-#         def on_err(ex: Exception):
-#             logger.error(f"Failed to update item {item_id}: {ex}", extra={'emoji_type': 'error'})
-
-#         status_code = retry_call(
-#             func=do_patch,
-#             on_error=on_err,
-#             retry_interval=retry_interval,
-#             retry_timeout=retry_timeout,
-#             success_condition=lambda code: code == 204
-#         )
-        
-#         # Check if the actual success condition was met
-#         if status_code == 204:
-#             updated_any = True
-#             logger.info(f"Successfully updated Jellyfin item {item_id}", extra={'emoji_type': 'success'})
-#         else:
-#             logger.warning(f"Failed to update Jellyfin item {item_id} - got status code {status_code}", extra={'emoji_type': 'warning'})
-
-#     logger.info(f"Jellyfin title status update completed, success: {updated_any}", extra={'emoji_type': 'success' if updated_any else 'warning'})
-#     return updated_any
-
-# def retry_failed_jellyfin_title_updates(
-#     dbsession: Session,
-#     ent_id: int,
-#     model: Type,
-#     action: str
-# ) -> None:
-#     """
-#     For every SubFlow queued at the 'update_jellyfin_title_status' step:
-#       - If ALL of its related DB records (Movie or Series→Season→Episode) already have
-#         their jellyfin_title and jellyfin_overview updated to include placeholder_status,
-#         mark that SubFlow DONE.
-#       - Otherwise, reset its step_index back to the update step and clear retry_count
-#         so it will be retried on the next poll.
-#     """
-#     logger.info(f"Starting retry_failed_jellyfin_title_updates for {model.__name__} {ent_id}", extra={'emoji_type': 'processing'})
-    
-#     # 1) Collect all queued SubFlows currently pointing at update step
-#     queued = dbsession.query(SubFlow).filter_by(status='QUEUED').all()
-#     logger.debug(f"Found {len(queued)} total queued subflows", extra={'emoji_type': 'debug'})
-    
-#     to_retry = []
-#     for sf in queued:
-#         steps = sf.steps.split(',')
-#         if sf.step_index < len(steps) and steps[sf.step_index] == 'retry_failed_title_updates':
-#             try:
-#                 update_idx = steps.index('update_jellyfin_title_status')
-#                 to_retry.append((sf, update_idx))
-#                 logger.debug(f"Found subflow {sf.id} to retry at step index {update_idx}", extra={'emoji_type': 'debug'})
-#             except ValueError:
-#                 logger.warning(f"Subflow {sf.id} missing 'update_jellyfin_title_status' step", extra={'emoji_type': 'warning'})
-    
-#     logger.info(f"Found {len(to_retry)} subflows ready for title update retry", extra={'emoji_type': 'retry'})
-
-#     for sf, update_idx in to_retry:
-#         logger.debug(f"Processing subflow {sf.id} for title update verification", extra={'emoji_type': 'processing'})
-        
-#         # 2) Build a list of records to verify
-#         records = []
-#         if sf.movie_id:
-#             m = dbsession.query(Movie).get(sf.movie_id)
-#             if m and m.jellyfin_id:
-#                 records.append((m, m.placeholder_status))
-#                 logger.debug(f"Added movie {m.id} to verification list", extra={'emoji_type': 'movie'})
-#         else:
-#             ep = dbsession.query(Episode).get(sf.episode_id)
-#             seas = dbsession.query(Season).get(ep.season_id) if ep else None
-#             series = dbsession.query(Series).get(seas.series_id) if seas else None
-            
-#             # always check series, then season, then episode
-#             if series and series.jellyfin_id:
-#                 records.append((series, series.placeholder_status))
-#                 logger.debug(f"Added series {series.id} to verification list", extra={'emoji_type': 'tv'})
-#             if seas and seas.jellyfin_id:
-#                 records.append((seas, seas.placeholder_status))
-#                 logger.debug(f"Added season {seas.id} to verification list", extra={'emoji_type': 'tv'})
-#             if ep and ep.jellyfin_id:
-#                 records.append((ep, ep.placeholder_status))
-#                 logger.debug(f"Added episode {ep.id} to verification list", extra={'emoji_type': 'tv'})
-
-#         logger.debug(f"Verifying {len(records)} records for subflow {sf.id}", extra={'emoji_type': 'debug'})
-
-#         # 3) Verify each record’s title/overview
-#         all_ok = True
-#         for record, placeholder in records:
-#             orig = strip_status_markers(record.jellyfin_title)
-#             desired_name = f"{orig} - [{placeholder}]" if placeholder else orig
-#             desired_ovr  = _prepend_status_to_summary(record.jellyfin_overview, placeholder)
-#             if record.jellyfin_title != desired_name or record.jellyfin_overview != desired_ovr:
-#                 all_ok = False
-#                 break
-
-#         # 4) Mark DONE if OK, otherwise rewind for retry
-#         if all_ok:
-#             sf.status = 'DONE'
-#         else:
-#             sf.step_index  = update_idx
-#             sf.retry_count = 0
-#             sf.status      = 'PENDING'  # Set to PENDING so scheduler picks it up for retry
-
-#         dbsession.add(sf)
-
-#     try:
-#         dbsession.commit()
-#         logger.info(f"Title update retry completed for {len(to_retry)} subflows", extra={'emoji_type': 'success'})
-#     except Exception as e:
-#         logger.error(f"Failed to commit title update retry changes: {e}", extra={'emoji_type': 'error'})
-#         return False
-    
-#     # Return True since this step completed successfully (whether retries were needed or not)
-#     return True
-
 def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
-    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
-        return ''
     """
     Retrieve the absolute filesystem path for a given Jellyfin item ID.
 
     You must supply the Jellyfin User ID to fetch disk paths. If not provided,
     it auto-discovers via the Users endpoint.
     """
+    if not settings.jellyfin_enabled or not settings.JELLYFIN_URL:
+        return ''
     # Discover user ID if not provided
     if not user_id:
         try:
@@ -2670,28 +2656,9 @@ def verify_title_status_jellyfin(
     subflow_to_reset.retry_count = 0
     subflow_to_reset.barrier_released = False  # Reset barrier flag too
     dbsession.add(subflow_to_reset)
-    dbsession.commit()
+    safe_commit(dbsession, subflow_to_reset)
     logger.info(f"SubFlow {subflow_to_reset.id} reset to refresh_jellyfin_dummy for re-scanning", extra={'emoji_type': 'success'})
     return False  # Return False so current step doesn't advance
 
 
-def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
-    """
-    Return the file path for a Jellyfin item, optionally for a specific user.
-    """
-    logger.debug(f"Getting file path for Jellyfin item {item_id}", extra={'emoji_type': 'debug'})
-    try:
-        if user_id:
-            url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}")
-        else:
-            url = build_jellyfin_url(f"Items/{item_id}")
-        resp = session.get(url)
-        if resp.status_code == 200:
-            item = resp.json()
-            return item.get("Path", "")
-        else:
-            logger.warning(f"get_jellyfin_file_path: Failed to fetch item {item_id} (status {resp.status_code})", extra={'emoji_type': 'warning'})
-            return ""
-    except Exception as ex:
-        logger.error(f"get_jellyfin_file_path: Exception for item {item_id}: {ex}", extra={'emoji_type': 'error'})
-        return ""
+

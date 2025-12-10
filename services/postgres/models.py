@@ -90,6 +90,7 @@ class SubFlow(Base):
     status = Column(String, default='PENDING')
     retry_count = Column(Integer, default=0)
     error_message = Column(String, nullable=True)
+    last_error_message = Column(String, nullable=True)  # Persistent error history
     trigger_id = Column(Integer, default=None, nullable=True)  # Identifies which trigger/action run this SubFlow belongs to
     barrier_released = Column(Boolean, default=False)  # Flag to track if this SubFlow was released from a barrier
 

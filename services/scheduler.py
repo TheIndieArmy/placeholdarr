@@ -205,18 +205,17 @@ class ActionScheduler:
                 sfs = (
                     session.query(SubFlow)
                     .with_for_update(skip_locked=True)
-                    .filter(
-                        (
-                            (SubFlow.status.in_(["PENDING", "FAILED"]) &
-                             (func.coalesce(SubFlow.retry_count, 0) < self.max_retries) &
-                             SubFlow.steps.isnot(None) &
-                             (SubFlow.steps != '') &
-                             (SubFlow.action == self.action)
-                            )
-                            |
-                            ((SubFlow.error_message != None) & (SubFlow.error_message.contains('[STUCK_TOO_LONG_MARKER]')))
-                        )
+                .filter(
+                    SubFlow.status.in_(["PENDING", "FAILED"]),  # Status MUST be Pending or Failed
+                    SubFlow.action == self.action,
+                    SubFlow.steps.isnot(None),
+                    SubFlow.steps != '',
+                    (
+                        (func.coalesce(SubFlow.retry_count, 0) < self.max_retries)
+                        |
+                        ((SubFlow.error_message != None) & (SubFlow.error_message.contains('[STUCK_TOO_LONG_MARKER]')))
                     )
+                )
                     .order_by(SubFlow.id)
                     .limit(batch_size)
                     .all()
@@ -246,7 +245,7 @@ class ActionScheduler:
                     next_func_name = steps[sf.step_index]
                     logger.verbose(f"Next step for subflow {sf.id}: {next_func_name} (step {sf.step_index + 1}/{len(steps)})", extra={'emoji_type': 'step'})
                     # Don't mark as QUEUED yet - keep as PENDING until job actually starts
-                    schedule_plan.append((sf.id, next_func_name, sf.episode_id))
+                    schedule_plan.append((sf.id, next_func_name, sf.episode_id, sf.action))
 
                 # Don't bulk update status to QUEUED - leave as PENDING until job execution starts
                 return schedule_plan
@@ -259,13 +258,13 @@ class ActionScheduler:
                 return
 
             # Schedule each planned subflow outside the transaction
-            for sf_id, next_func_name, episode_id in schedule_plan:
+            for sf_id, next_func_name, episode_id, sf_action in schedule_plan:
                 logger.verbose(f"Scheduling subflow {sf_id} step: {next_func_name}", extra={'emoji_type': 'schedule'})
                 try:
                     # Determine model type for the _schedule_subflow method
                     # This is complex, as it might be Movie, Series, or Episode
                     # We'll pass self.model as a default, _run_subflow will refine it
-                    self._schedule_subflow(sf_id, self._get_flow_function(next_func_name), self.model, episode_id)
+                    self._schedule_subflow(sf_id, self._get_flow_function(next_func_name, action=sf_action), self.model, episode_id)
                 except Exception as e:
                     logger.error(f"Failed to schedule subflow {sf_id} step {next_func_name}: {e}", extra={'emoji_type': 'error'})
 
@@ -299,7 +298,7 @@ class ActionScheduler:
                     steps = sf.steps.split(',')
                     if sf.step_index < len(steps):
                         current_step = steps[sf.step_index]
-                        self._schedule_subflow(sf.id, self._get_flow_function(current_step), self.model, sf.episode_id)
+                        self._schedule_subflow(sf.id, self._get_flow_function(current_step, action=sf.action), self.model, sf.episode_id)
                         retry_count += 1
                         logger.verbose(f"Rescheduled subflow {sf.id} step: {current_step}", extra={'emoji_type': 'schedule'})
                     else:
@@ -1458,6 +1457,7 @@ class ActionScheduler:
     ):
         # Import here to avoid circular imports
         from core.logger import set_subflow_context, clear_subflow_context
+        from services.postgres.utils import safe_commit
         
         logger.info(f"Starting subflow {sf_id} step '{step_name}' with context {context}", extra={'emoji_type': 'processing'})
         session = get_session()
@@ -1658,10 +1658,10 @@ class ActionScheduler:
                             arg = sf.series_id
                         else:
                             arg = None
-                        logger.verbose(f"Calling {step_name} with arg={arg}, model={current_model}, action={self.action}", extra={'emoji_type': 'debug'})
+                        logger.verbose(f"Calling {step_name} with arg={arg}, model={current_model}, action={sf.action}", extra={'emoji_type': 'debug'})
                         
-                        flow_func = self._get_flow_function(step_name)
-                        result = flow_func(session, arg, current_model, self.action)
+                        flow_func = self._get_flow_function(step_name, action=sf.action)
+                        result = flow_func(session, arg, current_model, sf.action)
                         success = bool(result)
 
                         if success:
@@ -1673,6 +1673,12 @@ class ActionScheduler:
                             logger.warning(f"Step '{step_name}' returned False for subflow {sf_id} on attempt {attempt + 1}", extra={'emoji_type': 'warning'})
                             error = Exception('Step returned False')
                             
+                            # CRITICAL FIX: Commit the retry count update so we don't spin in a loop
+                            # if the session is rolled back or closed without commit later
+                            sf.retry_count = retries
+                            session.add(sf)
+                            safe_commit(session)
+                            
                     except Exception as e:
                         error = e
                         retries += 1
@@ -1683,7 +1689,7 @@ class ActionScheduler:
                         if attempt < self.max_retries - 1:
                             logger.verbose(f"Will retry step '{step_name}' for subflow {sf_id}", extra={'emoji_type': 'retry'})
                         else:
-                            logger.error(f"All {self.max_retries} attempts failed for step '{step_name}' subflow {sf_id}", extra={'emoji_type': 'error'})
+                            logger.error(f"All {self.max_retries} attempts failed for step '{step_name}' subflow {sf_id}", extra={'emoji_type': 'error'}    )
             else:
                 logger.debug(f"SubFlow {sf_id} already marked as DONE, skipping execution", extra={'emoji_type': 'info'})
                 success = True
@@ -1693,10 +1699,28 @@ class ActionScheduler:
             os.makedirs(log_dir, exist_ok=True)
             
             # Update subflow status
-            sf.retry_count = retries
+            # Re-fetch SubFlow to ensure we're attached to the session
+            sf = session.query(SubFlow).get(sf_id)
+            if sf:
+                sf.retry_count = retries
+                if not success:
+                    logger.error(f"SubFlow {sf_id} failed after {retries} attempts, marking as FAILED", extra={'emoji_type': 'error'})
+                    sf.status = 'FAILED'
+                    sf.error_message = f"Failed step {step_name} after {retries} attempts"
+                    if error:
+                       sf.error_message += f": {str(error)}"
+                    
+                    # Persist the error history
+                    sf.last_error_message = sf.error_message
+                    
+                    session.add(sf)
+                    safe_commit(session)
 
             if success:
                 logger.info(f"SubFlow {sf_id} step '{step_name}' completed successfully", extra={'emoji_type': 'success'})
+                # Successful execution should clear any previous error markers (including STUCK marker)
+                sf.error_message = None
+                # NOTE: We intentionally DO NOT clear sf.last_error_message so we have history of what went wrong before success
 
                 # Refresh SubFlow from DB to see if the function modified step_index (bulk processing pattern)
                 session.refresh(sf)
@@ -2300,10 +2324,12 @@ class ActionScheduler:
         finally:
             session.close()
             
-    def _get_flow_function(self, func_name: str) -> Callable:
-        logger.verbose(f"Getting flow function '{func_name}' for action '{self.action}'", extra={'emoji_type': 'debug'})
+    def _get_flow_function(self, func_name: str, action: str = None) -> Callable:
+        # Use provided action or fall back to scheduler's action
+        target_action = action if action is not None else self.action
+        logger.verbose(f"Getting flow function '{func_name}' for action '{target_action}'", extra={'emoji_type': 'debug'})
         try:
-            module_name = f'services.actions.{self.action}_flow'
+            module_name = f'services.actions.{target_action}_flow'
             module = import_module(module_name)
             func = getattr(module, func_name)
             logger.debug(f"Successfully loaded function '{func_name}' from {module_name}", extra={'emoji_type': 'success'})
@@ -2315,7 +2341,7 @@ class ActionScheduler:
             logger.error(f"Function '{func_name}' not found in {module_name} - {e}", extra={'emoji_type': 'error'})
             raise
         except Exception as e:
-            logger.error(f"Unexpected error loading {func_name} from {self.action}_flow: {e}", extra={'emoji_type': 'error'})
+            logger.error(f"Unexpected error loading {func_name} from {target_action}_flow: {e}", extra={'emoji_type': 'error'})
             raise
 
 

@@ -17,3 +17,14 @@ def check_db():
     except Exception as e:
         print("❌ DB error:", e)
         sys.exit(1)
+
+def safe_commit(session, obj=None):
+    """
+    Commit the session only if obj.status is not 'CANCELLED'.
+    If obj is None or has no status, commit as usual.
+    Returns True if committed, False if skipped.
+    """
+    if obj is not None and hasattr(obj, 'status') and getattr(obj, 'status', None) == 'CANCELLED':
+        return False
+    session.commit()
+    return True

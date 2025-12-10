@@ -3,12 +3,34 @@ NFO file generation and management for Jellyfin metadata.
 Creates and updates .nfo files alongside placeholder files.
 """
 import os
+import re
 import xml.etree.ElementTree as ET
 from typing import Union, List
 from xml.dom import minidom
 from sqlalchemy.orm import Session
 from core.logger import logger
 from services.postgres.models import Movie, Series, Season, Episode
+
+
+
+def _strip_status_tag(text: str) -> str:
+    """
+    Remove any existing status tag (e.g. '[Request] ') from the start of the text.
+    Handles multiple tags like '[Request] [Request] Title'.
+    """
+    if not text:
+        return ""
+    
+    clean_text = text.strip()
+    # Loop to remove multiple prefixes if they exist
+    while True:
+        match = re.match(r"^\[[^\]]+\]\s*", clean_text)
+        if match:
+            clean_text = clean_text[match.end():]
+        else:
+            break
+            
+    return clean_text
 
 
 def create_movie_nfo(movie: Movie, request_status: str = None) -> str:
@@ -25,7 +47,7 @@ def create_movie_nfo(movie: Movie, request_status: str = None) -> str:
     root = ET.Element("movie")
     
     # Title with optional prefix
-    title = movie.title
+    title = _strip_status_tag(movie.title)
     if request_status:
         title = f"[{request_status}] {title}"
     
@@ -34,7 +56,7 @@ def create_movie_nfo(movie: Movie, request_status: str = None) -> str:
     ET.SubElement(root, "sorttitle").text = movie.sorttitle or movie.title.lower()
     
     # Plot/overview with optional prefix
-    plot = movie.plot or movie.jellyfin_overview or "No overview available"
+    plot = _strip_status_tag(movie.plot or movie.jellyfin_overview or "No overview available")
     if request_status:
         plot = f"[{request_status}] {plot}"
     ET.SubElement(root, "plot").text = plot
@@ -98,7 +120,7 @@ def create_series_nfo(series: Series, request_status: str = None) -> str:
     root = ET.Element("tvshow")
     
     # Title with optional prefix
-    title = series.title
+    title = _strip_status_tag(series.title)
     if request_status:
         title = f"[{request_status}] {title}"
     
@@ -107,7 +129,7 @@ def create_series_nfo(series: Series, request_status: str = None) -> str:
     ET.SubElement(root, "sorttitle").text = series.sorttitle or series.title.lower()
     
     # Plot/overview with optional prefix
-    plot = series.plot or series.jellyfin_overview or "No overview available"
+    plot = _strip_status_tag(series.plot or series.jellyfin_overview or "No overview available")
     if request_status:
         plot = f"[{request_status}] {plot}"
     ET.SubElement(root, "plot").text = plot
@@ -176,7 +198,7 @@ def create_season_nfo(season: Season, request_status: str = None) -> str:
     root = ET.Element("season")
     
     # Title with optional prefix
-    title = season.title
+    title = _strip_status_tag(season.title)
     if request_status:
         title = f"[{request_status}] {title}"
     
@@ -184,7 +206,7 @@ def create_season_nfo(season: Season, request_status: str = None) -> str:
     ET.SubElement(root, "seasonnumber").text = str(season.season_number)
     
     # Plot/overview with optional prefix
-    plot = season.plot or season.jellyfin_overview or "No overview available"
+    plot = _strip_status_tag(season.plot or season.jellyfin_overview or "No overview available")
     if request_status:
         plot = f"[{request_status}] {plot}"
     ET.SubElement(root, "plot").text = plot
@@ -230,7 +252,7 @@ def create_episode_nfo(episode: Episode, request_status: str = None) -> str:
     root = ET.Element("episodedetails")
     
     # Title with optional prefix
-    title = episode.title
+    title = _strip_status_tag(episode.title)
     if request_status:
         title = f"[{request_status}] {title}"
     
@@ -239,7 +261,7 @@ def create_episode_nfo(episode: Episode, request_status: str = None) -> str:
     ET.SubElement(root, "season").text = str(episode.season.season_number)
     
     # Plot/overview with optional prefix
-    plot = episode.plot or episode.jellyfin_overview or "No overview available"
+    plot = _strip_status_tag(episode.plot or episode.jellyfin_overview or "No overview available")
     if request_status:
         plot = f"[{request_status}] {plot}"
     ET.SubElement(root, "plot").text = plot
@@ -332,10 +354,8 @@ def update_nfo_status(nfo_path: str, new_status: str) -> bool:
         # Update title
         title_elem = root.find('title')
         if title_elem is not None and title_elem.text:
-            # Remove existing status prefix if any
-            title = title_elem.text
-            if title.startswith('[') and ']' in title:
-                title = title.split(']', 1)[1].strip()
+            # Remove ANY existing status prefixes using our robust helper
+            title = _strip_status_tag(title_elem.text)
             
             # Add new status prefix
             title_elem.text = f"[{new_status}] {title}"
@@ -343,10 +363,8 @@ def update_nfo_status(nfo_path: str, new_status: str) -> bool:
         # Update plot/overview
         plot_elem = root.find('plot')
         if plot_elem is not None and plot_elem.text:
-            # Remove existing status prefix if any
-            plot = plot_elem.text
-            if plot.startswith('[') and ']' in plot:
-                plot = plot.split(']', 1)[1].strip()
+            # Remove ANY existing status prefixes
+            plot = _strip_status_tag(plot_elem.text)
             
             # Add new status prefix
             plot_elem.text = f"[{new_status}] {plot}"

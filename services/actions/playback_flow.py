@@ -12,6 +12,7 @@ from services.integrations import (
     mark_movie_monitored
 )
 from core.logger import logger
+from services.postgres.utils import safe_commit
 
 # logger = logging.getLogger("playback_flow")
 # logger.setLevel(logging.INFO)
@@ -30,12 +31,14 @@ def identify_source(session: Session, ent_id: int, model: Type, action: str = No
     path = getattr(rec, 'dummypath', None)
     logger.debug(f"Placeholder path from DB: {path}")
     if not path:
-        logger.error(f"[{model.__name__}] no placeholder path recorded for id {ent_id}")
-        return False
+        msg = f"[{model.__name__}] no placeholder path recorded for id {ent_id}"
+        logger.error(msg)
+        raise Exception(msg)
 
     if not os.path.exists(path):
-        logger.error(f"[{model.__name__}] placeholder missing on disk for id {ent_id}: {path}")
-        return False
+        msg = f"[{model.__name__}] placeholder missing on disk for id {ent_id}: {path}"
+        logger.error(msg)
+        raise Exception(msg)
 
     logger.info(f"[{model.__name__}] placeholder present for id {ent_id}: {path}")
     return True
@@ -193,13 +196,15 @@ def lookup_and_monitor(session: Session,
         )
 
     if not eps_to_search:
-        logger.warning(f"No episodes found to search for {model.__name__} {ent_id}")
-        return False
+        msg = f"No episodes found to search for {model.__name__} {ent_id}"
+        logger.warning(msg)
+        raise Exception(msg)
 
     # Mark episodes for search
     for e in eps_to_search:
         e.placeholder_status = "Search"
         session.add(e)
+        safe_commit(session, e)
     
     logger.info(f"Updated placeholder_status to 'Search' for {len(eps_to_search)} episodes in series {series.title}")
     logger.info(f"Completed lookup_and_monitor for {model.__name__} {ent_id}")
@@ -217,9 +222,11 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         success = trigger_radarr_search(m.radarrid, m.title)
         if success:
             logger.info(f"✅ Successfully triggered Radarr search for {m.title}")
+            return True
         else:
-            logger.error(f"❌ Failed to trigger Radarr search for {m.title}")
-        return bool(success)
+            msg = f"❌ Failed to trigger Radarr search for {m.title}"
+            logger.error(msg)
+            raise Exception(msg)
 
     # Get the episode and series
     ep = session.query(Episode).get(ent_id)
@@ -239,8 +246,9 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         ep_ids = [e.sonarrid for e in eps if e.sonarrid]
         
         if not ep_ids:
-            logger.warning(f"No episodes ready for search in episode mode for series {series.title}")
-            return False
+            msg = f"No episodes ready for search in episode mode for series {series.title}"
+            logger.warning(msg)
+            raise Exception(msg)
             
         logger.info(f"📺 Episode mode: Triggering search for {len(ep_ids)} episodes")
         logger.debug(f"Episode IDs to search: {ep_ids}")
@@ -254,9 +262,11 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         
         if success:
             logger.info(f"✅ Successfully triggered episode search for {len(ep_ids)} episodes in {series.title}")
+            return True
         else:
-            logger.error(f"❌ Failed to trigger episode search for {series.title}")
-        return success
+            msg = f"❌ Failed to trigger episode search for {series.title}"
+            logger.error(msg)
+            raise Exception(msg)
     
     elif play_mode == 'season':
         # Search all seasons marked for search
@@ -270,8 +280,9 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         season_nums = list(set([e.season.season_number for e in eps]))
         
         if not season_nums:
-            logger.warning(f"No seasons ready for search in season mode for series {series.title}")
-            return False
+            msg = f"No seasons ready for search in season mode for series {series.title}"
+            logger.warning(msg)
+            raise Exception(msg)
         
         logger.info(f"🎬 Season mode: Triggering season search for seasons {season_nums} in {series.title}")
         
@@ -291,9 +302,11 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         
         if success:
             logger.info(f"✅ Successfully triggered season search for {len(season_nums)} season(s) in {series.title}")
+            return True
         else:
-            logger.error(f"❌ Some season searches failed for {series.title}")
-        return success
+            msg = f"❌ Some season searches failed for {series.title}"
+            logger.error(msg)
+            raise Exception(msg)
     
     elif play_mode == 'series':
         # Search entire series
@@ -307,9 +320,11 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         
         if success:
             logger.info(f"✅ Successfully triggered series search for {series.title}")
+            return True
         else:
-            logger.error(f"❌ Failed to trigger series search for {series.title}")
-        return success
+            msg = f"❌ Failed to trigger series search for {series.title}"
+            logger.error(msg)
+            raise Exception(msg)
     
     else:
         # Fallback to episode search
@@ -321,8 +336,9 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         ep_ids = [e.sonarrid for e in eps if e.sonarrid]
         
         if not ep_ids:
-            logger.warning(f"No episodes found for fallback search")
-            return False
+            msg = f"No episodes found for fallback search"
+            logger.warning(msg)
+            raise Exception(msg)
             
         logger.debug(f"Fallback episode search: {len(ep_ids)} episodes")
         success = trigger_sonarr_search(
@@ -334,15 +350,18 @@ def trigger_search(session: Session, ent_id: int, model: Type, action: str = Non
         
         if success:
             logger.info(f"✅ Successfully triggered fallback search for {len(ep_ids)} episodes")
+            return True
         else:
-            logger.error(f"❌ Failed to trigger fallback search")
-        return success
+            msg = f"❌ Failed to trigger fallback search"
+            logger.error(msg)
+            raise Exception(msg)
 
 
 def mark_done(session: Session, ent_id: int, model: Type, action: str = None) -> bool:
     rec = session.query(model).get(ent_id)
     rec.status = 'DONE'
     session.add(rec)
+    safe_commit(session, rec)
     return True
 
 
@@ -415,7 +434,7 @@ def enqueue_monitor(session: Session, ent_id: int, model: Type, action: str = No
                 logger.info(f"Created SubFlow for Episode ID {e.id}", extra={'emoji_type': 'queue'})
             
         else:
-            return False
+            raise Exception("Unsupported model type for enqueue_monitor")
                 
         from services.queue_monitor import trigger_monitoring
         trigger_monitoring()
@@ -454,7 +473,7 @@ def enqueue_monitor(session: Session, ent_id: int, model: Type, action: str = No
             end_handler_logging(session_id, success=False, 
                                summary=f"Playback flow failed: {e}")
         
-        return False
+        raise e
 
 
 def steps():
