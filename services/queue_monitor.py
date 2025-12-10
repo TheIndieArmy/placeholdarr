@@ -529,24 +529,21 @@ def handle_download_webhook(data):
     session = get_session()
     try:
         if 'movie' in data:
-            movie = data['movie']
-            radarr_id = movie.get('id')
-            if radarr_id is None:
+            # Movie download completed
+            movie = data.get('movie', {})
+            tmdb_id = movie.get('tmdbId')
+            radarr_id = movie.get('id')  # Radarr internal ID
+            title = movie.get('title')
+
+            if not radarr_id:
+                logger.warning(f"Movie download webhook missing Radarr ID for '{title}'", extra={'emoji_type': 'warning'})
                 return
 
-            # find the in-queue subflow for this radarr download
-            sf = (
-                session.query(SubFlow)
-                .filter_by(branch='playback', status='IN_QUEUE')
-                .filter(SubFlow.movie_id.isnot(None))
-                .filter(SubFlow.movie.has(radarrid=radarr_id))
-                .first()
-            )
-            if sf:
-                sf.status = 'DONE'
-                session.add(sf)
-                session.commit()
-
+            # Remove from monitoring using Radarr ID (to match add_to_monitor)
+            media_key = f"movie_{radarr_id}"
+            remove_from_monitor(media_key)
+            logger.debug(f"Removed movie '{title}' (Radarr ID: {radarr_id}) from monitoring", extra={'emoji_type': 'debug'})
+            
         elif 'episodes' in data and 'series' in data:
             series = data['series']
             episodes = data['episodes']

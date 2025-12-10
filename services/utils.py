@@ -1,6 +1,5 @@
-import os
 import re
-from pathlib import Path
+import os
 from core.config import settings
 from services.postgres.db import get_session
 from services.postgres.movie_repo import MovieRepository
@@ -53,38 +52,6 @@ def strip_status_markers(title: str) -> str:
     
     return title
 
-def get_series_folder(media_type, target_base_folder, title, year, media_id, season_number=None) -> str:
-    clean_title = sanitize_filename(title)
-    year_str = f" ({year})" if year else ''
-    folder = f"{clean_title}{year_str} {{tmdb-{media_id}}}" if media_type == 'movie' else f"{clean_title}{year_str} {{tvdb-{media_id}}}"
-    return os.path.join(target_base_folder, folder)
-
-def get_folder_path(media_type, base_path, title, year=None, media_id=None, season=None):
-    """Generate folder path according to Placeholdarr's naming convention"""
-    # First sanitize the title
-    sanitized_title = sanitize_filename(title)
-    
-    # Remove any year pattern from the title to prevent duplication
-    year_pattern = r'\s*\(\d{4}\)'
-    sanitized_title = re.sub(year_pattern, '', sanitized_title).strip()
-    
-    # Add the year from metadata when available
-    year_str = f" ({year})" if year else ""
-    
-    if media_type == "movie":
-        # Movie folder: "{Movie Title} ({Year}) {tmdb-123456}{edition-Dummy}"
-        folder_name = f"{sanitized_title}{year_str} {{tmdb-{media_id}}}{{edition-Dummy}}"
-        return os.path.join(base_path, folder_name)
-    else:
-        # Series folder: "{Series Title} ({year}) {tvdb-123456} (dummy)"
-        folder_name = f"{sanitized_title}{year_str} {{tvdb-{media_id}}} (dummy)"
-        
-        # Add season folder if provided
-        if season is not None:
-            return os.path.join(base_path, folder_name, f"Season {season:02d}")
-        else:
-            return os.path.join(base_path, folder_name)
-
 def is_4k_request(file_path: str, source_port: int = None) -> bool:
     """
     Determine if this is a 4K request based on:
@@ -130,12 +97,6 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
             "search_type": media_type  # This will be 'episode', 'season', or 'series'
         }
 
-def get_movie_by_id(movie_id, session=None):
-    session = session if session else get_session()
-    movie_repo = MovieRepository(session)
-    movie_repo.get_by_id(movie_id)
-    return movie_repo
-
 def resolve_final_folder(media_type, title=None, year=None, media_id=None, season_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None, payload=None):
     """
     Centralized function to resolve the final folder path for dummy file operations.
@@ -149,7 +110,7 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
     arr_folder_name = None
     arr_season_folder = None
     arr_root = None
-    # --- Always use basename of folder_path for movies if provided ---
+    # --- PATCH: Always use basename of folder_path for movies if provided ---
     if media_type == "movie" and folder_path:
         arr_folder_name = os.path.basename(folder_path)
         arr_root = os.path.dirname(folder_path)
@@ -162,9 +123,9 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
         arr_season_folder = payload.get('seasonFolder') or payload.get('season_folder') or season_folder_name
     # Determine base path
     if media_type == "movie":
-        env_base = getattr(settings, "DUMMY_MOVIE_LIBRARY_FOLDER", None)
+        env_base = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)
     else:
-        env_base = getattr(settings, "DUMMY_TV_LIBRARY_FOLDER", None)
+        env_base = getattr(settings, "TV_LIBRARY_FOLDER", None)
     base_folder = None
     if env_base and str(env_base).strip():
         # ENV is set: use ENV as base, append *arrs folder name
@@ -175,7 +136,7 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
             folder_name = sanitize_filename(title) if title else ("Unknown Movie" if media_type == "movie" else "Unknown Series")
             if year:
                 folder_name += f" ({year})"
-            if media_id and str(media_id).lower() != 'none':
+            if media_id:
                 folder_name += f" {{tmdb-{media_id}}}" if media_type == "movie" else f" {{tvdb-{media_id}}}"
             base_folder = os.path.join(env_base, folder_name)
     elif arr_root and arr_folder_name:
@@ -186,7 +147,7 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
         folder_name = sanitize_filename(title) if title else ("Unknown Movie" if media_type == "movie" else "Unknown Series")
         if year:
             folder_name += f" ({year})"
-        if media_id and str(media_id).lower() != 'none':
+        if media_id:
             folder_name += f" {{tmdb-{media_id}}}" if media_type == "movie" else f" {{tvdb-{media_id}}}"
         base_folder = folder_path or os.path.join(env_base or "", folder_name)
     # Season folder resolution (for TV)
@@ -203,3 +164,25 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
         if season_folder:
             return os.path.join(base_folder, season_folder)
     return base_folder
+
+def is_same_file(file1, file2):
+    import os
+    import hashlib
+    if not os.path.exists(file1) or not os.path.exists(file2):
+        return False
+    size1 = os.path.getsize(file1)
+    size2 = os.path.getsize(file2)
+    if size1 != size2:
+        return False
+    def file_hash(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    hash1 = file_hash(file1)
+    hash2 = file_hash(file2)
+    return hash1 == hash2
