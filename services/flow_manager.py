@@ -73,7 +73,7 @@ class FlowManager:
                         if step_index is not None and 0 <= step_index < len(funcs):
                             pos = step_index + 1
                             if pos < len(funcs):
-                                return funcs[pos]
+                                return funcs[pos:]  # CRITICAL FIX: Return remaining list, not single function
                             else:
                                 # End of branch, move to next entry in main flow
                                 return steps[idx + 1] if idx + 1 < len(steps) else None
@@ -81,7 +81,7 @@ class FlowManager:
                             # Fallback: use first occurrence
                             pos = names.index(last_step_id) + 1
                             if pos < len(funcs):
-                                return funcs[pos]
+                                return funcs[pos:]  # CRITICAL FIX: Return remaining list, not single function
                             else:
                                 # End of branch, move to next entry in main flow
                                 return steps[idx + 1] if idx + 1 < len(steps) else None
@@ -95,14 +95,14 @@ class FlowManager:
                             if step_index is not None and 0 <= step_index < len(funcs):
                                 pos = step_index + 1
                                 if pos < len(funcs):
-                                    return funcs[pos]
+                                    return funcs[pos:]  # CRITICAL FIX: Return remaining list, not single function
                                 else:
                                     # Last step in branch completed - move to next entry in main flow
                                     return steps[idx + 1] if idx + 1 < len(steps) else None
                             else:
                                 pos = names.index(last_step_id) + 1
                                 if pos < len(funcs):
-                                    return funcs[pos]
+                                    return funcs[pos:]  # CRITICAL FIX: Return remaining list, not single function
                                 else:
                                     # Last step in branch completed - move to next entry in main flow
                                     return steps[idx + 1] if idx + 1 < len(steps) else None
@@ -118,14 +118,14 @@ class FlowManager:
                     if step_index is not None and 0 <= step_index < len(entry):
                         pos = step_index + 1
                         if pos < len(entry):
-                            return entry[pos]
+                            return entry[pos:]  # CRITICAL FIX: Return remaining list, not single function
                         else:
                             # End of list, move to next entry in main flow
                             return steps[idx + 1] if idx + 1 < len(steps) else None
                     else:
                         pos = names.index(last_step_id) + 1
                         if pos < len(entry):
-                            return entry[pos]
+                            return entry[pos:]  # CRITICAL FIX: Return remaining list, not single function
                         else:
                             # End of list, move to next entry in main flow
                             return steps[idx + 1] if idx + 1 < len(steps) else None
