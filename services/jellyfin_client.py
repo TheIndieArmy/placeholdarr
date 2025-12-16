@@ -266,15 +266,14 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
             return True
 
         request_status = status if status else entity.placeholder_status  # Default status prefix
-
+        
         if model == Movie:
             # Handle movie NFO creation
             placeholder_path = getattr(entity, 'dummypath', None)
-            filepath = getattr(entity, 'filepath', None)
-            if not placeholder_path and 'delete' in action and not filepath:
+            if not placeholder_path and 'delete' in action:
                 logger.info(f"No placeholder path for Movie {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
-            elif not placeholder_path and not filepath:
+            elif not placeholder_path:
                 msg = f"No placeholder path found for Movie {ent_id}"
                 logger.error(msg, extra={'emoji_type': 'error'})
                 raise Exception(msg)
@@ -321,11 +320,10 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
             
             # Ensure we have the dummy paths
             episode_placeholder_path = getattr(episode, 'dummypath', None)
-            filepath = getattr(episode, 'filepath', None)
-            if not episode_placeholder_path and 'delete' in action and not filepath:
+            if not episode_placeholder_path and 'delete' in action:
                 logger.info(f"No placeholder path found for Episode {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
-            elif not episode_placeholder_path and not filepath:
+            elif not episode_placeholder_path:
                 msg = f"No placeholder path found for Episode {ent_id}"
                 logger.error(msg, extra={'emoji_type': 'error'})
                 raise Exception(msg)
@@ -394,11 +392,10 @@ def create_jellyfin_nfo(dbsession: Session, ent_id: int, model: type, action: st
         elif model == Series:
             # Handle series NFO creation
             placeholder_path = getattr(entity, 'dummypath', None)
-            filepath = getattr(entity, 'filepath', None)
-            if not placeholder_path and 'delete' in action and not filepath:
+            if not placeholder_path and 'delete' in action:
                 logger.info(f"No placeholder path for Series {ent_id} on delete action, skipping NFO creation", extra={'emoji_type': 'skip'})
                 return True
-            elif not placeholder_path and not filepath:
+            elif not placeholder_path:
                 msg = f"No placeholder path found for Series {ent_id}"
                 logger.error(msg, extra={'emoji_type': 'error'})
                 raise Exception(msg)
@@ -1124,6 +1121,7 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
     Returns True if Episode and any SubFlow was updated; False otherwise.
     """
     logger.info(f"Starting verify_arr_scan_jellyfin for {model.__name__} {ent_id}", extra={'emoji_type': 'processing'})
+    import os
     
     # MOVIE CASE
     user_id = get_admin_user()
@@ -1165,12 +1163,13 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
                             )
                         return True
                     return False
-                items = retry_call(
+                response = retry_call(
                     func=lambda: session.get(movie_url, timeout=5),
                     on_error=lambda ex: logger.error(f"Movie search error: {ex}"),
                     retry_interval=3, retry_timeout=9,  # 3 attempts max
                     success_condition=lambda res: success_movie(res)
-                ) or []
+                )
+                items = response.json().get('Items', []) if response and response.status_code == 200 else []
                 for candidate in items:
                     c_path = candidate.get('Path', '')
                     if (
@@ -1204,12 +1203,13 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
             "&includeItemTypes=Movie&recursive=true&fields=ProviderIds,Name,ProductionYear,Overview,Path"
         )
         def filter_movies(res):
+            import os as os_module  # Import locally to avoid scope issues
             if res.status_code not in (200, 204, 404):
                 return False
             if res.status_code == 404:
                 return True
             response_items = res.json().get('Items', [])
-            dummy_movie_base = (settings.DUMMY_MOVIE_LIBRARY_FOLDER or "").rstrip(os.sep)
+            dummy_movie_base = (settings.DUMMY_MOVIE_LIBRARY_FOLDER or "").rstrip(os_module.sep)
             return [
                 item for item in (response_items or [])
                 if (
@@ -1282,8 +1282,9 @@ def verify_arr_scan_jellyfin(dbsession: Session, ent_id: int, model: Type, actio
             logger.debug(f"No series.filepath found, will match on title and TVDB ID only", extra={'emoji_type': 'debug'})
         
         def pick_series(items: List[dict]) -> List[dict]:
+            import os as os_module  # Import locally to avoid scope issues
             matched = []
-            dummy_tv_base = (settings.DUMMY_TV_LIBRARY_FOLDER or "").rstrip(os.sep)
+            dummy_tv_base = (settings.DUMMY_TV_LIBRARY_FOLDER or "").rstrip(os_module.sep)
             
             for s in (items or []):
                 tvdb_match = (s.get("ProviderIds", {}).get("Tvdb") and 
@@ -2558,6 +2559,21 @@ def verify_title_status_jellyfin(
         logger.warning(f"{entity_type} {ent_id} not found in database", extra={'emoji_type': 'warning'})
         return False
 
+    if 'import' in action.lower() or 'upgrade' in action.lower():
+        if entity.placeholder_status:
+            logger.warning(
+                f"Detected leftover placeholder_status '{entity.placeholder_status}' during {action}. Resetting to None.", 
+                extra={'emoji_type': 'repair'}
+            )
+            entity.placeholder_status = None
+            # We need to commit this change so it persists
+            try:
+                dbsession.add(entity)
+                dbsession.commit()
+            except Exception as e:
+                logger.error(f"Failed to reset placeholder_status: {e}", extra={'emoji_type': 'error'})
+                dbsession.rollback()
+
     title_ok = False
     expected_prefix = f"[{entity.placeholder_status}]"
     # If no placeholder_status or it's empty, nothing to verify
@@ -2620,9 +2636,14 @@ def verify_title_status_jellyfin(
         if 'refresh_jellyfin_dummy' in steps and 'import' not in action:
             try:
                 refresh_idx = steps.index('refresh_jellyfin_dummy')
+                # Prioritize create_jellyfin_nfo if it exists (to regenerate broken NFOs)
+                if 'create_jellyfin_nfo' in steps:
+                    refresh_idx = steps.index('create_jellyfin_nfo')
+                    logger.debug(f"Found create_jellyfin_nfo at index {refresh_idx}, resetting to that", extra={'emoji_type': 'debug'})
+
                 subflow_to_reset = sf
                 logger.debug(
-                    f"Found SubFlow {sf.id} with refresh_jellyfin_dummy at index {refresh_idx}",
+                    f"Found SubFlow {sf.id} with target reset step at index {refresh_idx}",
                     extra={'emoji_type': 'debug'}
                 )
                 break
@@ -2631,9 +2652,14 @@ def verify_title_status_jellyfin(
         elif 'refresh_jellyfin_arr_path' in steps and 'import' in action:
             try:
                 refresh_idx = steps.index('refresh_jellyfin_arr_path')
+                # Prioritize create_jellyfin_nfo if it exists (to regenerate broken NFOs)
+                if 'create_jellyfin_nfo' in steps:
+                    refresh_idx = steps.index('create_jellyfin_nfo')
+                    logger.debug(f"Found create_jellyfin_nfo at index {refresh_idx}, resetting to that", extra={'emoji_type': 'debug'})
+                
                 subflow_to_reset = sf
                 logger.debug(
-                    f"Found SubFlow {sf.id} with refresh_jellyfin_arr_path at index {refresh_idx}",
+                    f"Found SubFlow {sf.id} with target reset step at index {refresh_idx}",
                     extra={'emoji_type': 'debug'}
                 )
                 break

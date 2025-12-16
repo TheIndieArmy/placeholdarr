@@ -567,10 +567,15 @@ def delete_dummy_file(
 def update_placeholder_status(dbSession: Session, ent_id: int, model: Type, action: str, status: str = None):
     """Update the status of a placeholder file"""
     try:
-        if not status and 'add' in action:
-            status = "Request"
-        if not status and 'delete' in action:
-            status = "Request"
+        if not status:
+            # Explicitly keep status as None for imports/upgrades (real files)
+            if 'import' in action or 'upgrade' in action:
+                status = None
+            elif 'add' in action:
+                status = "Request"
+            elif 'delete' in action:
+                status = "Request"
+                
         if model is Movie:
             movie = dbSession.query(Movie).get(ent_id)
             if not movie:

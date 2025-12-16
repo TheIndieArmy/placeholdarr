@@ -8,7 +8,6 @@ from services.jellyfin_client import (
 from services.plex_client import (
     refresh_plex_arr_path,
     refresh_plex_dummy,
-    refresh_plex_arr_path, 
     verify_arr_scan_plex,
     verify_dummy_scan_plex
 )
