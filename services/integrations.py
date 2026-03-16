@@ -40,6 +40,10 @@ def place_dummy_file(media_type, title, year=None, media_id=None, base_path=None
     Create a dummy video file in the correct location. Uses resolve_final_folder for path resolution.
     Accepts optional `overview` to embed in NFO and `request_mark` to prefix episode titles with [REQUEST].
     """
+    # Centralized guard: if placeholder creation/deletion is disabled, skip and return None.
+    if not getattr(settings, 'ENABLE_PLACEHOLDERS', True):
+        logger.info("Placeholder creation disabled by ENABLE_PLACEHOLDERS; skipping creation", extra={'emoji_type': 'skip'})
+        return None
     import os
     try:
         dummy_source = dummy_file_override or settings.DUMMY_FILE_PATH
@@ -911,7 +915,8 @@ def get_episodes_for_lookahead(series_id, current_season, current_episode, looka
             logger.info("End of Episodes Detection: Reached end of known episodes, will mark entire series as monitored", 
                        extra={'emoji_type': 'info'})
     else:
-        logger.warning("No episodes found to monitor", extra={'emoji_type': 'warning'})
+        # No episodes found — let caller (handlers.py) decide how to log/user-notify.
+        pass
     
     return filtered_episodes, reached_end
 
@@ -1120,14 +1125,76 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         folder_path = file_path or None
         arr_root_folder = getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
 
-        # Get all series from Sonarr for efficient matching
+        # Prepare series endpoint
         series_url = join_endpoint(sonarr_url, 'series')
+
+        # Prefer exact ID lookups first to avoid brittle folder-name matches
+        try:
+            if tvdb_id:
+                try:
+                    resp = requests.get(series_url, params={'tvdbId': tvdb_id}, headers=headers, timeout=8)
+                    resp.raise_for_status()
+                    j = resp.json()
+                    if j:
+                        sid = j[0].get('id')
+                        logger.info(f" SONARR MATCH: id={sid} rule=tvdb_lookup candidate={tvdb_id}", extra={'emoji_type': 'info'})
+                        return sid
+                except Exception:
+                    pass
+
+            # If file path carries embedded IDs, try those lookups too (fast exact match)
+            if file_path:
+                imdb_match = re.search(r'{imdb-([^}]+)}', file_path)
+                tvdb_match = re.search(r'{tvdb-(\d+)}', file_path)
+                tmdb_match = re.search(r'{tmdb-(\d+)}', file_path)
+
+                if imdb_match:
+                    path_imdb = imdb_match.group(1)
+                    try:
+                        resp = requests.get(series_url, params={'imdbId': path_imdb}, headers=headers, timeout=8)
+                        resp.raise_for_status()
+                        j = resp.json()
+                        if j:
+                            sid = j[0].get('id')
+                            logger.info(f" SONARR MATCH: id={sid} rule=path_imdb candidate={path_imdb}", extra={'emoji_type': 'info'})
+                            return sid
+                    except Exception:
+                        pass
+
+                if tvdb_match:
+                    path_tvdb = tvdb_match.group(1)
+                    try:
+                        resp = requests.get(series_url, params={'tvdbId': path_tvdb}, headers=headers, timeout=8)
+                        resp.raise_for_status()
+                        j = resp.json()
+                        if j:
+                            sid = j[0].get('id')
+                            logger.info(f" SONARR MATCH: id={sid} rule=path_tvdb candidate={path_tvdb}", extra={'emoji_type': 'info'})
+                            return sid
+                    except Exception:
+                        pass
+
+                if tmdb_match:
+                    path_tmdb = tmdb_match.group(1)
+                    try:
+                        resp = requests.get(series_url, params={'tmdbId': path_tmdb}, headers=headers, timeout=8)
+                        resp.raise_for_status()
+                        j = resp.json()
+                        if j:
+                            sid = j[0].get('id')
+                            logger.info(f" SONARR MATCH: id={sid} rule=path_tmdb candidate={path_tmdb}", extra={'emoji_type': 'info'})
+                            return sid
+                    except Exception:
+                        pass
+        except Exception:
+            # Any lookup failure falls through to full-series scan
+            pass
+
+        # Fall back to pulling the full series list for fallback matching
         series_response = requests.get(series_url, headers=headers)
-        
         if series_response.status_code != 200:
-            logger.error(f"Failed to get series from Sonarr: {series_response.text}", extra={'emoji_type': 'error'})
+            logger.error(f" Failed to get series from Sonarr: {series_response.text}", extra={'emoji_type': 'error'})
             return None
-            
         all_series = series_response.json()
         
         # METHOD 1: Try to match by filepath ID (most reliable)
@@ -1141,32 +1208,46 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
                 path_id = imdb_match.group(1)
                 for series in all_series:
                     if series.get('imdbId') == path_id:
-                        logger.info(f"Found series in Sonarr by path IMDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                        logger.info(f" Found series in Sonarr by path IMDB ID: {series['title']}", extra={'emoji_type': 'info'})
                         return series['id']
             
             if tvdb_match:
                 path_id = tvdb_match.group(1)
                 for series in all_series:
                     if str(series.get('tvdbId')) == str(path_id):
-                        logger.info(f"Found series in Sonarr by path TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                        logger.info(f" Found series in Sonarr by path TVDB ID: {series['title']}", extra={'emoji_type': 'info'})
                         return series['id']
             
             if tmdb_match:
                 path_id = tmdb_match.group(1)
                 for series in all_series:
                     if str(series.get('tmdbId')) == str(path_id):
-                        logger.info(f"Found series in Sonarr by path TMDB ID: {series['title']}", extra={'emoji_type': 'info'})
+                        logger.info(f" Found series in Sonarr by path TMDB ID: {series['title']}", extra={'emoji_type': 'info'})
                         return series['id']
                         
-            # Also try to match by series folder name in path
+            # Also try to match by series folder name in path (last-resort).
+            # Find actual season folder using a strict regex like 'Season 01' to avoid title collisions
+            season_re = re.compile(r'(?i)^season\s*\d+')
             path_parts = file_path.split('/')
             for idx, part in enumerate(path_parts):
-                if idx > 0 and idx < len(path_parts) - 1 and 'Season' in path_parts[idx+1]:
+                next_part = path_parts[idx+1] if idx+1 < len(path_parts) else ''
+                if season_re.match(next_part.strip()):
                     series_folder = part
+                    series_folder_clean = series_folder.strip()
+                    series_folder_lower = series_folder_clean.lower()
+                    # Compare candidate against Sonarr series paths
                     for series in all_series:
-                        if series_folder in series.get('path', ''):
-                            logger.info(f"Found series in Sonarr by folder path match: {series['title']}", extra={'emoji_type': 'info'})
-                            return series['id']
+                        series_path = series.get('path', '') or ''
+                        series_path_clean = series_path.rstrip('/ ')
+                        series_path_lower = series_path_clean.lower()
+                        series_basename = os.path.basename(series_path_clean)
+
+                        # Preserve substring matching but require season-like next segment
+                        if series_folder_clean in series_path_clean:
+                            # Emit concise match log
+                            sid = series.get('id')
+                            logger.info(f"SONARR MATCH: id={sid} title='{series.get('title')}' rule=folder_substring candidate={series_folder_clean}", extra={'emoji_type': 'info'})
+                            return sid
         
         # METHOD 2: Try TVDB ID matching (next most reliable)
         if tvdb_id:
@@ -1195,6 +1276,10 @@ def delete_dummy_files(media_type, title, year, tvdb_id=None, library_path=None,
     """
     Delete placeholder files. Uses resolve_final_folder for path resolution.
     """
+    # Centralized guard: if placeholder creation/deletion is disabled, skip and return False.
+    if not getattr(settings, 'ENABLE_PLACEHOLDERS', True):
+        logger.info("Placeholder deletion disabled by ENABLE_PLACEHOLDERS; skipping deletion", extra={'emoji_type': 'skip'})
+        return False
     import os
     try:
         final_folder = resolve_final_folder(media_type, title, year, tvdb_id, season_number, folder_path, arr_root_folder, season_folder_name, relative_path)
