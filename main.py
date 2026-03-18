@@ -111,9 +111,9 @@ if __name__ == '__main__':
 
     # Force import of media server clients to trigger connection tests and endpoint checks
     if settings.plex_enabled:
-        pass
+        from services.plex_client import plex  # noqa: F401
     if settings.jellyfin_enabled:
-        pass
+        from services.jellyfin_client import test_jellyfin_connection  # noqa: F401
 
     # Set port back to 8001 (your existing webhook port)
     port = int(os.getenv('PLACEHOLDARR_PORT', 8001))

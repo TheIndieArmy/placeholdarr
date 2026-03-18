@@ -180,20 +180,17 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
         root = get_root_folder_from_path(arr_root_folder or folder_path)
         if root and arr_folder_name:
             base_folder = os.path.join(root, settings.DUMMY_FOLDER_NAME, arr_folder_name)
-            # Apply season folder for TV and return
-            if media_type != "movie":
-                season_folder = arr_season_folder
-                if not season_folder and relative_path:
-                    parts = os.path.normpath(relative_path).split(os.sep)
-                    for part in parts:
-                        if part.lower().startswith("season"):
-                            season_folder = part
-                            break
-                elif not season_folder and season_number is not None:
-                    season_folder = f"Season {season_number:02d}"
-                if season_folder:
-                    return os.path.join(base_folder, season_folder)
-            return base_folder
+            if media_type == "movie":
+                return base_folder
+            season_folder = arr_season_folder
+            if not season_folder and relative_path:
+                for part in os.path.normpath(relative_path).split(os.sep):
+                    if part.lower().startswith("season"):
+                        season_folder = part
+                        break
+            if not season_folder and season_number is not None:
+                season_folder = f"Season {season_number:02d}"
+            return os.path.join(base_folder, season_folder) if season_folder else base_folder
 
     # Determine base path
     if media_type == "movie":
