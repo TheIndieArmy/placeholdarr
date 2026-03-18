@@ -1,14 +1,18 @@
-import os, glob, shutil, time, threading, requests, subprocess, platform, re, fnmatch, sys
+import os
+import shutil
+import time
+import threading
+import requests
+import re
 import xml.etree.ElementTree as ET
 from core.nfo import generate_movie_nfo, generate_episode_nfo, write_nfo_for_file
 from core.config import settings
 from core.logger import logger
 from services.utils import (
     resolve_final_folder, sanitize_filename, strip_status_markers, get_arr_config,
-    normalize_arr_base, join_endpoint
+    normalize_arr_base, join_endpoint, get_root_folder_from_path
 )
 from services.plex_client import plex
-import hashlib
 
 # Global variables
 BASE_TITLES = {}
@@ -580,7 +584,7 @@ def trigger_radarr_search(movie_id, movie_title=None):
         logger.error(f"Radarr search failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None, year=None):
+def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None, year=None, file_path=None):
     """Search for a movie in Radarr"""
     config = get_arr_config('movie', is_4k)
     # Validate tmdb_id is an integer
@@ -644,7 +648,7 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
             'qualityProfileId': 7,
             'tmdbId': int(movie_data['tmdbId']),
             'year': int(movie_data['year']),
-            'rootFolderPath': settings.MOVIE_LIBRARY_FOLDER,  # Use .env value
+            'rootFolderPath': get_root_folder_from_path(file_path) or settings.MOVIE_LIBRARY_FOLDER,
             'monitored': True,
             'addOptions': {
                 'searchForMovie': True,
@@ -679,72 +683,6 @@ def search_in_radarr(tmdb_id, rating_key, is_4k=False, title=None, imdb_id=None,
         logger.error(f"Radarr operation failed: {e}", extra={'emoji_type': 'error'})
         return False
 
-# Sonarr integration functions would follow a similar pattern.
-def search_in_sonarr(tvdb_id, rating_key, season_number=None, episode_number=None, is_4k=False):
-    """Search for a series in Sonarr but don't automatically mark as monitored"""
-    try:
-        config = get_arr_config('tv', is_4k)
-        # First check if series exists
-        existing_response = requests.get(
-            f"{config['url']}/series", 
-            params={'tvdbId': tvdb_id}, 
-            headers={'X-Api-Key': config['api_key']}
-        )
-        existing_response.raise_for_status()
-        
-        if existing_response.status_code == 200 and existing_response.json():
-            series = existing_response.json()[0]
-            logger.info(f"Series already exists in Sonarr: {series['title']}", extra={'emoji_type': 'info'})
-            
-            return series['id']
-                
-            # Only trigger series-wide search if not in episode mode
-            trigger_sonarr_search(series['id'], series_title=series['title'], is_4k=is_4k)
-            return series['id']
-        
-        # If series doesn't exist, look it up and add it
-        lookup_response = requests.get(
-            f"{config['url']}/series/lookup", 
-            params={'term': f"tvdb:{tvdb_id}"},
-            headers={'X-Api-Key': config['api_key']}
-        )
-        lookup_response.raise_for_status()
-        series_data = lookup_response.json()[0]
-        
-        payload = {
-            'title': series_data['title'],
-            'qualityProfileId': 3,
-            'titleSlug': series_data['titleSlug'],
-            'tvdbId': series_data['tvdbId'],
-            'year': series_data['year'],
-            'rootFolderPath': settings.TV_LIBRARY_FOLDER,  # Use .env value
-            'monitored': True,
-            'addOptions': {'searchForMissingEpisodes': True},
-            'seasons': []
-        }
-        
-        # Add all seasons as monitored
-        for season in series_data.get('seasons', []):
-            if season.get('seasonNumber', 0) > 0:  # Skip season 0
-                payload['seasons'].append({
-                    'seasonNumber': season['seasonNumber'],
-                    'monitored': True
-                })
-        
-        add_response = requests.post(
-            f"{config['url']}/series",
-            json=payload,
-            headers={'X-Api-Key': config['api_key']}
-        )
-        add_response.raise_for_status()
-        added_series = add_response.json()
-        logger.info(f"Added series: {series_data['title']}", extra={'emoji_type': 'success'})
-        
-        return added_series['id']
-        
-    except Exception as e:
-        logger.error(f"Sonarr operation failed: {e}", extra={'emoji_type': 'error'})
-        return None
 
 def trigger_sonarr_search(series_id, season_number=None, episode_ids=None, series_title="Unknown Series", is_4k=False):
     """Trigger a search in Sonarr for episodes"""
@@ -1121,10 +1059,6 @@ def search_in_sonarr(tvdb_id=None, title=None, year=None, rating_key=None, seaso
         sonarr_url = cfg['url']
         headers = {"X-Api-Key": cfg['api_key']}
         
-        # --- Always resolve folder path for placeholder creation/deletion ---
-        folder_path = file_path or None
-        arr_root_folder = getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
-
         # Prepare series endpoint
         series_url = join_endpoint(sonarr_url, 'series')
 
@@ -1495,7 +1429,6 @@ def batch_poll_and_update_plex_status(tvdb_id, title, episodes, max_attempts=10,
     import time
     from datetime import datetime, timedelta
     from services.plex_client import batch_update_plex_episode_status, find_show_by_id
-    from services.calendar_sync import _parse_air_date
     
     def _local_date(dt):
         return dt.astimezone().date() if dt and hasattr(dt, 'tzinfo') and dt.tzinfo else dt.date() if dt else None
@@ -1564,7 +1497,7 @@ def batch_poll_and_update_plex_status(tvdb_id, title, episodes, max_attempts=10,
             batch_update_plex_episode_status(tvdb_id, title, status_map, throttle=throttle)
         batch_duration = time.time() - batch_start
         if len(done) == prev_done_count and attempt > 0:
-            logger.info(f"[BatchPoll] No new episodes ready since last poll. Finishing early and updating all remaining as blank.", extra={'emoji_type': 'info'})
+            logger.info("[BatchPoll] No new episodes ready since last poll. Finishing early and updating all remaining as blank.", extra={'emoji_type': 'info'})
             remaining_status_map = {}
             for key, ep_data in ep_lookup.items():
                 if key not in done:

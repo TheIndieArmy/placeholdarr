@@ -1,8 +1,6 @@
 import os
-import time
-from typing import Optional, Any, Callable
+from typing import Optional
 import requests
-from urllib.parse import quote_plus
 from core.config import settings
 from core.logger import logger
 

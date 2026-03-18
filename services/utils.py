@@ -133,6 +133,24 @@ def get_arr_config(media_type: str, is_4k: bool = False) -> dict:
             "search_type": media_type
         }
 
+def get_root_folder_from_path(folder_path):
+    """Derive the *arr root folder from a full media folder path.
+
+    When USE_ROOT_FOLDERS=True and ROOT_FOLDER_SECTION_ID_MAPPINGS is set,
+    finds the matching root by startsWith against mapping keys. Returns the
+    original mapping key so callers can look it up directly.
+    Falls back to os.path.dirname(folder_path).
+    """
+    if not folder_path:
+        return None
+    if getattr(settings, 'USE_ROOT_FOLDERS', False) and settings.ROOT_FOLDER_SECTION_ID_MAPPINGS:
+        for root_folder in settings.ROOT_FOLDER_SECTION_ID_MAPPINGS:
+            prefix = root_folder if root_folder.endswith('/') else root_folder + '/'
+            if folder_path.startswith(prefix):
+                return root_folder
+    return os.path.dirname(folder_path)
+
+
 def resolve_final_folder(media_type, title=None, year=None, media_id=None, season_number=None, folder_path=None, arr_root_folder=None, season_folder_name=None, relative_path=None, payload=None):
     """
     Centralized function to resolve the final folder path for dummy file operations.
@@ -157,6 +175,26 @@ def resolve_final_folder(media_type, title=None, year=None, media_id=None, seaso
             arr_folder_name = os.path.basename(arr_full_path)
             arr_root = os.path.dirname(arr_full_path)
         arr_season_folder = payload.get('seasonFolder') or payload.get('season_folder') or season_folder_name
+    # Priority 0: USE_ROOT_FOLDERS mode — place placeholders in a subfolder of the *arr root folder
+    if getattr(settings, 'USE_ROOT_FOLDERS', False):
+        root = get_root_folder_from_path(arr_root_folder or folder_path)
+        if root and arr_folder_name:
+            base_folder = os.path.join(root, settings.DUMMY_FOLDER_NAME, arr_folder_name)
+            # Apply season folder for TV and return
+            if media_type != "movie":
+                season_folder = arr_season_folder
+                if not season_folder and relative_path:
+                    parts = os.path.normpath(relative_path).split(os.sep)
+                    for part in parts:
+                        if part.lower().startswith("season"):
+                            season_folder = part
+                            break
+                elif not season_folder and season_number is not None:
+                    season_folder = f"Season {season_number:02d}"
+                if season_folder:
+                    return os.path.join(base_folder, season_folder)
+            return base_folder
+
     # Determine base path
     if media_type == "movie":
         env_base = getattr(settings, "MOVIE_LIBRARY_FOLDER", None)

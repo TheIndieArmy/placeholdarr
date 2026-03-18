@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from typing import Literal, Optional
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ load_dotenv(dotenv_path)
 
 class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
-    WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
+    WORKER_COUNT: int = int(os.getenv("WORKER_COUNT", "4"))
 
     # Plex
     PLEX_URL: Optional[str] = None
@@ -49,10 +50,15 @@ class Settings(BaseSettings):
     SONARR_4K_API_KEY: str = ""
 
     # Library Paths
-    MOVIE_LIBRARY_FOLDER: str
-    TV_LIBRARY_FOLDER: str
+    MOVIE_LIBRARY_FOLDER: str = ""
+    TV_LIBRARY_FOLDER: str = ""
     MOVIE_LIBRARY_4K_FOLDER: str = ""
     TV_LIBRARY_4K_FOLDER: str = ""
+
+    # Root folder mode (Option 3)
+    USE_ROOT_FOLDERS: bool = os.getenv("USE_ROOT_FOLDERS", "false").split('#')[0].strip().lower() == "true"
+    DUMMY_FOLDER_NAME: str = os.getenv("DUMMY_FOLDER_NAME", "placeholders").split('#')[0].strip() or "placeholders"
+    ROOT_FOLDER_SECTION_ID_MAPPINGS: Optional[dict] = None
 
     # Application
     PLAYBACK_COOLDOWN: int = int(os.environ.get("PLAYBACK_COOLDOWN", "30").split('#')[0].strip())
@@ -87,10 +93,37 @@ class Settings(BaseSettings):
     ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
     ENABLE_EMBY: bool = os.getenv("ENABLE_EMBY", "false").split('#')[0].strip().lower() == "true"
 
+    @validator('ROOT_FOLDER_SECTION_ID_MAPPINGS', pre=True)
+    def parse_root_folder_section_id_mappings(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            try:
+                parsed = json.loads(v)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"ROOT_FOLDER_SECTION_ID_MAPPINGS must be valid JSON with string keys and integer values "
+                    f"(e.g. {{\"/mnt/movies/\": 1, \"/mnt/tv/\": 2}}). Parse error: {e}"
+                )
+            if not isinstance(parsed, dict):
+                raise ValueError("ROOT_FOLDER_SECTION_ID_MAPPINGS must be a JSON object")
+            for k, val in parsed.items():
+                if not isinstance(k, str):
+                    raise ValueError(f"ROOT_FOLDER_SECTION_ID_MAPPINGS keys must be strings, got: {k!r}")
+                if not isinstance(val, int):
+                    raise ValueError(f"ROOT_FOLDER_SECTION_ID_MAPPINGS values must be integers, got: {val!r} for key {k!r}")
+            return parsed
+        return v
+
     # Add a method to clean string values
     @validator('*', pre=True)
-    def clean_string_values(cls, v):
+    def clean_string_values(cls, v, values=None, field=None, config=None):
         """Clean string values by removing comments and extra whitespace"""
+        if field is not None and field.name == 'ROOT_FOLDER_SECTION_ID_MAPPINGS':
+            return v
         if isinstance(v, str):
             # Split on # but only if it's not part of a URL
             if '#' in v and not ('http://' in v or 'https://' in v):
@@ -119,6 +152,30 @@ class Settings(BaseSettings):
         if not v.startswith(('http://', 'https://')):
             raise ValueError(f"Invalid URL: {v}")
         return v.rstrip('/')
+
+    @root_validator(skip_on_failure=True)
+    def check_root_folder_mode(cls, values):
+        use_root_folders = values.get('USE_ROOT_FOLDERS', False)
+        if not use_root_folders:
+            return values
+        # USE_ROOT_FOLDERS=true: ROOT_FOLDER_SECTION_ID_MAPPINGS must be set
+        if not values.get('ROOT_FOLDER_SECTION_ID_MAPPINGS'):
+            raise ValueError(
+                "USE_ROOT_FOLDERS=true requires ROOT_FOLDER_SECTION_ID_MAPPINGS to be set "
+                "(e.g. ROOT_FOLDER_SECTION_ID_MAPPINGS={{\"/mnt/movies/\": 1, \"/mnt/tv/\": 2}})"
+            )
+        # USE_ROOT_FOLDERS=true: MOVIE_LIBRARY_FOLDER and TV_LIBRARY_FOLDER must be blank
+        if values.get('MOVIE_LIBRARY_FOLDER'):
+            raise ValueError(
+                "USE_ROOT_FOLDERS=true is incompatible with MOVIE_LIBRARY_FOLDER. "
+                "Leave MOVIE_LIBRARY_FOLDER blank when using root folder mode."
+            )
+        if values.get('TV_LIBRARY_FOLDER'):
+            raise ValueError(
+                "USE_ROOT_FOLDERS=true is incompatible with TV_LIBRARY_FOLDER. "
+                "Leave TV_LIBRARY_FOLDER blank when using root folder mode."
+            )
+        return values
 
     @root_validator(skip_on_failure=True)
     def check_media_providers(cls, values):
@@ -155,23 +212,23 @@ class Settings(BaseSettings):
         return enable_emby and bool(getattr(self, 'EMBY_URL', None) and getattr(self, 'EMBY_TOKEN', None))
 
     @property
-    def radarr_4k_port(self) -> int:
-        return int(urllib.parse.urlparse(self.RADARR_4K_URL).port) if self.RADARR_4K_URL else None
-    
+    def radarr_4k_port(self) -> Optional[int]:
+        return urllib.parse.urlparse(self.RADARR_4K_URL).port if self.RADARR_4K_URL else None
+
     @property
-    def sonarr_4k_port(self) -> int:
-        return int(urllib.parse.urlparse(self.SONARR_4K_URL).port) if self.SONARR_4K_URL else None
+    def sonarr_4k_port(self) -> Optional[int]:
+        return urllib.parse.urlparse(self.SONARR_4K_URL).port if self.SONARR_4K_URL else None
 
     @property
     def has_4k_support(self) -> bool:
         return bool(self.RADARR_4K_URL and self.MOVIE_LIBRARY_4K_FOLDER) or bool(self.SONARR_4K_URL and self.TV_LIBRARY_4K_FOLDER)
 
     @property
-    def plex_4k_movie_section_id(self) -> int:
+    def plex_4k_movie_section_id(self) -> Optional[int]:
         return self.PLEX_MOVIE_4K_SECTION_ID if hasattr(self, 'PLEX_MOVIE_4K_SECTION_ID') else self.PLEX_MOVIE_SECTION_ID
 
     @property
-    def plex_4k_tv_section_id(self) -> int:
+    def plex_4k_tv_section_id(self) -> Optional[int]:
         return self.PLEX_TV_4K_SECTION_ID if hasattr(self, 'PLEX_TV_4K_SECTION_ID') else self.PLEX_TV_SECTION_ID
 
     @property

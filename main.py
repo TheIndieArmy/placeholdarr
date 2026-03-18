@@ -11,7 +11,6 @@ from services.handlers import handle_webhook
 from services.migration import run_migration
 from core.config import settings
 from services.calendar_sync import start_calendar_sync
-from contextlib import asynccontextmanager
 
 # Load environment variables
 def load_env_and_migrate():
@@ -112,9 +111,9 @@ if __name__ == '__main__':
 
     # Force import of media server clients to trigger connection tests and endpoint checks
     if settings.plex_enabled:
-        from services.plex_client import plex
+        pass
     if settings.jellyfin_enabled:
-        from services.jellyfin_client import test_jellyfin_connection
+        pass
 
     # Set port back to 8001 (your existing webhook port)
     port = int(os.getenv('PLACEHOLDARR_PORT', 8001))

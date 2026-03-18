@@ -226,7 +226,7 @@ def main():
     movie_renames, movie_unmatched = scan_and_rename_by_name(MOVIE_LIBRARY_ROOT, expected_movie_names, 'movie')
 
     # Summary and prompt to proceed
-    print(f"\nSummary:")
+    print("\nSummary:")
     print(f"TV folders to rename: {len(tv_renames)}")
     print(f"TV unmatched folders: {len(tv_unmatched)}")
     print(f"Movie folders to rename: {len(movie_renames)}")

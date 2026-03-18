@@ -1,12 +1,16 @@
-import os, re, threading, time, shutil, requests
+import os
+import re
+import threading
+import time
+import requests
 from fastapi.responses import JSONResponse
 from core.config import settings
 from core.logger import logger
-from services.plex_client import plex, build_plex_url, refresh_plex_item
-from services.jellyfin_client import build_jellyfin_url, refresh_jellyfin_item, get_jellyfin_file_path
+from services.plex_client import refresh_plex_item
+from services.jellyfin_client import refresh_jellyfin_item, get_jellyfin_file_path
 from services.emby_client import get_emby_file_path, refresh_emby_item
 from services.integrations import (
-    place_dummy_file, delete_dummy_files, schedule_episode_request_update,
+    place_dummy_file, schedule_episode_request_update,
     schedule_movie_request_update, 
     search_in_radarr, search_in_sonarr, trigger_sonarr_search, monitor_episodes, 
     mark_series_monitored, get_episodes_for_lookahead,
@@ -14,10 +18,9 @@ from services.integrations import (
 )
 from services.queue_monitor import add_to_monitor
 from services.utils import (
-    strip_movie_status, sanitize_filename, extract_episode_title, 
-    is_4k_request, strip_status_markers, get_arr_config, join_endpoint
+    sanitize_filename, is_4k_request, get_arr_config, join_endpoint,
+    get_root_folder_from_path
 )
-from urllib.parse import quote
 from services.queue_monitor import handle_download_webhook
 
 # Series-based tracking for playback suppression
@@ -143,7 +146,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             year = movie.get('year')
             movie_path = data.get("movieFile", {}).get("path")
             folder_path = movie.get('folderPath') or movie.get('path')
-            arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+            arr_root_folder = get_root_folder_from_path(folder_path)
             # Use resolve_final_folder to match dummy creation
             dummy_folder = resolve_final_folder(
                 media_type="movie",
@@ -156,7 +159,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             file_name = f"{sanitize_filename(title)}"
             if year:
                 file_name += f" ({year})"
-            file_name += f" (dummy).mp4"
+            file_name += " (dummy).mp4"
             dummy_file_path = os.path.join(dummy_folder, file_name)
             logger.info(f"Processing movie import cleanup for: {title}", extra={'emoji_type': 'cleanup'})
             # Update Plex/Jellyfin title to "Available" (remove status markers)
@@ -216,7 +219,7 @@ def handle_import_event(data: dict, is_4k: bool = False):
             episode_title = episode.get('title', 'Unknown Episode')
             episode_path = data.get("episodeFile", {}).get("path")
             folder_path = series.get('folderPath') or series.get('path')
-            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            arr_root_folder = get_root_folder_from_path(folder_path)
             # Use resolve_final_folder to match dummy creation
             dummy_folder = resolve_final_folder(
                 media_type="tv",
@@ -309,7 +312,7 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
         year=series_year,
         media_id=tvdb_id,
         folder_path=series.get('folderPath') or series.get('path'),
-        arr_root_folder=series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None),
+        arr_root_folder=get_root_folder_from_path(series.get('folderPath') or series.get('path')),
         season_number=None,
         season_folder_name=None
     )
@@ -384,7 +387,7 @@ def handle_seriesadd(data: dict, is_4k: bool = False):
                                     episode_range=(episode_num, episode_num),
                                     episode_title=ep_title_final,
                                     folder_path=series.get('folderPath') or series.get('path'),
-                                    arr_root_folder=series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None),
+                                    arr_root_folder=get_root_folder_from_path(series.get('folderPath') or series.get('path')),
                                     overview=ep_overview,
                                     request_mark=False,
                                     genres=ep_genres,
@@ -459,7 +462,7 @@ def handle_episodefiledelete(data: dict, is_4k: bool = False):
                 
         # Use folderPath from webhook if available
         folder_path = series.get('folderPath')
-        arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+        arr_root_folder = get_root_folder_from_path(folder_path)
         dummy_path = place_dummy_file("tv", series_title, series_year, tvdb_id,
                                       None,
                                       season_number=season_num,
@@ -515,7 +518,7 @@ def handle_moviefiledelete(data: dict):
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
         folder_path = movie.get('folderPath')
-        arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+        arr_root_folder = get_root_folder_from_path(folder_path)
         library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
         # Create a placeholder dummy file for the deleted movie
         from services.integrations import place_dummy_file
@@ -562,15 +565,21 @@ def handle_movie_delete(data: dict):
         title = movie.get('title', 'Unknown Movie')
         year = movie.get('year')
         folder_path = movie.get('folderPath')
-        arr_root_folder = movie.get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+        arr_root_folder = get_root_folder_from_path(folder_path)
         library_path = getattr(settings, 'MOVIE_LIBRARY_FOLDER', None)
         # Use the unified dummy deletion logic
         from services.integrations import delete_dummy_files
         delete_dummy_files('movie', title, year, tmdb_id, library_path=library_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
         # Optionally refresh Plex/Jellyfin at the dummy folder location
-        if folder_path and library_path:
+        dummy_folder = None
+        if folder_path:
             import os
-            dummy_folder = os.path.join(library_path, os.path.basename(folder_path))
+            if getattr(settings, 'USE_ROOT_FOLDERS', False):
+                _root = arr_root_folder or os.path.dirname(folder_path)
+                dummy_folder = os.path.join(_root, settings.DUMMY_FOLDER_NAME, os.path.basename(folder_path))
+            elif library_path:
+                dummy_folder = os.path.join(library_path, os.path.basename(folder_path))
+        if dummy_folder:
             if settings.plex_enabled:
                 refresh_plex_item(dummy_folder)
             if settings.jellyfin_enabled:
@@ -608,7 +617,7 @@ def handle_movieadd(data: dict):
                 return
             # Use folderPath from webhook if available
             folder_path = data.get('movie', {}).get('folderPath')
-            arr_root_folder = data.get('movie', {}).get('rootFolderPath') or getattr(settings, 'RADARR_ROOT_FOLDER', None) or None
+            arr_root_folder = get_root_folder_from_path(folder_path)
             # Try basic placeholder first
             dummy_path = place_dummy_file("movie", title, year, tmdb_id, None, folder_path=folder_path, arr_root_folder=arr_root_folder,
                                          overview=movie.get('overview') or movie.get('synopsis') or None,
@@ -675,12 +684,11 @@ def handle_seriesdelete(data: dict, is_4k: bool = False):
         else:
             base_path = None
             folder_path = series.get('folderPath') or series.get('path')
-            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            arr_root_folder = get_root_folder_from_path(folder_path)
         from services.integrations import delete_dummy_files
         delete_dummy_files('tv', title, year, tvdb_id, base_path, folder_path=folder_path, arr_root_folder=arr_root_folder)
         # Remove series-level NFO if present
         try:
-            from services.integrations import _write_series_nfo
             import os
             nfo_path = os.path.join(base_path, f"{sanitize_filename(title)} ({year}) {{tvdb-{tvdb_id}}}", 'tvshow.nfo')
             if os.path.exists(nfo_path):
@@ -750,6 +758,12 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
             placeholder_folders.append(settings.MOVIE_LIBRARY_4K_FOLDER)
         if getattr(settings, 'TV_LIBRARY_4K_FOLDER', None):
             placeholder_folders.append(settings.TV_LIBRARY_4K_FOLDER)
+            
+        # Option 3: add {root}/{DUMMY_FOLDER_NAME}/ prefix for each mapped root folder
+        if getattr(settings, 'USE_ROOT_FOLDERS', False) and settings.ROOT_FOLDER_SECTION_ID_MAPPINGS:
+            dummy = getattr(settings, 'DUMMY_FOLDER_NAME', 'placeholders')
+            for root in settings.ROOT_FOLDER_SECTION_ID_MAPPINGS:
+                placeholder_folders.append(root.rstrip('/') + '/' + dummy + '/')
 
         logger.debug(f"Checking path against placeholder folders: {placeholder_folders}", extra={'emoji_type': 'debug'})
         is_placeholder = any(file_path.startswith(folder) for folder in placeholder_folders if folder)
@@ -784,8 +798,9 @@ def handle_playback(data: dict, precomputed_file_path: str = None):
             
             logger.info(f"Processing movie playback for {title}", extra={'emoji_type': 'process'})
             
-            radarr_id = search_in_radarr(title=title, tmdb_id=tmdb_id, imdb_id=imdb_id, 
-                                       year=year, rating_key=rating_key, is_4k=is_4k)
+            radarr_id = search_in_radarr(title=title, tmdb_id=tmdb_id, imdb_id=imdb_id,
+                                       year=year, rating_key=rating_key, is_4k=is_4k,
+                                       file_path=file_path)
             
             if radarr_id:
                 # Movie exists in Radarr, add to our monitoring system

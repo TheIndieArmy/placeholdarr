@@ -1,8 +1,10 @@
-import os, urllib.parse, requests
+import os
+import requests
 from urllib.parse import quote
 from plexapi.server import PlexServer
 from core.config import settings
 from core.logger import logger
+from services.utils import get_root_folder_from_path
 
 def build_plex_url(path: str) -> str:
     if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL:
@@ -17,35 +19,51 @@ def build_plex_url(path: str) -> str:
     logger.debug(f"Built Plex URL: {url}", extra={'emoji_type': 'debug'})
     return url
 
+def _get_section_id_for_path(item_path, media_type=None):
+    """Determine the Plex section ID for a given file/folder path.
+
+    Consults ROOT_FOLDER_SECTION_ID_MAPPINGS first (Option 3), then falls back
+    to the legacy MOVIE_LIBRARY_FOLDER / TV_LIBRARY_FOLDER prefix matching,
+    and finally uses the media_type hint or path keyword heuristics.
+    """
+    if not item_path:
+        return None
+    # Option 3: look up by root folder mapping
+    if getattr(settings, 'USE_ROOT_FOLDERS', False) and settings.ROOT_FOLDER_SECTION_ID_MAPPINGS:
+        root = get_root_folder_from_path(item_path)
+        if root is not None and root in settings.ROOT_FOLDER_SECTION_ID_MAPPINGS:
+            return settings.ROOT_FOLDER_SECTION_ID_MAPPINGS[root]
+
+    # Legacy: match against explicit library folder prefixes
+    if any(item_path.startswith(f) for f in [settings.MOVIE_LIBRARY_FOLDER, settings.MOVIE_LIBRARY_4K_FOLDER] if f):
+        return settings.PLEX_MOVIE_SECTION_ID
+    if any(item_path.startswith(f) for f in [settings.TV_LIBRARY_FOLDER, settings.TV_LIBRARY_4K_FOLDER] if f):
+        return settings.PLEX_TV_SECTION_ID
+
+    # Fallback: media_type hint or path keyword heuristics
+    if media_type == 'movie' or 'movie' in item_path.lower():
+        return settings.PLEX_MOVIE_SECTION_ID
+    if media_type == 'tv' or 'tv' in item_path.lower() or 'season' in item_path.lower():
+        return settings.PLEX_TV_SECTION_ID
+
+    return None
+
+
 def refresh_plex_item(item_path, media_type=None):
     if not getattr(settings, "plex_enabled", False) or not settings.PLEX_URL or not settings.PLEX_TOKEN:
         return False
     """
     Refresh a specific Plex path
-    
+
     Args:
         item_path (str): Path to refresh
         media_type (str, optional): 'movie' or 'tv' to help determine section
     """
     try:
-        # Determine section ID from path or media_type
-        section_id = None
-        
-        # First try to determine by path prefix
-        if any(item_path.startswith(folder) for folder in [settings.MOVIE_LIBRARY_FOLDER, settings.MOVIE_LIBRARY_4K_FOLDER] if folder):
-            section_id = settings.PLEX_MOVIE_SECTION_ID
-        elif any(item_path.startswith(folder) for folder in [settings.TV_LIBRARY_FOLDER, settings.TV_LIBRARY_4K_FOLDER] if folder):
-            section_id = settings.PLEX_TV_SECTION_ID
-        
-        # If that fails, use media_type hint or try to guess from path
+        section_id = _get_section_id_for_path(item_path, media_type)
         if section_id is None:
-            if media_type == 'movie' or ('movie' in item_path.lower()):
-                section_id = settings.PLEX_MOVIE_SECTION_ID
-            elif media_type == 'tv' or 'tv' in item_path.lower() or 'season' in item_path.lower():
-                section_id = settings.PLEX_TV_SECTION_ID
-            else:
-                logger.error(f"Cannot determine section ID for path: {item_path}", extra={'emoji_type': 'error'})
-                return False
+            logger.error(f"Cannot determine section ID for path: {item_path}", extra={'emoji_type': 'error'})
+            return False
         
         # Make sure we're refreshing a directory, not a file
         if os.path.isfile(item_path):

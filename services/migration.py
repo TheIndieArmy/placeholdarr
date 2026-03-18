@@ -3,11 +3,9 @@ import requests
 import time
 from pathlib import Path
 from services.utils import get_arr_config, join_endpoint
-from fastapi.responses import JSONResponse
 
 from core.config import settings
 from core.logger import logger
-from services.integrations import place_dummy_file
 from services.handlers import handle_seriesadd, handle_movieadd
 from services.plex_client import refresh_plex_item
 from services.jellyfin_client import refresh_jellyfin_item

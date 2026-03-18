@@ -97,8 +97,41 @@ Once you have created your placeholder folders, you have two options for adding 
 - Keep your real file libraries (e.g., `/mnt/user/data/movies`, `/mnt/user/data/tv`) as separate libraries.
 - This setup makes it clear to users which items are placeholders (requests) and which are available to play immediately, and keeps your real and placeholder files fully separated for easy management and cleanup.
 
-**Note:**  
-Placeholdarr does not need to know your *arr root folders—just set the library folders to wherever you want placeholders to appear.
+#### Option 3: Root Folder Mode (`USE_ROOT_FOLDERS=true`)
+
+This mode removes the need to hardcode a single placeholder folder. Placeholdarr derives the root folder by matching the `folderPath` from each webhook against the keys in `ROOT_FOLDER_SECTION_ID_MAPPINGS` using a `startsWith` check, then creates a subfolder named `DUMMY_FOLDER_NAME` (default: `placeholders`) inside that root folder.
+
+**Setup:**
+1. Leave `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` blank.
+2. Set `USE_ROOT_FOLDERS=true`.
+3. Mount all your *arr root folders at the same absolute paths inside the container (same as their host paths).
+4. Set `ROOT_FOLDER_SECTION_ID_MAPPINGS` to a JSON object mapping each root folder to its Plex section ID:
+   ```
+   ROOT_FOLDER_SECTION_ID_MAPPINGS={"/mnt/user/data/movies/": 1, "/mnt/user/data/tv/": 2}
+   ```
+   Keys must use **double quotes** (standard JSON). Values are integer Plex section IDs.
+5. `PLEX_MOVIE_SECTION_ID` / `PLEX_TV_SECTION_ID` are not used for primary section lookup in this mode — section IDs come from `ROOT_FOLDER_SECTION_ID_MAPPINGS`. They are used as a fallback if a path doesn't match any mapping key, so setting them is still recommended.
+
+**Resulting folder structure** (with default `DUMMY_FOLDER_NAME=placeholders`):
+```
+/mnt/user/data/movies/
+└── placeholders/
+    └── Movie Name (2023)/
+        └── Movie Name (2023) (dummy).mp4
+
+/mnt/user/data/tv/
+└── placeholders/
+    └── Series Name (2020)/
+        └── Season 01/
+            └── Series Name (2020) - s01e01 - Episode Title.mp4
+```
+
+In Plex/Jellyfin, add `{root}/{DUMMY_FOLDER_NAME}` for each root folder as a library (e.g. `/mnt/user/data/movies/placeholders` and `/mnt/user/data/tv/placeholders`), or as additional folders in your existing movie/TV libraries.
+
+---
+
+**Note:**
+For Options 1 and 2, Placeholdarr does not need to know your *arr root folders—just set the library folders to wherever you want placeholders to appear.
 
 ---
 
@@ -108,11 +141,14 @@ Required settings in `.env`:
 - `PLEX_URL`, `PLEX_TOKEN`: Your Plex server details
 - `RADARR_URL`, `RADARR_API_KEY`: Radarr connection details
 - `SONARR_URL`, `SONARR_API_KEY`: Sonarr connection details
-- `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin
+- `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin *(not required when `USE_ROOT_FOLDERS=true`)*
 - `DUMMY_FILE_PATH`: Path to your dummy.mp4 file
  - `EMBY_URL`, `EMBY_TOKEN`: Emby server details (if using Emby). Note: Emby commonly exposes its API under an `/emby/` prefix. Set `EMBY_URL` to the server base (e.g., `http://localhost:8096`) and `EMBY_TOKEN` to an API key.
 
 Optional settings:
+- `USE_ROOT_FOLDERS`: Enable root folder mode (Option 3) — derives placeholder paths from *arr root folders (`true`/`false`, default `false`)
+- `DUMMY_FOLDER_NAME`: Subfolder name created inside each *arr root folder when `USE_ROOT_FOLDERS=true` (default: `placeholders`)
+- `ROOT_FOLDER_SECTION_ID_MAPPINGS`: JSON object mapping root folder paths to Plex section IDs, required when `USE_ROOT_FOLDERS=true` (e.g. `{"/mnt/movies/": 1, "/mnt/tv/": 2}`)
 - `PLACEHOLDER_STRATEGY`: How to create placeholders (`hardlink` or `copy`)
 - `TV_PLAY_MODE`: Download scope (`episode`, `season`, or `series`)
 - `TITLE_UPDATES`: What level of status updates are shown in Plex. "ALL" not currently recommended, as this feature is still in development (`OFF`, `REQUEST`, `ALL`)

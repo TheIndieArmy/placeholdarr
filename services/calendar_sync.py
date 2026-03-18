@@ -1,4 +1,3 @@
-import os  # <-- Add this import
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,7 +8,7 @@ from core.logger import logger
 from services.integrations import place_dummy_file, schedule_episode_request_update, schedule_movie_request_update, update_title_status
 from services.plex_client import refresh_plex_item
 from services.jellyfin_client import refresh_jellyfin_item
-from services.utils import sanitize_filename, resolve_final_folder, get_arr_config, join_endpoint
+from services.utils import sanitize_filename, resolve_final_folder, get_arr_config, join_endpoint, get_root_folder_from_path
 
 # --- Scheduler/Timer ---
 
@@ -101,7 +100,7 @@ def sync_calendar_episodes():
             air_date = _parse_air_date(air_date_str)
             # --- Always check for both folderPath and path ---
             folder_path = series.get('folderPath') or series.get('path')
-            arr_root_folder = series.get('rootFolderPath') or getattr(settings, 'SONARR_ROOT_FOLDER', None) or None
+            arr_root_folder = get_root_folder_from_path(folder_path)
             # --- Authoritative hasFile from Sonarr: fetch per-series episode list once and cache ---
             series_internal_id = series.get('id') or ep.get('seriesId')
             has_file = False
@@ -353,7 +352,7 @@ def sync_calendar_episodes():
             air_date = _parse_air_date(date_str)
             # Use 'path' for API lookups (Radarr), fallback to 'folderPath' for legacy/compat
             folder_path = movie.get('path') or movie.get('folderPath')
-            arr_root_folder = movie.get('rootFolderPath')
+            arr_root_folder = get_root_folder_from_path(folder_path)
             if not air_date:
                 continue
             if not enable_placeholders:

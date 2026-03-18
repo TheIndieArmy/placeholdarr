@@ -3,8 +3,8 @@ import time
 import requests
 from core.logger import logger
 from core.config import settings
-from services.integrations import get_sonarr_queue, get_radarr_queue, strip_status_markers
-from datetime import datetime, timezone, timedelta
+from services.integrations import get_sonarr_queue, get_radarr_queue
+from datetime import datetime
 from services.utils import get_arr_config, join_endpoint
 
 # Global registry to track monitored media

@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from typing import List, Optional, Dict, Any, Callable, Tuple
+from typing import List, Optional, Any, Callable
 from urllib.parse import quote
 import requests
 from core.config import settings
@@ -500,7 +500,7 @@ def test_jellyfin_connection() -> bool:
         resp = session.get(url)
         resp.raise_for_status()
         return True
-    except Exception as ex:
+    except Exception:
         return False
 
 def test_jellyfin_endpoints():
@@ -530,22 +530,3 @@ if getattr(settings, "jellyfin_enabled", False):
     except Exception as ex:
         logger.error(f"Failed to connect to Jellyfin server: {ex}", extra={'emoji_type': 'error'})
 
-def get_jellyfin_file_path(item_id: str, user_id: Optional[str] = None) -> str:
-    """
-    Return the file path for a Jellyfin item, optionally for a specific user.
-    """
-    try:
-        if user_id:
-            url = build_jellyfin_url(f"Users/{user_id}/Items/{item_id}")
-        else:
-            url = build_jellyfin_url(f"Items/{item_id}")
-        resp = session.get(url)
-        if resp.status_code == 200:
-            item = resp.json()
-            return item.get("Path", "")
-        else:
-            logger.warning(f"get_jellyfin_file_path: Failed to fetch item {item_id} (status {resp.status_code})", extra={'emoji_type': 'warning'})
-            return ""
-    except Exception as ex:
-        logger.error(f"get_jellyfin_file_path: Exception for item {item_id}: {ex}", extra={'emoji_type': 'error'})
-        return ""
