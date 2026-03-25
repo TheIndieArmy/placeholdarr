@@ -168,15 +168,20 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 status=None,     # None → strip markers
                 year=year
             )
-            # Clean up placeholder files (delete only the dummy file, not the folder)
-            if os.path.exists(dummy_file_path):
-                try:
-                    os.remove(dummy_file_path)
-                    logger.info(f"Deleted placeholder file: {dummy_file_path}", extra={'emoji_type': 'delete'})
-                except Exception as e:
-                    logger.error(f"Failed to delete dummy file {dummy_file_path}: {e}", extra={'emoji_type': 'error'})
+            # Clean up placeholder artifacts using centralized logic (dummy + matching NFO/folder cleanup)
+            deleted = delete_dummy_files(
+                'movie',
+                title,
+                year,
+                tmdb_id,
+                library_path=getattr(settings, 'MOVIE_LIBRARY_FOLDER', None),
+                folder_path=folder_path,
+                arr_root_folder=arr_root_folder
+            )
+            if deleted:
+                logger.info(f"Deleted placeholder artifacts for movie: {title} ({year})", extra={'emoji_type': 'delete'})
             else:
-                logger.debug(f"Dummy file not found for deletion: {dummy_file_path}", extra={'emoji_type': 'debug'})
+                logger.debug(f"No movie placeholder artifacts found to delete for: {title} ({year})", extra={'emoji_type': 'debug'})
             # --- NEW: Always refresh parent folder ---
             if movie_path:
                 parent_folder = os.path.dirname(movie_path)
@@ -243,15 +248,22 @@ def handle_import_event(data: dict, is_4k: bool = False):
                 season=season_num,
                 episode=episode_num
             )
-            # Clean up placeholder files
-            if os.path.exists(dummy_file_path):
-                try:
-                    os.remove(dummy_file_path)
-                    logger.info(f"Deleted placeholder file: {dummy_file_path}", extra={'emoji_type': 'delete'})
-                except Exception as e:
-                    logger.error(f"Failed to delete dummy file {dummy_file_path}: {e}", extra={'emoji_type': 'error'})
+            # Clean up placeholder artifacts using centralized logic (dummy + matching NFO/folder cleanup)
+            deleted = delete_dummy_files(
+                'tv',
+                series_title,
+                series_year,
+                tvdb_id,
+                library_path=getattr(settings, 'TV_LIBRARY_FOLDER', None),
+                season_number=season_num,
+                episode_number=episode_num,
+                folder_path=folder_path,
+                arr_root_folder=arr_root_folder
+            )
+            if deleted:
+                logger.info(f"Deleted placeholder artifacts for episode: {series_title} S{season_num:02d}E{episode_num:02d}", extra={'emoji_type': 'delete'})
             else:
-                logger.debug(f"Dummy file not found for deletion: {dummy_file_path}", extra={'emoji_type': 'debug'})
+                logger.debug(f"No episode placeholder artifacts found to delete for: {series_title} S{season_num:02d}E{episode_num:02d}", extra={'emoji_type': 'debug'})
             # --- NEW: Always refresh parent folder ---
             if episode_path:
                 parent_folder = os.path.dirname(episode_path)
