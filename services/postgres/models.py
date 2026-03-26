@@ -120,6 +120,16 @@ class Placeholder(Base):
     display_progress = Column(Integer, nullable=True)
     display_reason = Column(String, nullable=True)
     format_hint = Column(String, nullable=True)
+    # Per-service placeholder item ids and first-observed timestamps.
+    # These are runtime/media-server observations for the placeholder row.
+    plex_placeholder_id = Column(String, nullable=True)
+    plex_id_observed_at = Column(DateTime(timezone=True), nullable=True)
+    jellyfin_placeholder_id = Column(String, nullable=True)
+    jellyfin_id_observed_at = Column(DateTime(timezone=True), nullable=True)
+    emby_placeholder_id = Column(String, nullable=True)
+    emby_id_observed_at = Column(DateTime(timezone=True), nullable=True)
+    media_lookup_last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    media_lookup_error = Column(String, nullable=True)
     extra = Column(JSON, nullable=True)
     created_by = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
@@ -168,6 +178,60 @@ class Job(Base):
 
     def __repr__(self):
         return f"<Job(id={self.id}, type={self.job_type!r}, status={self.status})>"
+
+
+class ObservationTrailAttempt(Base):
+    """Audit record for each deferred observation-trail polling attempt."""
+
+    __tablename__ = 'observation_trail_attempt'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trail_job_id = Column(Integer, ForeignKey('job.id'), nullable=False)
+    source = Column(String, nullable=True)
+    attempt_number = Column(Integer, nullable=False, default=1)
+    placeholders_before = Column(Integer, nullable=False, default=0)
+    placeholders_after = Column(Integer, nullable=False, default=0)
+    observed_plex = Column(Integer, nullable=False, default=0)
+    observed_jellyfin = Column(Integer, nullable=False, default=0)
+    observed_emby = Column(Integer, nullable=False, default=0)
+    observe_failed = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=1)
+    elapsed_ms = Column(Integer, nullable=True)
+    resolution_reason = Column(String, nullable=True)
+    unresolved_placeholder_ids = Column(JSON, nullable=True)
+    error_message = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+
+    __table_args__ = (
+        Index('ix_observation_trail_attempt_job_created', 'trail_job_id', 'created_at'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ObservationTrailAttempt(id={self.id}, trail_job_id={self.trail_job_id}, "
+            f"attempt={self.attempt_number})>"
+        )
+
+
+class EventLog(Base):
+    __tablename__ = 'event_log'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_type = Column(String, nullable=False)
+    source = Column(String, nullable=True)
+    payload = Column(JSON, nullable=False)
+    status = Column(String, default='PENDING')
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=10)
+    error_message = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index('ix_event_log_status_created_at', 'status', 'created_at'),
+    )
+
+    def __repr__(self):
+        return f"<EventLog(id={self.id}, event_type={self.event_type!r}, status={self.status!r})>"
 
 
 # Table to claim a single FS-scan per external run (e.g. fullsync:<id>)

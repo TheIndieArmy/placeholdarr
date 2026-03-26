@@ -161,6 +161,35 @@ def init_db(engine=None, convert_ts: bool | None = None):
     except Exception as ex:
         logger.debug(f"Could not ensure ux_job_enrichment_groupid index exists: {ex}", extra={'emoji_type': 'debug'})
 
+    # Ensure unique partial index to prevent duplicate active observation trail
+    # jobs for the same group_id when producers run concurrently.
+    try:
+        from sqlalchemy import text
+        idx_sql_obs_trail = text(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_obs_trail_groupid "
+            "ON job(group_id) "
+            "WHERE job_type='placeholder_observation_trail' AND status IN ('PENDING','CLAIMED','WORKING')"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_sql_obs_trail)
+    except Exception as ex:
+        logger.debug(f"Could not ensure ux_job_obs_trail_groupid index exists: {ex}", extra={'emoji_type': 'debug'})
+    
+    # Ensure unique partial index for Plex busy-aware deferred observation trails
+    try:
+        from sqlalchemy import text
+        idx_sql_plex_busy = text(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_plex_busy_deferred_groupid "
+            "ON job(group_id) "
+            "WHERE job_type='plex_busy_deferred_observation_trail' AND status IN ('PENDING','CLAIMED','WORKING')"
+        )
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+            conn.execute(idx_sql_plex_busy)
+    except Exception as ex:
+        logger.debug(f"Could not ensure ux_job_plex_busy_deferred_groupid index exists: {ex}", extra={'emoji_type': 'debug'})
+
     # Ensure unique partial index to prevent multiple active SubFlows for same (movie_id, action, branch)
     try:
         from sqlalchemy import text

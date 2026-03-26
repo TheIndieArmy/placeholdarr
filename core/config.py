@@ -12,10 +12,23 @@ except Exception:
         return False
 from pydantic_settings import BaseSettings
 from pydantic import validator, root_validator
-import urllib.parse
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_octal_mode(value: str, default: int) -> int:
+    text = str(value or '').strip().lower()
+    if not text:
+        return default
+    if text.startswith('0o'):
+        text = text[2:]
+    if text.startswith('0') and len(text) > 1:
+        text = text[1:]
+    try:
+        return int(text, 8)
+    except Exception:
+        return default
 
 # Get the project root directory (where main.py is)
 ROOT_DIR = Path(__file__).parent.parent
@@ -44,6 +57,10 @@ class Settings(BaseSettings):
     JELLYFIN_URL: Optional[str] = None
     JELLYFIN_TOKEN: Optional[str] = None
 
+    # Emby
+    EMBY_URL: Optional[str] = None
+    EMBY_TOKEN: Optional[str] = None
+
     # Services
     RADARR_URL: str
     RADARR_API_KEY: str
@@ -58,19 +75,17 @@ class Settings(BaseSettings):
 
     # Sync Settings (grouped by instance)
     RADARR_SYNC_ON_STARTUP: bool = os.getenv("RADARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    RADARR_SYNC_CRON: str = os.getenv("RADARR_SYNC_CRON", "")
     RADARR_4K_SYNC_ON_STARTUP: bool = os.getenv("RADARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    RADARR_4K_SYNC_CRON: str = os.getenv("RADARR_4K_SYNC_CRON", "")
     SONARR_SYNC_ON_STARTUP: bool = os.getenv("SONARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    SONARR_SYNC_CRON: str = os.getenv("SONARR_SYNC_CRON", "")
     SONARR_4K_SYNC_ON_STARTUP: bool = os.getenv("SONARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    SONARR_4K_SYNC_CRON: str = os.getenv("SONARR_4K_SYNC_CRON", "")
+    FULL_SYNC_INTERVAL_HOURS: int = int(os.getenv("FULL_SYNC_INTERVAL_HOURS", "0").split('#')[0].strip())
 
     # Library Paths
-    MOVIE_LIBRARY_FOLDER: str
-    TV_LIBRARY_FOLDER: str
-    MOVIE_LIBRARY_4K_FOLDER: str = ""
-    TV_LIBRARY_4K_FOLDER: str = ""
+    LIBRARY_ROOT: str = os.getenv("LIBRARY_ROOT", "").split('#')[0].strip()
+    MOVIE_LIBRARY_FOLDER: str = os.getenv("MOVIE_LIBRARY_FOLDER", "").split('#')[0].strip()
+    TV_LIBRARY_FOLDER: str = os.getenv("TV_LIBRARY_FOLDER", "").split('#')[0].strip()
+    MOVIE_LIBRARY_4K_FOLDER: str = os.getenv("MOVIE_LIBRARY_4K_FOLDER", "").split('#')[0].strip()
+    TV_LIBRARY_4K_FOLDER: str = os.getenv("TV_LIBRARY_4K_FOLDER", "").split('#')[0].strip()
 
     # Application
     PLAYBACK_COOLDOWN: int = int(os.environ.get("PLAYBACK_COOLDOWN", "30").split('#')[0].strip())
@@ -82,10 +97,21 @@ class Settings(BaseSettings):
     DUMMY_FILE_PATH: str
     COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
+    PLACEHOLDER_CREATE_NFO: bool = os.getenv("PLACEHOLDER_CREATE_NFO", "true").split('#')[0].strip().lower() == "true"
+    PLACEHOLDER_STATUS_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
+    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both", "off"] = os.getenv("PLACEHOLDER_STATUS_PROJECTION_MODE", "summary").split('#')[0].strip().lower()
+    PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
+    PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
+    PRIMER_ENABLED: bool = os.getenv("PRIMER_ENABLED", "true").split('#')[0].strip().lower() == "true"
+    FORCE_PRIME_ON_STARTUP: bool = os.getenv("FORCE_PRIME_ON_STARTUP", "false").split('#')[0].strip().lower() == "true"
+    PRIMER_SERIES_COUNT: int = int(os.getenv("PRIMER_SERIES_COUNT", "3").split('#')[0].strip())
+    PRIMER_EPISODES_PER_SERIES: int = int(os.getenv("PRIMER_EPISODES_PER_SERIES", "3").split('#')[0].strip())
+    PRIMER_REFRESH_WAIT_SECONDS: int = int(os.getenv("PRIMER_REFRESH_WAIT_SECONDS", "60").split('#')[0].strip())
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
-    TITLE_UPDATES: str = os.getenv("TITLE_UPDATES", "ALL")  # Options: OFF, REQUEST, ALL
+    # Backward-compat alias for legacy modules still reading TITLE_UPDATES.
+    TITLE_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
 
     # Migration settings
@@ -113,6 +139,7 @@ class Settings(BaseSettings):
 
     ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").split('#')[0].strip().lower() == "true"
     ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_EMBY: bool = os.getenv("ENABLE_EMBY", "false").split('#')[0].strip().lower() == "true"
 
     # Job queue / batching
     BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
@@ -132,20 +159,31 @@ class Settings(BaseSettings):
                 v = v.strip()
         return v
     
-    @validator('DUMMY_FILE_PATH', 'COMING_SOON_DUMMY_FILE_PATH', 'MOVIE_LIBRARY_FOLDER', 'TV_LIBRARY_FOLDER')
-    def validate_path_exists(cls, v):
+    @validator('DUMMY_FILE_PATH')
+    def validate_dummy_file_path(cls, v):
+        if not v:
+            raise ValueError("DUMMY_FILE_PATH is required")
+        path = Path(v)
+        if not path.exists():
+            raise ValueError(f"Path does not exist: {v}")
+        if not path.is_file():
+            raise ValueError(f"DUMMY_FILE_PATH must be a file: {v}")
+        if path.stat().st_size == 0:
+            raise ValueError(f"Dummy file exists but is empty: {v}")
+        return str(path.absolute())
+
+    @validator('COMING_SOON_DUMMY_FILE_PATH')
+    def validate_coming_soon_dummy_file_path(cls, v):
         if not v:
             return v
         path = Path(v)
         if not path.exists():
             raise ValueError(f"Path does not exist: {v}")
-        # If it's a file, check it's not empty (for DUMMY_FILE_PATH)
-        if path.is_file() and path.name == os.path.basename(os.getenv("DUMMY_FILE_PATH", "")):
-            if path.stat().st_size == 0:
-                raise ValueError(f"Dummy file exists but is empty: {v}")
+        if not path.is_file():
+            raise ValueError(f"COMING_SOON_DUMMY_FILE_PATH must be a file: {v}")
         return str(path.absolute())
     
-    @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', pre=True)
+    @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', 'EMBY_URL', pre=True)
     def validate_url(cls, v):
         if v is None or v == "":
             return v  # Allow missing/blank for optional URLs
@@ -157,16 +195,81 @@ class Settings(BaseSettings):
     def check_media_providers(cls, values):
         enable_plex = values.get('ENABLE_PLEX', True)
         enable_jellyfin = values.get('ENABLE_JELLYFIN', True)
+        enable_emby = values.get('ENABLE_EMBY', False)
         plex_keys = [values.get('PLEX_URL'), values.get('PLEX_TOKEN')]
         jellyfin_keys = [values.get('JELLYFIN_URL'), values.get('JELLYFIN_TOKEN')]
+        emby_keys = [values.get('EMBY_URL'), values.get('EMBY_TOKEN')]
         plex_configured = all(plex_keys)
         jellyfin_configured = all(jellyfin_keys)
+        emby_configured = all(emby_keys)
         if enable_plex and not plex_configured:
             raise ValueError("ENABLE_PLEX is true but PLEX_URL or PLEX_TOKEN is missing.")
         if enable_jellyfin and not jellyfin_configured:
             raise ValueError("ENABLE_JELLYFIN is true but JELLYFIN_URL or JELLYFIN_TOKEN is missing.")
-        if not (enable_plex or enable_jellyfin):
-            raise ValueError("At least one of ENABLE_PLEX or ENABLE_JELLYFIN must be true.")
+        if enable_emby and not emby_configured:
+            raise ValueError("ENABLE_EMBY is true but EMBY_URL or EMBY_TOKEN is missing.")
+        if not (enable_plex or enable_jellyfin or enable_emby):
+            raise ValueError("At least one of ENABLE_PLEX, ENABLE_JELLYFIN, or ENABLE_EMBY must be true.")
+        return values
+
+    @root_validator(skip_on_failure=True)
+    def configure_library_paths(cls, values):
+        library_root = str(values.get('LIBRARY_ROOT') or '').strip()
+
+        movie_folder = str(values.get('MOVIE_LIBRARY_FOLDER') or '').strip()
+        tv_folder = str(values.get('TV_LIBRARY_FOLDER') or '').strip()
+        movie_4k_folder = str(values.get('MOVIE_LIBRARY_4K_FOLDER') or '').strip()
+        tv_4k_folder = str(values.get('TV_LIBRARY_4K_FOLDER') or '').strip()
+
+        if library_root:
+            if not movie_folder:
+                movie_folder = os.path.join(library_root, 'movies')
+            if not tv_folder:
+                tv_folder = os.path.join(library_root, 'tv')
+
+        # 4K defaults to the main library root. Users can override either path explicitly.
+        has_4k_service = bool(values.get('RADARR_4K_URL') or values.get('SONARR_4K_URL'))
+        if has_4k_service and library_root:
+            if not movie_4k_folder:
+                movie_4k_folder = os.path.join(library_root, 'movies-4k')
+            if not tv_4k_folder:
+                tv_4k_folder = os.path.join(library_root, 'tv-4k')
+
+        if not movie_folder or not tv_folder:
+            raise ValueError(
+                'Set MOVIE_LIBRARY_FOLDER/TV_LIBRARY_FOLDER directly or set LIBRARY_ROOT so folders can be derived.'
+            )
+
+        dir_mode = _parse_octal_mode(values.get('PLACEHOLDER_DIR_MODE', '777'), 0o777)
+        folder_values = {
+            'MOVIE_LIBRARY_FOLDER': movie_folder,
+            'TV_LIBRARY_FOLDER': tv_folder,
+            'MOVIE_LIBRARY_4K_FOLDER': movie_4k_folder,
+            'TV_LIBRARY_4K_FOLDER': tv_4k_folder,
+        }
+
+        for key, raw in folder_values.items():
+            raw = str(raw or '').strip()
+            if not raw:
+                values[key] = ''
+                continue
+
+            path = Path(raw)
+            if path.exists() and not path.is_dir():
+                raise ValueError(f'{key} must be a directory path: {raw}')
+
+            if not path.exists():
+                path.mkdir(parents=True, exist_ok=True)
+                logger.info(f'Created missing library folder for {key}: {path}')
+
+            # Keep directory permissions aligned with placeholder folder policy.
+            try:
+                os.chmod(path, dir_mode)
+            except Exception:
+                pass
+
+            values[key] = str(path.absolute())
+
         return values
 
     @property
@@ -178,12 +281,8 @@ class Settings(BaseSettings):
         return self.ENABLE_JELLYFIN and bool(self.JELLYFIN_URL and self.JELLYFIN_TOKEN)
 
     @property
-    def radarr_4k_port(self) -> int:
-        return int(urllib.parse.urlparse(self.RADARR_4K_URL).port) if self.RADARR_4K_URL else None
-    
-    @property
-    def sonarr_4k_port(self) -> int:
-        return int(urllib.parse.urlparse(self.SONARR_4K_URL).port) if self.SONARR_4K_URL else None
+    def emby_enabled(self) -> bool:
+        return self.ENABLE_EMBY and bool(self.EMBY_URL and self.EMBY_TOKEN)
 
     @property
     def has_4k_support(self) -> bool:

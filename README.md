@@ -113,14 +113,20 @@ Required settings in `.env`:
 
 Optional settings:
 - `PLACEHOLDER_STRATEGY`: How to create placeholders (`hardlink` or `copy`)
+- `PLACEHOLDER_CREATE_NFO`: Create `.nfo` sidecar metadata next to placeholder files (`true`/`false`, default `true`)
+- `PLACEHOLDER_STATUS_UPDATES`: Controls whether Placeholdarr writes placeholder status text updates (`OFF`, `REQUEST`, `ALL`)
+- `PLACEHOLDER_STATUS_PROJECTION_MODE`: Controls where status text is projected when status updates are enabled: `summary`, `title`, `both`, `off`
+  - If `PLACEHOLDER_STATUS_UPDATES=OFF`, no status text is written, so projection output will not be shown regardless of projection mode.
+- `PLACEHOLDER_FILE_MODE`: Octal file mode applied to placeholders and `.nfo` files (default `666`)
+- `PLACEHOLDER_DIR_MODE`: Octal directory mode applied to placeholder folders (default `777`)
 - `TV_PLAY_MODE`: Download scope (`episode`, `season`, or `series`)
-- `TITLE_UPDATES`: What level of status updates are shown in Plex. "ALL" not currently recommended, as this feature is still in development (`OFF`, `REQUEST`, `ALL`)
 - 4K support settings (if needed)
 - `INCLUDE_SPECIALS`: Include specials in TV placeholder creation (`true`/`false`)
 - `EPISODES_LOOKAHEAD`: Number of episodes to look ahead and download (integer)
 - `MAX_MONITOR_TIME`: Maximum time to monitor for file in seconds (integer)
 - `CHECK_INTERVAL`: How often to check queue status in seconds (integer)
 - `AVAILABLE_CLEANUP_DELAY`: Delay before removing monitored item after it becomes available (integer)
+- `FULL_SYNC_INTERVAL_HOURS`: Source-of-truth full sync cadence in hours for Radarr/Sonarr recurring runs (`0` disables recurring runs; minimum effective interval is `1` hour)
 - **Calendar-based status update settings:**
   - `CALENDAR_LOOKAHEAD_DAYS`: How many days into the future to allow placeholders/"Coming Soon" (integer)
   - `CALENDAR_SYNC_INTERVAL_HOURS`: How often to sync calendar and update statuses (hours, integer)
@@ -136,6 +142,7 @@ Optional settings:
 - `DUMMY_FILE_PATH`: Path to your standard dummy video file (used for available/requestable placeholders).
 - `COMING_SOON_DUMMY_FILE_PATH`: (Optional) Path to a special dummy video file used for "Coming Soon" placeholders (future releases).  
   If not set, the standard dummy file will be used for all placeholders.
+- Placeholdarr now writes a `.nfo` sidecar beside each placeholder by default to support faster Jellyfin/Plex metadata refresh workflows.
 
 ---
 
@@ -152,25 +159,79 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 
 ---
 
+### Webhook Setup Overview
+
+Placeholdarr receives all webhook traffic on `/webhook` and routes each request by the required `instance` query parameter.
+
+Use this URL format for every sender:
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<value>`
+
+Allowed `instance` values:
+- `radarr_std`
+- `radarr_4k`
+- `sonarr_std`
+- `sonarr_4k`
+- `tautulli`
+- `jellyfin`
+- `emby`
+
+Current behavior:
+- Requests without a valid configured `instance` value are rejected with HTTP 400.
+- Placeholdarr does not infer sender identity from payload content.
+- The only deployment-specific parts are your server address and `PLACEHOLDARR_PORT`.
+
+---
+
+### Radarr Webhook Setup
+
+- For more-tailored control of content, utilize tags to determine what titles get placeholders created for them.
+
+1. In Radarr, go to Settings → Connect → Add Connection (Plus Icon)
+2. Select "Webhook"
+3. Configure:
+   - Name: PlaceholdARR
+   - Standard Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=radarr_std`
+   - 4K Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=radarr_4k`
+   - Method: POST
+   - Triggers (enable only):
+     - On Grab
+     - On File Import
+     - On Movie Added
+     - On Movie Delete
+     - On Movie File Delete
+
+---
+
+### Sonarr Webhook Setup
+
+1. In Sonarr, go to Settings → Connect → Add Connection (Plus Icon)
+2. Select "Webhook"
+3. Configure:
+   - Name: PlaceholdARR
+   - Standard Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=sonarr_std`
+   - 4K Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=sonarr_4k`
+   - Method: POST
+   - Triggers (enable only):
+     - On Grab
+     - On File Import
+     - On Series Add
+     - On Series Delete
+     - On Episode File Delete
+
+---
+
 ### Tautulli Webhook Setup
+
+Required Tautulli webhook URL pattern:
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=tautulli`
 
 1. In Tautulli, go to Settings → Notification Agents
 2. Add a new Webhook notification agent
 3. Configure the webhook:
-   - Webhook URL: `http://your-server:8000/webhook`
+   - Webhook URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=tautulli`
    - Trigger: Playback Start
    - Payload Format: JSON
-   
-4. Add this condition to only trigger on dummy files:
-```
-{
-    "operator": "contains",
-    "condition": "filename",
-    "value": "dummy"
-}
-```
-
-5. Use this JSON payload:
+4. Use this JSON payload:
 ```json
 {
     "event": "playback.start",
@@ -199,13 +260,16 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
 
 ### Jellyfin Webhook Setup
 
+Required Jellyfin webhook URL pattern:
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=jellyfin`
+
 1. In Jellyfin, go to **Dashboard → Plugins → Catalog** and install the **Webhook** plugin if not already installed.
 2. Go to **Dashboard → Plugins → Webhook** and click **Add Webhook**.
 3. Set the **Webhook URL** to:
    ```
-   http://your-server:8000/webhook
+   http://your-server:PLACEHOLDARR_PORT/webhook?instance=jellyfin
    ```
-   Replace `your-server` with your actual server address.
+   Replace `your-server` and `PLACEHOLDARR_PORT` with your actual address and configured Placeholdarr port.
 4. Under **Events**, enable **Playback Start**.
 5. Set **Content Type** to `application/json`.
 6. Use this as the **Payload Template**:
@@ -228,41 +292,22 @@ You must have at least one of Plex or Jellyfin configured. Placeholdarr will aut
    ```
 7. Save the webhook.
 
-**Note:** Placeholdarr will automatically detect and process both Tautulli (Plex) and Jellyfin webhooks using their respective payload formats. No extra configuration is needed—just set up the webhook as shown.
-
 ---
 
-### Radarr Webhook Setup
+### Emby Webhook Setup
 
-- For more-tailored control of content, utilize tags to determine what titles get placeholders created for them. 
+Required Emby webhook URL pattern:
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=emby`
 
-1. In Radarr, go to Settings → Connect → Add Connection (Plus Icon)
-2. Select "Webhook"
-3. Configure:
-   - Name: PlaceholdARR
-   - URL: `http://your-server:8000/webhook`
-   - Method: POST
-   - Triggers (enable only):
-     - On Import
-     - On Movie Added
-     - On Movie Delete
-     - On Movie File Delete
-
----
-
-### Sonarr Webhook Setup
-
-1. In Sonarr, go to Settings → Connect → Add Connection (Plus Icon)
-2. Select "Webhook"
-3. Configure:
-   - Name: PlaceholdARR
-   - URL: `http://your-server:8000/webhook`
-   - Method: POST
-   - Triggers (enable only):
-     - On Import
-     - On Series Add
-     - On Series Delete
-     - On Episode File Delete
+1. In Emby, go to **Settings → Notifications**.
+2. Add or edit your webhook notification.
+3. Set the **Webhook URL** to:
+   ```
+   http://your-server:PLACEHOLDARR_PORT/webhook?instance=emby
+   ```
+   Replace `your-server` and `PLACEHOLDARR_PORT` with your actual address and configured Placeholdarr port.
+4. Enable the playback-start event you want Placeholdarr to receive.
+5. Save the webhook.
 
 ---
 
