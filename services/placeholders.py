@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import filecmp
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -137,15 +138,41 @@ def episode_placeholder_path(episode: Any, season: Any, series: Any) -> str:
     return os.path.join(folder, filename)
 
 
-def ensure_placeholder_file(path: str) -> bool:
-    """Create placeholder media if missing. Returns True when file is created."""
-    if os.path.isfile(path):
-        _ensure_open_permissions(path)
-        return False
+def ensure_placeholder_file(
+    path: str,
+    *,
+    dummy_file_path: str | None = None,
+    replace_existing: bool = False,
+) -> bool:
+    """Create or replace placeholder media file.
 
-    dummy_path = getattr(settings, "DUMMY_FILE_PATH", None)
+    Args:
+        path: Destination media file path.
+        dummy_file_path: Optional explicit source dummy file variant.
+        replace_existing: When True, existing file can be replaced if variant differs.
+
+    Returns:
+        True when a file was created/replaced, False when no write was needed.
+    """
+    dummy_path = dummy_file_path or getattr(settings, "DUMMY_FILE_PATH", None)
     if not dummy_path or not os.path.isfile(dummy_path):
         raise RuntimeError(f"DUMMY_FILE_PATH missing or invalid: {dummy_path}")
+
+    if os.path.isfile(path):
+        if not replace_existing:
+            _ensure_open_permissions(path)
+            return False
+        try:
+            if filecmp.cmp(path, dummy_path, shallow=False):
+                _ensure_open_permissions(path)
+                return False
+        except Exception:
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            # Best-effort replacement path; continue and let write fail if needed.
+            pass
 
     parent = os.path.dirname(path)
     os.makedirs(parent, exist_ok=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, datetime, timezone
 
 from sqlalchemy import func
 
@@ -17,11 +18,29 @@ DETERMINATION_EXISTS = 'placeholder_exists'
 DETERMINATION_NEEDS = 'needs_placeholder'
 
 
+def _preferred_movie_release_date(movie: Movie) -> date | None:
+    """Return only the configured preferred movie release date.
+
+    Strict behavior: do not fallback to other release types.
+    """
+    preferred = str(getattr(settings, 'PREFERRED_MOVIE_DATE_TYPE', 'inCinemas') or 'inCinemas').strip()
+    mapping = {
+        'inCinemas': 'theater_release_date',
+        'digitalRelease': 'digital_release_date',
+        'physicalRelease': 'physical_release_date',
+    }
+    preferred_field = mapping.get(preferred, 'theater_release_date')
+    candidate = getattr(movie, preferred_field, None)
+    if candidate:
+        return candidate
+    return None
+
+
 def run_placeholder_link_reconcile() -> dict:
     """Reset and rebuild placeholder linkage on Movie/Episode rows.
 
     This is the authoritative reconciliation pass for derived placeholder fields:
-    - clear Movie/Episode has_placeholder, placeholder_filepath, and placeholder_status
+    - clear Movie/Episode has_placeholder and placeholder_filepath
     - re-link from active Placeholder rows (has_placeholder=True)
     """
     session = get_session()
@@ -60,7 +79,6 @@ def run_placeholder_link_reconcile() -> dict:
             {
                 Movie.has_placeholder: False,
                 Movie.placeholder_filepath: None,
-                Movie.placeholder_status: None,
             },
             synchronize_session=False,
         )
@@ -68,7 +86,6 @@ def run_placeholder_link_reconcile() -> dict:
             {
                 Episode.has_placeholder: False,
                 Episode.placeholder_filepath: None,
-                Episode.placeholder_status: None,
             },
             synchronize_session=False,
         )
@@ -200,7 +217,16 @@ def run_placeholder_link_reconcile() -> dict:
         session.close()
 
 
-def _compute_determination(has_placeholder: bool, has_file: bool, is_deleted: bool) -> str:
+def _compute_determination(
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+    *,
+    target_date: date | None = None,
+    lookahead_days: int | None = None,
+    placeholders_enabled: bool | None = None,
+    now_date: date | None = None,
+) -> str:
     """Return canonical determination from content flags.
 
     Rules:
@@ -209,6 +235,29 @@ def _compute_determination(has_placeholder: bool, has_file: bool, is_deleted: bo
     - placeholder_exists: placeholder exists and item still needs placeholder state
     - needs_placeholder: no placeholder and no real file and not deleted
     """
+    # Calendar lookahead guard semantics:
+    # - lookahead < 0  => infinite
+    # - lookahead == 0 => disabled/off for future placeholders
+    # - lookahead > 0  => strict horizon in days
+    if placeholders_enabled is True and lookahead_days is not None and not has_file and not is_deleted:
+        effective_now = now_date or datetime.now(timezone.utc).date()
+        lookahead = int(lookahead_days)
+
+        if lookahead < 0:
+            # Infinite mode keeps normal lifecycle behavior, including unknown dates.
+            pass
+        elif target_date is None:
+            # Strict mode: unknown selected release date is treated as out-of-window.
+            return DETERMINATION_OBSOLETE if has_placeholder else DETERMINATION_NOT_NEEDED
+        else:
+            days_until = (target_date - effective_now).days
+            if lookahead == 0:
+                # Off mode: suppress all future placeholders.
+                if days_until > 0:
+                    return DETERMINATION_OBSOLETE if has_placeholder else DETERMINATION_NOT_NEEDED
+            elif days_until > lookahead:
+                return DETERMINATION_OBSOLETE if has_placeholder else DETERMINATION_NOT_NEEDED
+
     if has_placeholder and (has_file or is_deleted):
         return DETERMINATION_OBSOLETE
     if has_file or is_deleted:
@@ -237,6 +286,10 @@ def run_determination_pass() -> dict:
     }
 
     try:
+        placeholders_enabled = bool(getattr(settings, 'ENABLE_COMING_SOON_PLACEHOLDERS', True))
+        lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
+        now_date = datetime.now(timezone.utc).date()
+
         movies = session.query(Movie).all()
         stats['movies_total'] = len(movies)
         for movie in movies:
@@ -244,6 +297,10 @@ def run_determination_pass() -> dict:
                 bool(getattr(movie, 'has_placeholder', False)),
                 bool(getattr(movie, 'has_file', False)),
                 bool(getattr(movie, 'is_deleted', False)),
+                target_date=_preferred_movie_release_date(movie),
+                lookahead_days=lookahead_days,
+                placeholders_enabled=placeholders_enabled,
+                now_date=now_date,
             )
             stats[value] += 1
             if getattr(movie, 'determination', None) != value:
@@ -272,6 +329,10 @@ def run_determination_pass() -> dict:
                 bool(getattr(episode, 'has_placeholder', False)),
                 bool(getattr(episode, 'has_file', False)),
                 bool(getattr(episode, 'is_deleted', False)),
+                target_date=getattr(episode, 'air_date', None),
+                lookahead_days=lookahead_days,
+                placeholders_enabled=placeholders_enabled,
+                now_date=now_date,
             )
             stats[value] += 1
             if getattr(episode, 'determination', None) != value:
@@ -316,6 +377,10 @@ def run_determination_for_entities(
     }
 
     try:
+        placeholders_enabled = bool(getattr(settings, 'ENABLE_COMING_SOON_PLACEHOLDERS', True))
+        lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
+        now_date = datetime.now(timezone.utc).date()
+
         movies_q = session.query(Movie)
         if movie_ids:
             movies_q = movies_q.filter(Movie.id.in_(movie_ids))
@@ -329,6 +394,10 @@ def run_determination_for_entities(
                 bool(getattr(movie, 'has_placeholder', False)),
                 bool(getattr(movie, 'has_file', False)),
                 bool(getattr(movie, 'is_deleted', False)),
+                target_date=_preferred_movie_release_date(movie),
+                lookahead_days=lookahead_days,
+                placeholders_enabled=placeholders_enabled,
+                now_date=now_date,
             )
             stats[value] += 1
             if getattr(movie, 'determination', None) != value:
@@ -363,6 +432,10 @@ def run_determination_for_entities(
                 bool(getattr(episode, 'has_placeholder', False)),
                 bool(getattr(episode, 'has_file', False)),
                 bool(getattr(episode, 'is_deleted', False)),
+                target_date=getattr(episode, 'air_date', None),
+                lookahead_days=lookahead_days,
+                placeholders_enabled=placeholders_enabled,
+                now_date=now_date,
             )
             stats[value] += 1
             if getattr(episode, 'determination', None) != value:

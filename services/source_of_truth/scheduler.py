@@ -8,7 +8,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from core.config import settings
 from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
 from services.source_of_truth.filesystem import scan_once_if_needed
+from services.source_of_truth.calendar_phase import run_calendar_phase
+from services.source_of_truth.calendar_date_refresh import run_calendar_date_refresh
 from services.source_of_truth.materializer import run_materialization_pass
+from services.source_of_truth.status_reconciler import run_status_projection_reconciliation
 from services.source_of_truth.sync_runner import run_full_sync
 
 
@@ -18,7 +21,7 @@ _pipeline_lock = threading.Lock()
 
 
 def _run_self_healing_pipeline(run_id: str) -> None:
-    """Run reconcile → determine → materialize, serialized by a process-wide lock.
+    """Run reconcile → determine → materialize → calendar → reconcile_statuses, serialized by a process-wide lock.
 
     If a pipeline run is already in progress (e.g. a concurrent scheduled job),
     the incoming run is skipped rather than blocked — the next interval will catch up.
@@ -39,18 +42,23 @@ def _run_self_healing_pipeline(run_id: str) -> None:
         reconcile_stats = run_placeholder_link_reconcile()
         determination_stats = run_determination_pass()
         materialization_stats = run_materialization_pass()
+        calendar_stats = run_calendar_phase()
+        status_reconcile_stats = run_status_projection_reconciliation()
         logger.info(
             "Scheduled self-heal completed "
             f"run_id={run_id} scan_count={scan_count} scan_info={scan_info} "
-            f"reconcile={reconcile_stats} determination={determination_stats} materialization={materialization_stats}"
+            f"reconcile={reconcile_stats} determination={determination_stats} "
+            f"materialization={materialization_stats} calendar={calendar_stats} "
+            f"status_reconcile={status_reconcile_stats}"
         )
     finally:
         _pipeline_lock.release()
 
 
-def _start_interval(interval_hours, target, label):
+
+def _start_interval(interval_hours, target, label, disable_hint: str = 'FULL_SYNC_INTERVAL_HOURS'):
     if interval_hours <= 0:
-        logger.info(f"{label} scheduler disabled (FULL_SYNC_INTERVAL_HOURS <= 0)")
+        logger.info(f"{label} scheduler disabled ({disable_hint} <= 0)")
         return
 
     global _scheduler
@@ -102,10 +110,46 @@ def _run_all_syncs():
         logger.exception('Scheduled full-sync failed')
 
 
+def _run_calendar_only_syncs():
+    """Run lightweight date refresh + calendar lifecycle/status reconciliation without full ARR sync."""
+    run_id = f'scheduled:calendar:{uuid4()}'
+    try:
+        if not _pipeline_lock.acquire(blocking=False):
+            logger.warning(
+                f"Pipeline already running, skipping calendar-only run_id={run_id}",
+                extra={'emoji_type': 'warning'},
+            )
+            return
+        try:
+            date_refresh_stats = run_calendar_date_refresh()
+            determination_stats = run_determination_pass()
+            materialization_stats = run_materialization_pass()
+            calendar_stats = run_calendar_phase()
+            status_reconcile_stats = run_status_projection_reconciliation()
+            logger.info(
+                "Scheduled calendar-only sync completed "
+                f"run_id={run_id} date_refresh={date_refresh_stats} "
+                f"determination={determination_stats} materialization={materialization_stats} "
+                f"calendar={calendar_stats} status_reconcile={status_reconcile_stats}"
+            )
+        finally:
+            _pipeline_lock.release()
+    except Exception:
+        logger.exception('Scheduled calendar-only sync failed')
+
+
 def schedule_all_syncs():
     """Schedule a single interval-based source-of-truth fullsync job covering all configured ARR services."""
     interval_hours = getattr(settings, 'FULL_SYNC_INTERVAL_HOURS', 0)
-    _start_interval(interval_hours, _run_all_syncs, 'All ARRs')
+    _start_interval(interval_hours, _run_all_syncs, 'All ARRs', 'FULL_SYNC_INTERVAL_HOURS')
+
+    calendar_interval_hours = getattr(settings, 'CALENDAR_SYNC_INTERVAL_HOURS', 0)
+    _start_interval(
+        calendar_interval_hours,
+        _run_calendar_only_syncs,
+        'Calendar Date Refresh',
+        'CALENDAR_SYNC_INTERVAL_HOURS',
+    )
 
     global _scheduler
     if _scheduler and not _scheduler.running:

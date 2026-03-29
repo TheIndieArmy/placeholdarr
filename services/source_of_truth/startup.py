@@ -4,10 +4,13 @@ import uuid
 
 from core.config import settings
 from core.logger import logger
+from services.source_of_truth.calendar_phase import run_calendar_phase
+from services.source_of_truth.calendar_date_refresh import run_calendar_date_refresh
 from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
 from services.source_of_truth.filesystem import scan_once_if_needed
 from services.source_of_truth.materializer import run_materialization_pass
 from services.source_of_truth.primer import run_primer_phase
+from services.source_of_truth.status_reconciler import run_status_projection_reconciliation
 from services.source_of_truth.sync_runner import run_full_sync
 
 
@@ -63,9 +66,12 @@ def run_startup_source_of_truth() -> dict:
         scan_count, scan_info = scan_result, {'reason': 'ok'}
 
     reconcile_stats = run_placeholder_link_reconcile()
+    calendar_date_refresh_stats = run_calendar_date_refresh()
     determination_stats = run_determination_pass()
     primer_stats = run_primer_phase()
     materialization_stats = run_materialization_pass()
+    calendar_stats = run_calendar_phase()
+    status_reconcile_stats = run_status_projection_reconciliation()
 
     return {
         'ran': True,
@@ -76,8 +82,11 @@ def run_startup_source_of_truth() -> dict:
             'info': scan_info,
         },
         'reconcile': reconcile_stats,
+        'calendar_date_refresh': calendar_date_refresh_stats,
         'determination': determination_stats,
         'primer': primer_stats,
         'materialization': materialization_stats,
+        'calendar': calendar_stats,
+        'status_reconcile': status_reconcile_stats,
         'primer_cleanup': {},
     }

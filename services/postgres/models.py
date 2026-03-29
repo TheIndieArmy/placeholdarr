@@ -12,6 +12,9 @@ def utcnow():
 
 class Movie(Base):
     __tablename__ = "movie"
+    __table_args__ = (
+        Index('ix_movie_determination', 'determination'),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
@@ -52,7 +55,6 @@ class Movie(Base):
     plex_id = Column(String, nullable=True)
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
-    placeholder_status = Column(String, nullable=True)
     # Boolean to track if placeholder file physically exists (aggregated)
     has_placeholder = Column(Boolean, default=False)
     # Canonical observed placeholder file path for this movie (derived)
@@ -107,6 +109,13 @@ class SubFlow(Base):
 # Placeholder table: tracks placeholder files attached to movies/episodes
 class Placeholder(Base):
     __tablename__ = 'placeholder'
+    __table_args__ = (
+        Index(
+            'ix_placeholder_plex_placeholder_id_missing',
+            'plex_placeholder_id',
+            postgresql_where=text('plex_placeholder_id IS NULL'),
+        ),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     movie_id = Column(Integer, ForeignKey('movie.id'), nullable=True)
     series_id = Column(Integer, ForeignKey('series.id'), nullable=True)
@@ -247,6 +256,9 @@ class FSScanRun(Base):
         return f"<FSScanRun(id={self.id}, run_id={self.run_id!r})>"
 class Series(Base):
     __tablename__ = "series"
+    __table_args__ = (
+        Index('ix_series_plex_dummy_id', 'plex_dummy_id'),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
@@ -279,7 +291,6 @@ class Series(Base):
     plex_id = Column(String, nullable=True)
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
-    placeholder_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
@@ -321,7 +332,6 @@ class Season(Base):
     plex_id = Column(String, nullable=True)
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
-    placeholder_status = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'), onupdate=func.now())
@@ -334,6 +344,9 @@ class Season(Base):
         return f"<Season(id={self.id}, title={self.title!r}, year={self.year})>"
 class Episode(Base):
     __tablename__ = "episode"
+    __table_args__ = (
+        Index('ix_episode_determination', 'determination'),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     season_id = Column(Integer, ForeignKey('season.id'), nullable=False)
     # episode_number must NOT be unique across the whole table — uniqueness applies per season
@@ -367,7 +380,6 @@ class Episode(Base):
     plex_id = Column(String, nullable=True)
     plex_dummy_id = Column(String, nullable=True)
     plex_overview = Column(String, nullable=True)
-    placeholder_status = Column(String, nullable=True)
     # Boolean to track if placeholder file physically exists (aggregated)
     has_placeholder = Column(Boolean, default=False)
     # Canonical observed placeholder file path for this episode (derived)

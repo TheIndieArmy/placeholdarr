@@ -129,11 +129,24 @@ Optional settings:
 - `FULL_SYNC_INTERVAL_HOURS`: Source-of-truth full sync cadence in hours for Radarr/Sonarr recurring runs (`0` disables recurring runs; minimum effective interval is `1` hour)
 - **Calendar-based status update settings:**
   - `CALENDAR_LOOKAHEAD_DAYS`: How many days into the future to allow placeholders/"Coming Soon" (integer)
-  - `CALENDAR_SYNC_INTERVAL_HOURS`: How often to sync calendar and update statuses (hours, integer)
+    - `> 0`: strict horizon in days for the selected release type.
+    - `0`: disables future placeholder lookahead behavior (future placeholders are reconciled out).
+    - `< 0` (for example `-1`): infinite lookahead.
+  - `CALENDAR_SYNC_INTERVAL_HOURS`: Independent calendar/date-refresh scheduler cadence in hours (`0` disables independent calendar scheduler)
+    - This scheduler runs lightweight date refresh + determination/materialization/calendar/status reconcile without a full ARR sync.
   - `ENABLE_COMING_SOON_PLACEHOLDERS`: Enable or disable "Coming Soon" placeholders (`true`/`false`)
   - `PREFERRED_MOVIE_DATE_TYPE`: Which movie release date to use (`inCinemas`, `digitalRelease`, `physicalRelease`)
+    - This is the selected movie date type for status text and lookahead decisions.
+    - Strict behavior: Placeholdarr does not fallback to another release type when this date is missing.
+    - TBA status text is shown only when lookahead is infinite (`CALENDAR_LOOKAHEAD_DAYS < 0`) and the selected release date is unavailable.
+    - Movie status text uses release type wording when possible, for example: `Digital release in 12 days`, `Theatrical release today`, `Physical release was 5 days ago`.
   - `ENABLE_COMING_SOON_COUNTDOWN`: Show countdown in "Coming Soon" status (`true`/`false`)
   - `CALENDAR_PLACEHOLDER_MODE`: Add placeholders as each episode enters lookahead window (`episode`) or add all known episodes of a season when any enters window (`season`)
+
+Calendar freshness notes:
+- Full sync refreshes broad content metadata and date fields.
+- Independent calendar scheduler refreshes only date-relevant metadata via ARR calendar-range calls.
+- Visibility rules still strictly follow `CALENDAR_LOOKAHEAD_DAYS` and selected `PREFERRED_MOVIE_DATE_TYPE`; future-buffer fetch does not expand what users see.
 
 ---
 

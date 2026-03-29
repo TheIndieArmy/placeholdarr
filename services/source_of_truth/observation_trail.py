@@ -109,6 +109,7 @@ def enqueue_observation_trail(
     placeholder_ids: list[int],
     source: str,
     run_id: str | None = None,
+    delay_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Enqueue one delayed follow-up observation pass for unresolved placeholders."""
     if not _service_enabled("plex"):
@@ -118,8 +119,9 @@ def enqueue_observation_trail(
     if not ids:
         return {"enqueued": False, "reason": "no_placeholder_ids"}
 
+    effective_delay = delay_seconds if delay_seconds is not None else TRAIL_FIRST_DELAY_SECONDS
     group_id = _build_trail_group_id(source, ids)
-    run_after = _safe_now() + timedelta(seconds=TRAIL_FIRST_DELAY_SECONDS)
+    run_after = _safe_now() + timedelta(seconds=effective_delay)
 
     payload = {
         "source": source,
@@ -140,7 +142,7 @@ def enqueue_observation_trail(
         "enqueued": True,
         "job_id": int(job_id),
         "group_id": group_id,
-        "first_delay_seconds": TRAIL_FIRST_DELAY_SECONDS,
+        "first_delay_seconds": effective_delay,
     }
 
 
@@ -176,7 +178,11 @@ def process_observation_trail_job(session, job: Job) -> dict[str, Any]:
 
     try:
         if candidates:
-            observe_stats = observe_placeholders_with_polling(session, candidates)
+            observe_stats = observe_placeholders_with_polling(
+                session,
+                candidates,
+                allow_title_fallback=True,
+            )
     except Exception as e:
         error_message = str(e)
         logger.warning(

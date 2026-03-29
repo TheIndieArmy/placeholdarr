@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import and_
+
 from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
@@ -74,6 +76,22 @@ def _extract_movie_id(payload: dict[str, Any]) -> int | None:
         return int(val) if val is not None else None
     except Exception:
         return None
+
+
+def _extract_episode_pairs(payload: dict[str, Any]) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    episodes = payload.get("episodes") if isinstance(payload.get("episodes"), list) else []
+    for ep in episodes:
+        if not isinstance(ep, dict):
+            continue
+        try:
+            season_num = int(ep.get("seasonNumber") or 0)
+            episode_num = int(ep.get("episodeNumber") or 0)
+        except Exception:
+            continue
+        if season_num >= 0 and episode_num > 0:
+            pairs.append((season_num, episode_num))
+    return pairs
 
 
 def process_series_add_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
@@ -246,6 +264,151 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             "event": "movieadd",
             "is_4k": inferred_is_4k,
             "movie_id": movie_row_id,
+            "determination": determination_stats,
+            "materialization": materialization_stats,
+        }
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def process_movie_imported_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
+    """Process one movie import event by reusing add-event ingest semantics.
+
+    Import events should converge quickly to ARR has_file truth and run determination/
+    materialization to clear placeholders when obsolete.
+    """
+    result = process_movie_add_event(payload, instance=instance)
+    result["event"] = "movie_imported"
+    return result
+
+
+def process_episode_imported_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
+    """Process one episode import event and upsert only touched episodes when provided."""
+    stats: dict[str, Any] = {
+        "series_upserted": 0,
+        "seasons_upserted": 0,
+        "episodes_upserted": 0,
+        "episodes_touched": 0,
+    }
+
+    series_id = _extract_series_id(payload)
+    if not series_id:
+        raise ValueError("episodeimport_missing_series_id")
+
+    inferred_is_4k = _infer_is_4k_from_instance(instance)
+    base_url, api_key = _resolve_endpoint("series", inferred_is_4k)
+    if not base_url or not api_key:
+        raise ValueError("episodeimport_missing_sonarr_config")
+
+    series_entry = fetch_sonarr_series_item(series_id, base_url, api_key)
+    if not isinstance(series_entry, dict):
+        logger.warning(
+            f"Episode import ARR lookup failed for series_id={series_id}; falling back to webhook payload.",
+            extra={'emoji_type': 'warning'},
+        )
+        series_entry = payload.get("series") if isinstance(payload.get("series"), dict) else None
+    if not isinstance(series_entry, dict):
+        raise ValueError("episodeimport_missing_series_payload")
+
+    webhook_episode_pairs = _extract_episode_pairs(payload)
+    payload_episodes = payload.get("episodes") if isinstance(payload.get("episodes"), list) else []
+
+    session = get_session()
+    try:
+        s_fields = _series_fields(series_entry, inferred_is_4k)
+        if not s_fields.get("tvdbid"):
+            raise ValueError("episodeimport_missing_tvdbid")
+
+        series_row, _ = _upsert_series(session, s_fields)
+        stats["series_upserted"] = 1
+
+        episodes_source: list[dict[str, Any]] = []
+        if webhook_episode_pairs:
+            sonarr_episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
+            pair_map = {(int(season), int(episode)) for season, episode in webhook_episode_pairs}
+            episodes_source = [
+                ep
+                for ep in sonarr_episodes
+                if isinstance(ep, dict)
+                and (int(ep.get("seasonNumber") or 0), int(ep.get("episodeNumber") or 0)) in pair_map
+            ]
+            if not episodes_source:
+                # Fallback to raw webhook episodes when Sonarr lookup did not include them yet.
+                episodes_source = [ep for ep in payload_episodes if isinstance(ep, dict)]
+        else:
+            episodes_source = [ep for ep in payload_episodes if isinstance(ep, dict)]
+
+        if not episodes_source:
+            raise ValueError("episodeimport_missing_episode_payload")
+
+        include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
+        season_rows_by_number: dict[int, Season] = {}
+        touched_episode_rows: list[Episode] = []
+        payload_episode_file = payload.get("episodeFile") if isinstance(payload.get("episodeFile"), dict) else {}
+
+        for ep in episodes_source:
+            season_number = int(ep.get("seasonNumber") or 0)
+            if season_number == 0 and not include_specials:
+                continue
+
+            season_row, season_created = _upsert_season(session, series_row, season_number)
+            season_rows_by_number[season_number] = season_row
+            if season_created:
+                stats["seasons_upserted"] += 1
+
+            ep_entry = dict(ep)
+            if payload_episode_file and not isinstance(ep_entry.get("episodeFile"), dict):
+                ep_entry["episodeFile"] = payload_episode_file
+
+            episode_file = _resolve_episode_file_payload(ep_entry, base_url, api_key)
+            if not episode_file and payload_episode_file:
+                episode_file = payload_episode_file
+
+            ep_fields = _episode_fields(series_row, season_row, ep_entry, episode_file)
+            ep_fields["has_file"] = True
+            if not ep_fields.get("sonarr_filepath") and isinstance(payload_episode_file, dict):
+                fallback_path = str(payload_episode_file.get("path") or "").strip()
+                if fallback_path:
+                    ep_fields["sonarr_filepath"] = fallback_path
+
+            ep_row, ep_created = _upsert_episode(session, ep_fields)
+            touched_episode_rows.append(ep_row)
+            if ep_created:
+                stats["episodes_upserted"] += 1
+
+        # Refresh lightweight season aggregate indicators for touched seasons.
+        for season_number, season_row in season_rows_by_number.items():
+            files_count = (
+                session.query(Episode)
+                .filter(and_(Episode.season_id == season_row.id, Episode.has_file.is_(True), Episode.is_deleted.is_(False)))
+                .count()
+            )
+            season_row.has_files = bool(files_count)
+            season_row.seasonfile_count = int(files_count)
+            season_row.is_deleted = False
+            session.add(season_row)
+
+        session.flush()
+        episode_ids = [int(ep.id) for ep in touched_episode_rows if getattr(ep, "id", None)]
+        stats["episodes_touched"] = len(episode_ids)
+        session.commit()
+
+        determination_stats = run_determination_for_entities(episode_ids=episode_ids)
+        materialization_stats = run_materialization_for_entities(
+            episode_ids=episode_ids,
+            observation_source="event_episode_imported",
+        )
+
+        return {
+            "ok": True,
+            "event": "episode_imported",
+            "is_4k": inferred_is_4k,
+            "series_id": int(series_row.id),
+            "episode_ids": episode_ids,
+            "upsert_stats": stats,
             "determination": determination_stats,
             "materialization": materialization_stats,
         }

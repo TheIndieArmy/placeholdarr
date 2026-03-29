@@ -3,13 +3,26 @@ from datetime import datetime, timezone
 
 from sqlalchemy import and_
 
+from core.config import settings
 from core.logger import logger
+from services.event_normalization import legacy_dispatch_event_type
 from services.postgres.db import get_session
 from services.postgres.models import EventLog, Job
-from services.source_of_truth.event_add import process_movie_add_event, process_series_add_event
+from services.source_of_truth.event_add import (
+    process_episode_imported_event,
+    process_movie_add_event,
+    process_movie_imported_event,
+    process_series_add_event,
+)
 from services.source_of_truth.observation_trail import (
     TRAIL_JOB_TYPE,
     process_observation_trail_job,
+)
+from services.source_of_truth.status_reconciler import (
+    NFO_REFRESH_JOB_TYPE,
+    STATUS_PROJECTION_JOB_TYPE,
+    process_nfo_refresh_job,
+    process_status_projection_job,
 )
 
 
@@ -50,6 +63,12 @@ def _process_webhook_event(session, job: Job):
 
     event_type = str(getattr(event, 'event_type', '') or '').strip().lower()
     payload = event.payload if isinstance(event.payload, dict) else {}
+    event_meta = payload.get('_event_meta') if isinstance(payload, dict) else None
+    raw_event_type = None
+    if isinstance(event_meta, dict):
+        raw_event_type = event_meta.get('raw_event_type')
+
+    dispatch_type = legacy_dispatch_event_type(event_type, raw_event_type)
 
     # Extract instance identifier from source string (e.g. "webhook:radarr_std" -> "radarr_std")
     source_str = getattr(event, 'source', '') or ''
@@ -57,17 +76,57 @@ def _process_webhook_event(session, job: Job):
     if source_str.startswith('webhook:'):
         instance = source_str.split(':', 1)[1].strip() or None
 
-    if event_type == 'seriesadd':
+    handled = False
+    if dispatch_type == 'seriesadd':
         result = process_series_add_event(payload, instance=instance)
         logger.info(
             f"Processed seriesadd event_log_id={event.id} result={result.get('upsert_stats', {})}",
             extra={'emoji_type': 'success'},
         )
-    elif event_type in ('movieadd', 'movieadded'):
+        handled = True
+    elif dispatch_type in ('movieadd', 'movieadded'):
         result = process_movie_add_event(payload, instance=instance)
         logger.info(
-            f"Processed {event_type} event_log_id={event.id} movie_id={result.get('movie_id')}",
+            f"Processed {dispatch_type} event_log_id={event.id} movie_id={result.get('movie_id')}",
             extra={'emoji_type': 'success'},
+        )
+        handled = True
+    elif event_type == 'movie_imported' or dispatch_type == 'moviefileimported':
+        if bool(getattr(settings, 'ENABLE_IMPORT_EVENT_HANDLERS', False)):
+            result = process_movie_imported_event(payload, instance=instance)
+            logger.info(
+                f"Processed movie_imported event_log_id={event.id} movie_id={result.get('movie_id')}",
+                extra={'emoji_type': 'success'},
+            )
+            handled = True
+        else:
+            event.error_message = f'feature_disabled:import_handlers:{event_type}'
+            logger.info(
+                f"Import handler disabled event_log_id={event.id} canonical={event_type}",
+                extra={'emoji_type': 'info'},
+            )
+            handled = True
+    elif event_type == 'episode_imported' or dispatch_type in ('episodefileimported', 'download'):
+        if bool(getattr(settings, 'ENABLE_IMPORT_EVENT_HANDLERS', False)):
+            result = process_episode_imported_event(payload, instance=instance)
+            logger.info(
+                f"Processed episode_imported event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+                extra={'emoji_type': 'success'},
+            )
+            handled = True
+        else:
+            event.error_message = f'feature_disabled:import_handlers:{event_type}'
+            logger.info(
+                f"Import handler disabled event_log_id={event.id} canonical={event_type}",
+                extra={'emoji_type': 'info'},
+            )
+            handled = True
+
+    if not handled:
+        event.error_message = f'unhandled_event_type:{event_type}'
+        logger.warning(
+            f"Webhook event not yet handled event_log_id={event.id} canonical={event_type} raw={raw_event_type or 'unknown'}",
+            extra={'emoji_type': 'warning'},
         )
 
     event.status = 'DONE'
@@ -116,6 +175,20 @@ def _process_claimed_job(session, job: Job):
         result = process_observation_trail_job(session, job)
         if result.get('done', False):
             _mark_job_done(session, job)
+        return
+
+    if job.job_type == STATUS_PROJECTION_JOB_TYPE:
+        result = process_status_projection_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'status_projection_failed'))
+        _mark_job_done(session, job)
+        return
+
+    if job.job_type == NFO_REFRESH_JOB_TYPE:
+        result = process_nfo_refresh_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'nfo_refresh_failed'))
+        _mark_job_done(session, job)
         return
 
     # Keep unknown job types non-blocking while rebuild is in progress.

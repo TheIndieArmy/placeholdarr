@@ -91,6 +91,34 @@ def _select_needs_episode_ids(session, series_limit: int, per_series: int) -> li
     return chosen
 
 
+def _select_needs_coming_soon_episode_ids(session, limit: int) -> list[int]:
+    """Return episode IDs whose placeholder is tagged coming_soon variant but has no file on disk.
+
+    These are episodes that went through the calendar phase in a prior run so
+    their placeholder.extra['calendar_dummy_variant'] == 'coming_soon', but the
+    placeholder file has since been purged/marked-missing and needs to be primed
+    as an independent copy so Plex sees a distinct inode for the coming-soon dummy.
+    """
+    rows = (
+        session.query(Episode.id, Placeholder.extra)
+        .join(Placeholder, Placeholder.episode_id == Episode.id)
+        .filter(Episode.is_deleted == False)  # noqa: E712
+        .filter(Episode.has_file == False)  # noqa: E712
+        .filter(Episode.determination == DETERMINATION_NEEDS)
+        .filter(Placeholder.has_placeholder == False)  # noqa: E712
+        .order_by(Episode.id.asc())
+        .all()
+    )
+    result: list[int] = []
+    for episode_id, extra in rows:
+        if len(result) >= limit:
+            break
+        extra_dict = dict(extra or {})
+        if str(extra_dict.get("calendar_dummy_variant") or "").strip() == "coming_soon":
+            result.append(int(episode_id))
+    return result
+
+
 def _select_existing_movie_paths(session, limit: int) -> list[str]:
     rows = (
         session.query(Movie.placeholder_filepath)
@@ -142,13 +170,101 @@ def _select_existing_episode_paths(session, series_limit: int, per_series: int) 
     return chosen
 
 
-def _to_copy(path: str) -> None:
+def _is_coming_soon_status(status: str | None) -> bool:
+    return str(status or "") in {
+        "COMING_SOON",
+        "COMING_SOON_30",
+        "COMING_SOON_14",
+        "COMING_SOON_7",
+        "COMING_SOON_1",
+        "COMING_SOON_TODAY",
+    }
+
+
+def _dummy_file_path_for_variant(variant: str) -> str | None:
+    coming_soon_dummy = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
+    if variant == "coming_soon" and coming_soon_dummy:
+        return coming_soon_dummy
+    request_dummy = str(getattr(settings, "DUMMY_FILE_PATH", "") or "").strip()
+    return request_dummy or None
+
+
+def _resolve_variant_for_path(session, path: str) -> str:
+    row = (
+        session.query(Placeholder)
+        .filter(Placeholder.path == path)
+        .order_by(Placeholder.id.desc())
+        .first()
+    )
+    if not row:
+        return "request"
+
+    extra = dict(getattr(row, "extra", {}) or {})
+    stored_variant = str(extra.get("calendar_dummy_variant") or "").strip()
+    if stored_variant in {"coming_soon", "request"}:
+        return stored_variant
+
+    return "coming_soon" if _is_coming_soon_status(getattr(row, "display_status", None)) else "request"
+
+
+def _resolve_variant_for_row(row: Placeholder) -> str:
+    extra = dict(getattr(row, "extra", {}) or {})
+    stored_variant = str(extra.get("calendar_dummy_variant") or "").strip()
+    if stored_variant in {"coming_soon", "request"}:
+        return stored_variant
+    return "coming_soon" if _is_coming_soon_status(getattr(row, "display_status", None)) else "request"
+
+
+def _is_independent_copy(path: str, variant: str) -> bool:
+    """Return True if *path* is NOT a hardlink to the variant's dummy source file.
+
+    A placeholder that shares an inode with the dummy has never been primer-seeded
+    and still needs to be converted to an independent copy.  If the dummy path
+    cannot be resolved we conservatively return False so the primer will run.
+    """
+    dummy_path = _dummy_file_path_for_variant(variant)
+    if not dummy_path or not os.path.isfile(dummy_path):
+        return False
+    if not os.path.isfile(path):
+        return False
+    try:
+        return os.stat(path).st_ino != os.stat(dummy_path).st_ino
+    except OSError:
+        return False
+
+
+def _variant_coverage(session) -> dict[str, bool]:
+    """Return whether active placeholders already cover each dummy variant
+    with at least one independent copy (i.e. a file whose inode differs from
+    the dummy source).  A placeholder that is still a hardlink to the dummy
+    has not been primer-seeded and does NOT count as covered."""
+    covered = {"request": False, "coming_soon": False}
+    rows = (
+        session.query(Placeholder)
+        .filter(Placeholder.has_placeholder == True)  # noqa: E712
+        .filter(Placeholder.path.isnot(None))
+        .all()
+    )
+    for row in rows:
+        variant = _resolve_variant_for_row(row)
+        if covered.get(variant):
+            continue
+        path = getattr(row, "path", None)
+        if path and _is_independent_copy(str(path), variant):
+            covered[variant] = True
+        if covered["request"] and covered["coming_soon"]:
+            break
+    return covered
+
+
+def _to_copy(session, path: str) -> None:
     """Ensure a primer placeholder is an independent copy, not a hardlink.
 
     Called after materialisation so Plex always sees a distinct inode/hash
     for each primer file regardless of the global PLACEHOLDER_STRATEGY.
     """
-    dummy_path = getattr(settings, "DUMMY_FILE_PATH", None)
+    variant = _resolve_variant_for_path(session, path)
+    dummy_path = _dummy_file_path_for_variant(variant)
     if not dummy_path or not os.path.isfile(dummy_path) or not os.path.isfile(path):
         return
     try:
@@ -162,7 +278,7 @@ def _to_copy(path: str) -> None:
 
 
 
-def _reprime_paths(paths: list[str]) -> tuple[int, set[str]]:
+def _reprime_paths(session, paths: list[str]) -> tuple[int, set[str]]:
     updated = 0
     folders: set[str] = set()
 
@@ -172,7 +288,8 @@ def _reprime_paths(paths: list[str]) -> tuple[int, set[str]]:
         try:
             if os.path.isfile(path):
                 os.remove(path)
-            created = ensure_placeholder_file(path)
+            variant = _resolve_variant_for_path(session, path)
+            created = ensure_placeholder_file(path, dummy_file_path=_dummy_file_path_for_variant(variant))
             if created:
                 updated += 1
                 folders.add(os.path.dirname(path))
@@ -185,15 +302,15 @@ def _reprime_paths(paths: list[str]) -> tuple[int, set[str]]:
 def run_primer_phase() -> dict:
     strategy = str(getattr(settings, "PLACEHOLDER_STRATEGY", "hardlink") or "hardlink").strip().lower()
     force_prime = bool(getattr(settings, "FORCE_PRIME_ON_STARTUP", False))
-    primer_enabled = bool(getattr(settings, "PRIMER_ENABLED", False))
 
     stats = {
-        "enabled": primer_enabled,
         "force_enabled": force_prime,
         "strategy": strategy,
         "skipped": False,
         "reason": None,
         "empty_roots": [],
+        "variant_request_covered": False,
+        "variant_coming_soon_covered": False,
         "attempted_movies": 0,
         "attempted_episodes": 0,
         "materialized_movies": 0,
@@ -204,11 +321,13 @@ def run_primer_phase() -> dict:
         "wait_seconds": 0,
     }
 
-    if not primer_enabled and not force_prime:
+    # Hardlink mode needs primer protections by default. Non-hardlink mode only
+    # runs primer when force is explicitly requested.
+    if strategy != "hardlink" and not force_prime:
         stats["skipped"] = True
-        stats["reason"] = "disabled"
+        stats["reason"] = "non_hardlink_no_force"
         logger.info(
-            "Primer phase skipped: PRIMER_ENABLED=false and FORCE_PRIME_ON_STARTUP=false",
+            "Primer phase skipped: PLACEHOLDER_STRATEGY is not hardlink and force prime is off",
             extra={"emoji_type": "info"},
         )
         return stats
@@ -221,66 +340,83 @@ def run_primer_phase() -> dict:
     try:
         empty_roots = _empty_roots(session)
         stats["empty_roots"] = empty_roots
+        coverage = _variant_coverage(session)
+        stats["variant_request_covered"] = bool(coverage.get("request"))
+        stats["variant_coming_soon_covered"] = bool(coverage.get("coming_soon"))
 
-        should_prime = force_prime or bool(empty_roots)
-        if not should_prime:
+        # Auto-primer should stop once both variants are covered, unless forced.
+        if not force_prime and coverage.get("request") and coverage.get("coming_soon"):
             stats["skipped"] = True
-            stats["reason"] = "roots_not_empty"
+            stats["reason"] = "already_primed_both_variants"
             logger.info(
-                "Primer phase skipped: all library roots already contain placeholders",
+                "Primer phase skipped: request and coming-soon variants already primed",
                 extra={"emoji_type": "info"},
             )
             return stats
 
         movie_ids = _select_needs_movie_ids(session, target_movies)
         episode_ids = _select_needs_episode_ids(session, target_series, target_episodes)
+
+        # When the coming-soon variant isn't covered yet, explicitly seek out
+        # episodes tagged as coming_soon from a prior calendar-phase run.
+        # These won't be reached by the normal selection (which sorts by series/
+        # season/episode and stops at per-series limits), so we add them separately.
+        if not coverage.get("coming_soon"):
+            coming_soon_ids = _select_needs_coming_soon_episode_ids(session, target_series)
+            # Prepend so they're primed even if we hit limits on other episodes.
+            episode_ids = coming_soon_ids + [eid for eid in episode_ids if eid not in set(coming_soon_ids)]
+
         stats["attempted_movies"] = len(movie_ids)
         stats["attempted_episodes"] = len(episode_ids)
     finally:
         session.close()
 
     changed_folders: set[str] = set()
+    variant_session = get_session()
 
-    for movie_id in movie_ids:
-        result = apply_movie_materialization(movie_id)
-        if result.get("ok") and result.get("action") == "created_or_exists":
-            path = result.get("path")
-            if path:
-                _to_copy(path)
-                changed_folders.add(os.path.dirname(path))
-            created = result.get("created", False)
-            logger.info(
-                f"Primer {'created' if created else 'exists'} movie placeholder: {path}",
-                extra={"emoji_type": "info"},
-            )
-            stats["materialized_movies"] += 1
+    try:
+        for movie_id in movie_ids:
+            result = apply_movie_materialization(movie_id)
+            if result.get("ok") and result.get("action") == "created_or_exists":
+                path = result.get("path")
+                if path:
+                    _to_copy(variant_session, path)
+                    changed_folders.add(os.path.dirname(path))
+                created = result.get("created", False)
+                logger.info(
+                    f"Primer {'created' if created else 'exists'} movie placeholder: {path}",
+                    extra={"emoji_type": "info"},
+                )
+                stats["materialized_movies"] += 1
 
-    for episode_id in episode_ids:
-        result = apply_episode_materialization(episode_id)
-        if result.get("ok") and result.get("action") == "created_or_exists":
-            path = result.get("path")
-            if path:
-                _to_copy(path)
-                changed_folders.add(os.path.dirname(path))
-            created = result.get("created", False)
-            logger.info(
-                f"Primer {'created' if created else 'exists'} episode placeholder: {path}",
-                extra={"emoji_type": "info"},
-            )
-            stats["materialized_episodes"] += 1
+        for episode_id in episode_ids:
+            result = apply_episode_materialization(episode_id)
+            if result.get("ok") and result.get("action") == "created_or_exists":
+                path = result.get("path")
+                if path:
+                    _to_copy(variant_session, path)
+                    changed_folders.add(os.path.dirname(path))
+                created = result.get("created", False)
+                logger.info(
+                    f"Primer {'created' if created else 'exists'} episode placeholder: {path}",
+                    extra={"emoji_type": "info"},
+                )
+                stats["materialized_episodes"] += 1
 
-    # Force mode fallback: if nothing needed creation, rewrite a small sample of existing placeholders.
-    if force_prime and stats["materialized_movies"] == 0 and stats["materialized_episodes"] == 0:
-        session = get_session()
-        try:
-            movie_paths = _select_existing_movie_paths(session, target_movies)
-            episode_paths = _select_existing_episode_paths(session, target_series, target_episodes)
-        finally:
-            session.close()
+        # Force mode fallback: if nothing needed creation, rewrite a small sample of existing placeholders.
+        if force_prime and stats["materialized_movies"] == 0 and stats["materialized_episodes"] == 0:
+            session = get_session()
+            try:
+                movie_paths = _select_existing_movie_paths(session, target_movies)
+                episode_paths = _select_existing_episode_paths(session, target_series, target_episodes)
+            finally:
+                session.close()
 
-        reprime_count, reprime_folders = _reprime_paths(movie_paths + episode_paths)
-        stats["force_reprimed"] = reprime_count
-        changed_folders.update(reprime_folders)
+            reprime_count, reprime_folders = _reprime_paths(variant_session, movie_paths + episode_paths)
+            stats["force_reprimed"] = reprime_count
+            changed_folders.update(reprime_folders)
+    finally:
+        variant_session.close()
 
     if changed_folders:
         refresh_stats = refresh_all_sections(

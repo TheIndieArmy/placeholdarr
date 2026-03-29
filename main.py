@@ -168,40 +168,39 @@ async def lifespan(app: FastAPI):
                     scan = startup_result.get('scan', {})
                     primer = startup_result.get('primer', {})
                     determination = startup_result.get('determination', {})
+                    calendar_date_refresh = startup_result.get('calendar_date_refresh', {})
+                    calendar = startup_result.get('calendar', {})
+                    status_reconcile = startup_result.get('status_reconcile', {})
                     materialization = startup_result.get('materialization', {})
                     logger.info(
-                        f"Startup source-of-truth completed run_ids={run_ids} fs_scan_count={scan.get('count')}",
+                        f"Startup source-of-truth completed run_ids={run_ids} fs_scan_count={scan.get('count')} "
+                        f"date_refresh_movies={calendar_date_refresh.get('movie_rows_updated', 0)} "
+                        f"date_refresh_episodes={calendar_date_refresh.get('episode_rows_updated', 0)} "
+                        f"needs={determination.get('needs_placeholder')} exists={determination.get('placeholder_exists')} "
+                        f"calendar_intents={calendar.get('status_intents', 0)} "
+                        f"calendar_applied={calendar.get('status_applied', 0)} "
+                        f"variant_switched={calendar.get('variant_switched', 0)} "
+                        f"status_reconciled={status_reconcile.get('reconciled')} "
+                        f"status_skipped={status_reconcile.get('skipped', 0)} "
+                        f"status_errors={status_reconcile.get('errors')} "
+                        f"materialized_created={materialization.get('created')} "
+                        f"materialized_deleted={materialization.get('deleted')} "
+                        f"materialization_errors={materialization.get('errors')}",
                         extra={'emoji_type': 'info'},
                     )
-                    logger.info(
-                        f"Primer phase: skipped={primer.get('skipped')} reason={primer.get('reason')} "
-                        f"strategy={primer.get('strategy')} empty_roots={primer.get('empty_roots')} "
-                        f"movies={primer.get('materialized_movies')} episodes={primer.get('materialized_episodes')} "
-                        f"force_reprimed={primer.get('force_reprimed')} "
-                        f"refresh_requested={primer.get('refresh_requested')} refresh_failed={primer.get('refresh_failed')}",
-                        extra={'emoji_type': 'info'},
-                    )
-                    logger.info(
-                        f"Determination phase: needs={determination.get('needs_placeholder')} "
-                        f"exists={determination.get('placeholder_exists')} "
-                        f"obsolete={determination.get('obsolete_placeholder')} "
-                        f"not_needed={determination.get('not_needed')} "
-                        f"movies_changed={determination.get('movies_changed')} "
-                        f"episodes_changed={determination.get('episodes_changed')}",
-                        extra={'emoji_type': 'info'},
-                    )
-                    logger.info(
-                        f"Materialization phase: created={materialization.get('created')} "
-                        f"deleted={materialization.get('deleted')} noop={materialization.get('noop')} "
-                        f"files_created={materialization.get('files_created')} "
-                        f"files_deleted={materialization.get('files_deleted')} "
-                        f"errors={materialization.get('errors')} "
-                        f"media_id_observed_plex={materialization.get('media_id_observed_plex')} "
-                        f"media_id_observed_jellyfin={materialization.get('media_id_observed_jellyfin')} "
-                        f"media_id_observed_emby={materialization.get('media_id_observed_emby')} "
-                        f"media_id_observe_failed={materialization.get('media_id_observe_failed')}",
-                        extra={'emoji_type': 'info'},
-                    )
+                    if status_reconcile.get('errors'):
+                        logger.warning(
+                            f"Startup status reconcile errors={status_reconcile.get('errors')} "
+                            f"error_breakdown={status_reconcile.get('error_breakdown') or {}}",
+                            extra={'emoji_type': 'warning'},
+                        )
+                    if primer.get('skipped') is False:
+                        logger.info(
+                            f"Startup primer applied: strategy={primer.get('strategy')} "
+                            f"movies={primer.get('materialized_movies')} episodes={primer.get('materialized_episodes')} "
+                            f"refresh_requested={primer.get('refresh_requested')} refresh_failed={primer.get('refresh_failed')}",
+                            extra={'emoji_type': 'info'},
+                        )
                     try:
                         log_db_summary()
                     except Exception:
@@ -289,7 +288,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             logger.info('Webhook received but no handler available in services.handlers; ignoring payload', extra={'emoji_type': 'info'})
             return {"status": "accepted"}
 
-        ok, reason, event_type = validate_webhook_payload(payload, instance)
+        ok, reason, event_type, _event_meta = validate_webhook_payload(payload, instance)
         if not ok:
             logger.warning(
                 f"Webhook rejected before enqueue event_type={event_type} reason={reason}",

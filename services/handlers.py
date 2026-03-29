@@ -3,6 +3,7 @@ from typing import Any, Dict
 
 from core.config import settings
 from core.logger import logger
+from services.event_normalization import infer_raw_event_type, normalize_event_type
 from services.postgres.db import get_session
 from services.postgres.models import EventLog, Job
 
@@ -61,14 +62,20 @@ def validate_webhook_instance(instance: str | None) -> str | None:
 
 
 def _infer_event_type(payload: Dict[str, Any]) -> str:
-    if not isinstance(payload, dict):
-        return 'unknown'
-    return str(
-        payload.get('eventType')
-        or payload.get('event_type')
-        or payload.get('type')
-        or 'unknown'
-    )
+    raw_event_type = infer_raw_event_type(payload)
+    normalized = normalize_event_type(raw_event_type)
+    return normalized.canonical_event_type
+
+
+def _infer_event_meta(payload: Dict[str, Any]) -> dict[str, Any]:
+    raw_event_type = infer_raw_event_type(payload)
+    normalized = normalize_event_type(raw_event_type)
+    return {
+        'raw_event_type': normalized.raw_event_type,
+        'canonical_event_type': normalized.canonical_event_type,
+        'matched_alias': normalized.matched_alias,
+        'is_known': normalized.is_known,
+    }
 
 
 def _enqueue_event_job(session, event_log_id: int, event_type: str):
@@ -98,13 +105,14 @@ def build_webhook_source(instance: str | None = None) -> str:
 def validate_webhook_payload(
     payload: Dict[str, Any],
     instance: str | None = None,
-) -> tuple[bool, str | None, str]:
-    """Validate webhook payload and return (ok, reason, event_type)."""
-    event_type = _infer_event_type(payload)
+) -> tuple[bool, str | None, str, dict[str, Any]]:
+    """Validate webhook payload and return (ok, reason, canonical_event_type, event_meta)."""
+    event_meta = _infer_event_meta(payload)
+    event_type = str(event_meta.get('canonical_event_type') or 'unknown')
     reason = validate_webhook_instance(instance)
     if reason:
-        return False, reason, event_type
-    return True, None, event_type
+        return False, reason, event_type, event_meta
+    return True, None, event_type, event_meta
 
 
 def handle_webhook(
@@ -122,7 +130,7 @@ def handle_webhook(
     """
     session = get_session()
     try:
-        ok, reason, event_type = validate_webhook_payload(payload, instance)
+        ok, reason, event_type, event_meta = validate_webhook_payload(payload, instance)
         if not ok:
             logger.warning(
                 f'Rejected webhook event {event_type}: {reason}',
@@ -131,10 +139,17 @@ def handle_webhook(
             return {'status': 'rejected', 'reason': reason, 'event_type': event_type}
 
         source = build_webhook_source(instance)
+        payload_to_store: Dict[str, Any]
+        if isinstance(payload, dict):
+            payload_to_store = dict(payload)
+            payload_to_store['_event_meta'] = event_meta
+        else:
+            payload_to_store = {'raw': payload, '_event_meta': event_meta}
+
         event = EventLog(
             event_type=event_type,
             source=source,
-            payload=payload if isinstance(payload, dict) else {'raw': payload},
+            payload=payload_to_store,
             status='PENDING',
             attempts=0,
             max_attempts=10,

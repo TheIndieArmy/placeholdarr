@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+"""Observer contract: discover media-server identity only.
+
+This module enriches Placeholder rows with media-server identifiers such as
+`plex_placeholder_id`, `jellyfin_placeholder_id`, and `emby_placeholder_id`.
+It must never mutate `display_status`, `display_reason`, or `display_progress`.
+
+Lifecycle sequencing requirement:
+materialize -> observe -> status projection.
+Observation is allowed to run repeatedly and via deferred trail retries because
+it only enriches identity fields and does not own user-facing status.
+"""
+
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -11,11 +23,11 @@ from sqlalchemy import func
 
 from core.config import settings
 from core.logger import logger
+from services.media_servers.plex_identity import persist_episode_hierarchy_plex_identity, persist_movie_plex_identity
+from services.media_servers.plex_lookup import find_show_by_id, get_plex_server
+from services.media_servers.plex_status_writer import batch_update_plex_statuses
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
-from services.source_of_truth.plex_busy_check import (
-	get_active_expected_scan_sections,
-	has_any_active_plex_scan,
-)
+
 
 
 def _safe_now() -> datetime:
@@ -161,6 +173,73 @@ def _extract_path_numeric(item: Any, provider: str) -> str | None:
 	return None
 
 
+def _normalize_path(path: str | None) -> str:
+	if not path:
+		return ''
+	text = str(path).strip().replace('\\', '/').lower()
+	while '//' in text:
+		text = text.replace('//', '/')
+	return text.rstrip('/')
+
+
+def _path_suffix_key(path: str | None, depth: int) -> str | None:
+	norm = _normalize_path(path)
+	if not norm or depth <= 0:
+		return None
+	parts = [p for p in norm.split('/') if p]
+	if len(parts) < depth:
+		return None
+	return '/'.join(parts[-depth:])
+
+
+def _append_item_to_suffix_index(index: dict[str, list[Any]], item: Any, location: str | None, depth: int) -> None:
+	key = _path_suffix_key(location, depth)
+	if not key:
+		return
+	index_key = f"{depth}:{key}"
+	existing = index.setdefault(index_key, [])
+	item_rating_key = str(getattr(item, 'ratingKey', '') or '')
+	for current in existing:
+		if str(getattr(current, 'ratingKey', '') or '') == item_rating_key:
+			return
+	existing.append(item)
+
+
+def _single_match_from_suffix_index(
+	index: dict[str, list[Any]],
+	target_path: str | None,
+	depths: tuple[int, ...],
+) -> Any | None:
+	for depth in depths:
+		key = _path_suffix_key(target_path, depth)
+		if not key:
+			continue
+		candidates = index.get(f"{depth}:{key}", [])
+		if len(candidates) == 1:
+			return candidates[0]
+		if len(candidates) > 1:
+			return None
+	return None
+
+
+def _single_match_from_item_locations(items: list[Any], target_path: str | None, depths: tuple[int, ...]) -> Any | None:
+	for depth in depths:
+		target_key = _path_suffix_key(target_path, depth)
+		if not target_key:
+			continue
+		matches: list[Any] = []
+		for item in items:
+			for location in getattr(item, 'locations', []) or []:
+				if _path_suffix_key(location, depth) == target_key:
+					matches.append(item)
+					break
+		if len(matches) == 1:
+			return matches[0]
+		if len(matches) > 1:
+			return None
+	return None
+
+
 def _plex_item_metadata_ready(item: Any) -> bool:
 	"""Legacy-parity readiness gate for status-safe updates.
 
@@ -180,12 +259,7 @@ def _build_plex_snapshot() -> dict[str, Any] | None:
 	"""Build a one-attempt in-memory Plex snapshot for fast multi-item matching."""
 	if not _is_enabled('plex'):
 		return None
-	try:
-		from services.services_old import plex_client
-	except Exception:
-		return None
-
-	plex = getattr(plex_client, 'plex', None)
+	plex = get_plex_server()
 	if not plex:
 		return None
 
@@ -198,6 +272,8 @@ def _build_plex_snapshot() -> dict[str, Any] | None:
 	snapshot: dict[str, Any] = {
 		'movies_by_tmdb': {},
 		'movies_by_path_tmdb': {},
+		'movies_by_imdb': {},
+		'movies_by_path_suffix': {},
 		'movies_by_title_year': {},
 		'movies_by_title': {},
 		'episodes_by_tvdb_sxe': {},
@@ -217,8 +293,15 @@ def _build_plex_snapshot() -> dict[str, Any] | None:
 		if tmdb_path and tmdb_path not in snapshot['movies_by_path_tmdb']:
 			snapshot['movies_by_path_tmdb'][tmdb_path] = m
 
+		imdb_guid = str(_extract_guid_numeric(m, 'imdb') or '').strip().lower()
+		if imdb_guid and imdb_guid not in snapshot['movies_by_imdb']:
+			snapshot['movies_by_imdb'][imdb_guid] = m
+
 		norm_title = _normalize_title(getattr(m, 'title', None))
 		year = int(getattr(m, 'year', 0) or 0)
+		for location in getattr(m, 'locations', []) or []:
+			_append_item_to_suffix_index(snapshot['movies_by_path_suffix'], m, location, 3)
+			_append_item_to_suffix_index(snapshot['movies_by_path_suffix'], m, location, 2)
 		if norm_title:
 			snapshot['movies_by_title_year'][(norm_title, year)] = m
 			snapshot['movies_by_title'].setdefault(norm_title, []).append(m)
@@ -257,7 +340,12 @@ def _build_plex_snapshot() -> dict[str, Any] | None:
 	return snapshot
 
 
-def _resolve_plex_movie_item_from_snapshot(snapshot: dict[str, Any], movie: Movie) -> Any | None:
+def _resolve_plex_movie_item_from_snapshot(
+	snapshot: dict[str, Any],
+	movie: Movie,
+	observed_path: str | None = None,
+	allow_title_fallback: bool = True,
+) -> Any | None:
 	tmdb_target = str(getattr(movie, 'tmdbid', '') or '')
 	if tmdb_target:
 		item = snapshot.get('movies_by_tmdb', {}).get(tmdb_target)
@@ -267,19 +355,46 @@ def _resolve_plex_movie_item_from_snapshot(snapshot: dict[str, Any], movie: Movi
 		if item:
 			return item
 
+	imdb_target = str(getattr(movie, 'imdbid', '') or '').strip().lower()
+	if imdb_target:
+		item = snapshot.get('movies_by_imdb', {}).get(imdb_target)
+		if item:
+			return item
+
+	path_item = _single_match_from_suffix_index(
+		snapshot.get('movies_by_path_suffix', {}),
+		observed_path,
+		(3, 2),
+	)
+	if path_item is not None:
+		return path_item
+
+	if not allow_title_fallback:
+		return None
+
 	norm_title = _normalize_title(getattr(movie, 'title', None))
 	target_year = int(getattr(movie, 'year', 0) or 0)
 	if norm_title and target_year:
 		item = snapshot.get('movies_by_title_year', {}).get((norm_title, target_year))
 		if item:
 			return item
+		# Avoid cross-year title-only false positives for duplicate titles.
+		return None
 
 	if norm_title:
 		candidates = snapshot.get('movies_by_title', {}).get(norm_title, [])
-		if candidates:
+		if len(candidates) == 1:
 			return candidates[0]
 
 	return None
+
+
+def _normalize_title_tokens(text: str | None) -> list[str]:
+	norm = _normalize_title(text)
+	if not norm:
+		return []
+	clean = ''.join(ch if ch.isalnum() else ' ' for ch in norm)
+	return [tok for tok in clean.split() if tok]
 
 
 def _resolve_plex_episode_item_from_snapshot(
@@ -476,17 +591,7 @@ def _resolve_emby_episode_id(episode: Episode, season: Season, series: Series) -
 
 def _resolve_plex_movie_id(movie: Movie) -> str | None:
 	try:
-		from services.services_old.plex_client import find_movie_by_id
-	except Exception as e:
-		logger.debug(f"Plex helper import failed (movie): {e}", extra={'emoji_type': 'debug'})
-		return None
-
-	tmdb_id = getattr(movie, 'tmdbid', None)
-	if not tmdb_id:
-		return None
-
-	try:
-		found = find_movie_by_id(tmdb_id, title=getattr(movie, 'title', None), year=getattr(movie, 'year', None))
+		found = _resolve_plex_movie_item(movie)
 		rating_key = getattr(found, 'ratingKey', None) if found else None
 		return str(rating_key) if rating_key else None
 	except Exception:
@@ -494,12 +599,6 @@ def _resolve_plex_movie_id(movie: Movie) -> str | None:
 
 
 def _resolve_plex_episode_id(episode: Episode, season: Season, series: Series) -> str | None:
-	try:
-		from services.services_old.plex_client import find_show_by_id
-	except Exception as e:
-		logger.debug(f"Plex helper import failed (episode): {e}", extra={'emoji_type': 'debug'})
-		return None
-
 	tvdb_id = getattr(series, 'tvdbid', None)
 	if not tvdb_id:
 		return None
@@ -519,6 +618,105 @@ def _resolve_plex_episode_id(episode: Episode, season: Season, series: Series) -
 				if int(getattr(plex_episode, 'index', -1)) == target_episode:
 					rating_key = getattr(plex_episode, 'ratingKey', None)
 					return str(rating_key) if rating_key else None
+		return None
+	except Exception:
+		return None
+
+
+def _resolve_plex_movie_item(
+	movie: Movie,
+	observed_path: str | None = None,
+	allow_title_fallback: bool = True,
+):
+	"""Return the resolved Plex movie item (full object) or None."""
+	plex = get_plex_server()
+	if not plex:
+		return None
+
+	try:
+		movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
+		all_movies = movie_section.all()
+	except Exception:
+		return None
+
+	tmdb_target = str(getattr(movie, 'tmdbid', '') or '')
+	if tmdb_target:
+		for item in all_movies:
+			guid_tmdb = _extract_guid_numeric(item, 'tmdb')
+			if guid_tmdb and guid_tmdb == tmdb_target:
+				return item
+		for item in all_movies:
+			path_tmdb = _extract_path_numeric(item, 'tmdb')
+			if path_tmdb and path_tmdb == tmdb_target:
+				return item
+
+	imdb_target = str(getattr(movie, 'imdbid', '') or '').strip().lower()
+	if imdb_target:
+		for item in all_movies:
+			guid_imdb = str(_extract_guid_numeric(item, 'imdb') or '').strip().lower()
+			if guid_imdb and guid_imdb == imdb_target:
+				return item
+
+	path_item = _single_match_from_item_locations(all_movies, observed_path, (3, 2))
+	if path_item is not None:
+		return path_item
+
+	if not allow_title_fallback:
+		return None
+
+	norm_title = _normalize_title(getattr(movie, 'title', None))
+	target_year = int(getattr(movie, 'year', 0) or 0)
+	if norm_title and target_year:
+		# Exact title+year first.
+		for item in all_movies:
+			item_year = int(getattr(item, 'year', 0) or 0)
+			if item_year != target_year:
+				continue
+			if _normalize_title(getattr(item, 'title', None)) == norm_title:
+				return item
+
+		# Loose title token fallback constrained to same year only.
+		tokens = set(_normalize_title_tokens(norm_title))
+		if tokens:
+			matches = []
+			for item in all_movies:
+				item_year = int(getattr(item, 'year', 0) or 0)
+				if item_year != target_year:
+					continue
+				item_tokens = set(_normalize_title_tokens(getattr(item, 'title', None)))
+				if tokens.issubset(item_tokens):
+					matches.append(item)
+			if len(matches) == 1:
+				return matches[0]
+
+		# Do not accept title-only matches across years for ambiguous titles.
+		return None
+
+	if norm_title:
+		candidates = [item for item in all_movies if _normalize_title(getattr(item, 'title', None)) == norm_title]
+		if len(candidates) == 1:
+			return candidates[0]
+
+	return None
+
+
+def _resolve_plex_episode_item(episode: Episode, season: Season, series: Series):
+	"""Return the resolved Plex episode item (full object) or None."""
+	tvdb_id = getattr(series, 'tvdbid', None)
+	if not tvdb_id:
+		return None
+	try:
+		show = find_show_by_id(tvdb_id, title=getattr(series, 'title', None))
+		if not show:
+			return None
+		target_season = int(getattr(season, 'season_number', 0) or 0)
+		target_episode = int(getattr(episode, 'episode_number', 0) or 0)
+		for plex_season in show.seasons():
+			if int(getattr(plex_season, 'index', -1)) != target_season:
+				continue
+			for plex_ep in plex_season.episodes():
+				if int(getattr(plex_ep, 'index', -1)) == target_episode:
+					return plex_ep
 		return None
 	except Exception:
 		return None
@@ -545,14 +743,17 @@ def observe_placeholder_plex_id(session, placeholder: Placeholder, movie: Movie 
 		if rating_key:
 			_set_plex_observed(placeholder, rating_key)
 			# Best-effort summary/status projection in Plex once we have a stable item id.
-			# Uses existing updater for compatibility with current status format.
+			# Uses batch updater for efficiency and consistency.
 			if _should_send_status_updates():
 				try:
-					from services.services_old.plex_client import update_plex_title_status
+					intents = []
+					status = _placeholder_display_status(placeholder)
 					if movie is not None:
-						update_plex_title_status(session, int(movie.id), Movie, action='status_update')
+						intents.append({'entity_type': Movie, 'entity_id': int(movie.id), 'status': status})
 					elif episode is not None:
-						update_plex_title_status(session, int(episode.id), Episode, action='status_update')
+						intents.append({'entity_type': Episode, 'entity_id': int(episode.id), 'status': status})
+					if intents:
+						batch_update_plex_statuses(session, intents)
 				except Exception:
 					# Keep observation resilient even when Plex summary update fails.
 					pass
@@ -573,7 +774,32 @@ def _is_placeholder_fully_resolved(placeholder: Placeholder) -> bool:
 	# Observation polling is intentionally Plex-only for now.
 	if not _is_enabled('plex'):
 		return True
-	return bool(getattr(placeholder, 'plex_placeholder_id', None))
+	# Must have both identity (ratingKey) *and* confirmed metadata projection.
+	has_id = bool(getattr(placeholder, 'plex_placeholder_id', None))
+	if not has_id:
+		return False
+	return getattr(placeholder, 'media_lookup_error', None) != 'plex_metadata_pending'
+
+
+def _placeholder_display_status(placeholder: Placeholder) -> str | None:
+	status = getattr(placeholder, 'display_status', None)
+	if isinstance(status, str):
+		status = status.strip() or None
+	reason = getattr(placeholder, 'display_reason', None)
+	if isinstance(reason, str):
+		reason = reason.strip() or None
+
+	if status in {
+		'COMING_SOON',
+		'COMING_SOON_30',
+		'COMING_SOON_14',
+		'COMING_SOON_7',
+		'COMING_SOON_1',
+		'COMING_SOON_TODAY',
+	} and reason:
+		return reason
+
+	return status
 
 
 def observe_placeholder_media_ids(
@@ -582,14 +808,21 @@ def observe_placeholder_media_ids(
 	movie: Movie | None,
 	episode: Episode | None,
 	plex_snapshot: dict[str, Any] | None = None,
+	allow_title_fallback: bool = True,
 ) -> dict[str, Any]:
-	"""Attempt to observe IDs for all enabled media servers for one placeholder."""
+	"""Attempt to observe IDs for all enabled media servers for one placeholder.
+
+	Contract: this function only enriches media-server identity fields and does
+	not change Placeholder.display_status or any other user-facing display
+	field. It is safe to call repeatedly on the same placeholder.
+	"""
 	placeholder.media_lookup_last_attempt_at = func.now()
 	result = {
 		'observed_plex': 0,
 		'observed_jellyfin': 0,
 		'observed_emby': 0,
 		'status_updates_plex': 0,
+		'plex_progress': 0,
 		'resolved_all': False,
 	}
 
@@ -599,47 +832,118 @@ def observe_placeholder_media_ids(
 		season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
 		series = session.query(Series).filter(Series.id == int(season.series_id)).first() if season else None
 
-	if _is_enabled('plex') and not getattr(placeholder, 'plex_placeholder_id', None):
-		plex_id = None
-		plex_ready = False
-		if movie is not None:
-			if plex_snapshot is not None:
-				plex_item = _resolve_plex_movie_item_from_snapshot(plex_snapshot, movie)
+	if _is_enabled('plex'):
+		has_plex_id = bool(getattr(placeholder, 'plex_placeholder_id', None))
+		meta_pending = getattr(placeholder, 'media_lookup_error', None) == 'plex_metadata_pending'
+
+		if not has_plex_id:
+			# Phase 1: find Plex identity (ratingKey).
+			plex_id = None
+			plex_ready = False
+			plex_item = None
+			observed_path = str(getattr(placeholder, 'path', '') or '') or None
+			if movie is not None:
+				if plex_snapshot is not None:
+					plex_item = _resolve_plex_movie_item_from_snapshot(
+						plex_snapshot,
+						movie,
+						observed_path=observed_path,
+						allow_title_fallback=allow_title_fallback,
+					)
+					if plex_item is None:
+						# Keep snapshot as fast path, but fall back to direct resolver.
+						plex_item = _resolve_plex_movie_item(
+							movie,
+							observed_path=observed_path,
+							allow_title_fallback=allow_title_fallback,
+						)
+				else:
+					plex_item = _resolve_plex_movie_item(
+						movie,
+						observed_path=observed_path,
+						allow_title_fallback=allow_title_fallback,
+					)
 				if plex_item is not None:
 					plex_id = str(getattr(plex_item, 'ratingKey', '') or '') or None
-					plex_ready = _plex_item_metadata_ready(plex_item)
-			else:
-				plex_id = _resolve_plex_movie_id(movie)
-				plex_ready = bool(plex_id)
-		elif episode is not None and season and series:
-			if plex_snapshot is not None:
-				plex_item = _resolve_plex_episode_item_from_snapshot(plex_snapshot, episode, season, series)
+					plex_ready = _plex_item_metadata_ready(plex_item) if plex_snapshot is not None else bool(plex_id)
+			elif episode is not None and season and series:
+				if plex_snapshot is not None:
+					plex_item = _resolve_plex_episode_item_from_snapshot(plex_snapshot, episode, season, series)
+					if plex_item is None:
+						# Snapshot miss fallback for naming/metadata-agent edge cases.
+						plex_item = _resolve_plex_episode_item(episode, season, series)
+				else:
+					plex_item = _resolve_plex_episode_item(episode, season, series)
 				if plex_item is not None:
 					plex_id = str(getattr(plex_item, 'ratingKey', '') or '') or None
-					plex_ready = _plex_item_metadata_ready(plex_item)
-			else:
-				plex_id = _resolve_plex_episode_id(episode, season, series)
-				plex_ready = bool(plex_id)
-		if plex_id and plex_ready:
-			_set_plex_observed(placeholder, plex_id)
-			result['observed_plex'] = 1
-			if _should_send_status_updates():
+					plex_ready = _plex_item_metadata_ready(plex_item) if plex_snapshot is not None else bool(plex_id)
+			if plex_id:
+				_set_plex_observed(placeholder, plex_id)
+				result['observed_plex'] = 1
+				# Finding the ratingKey is always progress, regardless of metadata state.
+				result['plex_progress'] = 1
 				try:
-					from services.services_old.plex_client import update_plex_title_status
 					if movie is not None:
-						if update_plex_title_status(session, int(movie.id), Movie, action='status_update'):
-							result['status_updates_plex'] = 1
-					elif episode is not None:
-						if update_plex_title_status(session, int(episode.id), Episode, action='status_update'):
-							result['status_updates_plex'] = 1
+						persist_movie_plex_identity(session, movie, plex_item)
+					elif episode is not None and season and series:
+						persist_episode_hierarchy_plex_identity(session, series, season, episode, plex_item)
 				except Exception:
 					pass
-		elif plex_id and not plex_ready:
-			placeholder.media_lookup_error = 'plex_metadata_pending'
+				if plex_ready and _should_send_status_updates():
+					try:
+						intents = []
+						status = _placeholder_display_status(placeholder)
+						if movie is not None:
+							intents.append({'entity_type': Movie, 'entity_id': int(movie.id), 'status': status})
+							result['status_updates_plex'] = 1
+						elif episode is not None:
+							intents.append({'entity_type': Episode, 'entity_id': int(episode.id), 'status': status})
+							result['status_updates_plex'] = 1
+						if intents:
+							batch_update_plex_statuses(session, intents)
+					except Exception:
+						pass
+				elif not plex_ready:
+					placeholder.media_lookup_error = 'plex_metadata_pending'
+
+		elif meta_pending:
+			# Phase 2: identity is confirmed; re-check whether Plex metadata is now ready.
+			# Fetch by ratingKey directly — always reflects the latest Plex state.
+			stored_plex_id = str(getattr(placeholder, 'plex_placeholder_id', '') or '').strip()
+			if stored_plex_id:
+				phase2_item = None
+				try:
+					_plex_conn = get_plex_server()
+					if _plex_conn:
+						phase2_item = _plex_conn.fetchItem(f'/library/metadata/{stored_plex_id}')
+				except Exception:
+					pass
+				if phase2_item is not None and _plex_item_metadata_ready(phase2_item):
+					# Metadata is now available — apply status projection and clear pending state.
+					result['plex_progress'] = 1
+					result['observed_plex'] = 1
+					placeholder.media_lookup_error = None
+					if _should_send_status_updates():
+						try:
+							intents = []
+							status = _placeholder_display_status(placeholder)
+							if movie is not None:
+								intents.append({'entity_type': Movie, 'entity_id': int(movie.id), 'status': status})
+								result['status_updates_plex'] = 1
+							elif episode is not None:
+								intents.append({'entity_type': Episode, 'entity_id': int(episode.id), 'status': status})
+								result['status_updates_plex'] = 1
+							if intents:
+								batch_update_plex_statuses(session, intents)
+						except Exception:
+							pass
 
 	if _is_placeholder_fully_resolved(placeholder):
 		placeholder.media_lookup_error = None
 		result['resolved_all'] = True
+	elif getattr(placeholder, 'media_lookup_error', None) == 'plex_metadata_pending':
+		# Identity found; metadata projection still in progress — preserve this state.
+		pass
 	else:
 		missing: list[str] = []
 		if _is_enabled('plex') and not getattr(placeholder, 'plex_placeholder_id', None):
@@ -665,142 +969,69 @@ def _expected_plex_section_ids(placeholders: list[Placeholder]) -> set[int]:
 
 
 def _run_plex_scan_gate(expected_section_ids: set[int], *, phase: str) -> dict[str, Any]:
-	probe_delays_seconds = [2, 5]
-	poll_interval_seconds = 5
-	activity_probe_window_seconds = 60
-	max_wait_seconds = 900
-	waited_seconds = 0
-	checks = 0
-
+	"""
+	Gate for Plex section scan: always enabled, no activity checking.
+	Busy/activity checker was removed in Phase 1.
+	"""
 	if not expected_section_ids:
 		return {
 			'ok': True,
 			'reason': 'no_expected_sections',
-			'waited_seconds': waited_seconds,
-			'checks': checks,
+			'waited_seconds': 0,
+			'checks': 0,
 			'scan_detected': False,
 		}
 
-	# Probe phase: check for Plex activity (both expected and any other activity)
-	expected_active_sections: set[int] = set()
-	has_any_activity = False
-	expected_activity_seen = False
-	for delay_seconds in probe_delays_seconds:
-		time.sleep(delay_seconds)
-		waited_seconds += delay_seconds
-		checks += 1
-		expected_active_sections = get_active_expected_scan_sections(expected_section_ids)
-		if expected_active_sections:
-			expected_activity_seen = True
-		has_any_activity = has_any_active_plex_scan()
-		if expected_active_sections or has_any_activity:
-			if expected_active_sections:
-				logger.info(
-					f"Plex activity check detected expected library activity during {phase}: sections={sorted(expected_active_sections)}.",
-					extra={'emoji_type': 'info'},
-				)
-			else:
-				logger.info(
-					f"Plex activity check detected other library scan active during {phase}; waiting for expected section or global idle.",
-					extra={'emoji_type': 'info'},
-				)
-			break
-
-	# If no Plex activity detected anywhere, quick-exit
-	if not has_any_activity:
-		logger.info(
-			f"Plex activity check detected no Plex activity during {phase}; assuming quick scan and continuing to content polling.",
-			extra={'emoji_type': 'info'},
-		)
-		return {
-			'ok': True,
-			'reason': 'quick_scan_or_no_activity',
-			'waited_seconds': waited_seconds,
-			'checks': checks,
-			'scan_detected': False,
-		}
-
-	# If Plex activity was detected, wait for expected scan to clear or timeout
-	while waited_seconds < max_wait_seconds:
-		time.sleep(poll_interval_seconds)
-		waited_seconds += poll_interval_seconds
-		checks += 1
-		expected_active_sections = get_active_expected_scan_sections(expected_section_ids)
-		if expected_active_sections:
-			expected_activity_seen = True
-		has_any_activity = has_any_active_plex_scan()
-		
-		# If we previously saw expected activity and it has now cleared
-		if expected_activity_seen and not expected_active_sections:
-			logger.info(
-				f"Plex activity check cleared expected library activity during {phase}; starting content polling.",
-				extra={'emoji_type': 'info'},
-			)
-			return {
-				'ok': True,
-				'reason': 'expected_scan_completed',
-				'waited_seconds': waited_seconds,
-				'checks': checks,
-				'scan_detected': True,
-			}
-		
-		# If all Plex activity completely idle
-		if not has_any_activity:
-			logger.info(
-				f"Plex activity check detected global idle during {phase}; starting content polling.",
-				extra={'emoji_type': 'info'},
-			)
-			return {
-				'ok': True,
-				'reason': 'global_idle',
-				'waited_seconds': waited_seconds,
-				'checks': checks,
-				'scan_detected': True,
-			}
-
-		if has_any_activity and waited_seconds >= activity_probe_window_seconds:
-			logger.info(
-				f"Plex activity check still sees active scans during {phase} after {waited_seconds}s; starting sparse content polling while scans continue.",
-				extra={'emoji_type': 'info'},
-			)
-			return {
-				'ok': True,
-				'reason': 'activity_probe_window_elapsed',
-				'waited_seconds': waited_seconds,
-				'checks': checks,
-				'scan_detected': True,
-			}
-
+	# Busy/activity checker removed: always proceed
 	return {
-		'ok': False,
-		'reason': 'scan_wait_timeout',
-		'waited_seconds': waited_seconds,
-		'checks': checks,
-		'scan_detected': True,
+		'ok': True,
+		'reason': 'scan_gate_always_ok',
+		'waited_seconds': 0,
+		'checks': 0,
+		'scan_detected': False,
 	}
 
 
-def _run_observation_pass(session, unresolved: list[Placeholder]) -> tuple[list[Placeholder], dict[str, int], int]:
-	pass_stats = {
+# Sleep durations (seconds) per consecutive no-progress poll.
+# Schedule: 5 → 10 → 20 → 20, then stop on the 5th consecutive no-progress.
+# Total worst-case sleep: 5 + 10 + 20 + 20 = 55 s.
+_NO_PROGRESS_SLEEP_SCHEDULE = [5, 10, 20, 20]
+
+
+def _run_observation_pass(
+	session,
+	placeholders: list[Placeholder],
+	allow_title_fallback: bool = True,
+) -> tuple[list[Placeholder], dict[str, Any], int, int]:
+	"""Build a single Plex snapshot then probe every placeholder in the list.
+
+	Returns:
+	    (still_unresolved, pass_stats, resolved_delta, progress_delta)
+	    resolved_delta — items that became fully resolved this pass.
+	    progress_delta — items that made *any* Plex advancement (identity found
+	                    or metadata confirmed), used to reset the sleep cadence.
+	"""
+	pass_stats: dict[str, Any] = {
 		'observed_plex': 0,
 		'observed_jellyfin': 0,
 		'observed_emby': 0,
 		'status_updates_plex': 0,
+		'plex_progress': 0,
 	}
-	before_count = len(unresolved)
-	plex_snapshot = None
-	needs_plex = any(not getattr(placeholder, 'plex_placeholder_id', None) for placeholder in unresolved)
-	if needs_plex:
-		plex_snapshot = _build_plex_snapshot()
+	still_unresolved: list[Placeholder] = []
+	resolved_delta = 0
 
-	next_round: list[Placeholder] = []
-	for placeholder in unresolved:
-		movie = None
-		episode = None
-		if getattr(placeholder, 'movie_id', None):
-			movie = session.query(Movie).filter(Movie.id == int(placeholder.movie_id)).first()
-		elif getattr(placeholder, 'episode_id', None):
-			episode = session.query(Episode).filter(Episode.id == int(placeholder.episode_id)).first()
+	plex_snapshot: dict[str, Any] | None = _build_plex_snapshot() if _is_enabled('plex') else None
+
+	for placeholder in placeholders:
+		movie: Movie | None = None
+		episode: Episode | None = None
+		movie_id = getattr(placeholder, 'movie_id', None)
+		episode_id = getattr(placeholder, 'episode_id', None)
+		if movie_id is not None:
+			movie = session.query(Movie).filter(Movie.id == int(movie_id)).first()
+		elif episode_id is not None:
+			episode = session.query(Episode).filter(Episode.id == int(episode_id)).first()
 
 		result = observe_placeholder_media_ids(
 			session,
@@ -808,29 +1039,35 @@ def _run_observation_pass(session, unresolved: list[Placeholder]) -> tuple[list[
 			movie,
 			episode,
 			plex_snapshot=plex_snapshot,
+			allow_title_fallback=allow_title_fallback,
 		)
-		pass_stats['observed_plex'] += int(result.get('observed_plex', 0) or 0)
-		pass_stats['observed_jellyfin'] += int(result.get('observed_jellyfin', 0) or 0)
-		pass_stats['observed_emby'] += int(result.get('observed_emby', 0) or 0)
-		pass_stats['status_updates_plex'] += int(result.get('status_updates_plex', 0) or 0)
-		if not result.get('resolved_all', False):
-			next_round.append(placeholder)
+		pass_stats['observed_plex'] += result['observed_plex']
+		pass_stats['observed_jellyfin'] += result['observed_jellyfin']
+		pass_stats['observed_emby'] += result['observed_emby']
+		pass_stats['status_updates_plex'] += result.get('status_updates_plex', 0)
+		pass_stats['plex_progress'] += result.get('plex_progress', 0)
 
-	session.commit()
-	resolved_delta = max(0, before_count - len(next_round))
-	return next_round, pass_stats, resolved_delta
+		if result['resolved_all']:
+			resolved_delta += 1
+		else:
+			still_unresolved.append(placeholder)
+
+	try:
+		session.commit()
+	except Exception:
+		session.rollback()
+		raise
+
+	progress_delta = pass_stats['plex_progress']
+	return still_unresolved, pass_stats, resolved_delta, progress_delta
 
 
-def _content_poll_interval_seconds() -> int:
-	normal_poll_interval_seconds = 5
-	active_scan_poll_interval_seconds = 60
-	if has_any_active_plex_scan():
-		return active_scan_poll_interval_seconds
-	return normal_poll_interval_seconds
-
-
-def observe_placeholders_with_polling(session, placeholders: list[Placeholder]) -> dict[str, Any]:
-	"""Observe placeholder media ids after refresh using a scan gate plus fixed polling."""
+def observe_placeholders_with_polling(
+	session,
+	placeholders: list[Placeholder],
+	allow_title_fallback: bool = False,
+) -> dict[str, Any]:
+	"""Observe placeholder media ids using direct polling with fixed intervals (no activity gating)."""
 	stats: dict[str, Any] = {
 		'observed_candidates': len(placeholders),
 		'observed_plex': 0,
@@ -857,6 +1094,8 @@ def observe_placeholders_with_polling(session, placeholders: list[Placeholder]) 
 	total_expected = len(unresolved)
 	resolved_total = 0
 	expected_section_ids = _expected_plex_section_ids(unresolved)
+	
+	# Initial scan gate: no activity checking (always succeeds)
 	initial_scan_gate = _run_plex_scan_gate(expected_section_ids, phase='initial')
 	if not initial_scan_gate.get('ok', False):
 		stats['observe_failed'] = len(unresolved)
@@ -867,13 +1106,17 @@ def observe_placeholders_with_polling(session, placeholders: list[Placeholder]) 
 		)
 		return stats
 
-	consecutive_no_progress = 0
-	recovery_scan_used = False
-	after_recovery_scan = False
+	# Polling loop: adaptive interval 5→10→20→20, stop on 5th consecutive no-progress.
+	# Any progress resets the interval back to 5 s.
+	no_progress_count = 0
 
 	while unresolved:
 		stats['attempts'] += 1
-		unresolved, pass_stats, resolved_delta = _run_observation_pass(session, unresolved)
+		unresolved, pass_stats, resolved_delta, progress_delta = _run_observation_pass(
+			session,
+			unresolved,
+			allow_title_fallback=allow_title_fallback,
+		)
 		stats['observed_plex'] += pass_stats['observed_plex']
 		stats['observed_jellyfin'] += pass_stats['observed_jellyfin']
 		stats['observed_emby'] += pass_stats['observed_emby']
@@ -900,66 +1143,112 @@ def observe_placeholders_with_polling(session, placeholders: list[Placeholder]) 
 				extra={'emoji_type': 'update'},
 			)
 
-		if resolved_delta > 0:
-			consecutive_no_progress = 0
-			after_recovery_scan = False
-			poll_interval_seconds = _content_poll_interval_seconds()
+		if progress_delta > 0:
+			# Progress: identity found or metadata confirmed — reset escalation state.
+			no_progress_count = 0
 			logger.info(
-				f"Content polling progress: +{resolved_delta} ready this pass ({resolved_total}/{total_expected}). Polling again in {poll_interval_seconds}s.",
+				f"Content polling progress: +{resolved_delta} fully resolved, +{progress_delta} advanced "
+				f"this pass ({resolved_total}/{total_expected} done). Polling again in {_NO_PROGRESS_SLEEP_SCHEDULE[0]}s.",
 				extra={'emoji_type': 'info'},
 			)
-			time.sleep(poll_interval_seconds)
+			time.sleep(_NO_PROGRESS_SLEEP_SCHEDULE[0])
 			continue
 
+		# No progress this pass.
+		if no_progress_count >= len(_NO_PROGRESS_SLEEP_SCHEDULE):
+			# Exhausted all retries — stop without sleeping.
+			stats['stopped_early'] = True
+			stats['stop_reason'] = 'no_progress_max_polls'
+			logger.warning(
+				f"Observation made no progress for {no_progress_count + 1} consecutive polls "
+				f"(schedule exhausted); finishing {len(unresolved)} unresolved.",
+				extra={'emoji_type': 'warning'},
+			)
+			break
+
+		sleep_seconds = _NO_PROGRESS_SLEEP_SCHEDULE[no_progress_count]
+		no_progress_count += 1
 		logger.info(
-			f"Content polling progress: no new ready items this pass ({resolved_total}/{total_expected}).",
+			f"No progress this pass ({resolved_total}/{total_expected} ready); "
+			f"escalating to {sleep_seconds}s interval (no-progress streak: {no_progress_count}).",
 			extra={'emoji_type': 'info'},
 		)
-
-		if after_recovery_scan:
-			stats['stopped_early'] = True
-			stats['stop_reason'] = 'no_progress_after_recovery_scan'
-			logger.warning(
-				"Observation made no progress after the recovery scan gate; finishing unresolved.",
-				extra={'emoji_type': 'warning'},
-			)
-			break
-
-		consecutive_no_progress += 1
-		if consecutive_no_progress < 2:
-			poll_interval_seconds = _content_poll_interval_seconds()
-			logger.info(
-				f"No progress yet; polling again in {poll_interval_seconds}s before re-running Plex activity check.",
-				extra={'emoji_type': 'info'},
-			)
-			time.sleep(poll_interval_seconds)
-			continue
-
-		if recovery_scan_used:
-			stats['stopped_early'] = True
-			stats['stop_reason'] = 'no_progress_recovery_exhausted'
-			logger.warning(
-				"Observation exhausted its recovery scan gate and still has unresolved placeholders.",
-				extra={'emoji_type': 'warning'},
-			)
-			break
-
-		recovery_scan_used = True
-		consecutive_no_progress = 0
-		recovery_scan_gate = _run_plex_scan_gate(expected_section_ids, phase='recovery')
-		if not recovery_scan_gate.get('ok', False):
-			stats['stopped_early'] = True
-			stats['stop_reason'] = str(recovery_scan_gate.get('reason') or 'recovery_scan_gate_failed')
-			logger.warning(
-				f"Observation recovery scan gate failed: reason={stats['stop_reason']}.",
-				extra={'emoji_type': 'warning'},
-			)
-			break
-		after_recovery_scan = str(recovery_scan_gate.get('reason') or '') not in {'activity_probe_window_elapsed'}
+		time.sleep(sleep_seconds)
 
 	stats['observe_failed'] = len(unresolved)
 	if not stats.get('stop_reason') and unresolved:
 		stats['stop_reason'] = 'unresolved_after_observer'
+
+	# When polling exhausts retries, handle two categories of remaining items:
+	#   1. metadata_pending — ratingKey known but Plex hasn't populated metadata yet.
+	#      Apply status projection now (using whatever Plex has at this moment) and
+	#      clear the pending state.  No trail needed — we've resolved what we can.
+	#   2. no_identity — Plex never found the item; enqueue a deferred 15-min trail.
+	if unresolved and stats.get('stop_reason') == 'no_progress_max_polls':
+		metadata_pending = [
+			p for p in unresolved
+			if bool(getattr(p, 'plex_placeholder_id', None))
+			and getattr(p, 'media_lookup_error', None) == 'plex_metadata_pending'
+		]
+		no_identity = [
+			p for p in unresolved
+			if not bool(getattr(p, 'plex_placeholder_id', None))
+		]
+
+		if metadata_pending and _should_send_status_updates():
+			fallback_intents: list[dict[str, Any]] = []
+			for p in metadata_pending:
+				status = _placeholder_display_status(p)
+				movie_id = getattr(p, 'movie_id', None)
+				episode_id = getattr(p, 'episode_id', None)
+				if movie_id is not None:
+					fallback_intents.append({'entity_type': Movie, 'entity_id': int(movie_id), 'status': status})
+				elif episode_id is not None:
+					fallback_intents.append({'entity_type': Episode, 'entity_id': int(episode_id), 'status': status})
+			if fallback_intents:
+				try:
+					batch_update_plex_statuses(session, fallback_intents)
+					logger.info(
+						f"Applied fallback status update for {len(metadata_pending)} metadata-pending item(s) "
+						f"after polling exhaustion.",
+						extra={'emoji_type': 'info'},
+					)
+				except Exception as exc:
+					logger.warning(
+						f"Fallback status update failed for metadata-pending items: {exc}",
+						extra={'emoji_type': 'warning'},
+					)
+			for p in metadata_pending:
+				p.media_lookup_error = None
+				p.updated_at = func.now()
+				session.add(p)
+			try:
+				session.commit()
+			except Exception:
+				session.rollback()
+
+		if no_identity:
+			no_identity_ids = [int(p.id) for p in no_identity if getattr(p, 'id', None)]
+			if no_identity_ids:
+				try:
+					# Local import to avoid circular dependency (observation_trail imports us).
+					from services.source_of_truth.observation_trail import enqueue_observation_trail  # noqa: PLC0415
+					enqueue_result = enqueue_observation_trail(
+						session,
+						placeholder_ids=no_identity_ids,
+						source='poller_early_stop',
+						delay_seconds=900,
+					)
+					logger.info(
+						f"Enqueued 15-minute follow-up observation trail for {len(no_identity_ids)} item(s) with no Plex identity: "
+						f"job_id={enqueue_result.get('job_id')}, enqueued={enqueue_result.get('enqueued')}.",
+						extra={'emoji_type': 'info'},
+					)
+				except Exception as exc:
+					logger.warning(
+						f"Could not enqueue follow-up observation trail: {exc}",
+						extra={'emoji_type': 'warning'},
+					)
 
 	logger.info(
 		"Observation summary: "

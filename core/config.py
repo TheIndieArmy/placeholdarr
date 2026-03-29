@@ -102,7 +102,6 @@ class Settings(BaseSettings):
     PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both", "off"] = os.getenv("PLACEHOLDER_STATUS_PROJECTION_MODE", "summary").split('#')[0].strip().lower()
     PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
-    PRIMER_ENABLED: bool = os.getenv("PRIMER_ENABLED", "true").split('#')[0].strip().lower() == "true"
     FORCE_PRIME_ON_STARTUP: bool = os.getenv("FORCE_PRIME_ON_STARTUP", "false").split('#')[0].strip().lower() == "true"
     PRIMER_SERIES_COUNT: int = int(os.getenv("PRIMER_SERIES_COUNT", "3").split('#')[0].strip())
     PRIMER_EPISODES_PER_SERIES: int = int(os.getenv("PRIMER_EPISODES_PER_SERIES", "3").split('#')[0].strip())
@@ -118,7 +117,14 @@ class Settings(BaseSettings):
     MIGRATION: bool = False
       
     # Calendar-based status update settings
+    # CALENDAR_LOOKAHEAD_DAYS: how many days into the future to create/show "Coming Soon" placeholders
+    #   - Positive integer (e.g., 30): strict horizon for selected release type; items beyond are REQUEST
+    #   - 0 (zero): disabled/off for future placeholder lookahead; future placeholders are reconciled out
+    #   - -1 (negative): infinite lookahead; future items can remain Coming Soon
+    # Default: 30 days
     CALENDAR_LOOKAHEAD_DAYS: int = int(os.getenv("CALENDAR_LOOKAHEAD_DAYS", "30").split('#')[0].strip())
+    # Calendar scheduler cadence (independent from full sync).
+    # <= 0 disables independent calendar scheduler.
     CALENDAR_SYNC_INTERVAL_HOURS: int = int(os.getenv("CALENDAR_SYNC_INTERVAL_HOURS", "12").split('#')[0].strip())
     ENABLE_COMING_SOON_PLACEHOLDERS: bool = os.getenv("ENABLE_COMING_SOON_PLACEHOLDERS", "true").split('#')[0].strip().lower() == "true"
     PREFERRED_MOVIE_DATE_TYPE: str = os.getenv("PREFERRED_MOVIE_DATE_TYPE", "inCinemas").split('#')[0].strip()
@@ -144,6 +150,10 @@ class Settings(BaseSettings):
     # Job queue / batching
     BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
     JOB_DEBOUNCE_SECONDS: int = int(os.getenv("JOB_DEBOUNCE_SECONDS", "3"))
+    ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_PLAYBACK_EVENT_HANDLERS: bool = os.getenv("ENABLE_PLAYBACK_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_STATUS_ORCHESTRATOR_CALENDAR: bool = os.getenv("ENABLE_STATUS_ORCHESTRATOR_CALENDAR", "true").split('#')[0].strip().lower() == "true"
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.
 

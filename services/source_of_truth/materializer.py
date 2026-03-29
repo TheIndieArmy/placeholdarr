@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, or_
@@ -25,42 +26,113 @@ from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
 )
+from services.source_of_truth.status_orchestrator import StatusOrchestrator
 
 
 REQUEST_STATUS = "REQUEST"
 REQUEST_REASON = "placeholder_request"
 
 
-def _sync_content_placeholder_status(session, *, movie_id: int | None, episode_id: int | None) -> None:
-    """Compatibility projection from Placeholder.display_status -> content placeholder_status.
+def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
+    """Return 'coming_soon' or 'request' for dummy file selection at episode creation time."""
+    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    if not bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True)):
+        return "request"
+    if lookahead_days <= 0:
+        return "request"
+    air_date = getattr(episode, "air_date", None)
+    if not air_date:
+        return "request"
+    days_until = (air_date - datetime.now(timezone.utc).date()).days
+    if days_until < 0 or days_until > lookahead_days:
+        return "request"
+    return "coming_soon"
 
-    Placeholder rows remain canonical for runtime display state. Content-row
-    placeholder_status is maintained as a derived mirror for compatibility while
-    legacy paths are phased out.
+
+def _compute_initial_dummy_variant_for_movie(movie: Movie) -> str:
+    """Return 'coming_soon' or 'request' for dummy file selection at movie creation time."""
+    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    if not bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True)):
+        return "request"
+    if lookahead_days <= 0:
+        return "request"
+    preferred = str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas").strip()
+    release_map = {
+        "inCinemas": "theater_release_date",
+        "digitalRelease": "digital_release_date",
+        "physicalRelease": "physical_release_date",
+    }
+    release_date = getattr(movie, release_map.get(preferred, "theater_release_date"), None)
+    if not release_date:
+        return "request"
+    days_until = (release_date - datetime.now(timezone.utc).date()).days
+    if days_until < 0 or days_until > lookahead_days:
+        return "request"
+    return "coming_soon"
+
+
+def _dummy_file_path_for_variant(variant: str) -> str:
+    """Return the configured dummy file path for the given variant."""
+    coming_soon_dummy = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
+    if variant == "coming_soon" and coming_soon_dummy:
+        return coming_soon_dummy
+    return str(getattr(settings, "DUMMY_FILE_PATH", "") or "")
+
+
+def _apply_initial_status_for_placeholder(session, *, placeholder_id: int, event_type: str = "creation") -> None:
     """
-    q = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
-    if movie_id is not None:
-        q = q.filter(Placeholder.movie_id == movie_id)
-        row = q.order_by(Placeholder.id.desc()).first()
-        movie = session.query(Movie).filter(Movie.id == int(movie_id)).first()
-        if movie:
-            movie.placeholder_status = getattr(row, 'display_status', None) if row else None
-            movie.updated_at = func.now()
-            session.add(movie)
-        return
-
-    if episode_id is not None:
-        q = q.filter(Placeholder.episode_id == episode_id)
-        row = q.order_by(Placeholder.id.desc()).first()
-        episode = session.query(Episode).filter(Episode.id == int(episode_id)).first()
-        if episode:
-            episode.placeholder_status = getattr(row, 'display_status', None) if row else None
-            episode.updated_at = func.now()
-            session.add(episode)
-        return
+    After materializer creates or deletes a placeholder, compute and apply initial status.
+    
+    This decouples status changes from file operations: the orchestrator handles all
+    status computation, not just file state changes.
+    """
+    try:
+        orchestrator = StatusOrchestrator(session=session)
+        intent = orchestrator.compute_status_for_lifecycle_event(placeholder_id, event_type=event_type)
+        
+        if intent:
+            orchestrator.apply_and_project_statuses([intent])
+            logger.debug(f"Applied initial status for Placeholder[{placeholder_id}]: {intent.new_status}")
+    except Exception as e:
+        logger.error(f"Failed to apply initial status for Placeholder[{placeholder_id}]: {e}", exc_info=True)
 
 
-def _mark_placeholder_row_active(session, *, movie_id: int | None, episode_id: int | None, path: str) -> None:
+def _sync_content_placeholder_status(session, *, movie_id: int | None, episode_id: int | None) -> None:
+    """Deprecated no-op.
+
+    Placeholder.display_status is now the single source of truth.
+    
+    STATUS REFACTOR NOTE:
+    Materializer is responsible for:
+    1. Creating/deleting placeholder files
+    2. Creating/updating/deleting Placeholder rows
+    3. Setting INITIAL status to REQUEST on new placeholders via StatusOrchestrator
+    
+    Materializer is NOT responsible for:
+    - Long-term status changes (countdown, queue progress, cleanup)
+    - Status projection to media servers
+    - Status-triggered NFO rewrites
+    
+    All subsequent status changes are driven by independent status_orchestrator flows:
+    - CalendarPhase: countdown logic
+    - QueueMonitor: search/download progress
+    - Event handlers: import/delete/playback cleanup
+    
+    See services/source_of_truth/status_orchestrator.py for the unified status architecture.
+    """
+    return None
+
+
+def _mark_placeholder_row_active(
+    session,
+    *,
+    movie_id: int | None,
+    episode_id: int | None,
+    path: str,
+    series_id: int | None = None,
+    season_id: int | None = None,
+    calendar_dummy_variant: str | None = None,
+) -> None:
     q = session.query(Placeholder)
     if movie_id is not None:
         q = q.filter(Placeholder.movie_id == movie_id)
@@ -85,8 +157,14 @@ def _mark_placeholder_row_active(session, *, movie_id: int | None, episode_id: i
 
     if movie_id is not None:
         row.movie_id = movie_id
+        row.episode_id = None
+        row.series_id = None
+        row.season_id = None
     if episode_id is not None:
+        row.movie_id = None
         row.episode_id = episode_id
+        row.series_id = series_id
+        row.season_id = season_id
 
     # Treat (re)materialization as a reconnect event: force fresh media-id observation.
     row.plex_placeholder_id = None
@@ -104,6 +182,10 @@ def _mark_placeholder_row_active(session, *, movie_id: int | None, episode_id: i
     row.display_status = REQUEST_STATUS
     row.display_reason = REQUEST_REASON
     row.display_progress = 0
+    if calendar_dummy_variant:
+        extra = dict(getattr(row, 'extra', {}) or {})
+        extra['calendar_dummy_variant'] = calendar_dummy_variant
+        row.extra = extra
     row.last_observed_at = func.now()
     row.updated_at = func.now()
     session.add(row)
@@ -151,15 +233,24 @@ def apply_movie_materialization(movie_id: int, session=None) -> dict[str, Any]:
         determination = getattr(movie, "determination", None)
         if determination == DETERMINATION_NEEDS:
             target_path = getattr(movie, "placeholder_filepath", None) or movie_placeholder_path(movie)
-            created = ensure_placeholder_file(target_path)
+            _initial_variant = _compute_initial_dummy_variant_for_movie(movie)
+            created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
             nfo_written = False
             if settings.PLACEHOLDER_CREATE_NFO:
                 nfo_written = ensure_movie_nfo(target_path, movie)
             movie.has_placeholder = True
             movie.placeholder_filepath = target_path
             movie.updated_at = func.now()
-            _mark_placeholder_row_active(session, movie_id=movie.id, episode_id=None, path=target_path)
+            _mark_placeholder_row_active(session, movie_id=movie.id, episode_id=None, path=target_path, calendar_dummy_variant=_initial_variant)
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
+            
+            # Apply initial status for the created placeholder
+            placeholder_row = session.query(Placeholder).filter(
+                Placeholder.movie_id == movie.id
+            ).order_by(Placeholder.id.desc()).first()
+            if placeholder_row:
+                _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
+            
             session.add(movie)
             if owns_session:
                 session.commit()
@@ -229,7 +320,8 @@ def apply_episode_materialization(episode_id: int, session=None) -> dict[str, An
         determination = getattr(episode, "determination", None)
         if determination == DETERMINATION_NEEDS:
             target_path = getattr(episode, "placeholder_filepath", None) or episode_placeholder_path(episode, season, series)
-            created = ensure_placeholder_file(target_path)
+            _initial_variant = _compute_initial_dummy_variant_for_episode(episode)
+            created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
             nfo_written = False
             if settings.PLACEHOLDER_CREATE_NFO:
                 nfo_written = ensure_episode_nfo(target_path, episode, season, series)
@@ -243,8 +335,24 @@ def apply_episode_materialization(episode_id: int, session=None) -> dict[str, An
             episode.has_placeholder = True
             episode.placeholder_filepath = target_path
             episode.updated_at = func.now()
-            _mark_placeholder_row_active(session, movie_id=None, episode_id=episode.id, path=target_path)
+            _mark_placeholder_row_active(
+                session,
+                movie_id=None,
+                episode_id=episode.id,
+                path=target_path,
+                series_id=series.id,
+                season_id=season.id,
+                calendar_dummy_variant=_initial_variant,
+            )
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
+            
+            # Apply initial status for the created placeholder
+            placeholder_row = session.query(Placeholder).filter(
+                Placeholder.episode_id == episode.id
+            ).order_by(Placeholder.id.desc()).first()
+            if placeholder_row:
+                _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
+            
             session.add(episode)
             if owns_session:
                 session.commit()
@@ -461,7 +569,11 @@ def _run_materialization_for_ids(
         # Check if Plex is busy before starting observation polling
         plex_is_busy = False
         # Always perform immediate polling
-        observe_stats = observe_placeholders_with_polling(session, observed_candidates)
+        observe_stats = observe_placeholders_with_polling(
+            session,
+            observed_candidates,
+            allow_title_fallback=False,
+        )
         stats["media_id_observed_plex"] = observe_stats.get("observed_plex", 0)
         stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
         stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)

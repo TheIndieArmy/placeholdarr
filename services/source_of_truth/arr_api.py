@@ -1,5 +1,6 @@
 import threading
 import time
+from datetime import date
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -186,3 +187,76 @@ def fetch_sonarr_episodefile(episode_file_id: int, url: Optional[str] = None, ap
         _cache_set(cache_key, data)
         return data
     return None
+
+
+def fetch_radarr_calendar(
+    start_date: date,
+    end_date: date,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> List[Dict]:
+    """Fetch Radarr calendar rows for a date range.
+
+    Returns movie payloads that include release/date metadata without requiring
+    a full movie index pull.
+    """
+    url = url or settings.RADARR_URL
+    api_key = api_key or settings.RADARR_API_KEY
+    if not url or not api_key:
+        return []
+
+    endpoint = _build_endpoint(url, 'calendar')
+    start_text = start_date.isoformat()
+    end_text = end_date.isoformat()
+    cache_key = f'radarr_calendar:{endpoint}:{start_text}:{end_text}'
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    data = _get_json(
+        endpoint,
+        {
+            'apikey': api_key,
+            'start': start_text,
+            'end': end_text,
+            'includeSeries': 'false',
+        },
+    ) or []
+    _cache_set(cache_key, data)
+    return data
+
+
+def fetch_sonarr_calendar(
+    start_date: date,
+    end_date: date,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> List[Dict]:
+    """Fetch Sonarr calendar rows for a date range.
+
+    Returns episode payloads with airDate metadata and series identifiers.
+    """
+    url = url or settings.SONARR_URL
+    api_key = api_key or settings.SONARR_API_KEY
+    if not url or not api_key:
+        return []
+
+    endpoint = _build_endpoint(url, 'calendar')
+    start_text = start_date.isoformat()
+    end_text = end_date.isoformat()
+    cache_key = f'sonarr_calendar:{endpoint}:{start_text}:{end_text}'
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    data = _get_json(
+        endpoint,
+        {
+            'apikey': api_key,
+            'start': start_text,
+            'end': end_text,
+            'includeSeries': 'true',
+        },
+    ) or []
+    _cache_set(cache_key, data)
+    return data
