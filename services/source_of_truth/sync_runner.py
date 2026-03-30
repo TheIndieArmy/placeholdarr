@@ -10,10 +10,12 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Season, Series
 from services.source_of_truth.arr_api import (
+    fetch_radarr_movie,
     fetch_radarr_movies,
     fetch_sonarr_episodefile,
     fetch_sonarr_episodes,
     fetch_sonarr_series,
+    fetch_sonarr_series_item,
 )
 
 
@@ -531,6 +533,166 @@ def run_full_sync(
     except Exception as e:
         session.rollback()
         logger.error(f"Source-of-truth fullsync failed: {e}", extra={'emoji_type': 'error'})
+        raise
+    finally:
+        session.close()
+
+
+def sync_radarr_movies_by_ids(
+    movie_ids: Iterable[int],
+    *,
+    base_url: str,
+    api_key: str,
+    is_4k: bool,
+) -> dict:
+    """Targeted movie sync for a specific Radarr instance and movie IDs."""
+    ids = sorted({int(mid) for mid in (movie_ids or []) if mid})
+    stats = {
+        'movies_requested': len(ids),
+        'movies_seen': 0,
+        'movies_created': 0,
+        'movies_updated': 0,
+        'movies_marked_deleted': 0,
+    }
+    if not ids:
+        return stats
+
+    session = get_session()
+    try:
+        for movie_id in ids:
+            movie = fetch_radarr_movie(movie_id, base_url, api_key)
+            if not isinstance(movie, dict):
+                marked = (
+                    session.query(Movie)
+                    .filter(and_(Movie.radarrid == movie_id, Movie.is_4k == is_4k))
+                    .update({'is_deleted': True}, synchronize_session=False)
+                )
+                stats['movies_marked_deleted'] += int(marked or 0)
+                continue
+
+            fields = _movie_fields(movie, is_4k)
+            if not fields['tmdbid']:
+                continue
+            stats['movies_seen'] += 1
+            _, created = _upsert_movie(session, fields)
+            if created:
+                stats['movies_created'] += 1
+            else:
+                stats['movies_updated'] += 1
+
+        session.commit()
+        return stats
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def sync_sonarr_series_by_ids(
+    series_ids: Iterable[int],
+    *,
+    base_url: str,
+    api_key: str,
+    is_4k: bool,
+) -> dict:
+    """Targeted series+episode sync for a specific Sonarr instance and series IDs."""
+    ids = sorted({int(sid) for sid in (series_ids or []) if sid})
+    stats = {
+        'series_requested': len(ids),
+        'series_seen': 0,
+        'series_created': 0,
+        'series_updated': 0,
+        'series_marked_deleted': 0,
+        'seasons_created': 0,
+        'episodes_seen': 0,
+        'episodes_created': 0,
+        'episodes_updated': 0,
+    }
+    if not ids:
+        return stats
+
+    session = get_session()
+    try:
+        include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
+        for series_id in ids:
+            series_entry = fetch_sonarr_series_item(series_id, base_url, api_key)
+            if not isinstance(series_entry, dict):
+                marked = (
+                    session.query(Series)
+                    .filter(and_(Series.sonarrid == series_id, Series.is_4k == is_4k))
+                    .update({'is_deleted': True}, synchronize_session=False)
+                )
+                stats['series_marked_deleted'] += int(marked or 0)
+                continue
+
+            s_fields = _series_fields(series_entry, is_4k)
+            if not s_fields['tvdbid']:
+                continue
+
+            stats['series_seen'] += 1
+            series_row, created = _upsert_series(session, s_fields)
+            if created:
+                stats['series_created'] += 1
+            else:
+                stats['series_updated'] += 1
+
+            episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
+            season_rows_by_number: Dict[int, Season] = {}
+            season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
+            season_overview_by_number: Dict[int, str] = {}
+
+            for ep in episodes:
+                season_number = int(ep.get('seasonNumber') or 0)
+                if season_number == 0 and not include_specials:
+                    continue
+                season_row, season_created = _upsert_season(session, series_row, season_number)
+                season_rows_by_number[season_number] = season_row
+                if season_created:
+                    stats['seasons_created'] += 1
+
+                episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
+                ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
+
+                overview = str(ep.get('overview') or '').strip()
+                if overview and season_number not in season_overview_by_number:
+                    season_overview_by_number[season_number] = overview
+
+                rollup = season_rollups.setdefault(
+                    season_number,
+                    {'files': 0, 'episodes': 0, 'monitored': False, 'status': None},
+                )
+                rollup['episodes'] = int(rollup['episodes'] or 0) + 1
+                if ep_fields.get('has_file'):
+                    rollup['files'] = int(rollup['files'] or 0) + 1
+                rollup['monitored'] = bool(rollup['monitored']) or bool(ep_fields.get('sonarr_monitored'))
+                if not rollup.get('status') and ep_fields.get('sonarr_status'):
+                    rollup['status'] = ep_fields.get('sonarr_status')
+
+                stats['episodes_seen'] += 1
+                _, ep_created = _upsert_episode(session, ep_fields)
+                if ep_created:
+                    stats['episodes_created'] += 1
+                else:
+                    stats['episodes_updated'] += 1
+
+            for season_number, season_row in season_rows_by_number.items():
+                rollup = season_rollups.get(season_number) or {}
+                files_count = int(rollup.get('files') or 0)
+                season_row.has_files = bool(files_count)
+                season_row.seasonfile_count = files_count
+                season_row.sonarr_monitored = bool(rollup.get('monitored'))
+                if rollup.get('status'):
+                    season_row.sonarr_status = str(rollup['status'])
+                if season_overview_by_number.get(season_number):
+                    season_row.sonarr_season_overview = season_overview_by_number[season_number]
+                season_row.is_deleted = False
+                session.add(season_row)
+
+        session.commit()
+        return stats
+    except Exception:
+        session.rollback()
         raise
     finally:
         session.close()

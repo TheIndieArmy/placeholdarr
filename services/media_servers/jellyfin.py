@@ -35,29 +35,28 @@ def refresh_jellyfin_paths(folders: set[str]) -> dict[str, int]:
     sess = _session()
     url = _build_url("Library/Media/Updated")
 
-    for folder in sorted(folders):
-        try:
-            abs_folder = os.path.abspath(folder)
-            payload = {"Updates": [{"Path": abs_folder, "UpdateType": "Created"}]}
-            resp = sess.post(url, json=payload, timeout=15)
-            if resp.status_code in (200, 204):
-                refreshed += 1
-                logger.info(
-                    f"Jellyfin scan triggered for: {abs_folder}",
-                    extra={"emoji_type": "refresh"},
-                )
-            else:
-                failed += 1
-                logger.warning(
-                    f"Jellyfin scan returned {resp.status_code} for {abs_folder}: {resp.text}",
-                    extra={"emoji_type": "warning"},
-                )
-        except Exception as e:
-            failed += 1
+    abs_folders = [os.path.abspath(folder) for folder in sorted(folders)]
+    payload = {"Updates": [{"Path": folder, "UpdateType": "Created"} for folder in abs_folders]}
+    try:
+        resp = sess.post(url, json=payload, timeout=15)
+        if resp.status_code in (200, 204):
+            refreshed = len(abs_folders)
+            logger.info(
+                f"Jellyfin scan triggered for {refreshed} item(s) in single batched request.",
+                extra={"emoji_type": "refresh"},
+            )
+        else:
+            failed = len(abs_folders)
             logger.warning(
-                f"Jellyfin path refresh failed for folder={folder}: {e}",
+                f"Jellyfin batched scan returned {resp.status_code}: {resp.text}",
                 extra={"emoji_type": "warning"},
             )
+    except Exception as e:
+        failed = len(abs_folders)
+        logger.warning(
+            f"Jellyfin batched path refresh failed: {e}",
+            extra={"emoji_type": "warning"},
+        )
 
     return {"refreshed": refreshed, "failed": failed}
 
@@ -116,3 +115,36 @@ def refresh_jellyfin_sections(has_movies: bool, has_episodes: bool) -> dict[str,
             )
 
     return {"refreshed": refreshed, "failed": failed}
+
+
+def refresh_jellyfin_item_metadata(item_id: str) -> bool:
+    """Trigger metadata refresh for a specific Jellyfin item id."""
+    if not getattr(settings, "jellyfin_enabled", False):
+        return False
+
+    target = str(item_id or "").strip()
+    if not target:
+        return False
+
+    sess = _session()
+    endpoint = _build_url(f"Items/{target}/Refresh")
+    params = {
+        "MetadataRefreshMode": "Default",
+        "ImageRefreshMode": "None",
+        "ReplaceAllMetadata": "false",
+        "ReplaceAllImages": "false",
+    }
+    try:
+        resp = sess.post(endpoint, params=params, timeout=15)
+        if resp.status_code in (200, 204):
+            return True
+        logger.warning(
+            f"Jellyfin item refresh returned {resp.status_code} for item_id={target}: {resp.text}",
+            extra={"emoji_type": "warning"},
+        )
+    except Exception as e:
+        logger.warning(
+            f"Jellyfin item refresh failed for item_id={target}: {e}",
+            extra={"emoji_type": "warning"},
+        )
+    return False

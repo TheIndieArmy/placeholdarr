@@ -8,7 +8,7 @@ CANONICAL_EVENT_ALIASES: dict[str, tuple[str, ...]] = {
     "series_added": ("seriesadd",),
     "movie_added": ("movieadd", "movieadded"),
     "movie_imported": ("moviefileimported",),
-    "episode_imported": ("episodefileimported", "download"),
+    "episode_imported": ("episodefileimported",),
     "movie_file_deleted": ("moviefiledelete",),
     "episode_file_deleted": ("episodefiledelete",),
     "movie_deleted": ("moviedelete",),
@@ -43,8 +43,41 @@ def infer_raw_event_type(payload: dict[str, Any] | Any) -> str:
     return str(raw or "unknown").strip().lower()
 
 
-def normalize_event_type(raw_event_type: str | None) -> NormalizedEventType:
+def _normalize_download_event(instance: str | None) -> NormalizedEventType:
+    """Resolve ambiguous ARR download events using webhook instance."""
+    normalized_instance = str(instance or "").strip().lower()
+
+    if normalized_instance.startswith("radarr"):
+        return NormalizedEventType(
+            raw_event_type="download",
+            canonical_event_type="movie_imported",
+            matched_alias="download",
+            is_known=True,
+        )
+
+    if normalized_instance.startswith("sonarr"):
+        return NormalizedEventType(
+            raw_event_type="download",
+            canonical_event_type="episode_imported",
+            matched_alias="download",
+            is_known=True,
+        )
+
+    # Instance is required and validated before processing webhook events.
+    return NormalizedEventType(
+        raw_event_type="download",
+        canonical_event_type="unknown",
+        matched_alias=None,
+        is_known=False,
+    )
+
+
+def normalize_event_type(raw_event_type: str | None, instance: str | None = None) -> NormalizedEventType:
     raw = str(raw_event_type or "unknown").strip().lower()
+
+    if raw == "download":
+        return _normalize_download_event(instance)
+
     for canonical, aliases in CANONICAL_EVENT_ALIASES.items():
         for alias in aliases:
             if raw == alias:

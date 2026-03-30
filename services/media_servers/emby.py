@@ -139,3 +139,36 @@ def refresh_emby_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
             )
 
     return {"refreshed": refreshed, "failed": failed}
+
+
+def refresh_emby_item_metadata(item_id: str) -> bool:
+    """Trigger metadata refresh for a specific Emby item id."""
+    if not getattr(settings, "emby_enabled", False):
+        return False
+
+    target = str(item_id or "").strip()
+    if not target:
+        return False
+
+    sess = _session()
+    endpoint = _build_url(f"Items/{target}/Refresh")
+    params = {
+        "MetadataRefreshMode": "Default",
+        "ImageRefreshMode": "None",
+        "ReplaceAllMetadata": "false",
+        "ReplaceAllImages": "false",
+    }
+    try:
+        resp = sess.post(endpoint, params=params, timeout=15)
+        if resp.status_code in (200, 204):
+            return True
+        logger.warning(
+            f"Emby item refresh returned {resp.status_code} for item_id={target}: {resp.text}",
+            extra={"emoji_type": "warning"},
+        )
+    except Exception as e:
+        logger.warning(
+            f"Emby item refresh failed for item_id={target}: {e}",
+            extra={"emoji_type": "warning"},
+        )
+    return False

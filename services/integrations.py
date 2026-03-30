@@ -1,24 +1,105 @@
 from core.config import settings
 from core.logger import logger
 import os
+from urllib.parse import urlsplit, urlunsplit
+
+import requests
+
+
+def _configured_arr_instances() -> list[tuple[str, str, str]]:
+    instances: list[tuple[str, str, str]] = []
+    if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
+        instances.append(('radarr_std', 'radarr', settings.RADARR_URL))
+    if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
+        instances.append(('radarr_4k', 'radarr', settings.RADARR_4K_URL))
+    if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
+        instances.append(('sonarr_std', 'sonarr', settings.SONARR_URL))
+    if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None):
+        instances.append(('sonarr_4k', 'sonarr', settings.SONARR_4K_URL))
+    return instances
+
+
+def _build_endpoint(base_url: str, resource: str) -> str:
+    root = str(base_url or '').rstrip('/')
+    if '/api/' in root or root.endswith('/api'):
+        return f"{root}/{resource.lstrip('/')}"
+    return f"{root}/api/v3/{resource.lstrip('/')}"
+
+
+def _probe_arr_instance_live(instance_key: str, arr_type: str) -> bool:
+    if arr_type == 'radarr':
+        url = settings.RADARR_4K_URL if instance_key == 'radarr_4k' else settings.RADARR_URL
+        api_key = settings.RADARR_4K_API_KEY if instance_key == 'radarr_4k' else settings.RADARR_API_KEY
+    else:
+        url = settings.SONARR_4K_URL if instance_key == 'sonarr_4k' else settings.SONARR_URL
+        api_key = settings.SONARR_4K_API_KEY if instance_key == 'sonarr_4k' else settings.SONARR_API_KEY
+
+    if not url or not api_key:
+        return False
+
+    endpoint = _build_endpoint(url, 'system/status')
+    safe_url = endpoint
+    try:
+        parts = urlsplit(endpoint)
+        safe_url = urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
+    except Exception:
+        pass
+
+    try:
+        response = requests.get(endpoint, params={'apikey': api_key}, timeout=5)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        logger.warning(
+            f'ARR live startup check failed for {instance_key} url={safe_url} error_type={type(e).__name__}',
+            extra={'emoji_type': 'warning'},
+        )
+        return False
 
 
 def check_all_arr_webhooks() -> bool:
-    """Return True when at least one ARR service appears configured.
+    """Startup ARR preflight check.
 
-    This keeps startup behavior deterministic while the webhook registration
-    lifecycle is rebuilt in dedicated modules.
+    Modes controlled by STARTUP_ARR_CHECK_MODE:
+    - off: skip checks
+    - config: verify at least one ARR instance is configured
+    - live: probe each configured instance with a live API call and require at least one to be reachable
     """
-    candidates = [
-        (getattr(settings, 'RADARR_URL', None), getattr(settings, 'RADARR_API_KEY', None)),
-        (getattr(settings, 'RADARR_4K_URL', None), getattr(settings, 'RADARR_4K_API_KEY', None)),
-        (getattr(settings, 'SONARR_URL', None), getattr(settings, 'SONARR_API_KEY', None)),
-        (getattr(settings, 'SONARR_4K_URL', None), getattr(settings, 'SONARR_4K_API_KEY', None)),
-    ]
-    configured = any(url and key for url, key in candidates)
-    if not configured:
-        logger.debug('No ARR webhook sources configured yet', extra={'emoji_type': 'debug'})
-    return configured
+    mode = str(getattr(settings, 'STARTUP_ARR_CHECK_MODE', 'config') or 'config').strip().lower()
+    instances = _configured_arr_instances()
+
+    if mode == 'off':
+        logger.info('ARR startup check skipped (STARTUP_ARR_CHECK_MODE=off)', extra={'emoji_type': 'info'})
+        return True
+
+    if mode == 'config':
+        configured = bool(instances)
+        if not configured:
+            logger.debug('No ARR sources configured in startup config check mode', extra={'emoji_type': 'debug'})
+        return configured
+
+    if mode == 'live':
+        if not instances:
+            logger.debug('No ARR sources configured in startup live check mode', extra={'emoji_type': 'debug'})
+            return False
+
+        reachable = 0
+        for instance_key, arr_type, _ in instances:
+            if _probe_arr_instance_live(instance_key, arr_type):
+                reachable += 1
+
+        if reachable == 0:
+            logger.warning('No ARR instances reachable during startup live check', extra={'emoji_type': 'warning'})
+            return False
+
+        logger.info(
+            f'ARR live startup check passed for {reachable}/{len(instances)} configured instance(s)',
+            extra={'emoji_type': 'success'},
+        )
+        return True
+
+    logger.warning(f'Unknown STARTUP_ARR_CHECK_MODE={mode!r}; falling back to config check', extra={'emoji_type': 'warning'})
+    return bool(instances)
 
 
 def delete_dummy_file(path: str | None = None, *args, **kwargs) -> bool:

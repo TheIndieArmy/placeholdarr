@@ -254,6 +254,31 @@ class FSScanRun(Base):
 
     def __repr__(self):
         return f"<FSScanRun(id={self.id}, run_id={self.run_id!r})>"
+
+
+class ArrState(Base):
+    __tablename__ = 'arr_state'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Instance key examples: radarr_std, radarr_4k, sonarr_std, sonarr_4k
+    instance_key = Column(String, nullable=False, unique=True)
+    arr_type = Column(String, nullable=False)  # radarr | sonarr
+    last_history_id = Column(Integer, nullable=True)
+    last_history_checked_at = Column(DateTime(timezone=True), nullable=True)
+    first_full_sync_completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
+
+    __table_args__ = (
+        Index('ix_arr_state_arr_type', 'arr_type'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ArrState(id={self.id}, instance_key={self.instance_key!r}, "
+            f"last_history_id={self.last_history_id})>"
+        )
+
 class Series(Base):
     __tablename__ = "series"
     __table_args__ = (

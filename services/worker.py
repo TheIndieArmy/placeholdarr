@@ -3,20 +3,25 @@ from datetime import datetime, timezone
 
 from sqlalchemy import and_
 
-from core.config import settings
 from core.logger import logger
 from services.event_normalization import legacy_dispatch_event_type
 from services.postgres.db import get_session
 from services.postgres.models import EventLog, Job
-from services.source_of_truth.event_add import (
+from services.source_of_truth.event_handlers import (
+    process_episode_file_deleted_event,
     process_episode_imported_event,
     process_movie_add_event,
+    process_movie_file_deleted_event,
     process_movie_imported_event,
     process_series_add_event,
 )
 from services.source_of_truth.observation_trail import (
     TRAIL_JOB_TYPE,
     process_observation_trail_job,
+)
+from services.source_of_truth.import_grace import (
+    IMPORT_GRACE_JOB_TYPE,
+    process_import_grace_job,
 )
 from services.source_of_truth.status_reconciler import (
     NFO_REFRESH_JOB_TYPE,
@@ -36,7 +41,7 @@ def _claim_next_job(session):
                 (Job.run_after.is_(None) | (Job.run_after <= now)),
             )
         )
-        .order_by(Job.id.asc())
+        .order_by(Job.run_after.asc().nullsfirst(), Job.id.asc())
         .with_for_update(skip_locked=True)
         .first()
     )
@@ -92,35 +97,33 @@ def _process_webhook_event(session, job: Job):
         )
         handled = True
     elif event_type == 'movie_imported' or dispatch_type == 'moviefileimported':
-        if bool(getattr(settings, 'ENABLE_IMPORT_EVENT_HANDLERS', False)):
-            result = process_movie_imported_event(payload, instance=instance)
-            logger.info(
-                f"Processed movie_imported event_log_id={event.id} movie_id={result.get('movie_id')}",
-                extra={'emoji_type': 'success'},
-            )
-            handled = True
-        else:
-            event.error_message = f'feature_disabled:import_handlers:{event_type}'
-            logger.info(
-                f"Import handler disabled event_log_id={event.id} canonical={event_type}",
-                extra={'emoji_type': 'info'},
-            )
-            handled = True
+        result = process_movie_imported_event(payload, instance=instance)
+        logger.info(
+            f"Processed movie_imported event_log_id={event.id} movie_id={result.get('movie_id')}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
     elif event_type == 'episode_imported' or dispatch_type in ('episodefileimported', 'download'):
-        if bool(getattr(settings, 'ENABLE_IMPORT_EVENT_HANDLERS', False)):
-            result = process_episode_imported_event(payload, instance=instance)
-            logger.info(
-                f"Processed episode_imported event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
-                extra={'emoji_type': 'success'},
-            )
-            handled = True
-        else:
-            event.error_message = f'feature_disabled:import_handlers:{event_type}'
-            logger.info(
-                f"Import handler disabled event_log_id={event.id} canonical={event_type}",
-                extra={'emoji_type': 'info'},
-            )
-            handled = True
+        result = process_episode_imported_event(payload, instance=instance)
+        logger.info(
+            f"Processed episode_imported event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
+    elif event_type == 'movie_file_deleted' or dispatch_type == 'moviefiledelete':
+        result = process_movie_file_deleted_event(payload, instance=instance)
+        logger.info(
+            f"Processed movie_file_deleted event_log_id={event.id} movie_id={result.get('movie_id')}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
+    elif event_type == 'episode_file_deleted' or dispatch_type == 'episodefiledelete':
+        result = process_episode_file_deleted_event(payload, instance=instance)
+        logger.info(
+            f"Processed episode_file_deleted event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
 
     if not handled:
         event.error_message = f'unhandled_event_type:{event_type}'
@@ -188,6 +191,18 @@ def _process_claimed_job(session, job: Job):
         result = process_nfo_refresh_job(session, job)
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'nfo_refresh_failed'))
+        _mark_job_done(session, job)
+        return
+
+    if job.job_type == IMPORT_GRACE_JOB_TYPE:
+        logger.debug(f"Processing import_grace job: job_id={getattr(job, 'id', '?')}, payload={getattr(job, 'payload', '?')}", extra={'emoji_type': 'debug'})
+        result = process_import_grace_job(session, job)
+        logger.debug(f"import_grace job result: job_id={getattr(job, 'id', '?')}, result={result}", extra={'emoji_type': 'debug'})
+        if not result.get('ok', False):
+            reason = str(result.get('reason') or 'import_grace_failed')
+            logger.warning(f"import_grace job failed: job_id={getattr(job, 'id', '?')}, reason={reason}", extra={'emoji_type': 'warning'})
+            raise ValueError(reason)
+        logger.info(f"import_grace job completed: job_id={getattr(job, 'id', '?')}, phase={result.get('phase')}", extra={'emoji_type': 'success'})
         _mark_job_done(session, job)
         return
 

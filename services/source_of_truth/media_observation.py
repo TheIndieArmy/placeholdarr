@@ -255,6 +255,55 @@ def _plex_item_metadata_ready(item: Any) -> bool:
 		return False
 
 
+def _required_plex_metadata_confirm_polls() -> int:
+	"""Return how many consecutive metadata-ready polls are required before status writes."""
+	try:
+		return max(1, int(getattr(settings, 'PLEX_METADATA_READY_CONFIRM_POLLS', 2)))
+	except Exception:
+		return 2
+
+
+def _get_plex_metadata_ready_seen(placeholder: Placeholder) -> int:
+	extra = getattr(placeholder, 'extra', None)
+	if not isinstance(extra, dict):
+		return 0
+	try:
+		return max(0, int(extra.get('plex_metadata_ready_seen') or 0))
+	except Exception:
+		return 0
+
+
+def _set_plex_metadata_ready_seen(placeholder: Placeholder, count: int) -> None:
+	extra = getattr(placeholder, 'extra', None)
+	data: dict[str, Any] = dict(extra) if isinstance(extra, dict) else {}
+	if count <= 0:
+		data.pop('plex_metadata_ready_seen', None)
+	else:
+		data['plex_metadata_ready_seen'] = int(count)
+	placeholder.extra = data
+
+
+def _record_plex_metadata_ready_observation(placeholder: Placeholder, is_ready: bool) -> bool:
+	"""Track consecutive metadata-ready observations and return True once confirmed."""
+	required = _required_plex_metadata_confirm_polls()
+	if required <= 1:
+		if not is_ready:
+			_set_plex_metadata_ready_seen(placeholder, 0)
+		return is_ready
+
+	if not is_ready:
+		_set_plex_metadata_ready_seen(placeholder, 0)
+		return False
+
+	seen = _get_plex_metadata_ready_seen(placeholder) + 1
+	if seen >= required:
+		_set_plex_metadata_ready_seen(placeholder, 0)
+		return True
+
+	_set_plex_metadata_ready_seen(placeholder, seen)
+	return False
+
+
 def _build_plex_snapshot() -> dict[str, Any] | None:
 	"""Build a one-attempt in-memory Plex snapshot for fast multi-item matching."""
 	if not _is_enabled('plex'):
@@ -771,14 +820,21 @@ def observe_placeholder_plex_id(session, placeholder: Placeholder, movie: Movie 
 
 
 def _is_placeholder_fully_resolved(placeholder: Placeholder) -> bool:
-	# Observation polling is intentionally Plex-only for now.
-	if not _is_enabled('plex'):
-		return True
-	# Must have both identity (ratingKey) *and* confirmed metadata projection.
-	has_id = bool(getattr(placeholder, 'plex_placeholder_id', None))
-	if not has_id:
+	if _is_enabled('plex'):
+		# Must have both identity (ratingKey) and confirmed metadata projection.
+		has_plex_id = bool(getattr(placeholder, 'plex_placeholder_id', None))
+		if not has_plex_id:
+			return False
+		if getattr(placeholder, 'media_lookup_error', None) == 'plex_metadata_pending':
+			return False
+
+	if _is_enabled('jellyfin') and not bool(getattr(placeholder, 'jellyfin_placeholder_id', None)):
 		return False
-	return getattr(placeholder, 'media_lookup_error', None) != 'plex_metadata_pending'
+
+	if _is_enabled('emby') and not bool(getattr(placeholder, 'emby_placeholder_id', None)):
+		return False
+
+	return True
 
 
 def _placeholder_display_status(placeholder: Placeholder) -> str | None:
@@ -889,7 +945,8 @@ def observe_placeholder_media_ids(
 						persist_episode_hierarchy_plex_identity(session, series, season, episode, plex_item)
 				except Exception:
 					pass
-				if plex_ready and _should_send_status_updates():
+				confirmed_ready = _record_plex_metadata_ready_observation(placeholder, plex_ready)
+				if confirmed_ready and _should_send_status_updates():
 					try:
 						intents = []
 						status = _placeholder_display_status(placeholder)
@@ -903,7 +960,7 @@ def observe_placeholder_media_ids(
 							batch_update_plex_statuses(session, intents)
 					except Exception:
 						pass
-				elif not plex_ready:
+				if not confirmed_ready:
 					placeholder.media_lookup_error = 'plex_metadata_pending'
 
 		elif meta_pending:
@@ -918,7 +975,9 @@ def observe_placeholder_media_ids(
 						phase2_item = _plex_conn.fetchItem(f'/library/metadata/{stored_plex_id}')
 				except Exception:
 					pass
-				if phase2_item is not None and _plex_item_metadata_ready(phase2_item):
+				phase2_ready = bool(phase2_item is not None and _plex_item_metadata_ready(phase2_item))
+				confirmed_ready = _record_plex_metadata_ready_observation(placeholder, phase2_ready)
+				if confirmed_ready:
 					# Metadata is now available — apply status projection and clear pending state.
 					result['plex_progress'] = 1
 					result['observed_plex'] = 1
@@ -937,6 +996,38 @@ def observe_placeholder_media_ids(
 								batch_update_plex_statuses(session, intents)
 						except Exception:
 							pass
+				else:
+					if phase2_ready:
+						result['plex_progress'] = 1
+					placeholder.media_lookup_error = 'plex_metadata_pending'
+
+	if _is_enabled('jellyfin') and not getattr(placeholder, 'jellyfin_placeholder_id', None):
+		jellyfin_id: str | None = None
+		try:
+			if movie is not None:
+				jellyfin_id = _resolve_jellyfin_movie_id(movie)
+			elif episode is not None and season and series:
+				jellyfin_id = _resolve_jellyfin_episode_id(episode, season, series)
+		except Exception:
+			jellyfin_id = None
+
+		if jellyfin_id:
+			_set_jellyfin_observed(placeholder, jellyfin_id)
+			result['observed_jellyfin'] = 1
+
+	if _is_enabled('emby') and not getattr(placeholder, 'emby_placeholder_id', None):
+		emby_id: str | None = None
+		try:
+			if movie is not None:
+				emby_id = _resolve_emby_movie_id(movie)
+			elif episode is not None and season and series:
+				emby_id = _resolve_emby_episode_id(episode, season, series)
+		except Exception:
+			emby_id = None
+
+		if emby_id:
+			_set_emby_observed(placeholder, emby_id)
+			result['observed_emby'] = 1
 
 	if _is_placeholder_fully_resolved(placeholder):
 		placeholder.media_lookup_error = None
@@ -948,6 +1039,10 @@ def observe_placeholder_media_ids(
 		missing: list[str] = []
 		if _is_enabled('plex') and not getattr(placeholder, 'plex_placeholder_id', None):
 			missing.append('plex')
+		if _is_enabled('jellyfin') and not getattr(placeholder, 'jellyfin_placeholder_id', None):
+			missing.append('jellyfin')
+		if _is_enabled('emby') and not getattr(placeholder, 'emby_placeholder_id', None):
+			missing.append('emby')
 		placeholder.media_lookup_error = f"not_found:{','.join(missing)}" if missing else None
 
 	placeholder.updated_at = func.now()
@@ -1082,13 +1177,29 @@ def observe_placeholders_with_polling(
 	}
 	if not placeholders:
 		return stats
-	if not _is_enabled('plex'):
-		stats['stop_reason'] = 'plex_disabled'
+	if not any((_is_enabled('plex'), _is_enabled('jellyfin'), _is_enabled('emby'))):
+		stats['stop_reason'] = 'no_media_servers_enabled'
 		return stats
 
 	unresolved: list[Placeholder] = [p for p in placeholders if not _is_placeholder_fully_resolved(p)]
 	if not unresolved:
 		stats['stop_reason'] = 'all_resolved'
+		return stats
+
+	if not _is_enabled('plex'):
+		stats['attempts'] = 1
+		unresolved, pass_stats, resolved_delta, _ = _run_observation_pass(
+			session,
+			unresolved,
+			allow_title_fallback=allow_title_fallback,
+		)
+		stats['observed_plex'] += pass_stats.get('observed_plex', 0)
+		stats['observed_jellyfin'] += pass_stats.get('observed_jellyfin', 0)
+		stats['observed_emby'] += pass_stats.get('observed_emby', 0)
+		stats['status_updates_plex'] += pass_stats.get('status_updates_plex', 0)
+		stats['resolved_total'] = resolved_delta
+		stats['observe_failed'] = max(0, len(unresolved))
+		stats['stop_reason'] = 'single_pass_non_plex'
 		return stats
 
 	total_expected = len(unresolved)
@@ -1112,10 +1223,21 @@ def observe_placeholders_with_polling(
 
 	while unresolved:
 		stats['attempts'] += 1
+		pass_started = time.monotonic()
+		logger.info(
+			f"Observation poll pass #{stats['attempts']} starting with {len(unresolved)} unresolved item(s).",
+			extra={'emoji_type': 'info'},
+		)
 		unresolved, pass_stats, resolved_delta, progress_delta = _run_observation_pass(
 			session,
 			unresolved,
 			allow_title_fallback=allow_title_fallback,
+		)
+		pass_elapsed = time.monotonic() - pass_started
+		logger.info(
+			f"Observation poll pass #{stats['attempts']} finished in {pass_elapsed:.1f}s: "
+			f"resolved_delta={resolved_delta}, progress_delta={progress_delta}, remaining={len(unresolved)}.",
+			extra={'emoji_type': 'info'},
 		)
 		stats['observed_plex'] += pass_stats['observed_plex']
 		stats['observed_jellyfin'] += pass_stats['observed_jellyfin']

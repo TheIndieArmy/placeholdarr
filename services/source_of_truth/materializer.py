@@ -655,24 +655,10 @@ def run_materialization_for_entities(
 
     session = get_session()
     try:
-        actionable_movie_ids = [
-            r[0]
-            for r in session.query(Movie.id)
-            .filter(Movie.id.in_(movie_ids), Movie.determination.in_([DETERMINATION_NEEDS, DETERMINATION_OBSOLETE]))
-            .all()
-        ] if movie_ids else []
-
-        actionable_episode_ids = [
-            r[0]
-            for r in session.query(Episode.id)
-            .filter(Episode.id.in_(episode_ids), Episode.determination.in_([DETERMINATION_NEEDS, DETERMINATION_OBSOLETE]))
-            .all()
-        ] if episode_ids else []
-
-        stats = _run_materialization_for_ids(
+        stats = run_materialization_for_entities_in_session(
             session,
-            movie_ids=actionable_movie_ids,
-            episode_ids=actionable_episode_ids,
+            movie_ids=movie_ids,
+            episode_ids=episode_ids,
             observation_source=observation_source,
         )
         session.commit()
@@ -684,3 +670,34 @@ def run_materialization_for_entities(
         raise
     finally:
         session.close()
+
+
+def run_materialization_for_entities_in_session(
+    session,
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+    observation_source: str = "event_materialization",
+) -> dict[str, Any]:
+    movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
+    episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
+
+    actionable_movie_ids = [
+        r[0]
+        for r in session.query(Movie.id)
+        .filter(Movie.id.in_(movie_ids), Movie.determination.in_([DETERMINATION_NEEDS, DETERMINATION_OBSOLETE]))
+        .all()
+    ] if movie_ids else []
+
+    actionable_episode_ids = [
+        r[0]
+        for r in session.query(Episode.id)
+        .filter(Episode.id.in_(episode_ids), Episode.determination.in_([DETERMINATION_NEEDS, DETERMINATION_OBSOLETE]))
+        .all()
+    ] if episode_ids else []
+
+    return _run_materialization_for_ids(
+        session,
+        movie_ids=actionable_movie_ids,
+        episode_ids=actionable_episode_ids,
+        observation_source=observation_source,
+    )

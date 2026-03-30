@@ -73,11 +73,17 @@ class Settings(BaseSettings):
     SONARR_4K_URL: str = ""
     SONARR_4K_API_KEY: str = ""
 
-    # Sync Settings (grouped by instance)
-    RADARR_SYNC_ON_STARTUP: bool = os.getenv("RADARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    RADARR_4K_SYNC_ON_STARTUP: bool = os.getenv("RADARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    SONARR_SYNC_ON_STARTUP: bool = os.getenv("SONARR_SYNC_ON_STARTUP", "false").strip().lower() == "true"
-    SONARR_4K_SYNC_ON_STARTUP: bool = os.getenv("SONARR_4K_SYNC_ON_STARTUP", "false").strip().lower() == "true"
+    # Startup sync mode:
+    # - auto: first successful ARR startup run is full, then lite on later startups
+    # - full: always run full ARR startup sync
+    # - lite: run ARR history delta catch-up only
+    # - off: skip ARR startup sync
+    STARTUP_SYNC_MODE: Literal["auto", "full", "lite", "off"] = os.getenv("STARTUP_SYNC_MODE", "auto").split('#')[0].strip().lower()
+    # ARR startup check mode:
+    # - off: skip ARR preflight checks
+    # - config: verify configured URL/API-key pairs only
+    # - live: make live ARR API calls to verify reachability/auth
+    STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = os.getenv("STARTUP_ARR_CHECK_MODE", "config").split('#')[0].strip().lower()
     FULL_SYNC_INTERVAL_HOURS: int = int(os.getenv("FULL_SYNC_INTERVAL_HOURS", "0").split('#')[0].strip())
 
     # Library Paths
@@ -153,6 +159,10 @@ class Settings(BaseSettings):
     ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
     ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
     ENABLE_PLAYBACK_EVENT_HANDLERS: bool = os.getenv("ENABLE_PLAYBACK_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
+    IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
+    IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
+    PLEX_METADATA_READY_CONFIRM_POLLS: int = int(os.getenv("PLEX_METADATA_READY_CONFIRM_POLLS", "2").split('#')[0].strip())
     ENABLE_STATUS_ORCHESTRATOR_CALENDAR: bool = os.getenv("ENABLE_STATUS_ORCHESTRATOR_CALENDAR", "true").split('#')[0].strip().lower() == "true"
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.

@@ -61,15 +61,15 @@ def validate_webhook_instance(instance: str | None) -> str | None:
     return None
 
 
-def _infer_event_type(payload: Dict[str, Any]) -> str:
+def _infer_event_type(payload: Dict[str, Any], instance: str | None = None) -> str:
     raw_event_type = infer_raw_event_type(payload)
-    normalized = normalize_event_type(raw_event_type)
+    normalized = normalize_event_type(raw_event_type, instance=instance)
     return normalized.canonical_event_type
 
 
-def _infer_event_meta(payload: Dict[str, Any]) -> dict[str, Any]:
+def _infer_event_meta(payload: Dict[str, Any], instance: str | None = None) -> dict[str, Any]:
     raw_event_type = infer_raw_event_type(payload)
-    normalized = normalize_event_type(raw_event_type)
+    normalized = normalize_event_type(raw_event_type, instance=instance)
     return {
         'raw_event_type': normalized.raw_event_type,
         'canonical_event_type': normalized.canonical_event_type,
@@ -107,7 +107,7 @@ def validate_webhook_payload(
     instance: str | None = None,
 ) -> tuple[bool, str | None, str, dict[str, Any]]:
     """Validate webhook payload and return (ok, reason, canonical_event_type, event_meta)."""
-    event_meta = _infer_event_meta(payload)
+    event_meta = _infer_event_meta(payload, instance=instance)
     event_type = str(event_meta.get('canonical_event_type') or 'unknown')
     reason = validate_webhook_instance(instance)
     if reason:

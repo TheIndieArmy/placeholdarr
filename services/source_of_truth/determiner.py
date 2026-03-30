@@ -365,6 +365,31 @@ def run_determination_for_entities(
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
 
     session = get_session()
+    try:
+        stats = run_determination_for_entities_in_session(
+            session,
+            movie_ids=movie_ids,
+            episode_ids=episode_ids,
+        )
+        session.commit()
+        logger.info(f"Scoped determination complete: {stats}", extra={'emoji_type': 'success'})
+        return stats
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Scoped determination failed: {e}", extra={'emoji_type': 'error'})
+        raise
+    finally:
+        session.close()
+
+
+def run_determination_for_entities_in_session(
+    session,
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+) -> dict:
+    movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
+    episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
+
     stats = {
         'movies_total': 0,
         'movies_changed': 0,
@@ -376,80 +401,71 @@ def run_determination_for_entities(
         'needs_placeholder': 0,
     }
 
-    try:
-        placeholders_enabled = bool(getattr(settings, 'ENABLE_COMING_SOON_PLACEHOLDERS', True))
-        lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
-        now_date = datetime.now(timezone.utc).date()
+    placeholders_enabled = bool(getattr(settings, 'ENABLE_COMING_SOON_PLACEHOLDERS', True))
+    lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
+    now_date = datetime.now(timezone.utc).date()
 
-        movies_q = session.query(Movie)
-        if movie_ids:
-            movies_q = movies_q.filter(Movie.id.in_(movie_ids))
-        else:
-            movies_q = movies_q.filter(Movie.id == -1)
-        movies = movies_q.all()
-        stats['movies_total'] = len(movies)
+    movies_q = session.query(Movie)
+    if movie_ids:
+        movies_q = movies_q.filter(Movie.id.in_(movie_ids))
+    else:
+        movies_q = movies_q.filter(Movie.id == -1)
+    movies = movies_q.all()
+    stats['movies_total'] = len(movies)
 
-        for movie in movies:
-            value = _compute_determination(
-                bool(getattr(movie, 'has_placeholder', False)),
-                bool(getattr(movie, 'has_file', False)),
-                bool(getattr(movie, 'is_deleted', False)),
-                target_date=_preferred_movie_release_date(movie),
-                lookahead_days=lookahead_days,
-                placeholders_enabled=placeholders_enabled,
-                now_date=now_date,
-            )
-            stats[value] += 1
-            if getattr(movie, 'determination', None) != value:
-                movie.determination = value
-                movie.determination_updated_at = func.now()
-                session.add(movie)
-                stats['movies_changed'] += 1
+    for movie in movies:
+        value = _compute_determination(
+            bool(getattr(movie, 'has_placeholder', False)),
+            bool(getattr(movie, 'has_file', False)),
+            bool(getattr(movie, 'is_deleted', False)),
+            target_date=_preferred_movie_release_date(movie),
+            lookahead_days=lookahead_days,
+            placeholders_enabled=placeholders_enabled,
+            now_date=now_date,
+        )
+        stats[value] += 1
+        if getattr(movie, 'determination', None) != value:
+            movie.determination = value
+            movie.determination_updated_at = func.now()
+            session.add(movie)
+            stats['movies_changed'] += 1
 
-        include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
-        episodes_q = session.query(Episode)
-        if episode_ids:
-            episodes_q = episodes_q.filter(Episode.id.in_(episode_ids))
-        else:
-            episodes_q = episodes_q.filter(Episode.id == -1)
-        episodes = episodes_q.all()
-        stats['episodes_total'] = len(episodes)
+    include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
+    episodes_q = session.query(Episode)
+    if episode_ids:
+        episodes_q = episodes_q.filter(Episode.id.in_(episode_ids))
+    else:
+        episodes_q = episodes_q.filter(Episode.id == -1)
+    episodes = episodes_q.all()
+    stats['episodes_total'] = len(episodes)
 
-        for episode in episodes:
-            if not include_specials:
-                season = session.query(Season).filter(Season.id == episode.season_id).first()
-                if season and int(getattr(season, 'season_number', -1)) == 0:
-                    value = DETERMINATION_NOT_NEEDED
-                    stats[value] += 1
-                    if getattr(episode, 'determination', None) != value:
-                        episode.determination = value
-                        episode.determination_updated_at = func.now()
-                        session.add(episode)
-                        stats['episodes_changed'] += 1
-                    continue
+    for episode in episodes:
+        if not include_specials:
+            season = session.query(Season).filter(Season.id == episode.season_id).first()
+            if season and int(getattr(season, 'season_number', -1)) == 0:
+                value = DETERMINATION_NOT_NEEDED
+                stats[value] += 1
+                if getattr(episode, 'determination', None) != value:
+                    episode.determination = value
+                    episode.determination_updated_at = func.now()
+                    session.add(episode)
+                    stats['episodes_changed'] += 1
+                continue
 
-            value = _compute_determination(
-                bool(getattr(episode, 'has_placeholder', False)),
-                bool(getattr(episode, 'has_file', False)),
-                bool(getattr(episode, 'is_deleted', False)),
-                target_date=getattr(episode, 'air_date', None),
-                lookahead_days=lookahead_days,
-                placeholders_enabled=placeholders_enabled,
-                now_date=now_date,
-            )
-            stats[value] += 1
-            if getattr(episode, 'determination', None) != value:
-                episode.determination = value
-                episode.determination_updated_at = func.now()
-                session.add(episode)
-                stats['episodes_changed'] += 1
+        value = _compute_determination(
+            bool(getattr(episode, 'has_placeholder', False)),
+            bool(getattr(episode, 'has_file', False)),
+            bool(getattr(episode, 'is_deleted', False)),
+            target_date=getattr(episode, 'air_date', None),
+            lookahead_days=lookahead_days,
+            placeholders_enabled=placeholders_enabled,
+            now_date=now_date,
+        )
+        stats[value] += 1
+        if getattr(episode, 'determination', None) != value:
+            episode.determination = value
+            episode.determination_updated_at = func.now()
+            session.add(episode)
+            stats['episodes_changed'] += 1
 
-        session.commit()
-        logger.info(f"Scoped determination complete: {stats}", extra={'emoji_type': 'success'})
-        return stats
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Scoped determination failed: {e}", extra={'emoji_type': 'error'})
-        raise
-    finally:
-        session.close()
+    return stats

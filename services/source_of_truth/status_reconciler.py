@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 
 from core.config import settings
 from core.logger import logger
+from services.media_servers.emby import refresh_emby_item_metadata
+from services.media_servers.jellyfin import refresh_jellyfin_item_metadata
 from services.placeholders import ensure_episode_nfo, ensure_movie_nfo, ensure_series_nfo
 from services.media_servers.plex_status_writer import batch_update_plex_statuses
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder, Job, Season, Series
-from datetime import datetime, timezone
+from services.source_of_truth.media_observation import (
+    _resolve_emby_episode_id,
+    _resolve_emby_movie_id,
+    _resolve_jellyfin_episode_id,
+    _resolve_jellyfin_movie_id,
+)
 
 
 STATUS_PROJECTION_JOB_TYPE = "status_projection"
@@ -189,6 +197,75 @@ def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) ->
     return bool(episode_written or series_written)
 
 
+def _resolve_item_ids_for_remote_refresh(session, placeholder: Placeholder, movie: Movie | None, episode: Episode | None) -> dict[str, str]:
+    ids: dict[str, str] = {}
+
+    jf_id = str(getattr(placeholder, "jellyfin_placeholder_id", "") or "").strip()
+    emby_id = str(getattr(placeholder, "emby_placeholder_id", "") or "").strip()
+
+    season = None
+    series = None
+    if episode is not None:
+        season = session.query(Season).get(episode.season_id) if episode.season_id else None
+        series = session.query(Series).get(season.series_id) if season and season.series_id else None
+
+    if not jf_id and getattr(settings, "ENABLE_JELLYFIN", False):
+        try:
+            if movie is not None:
+                jf_id = str(_resolve_jellyfin_movie_id(movie) or "").strip()
+            elif episode is not None and season and series:
+                jf_id = str(_resolve_jellyfin_episode_id(episode, season, series) or "").strip()
+        except Exception:
+            jf_id = ""
+        if jf_id:
+            placeholder.jellyfin_placeholder_id = jf_id
+            if not getattr(placeholder, "jellyfin_id_observed_at", None):
+                placeholder.jellyfin_id_observed_at = datetime.now(timezone.utc)
+
+    if not emby_id and getattr(settings, "ENABLE_EMBY", False):
+        try:
+            if movie is not None:
+                emby_id = str(_resolve_emby_movie_id(movie) or "").strip()
+            elif episode is not None and season and series:
+                emby_id = str(_resolve_emby_episode_id(episode, season, series) or "").strip()
+        except Exception:
+            emby_id = ""
+        if emby_id:
+            placeholder.emby_placeholder_id = emby_id
+            if not getattr(placeholder, "emby_id_observed_at", None):
+                placeholder.emby_id_observed_at = datetime.now(timezone.utc)
+
+    if jf_id:
+        ids["jellyfin"] = jf_id
+    if emby_id:
+        ids["emby"] = emby_id
+
+    return ids
+
+
+def _refresh_remote_item_metadata(session, placeholder: Placeholder, movie: Movie | None, episode: Episode | None) -> tuple[int, int]:
+    ids = _resolve_item_ids_for_remote_refresh(session, placeholder, movie, episode)
+
+    refreshed = 0
+    failed = 0
+
+    jf_id = ids.get("jellyfin")
+    if jf_id and getattr(settings, "ENABLE_JELLYFIN", False):
+        if refresh_jellyfin_item_metadata(jf_id):
+            refreshed += 1
+        else:
+            failed += 1
+
+    emby_id = ids.get("emby")
+    if emby_id and getattr(settings, "ENABLE_EMBY", False):
+        if refresh_emby_item_metadata(emby_id):
+            refreshed += 1
+        else:
+            failed += 1
+
+    return refreshed, failed
+
+
 def process_nfo_refresh_job(session, job: Job) -> dict:
     """Refresh placeholder sidecar NFO files for a scoped set of placeholders."""
     payload = job.payload if isinstance(job.payload, dict) else {}
@@ -199,6 +276,8 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
 
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     refreshed = 0
+    remote_refreshed = 0
+    remote_failed = 0
 
     for placeholder in placeholders:
         if not getattr(placeholder, "has_placeholder", False):
@@ -208,11 +287,23 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
         if movie and _refresh_movie_nfo(placeholder, movie):
             refreshed += 1
+            rr, rf = _refresh_remote_item_metadata(session, placeholder, movie, None)
+            remote_refreshed += rr
+            remote_failed += rf
             continue
         if episode and _refresh_episode_nfo(session, placeholder, episode):
             refreshed += 1
+            rr, rf = _refresh_remote_item_metadata(session, placeholder, None, episode)
+            remote_refreshed += rr
+            remote_failed += rf
 
-    return {"ok": True, "refreshed": refreshed, "scanned": len(placeholders)}
+    return {
+        "ok": True,
+        "refreshed": refreshed,
+        "scanned": len(placeholders),
+        "remote_refreshed": remote_refreshed,
+        "remote_refresh_failed": remote_failed,
+    }
 
 
 def enqueue_status_projection(placeholder_ids: list[int], session=None) -> dict:
