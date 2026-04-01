@@ -70,6 +70,25 @@ def _extract_quality_name(value) -> str | None:
     return None
 
 
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _extract_image_url(entry: Dict, cover_types: tuple[str, ...]) -> str | None:
+    images = entry.get('images') or []
+    for img in images:
+        if not isinstance(img, dict):
+            continue
+        if str(img.get('coverType') or '').lower() in cover_types:
+            url = img.get('remoteUrl') or img.get('url')
+            if url:
+                return str(url)
+    return None
+
+
 def _resolve_episode_file_payload(entry: Dict, base_url: str, api_key: str) -> Dict:
     ep_file = entry.get('episodeFile') or {}
     if isinstance(ep_file, dict) and ep_file.get('path'):
@@ -155,6 +174,30 @@ def _movie_folder_name(title: str, year: int, tmdbid: int) -> str:
     return f"{_sanitize_name(title)} {{tmdb-{tmdbid}}}"
 
 
+def _extract_poster_url(entry: Dict) -> str | None:
+    """Extract poster URL from an ARR entry via fallback chain.
+
+    Priority:
+    1. ``remotePoster`` top-level field (Radarr/Sonarr convenience field)
+    2. ``images`` array entry with ``coverType == 'poster'``, using ``remoteUrl`` then ``url``
+    3. First entry in ``images`` array as last resort
+    """
+    url = entry.get('remotePoster')
+    if url:
+        return url
+    images = entry.get('images') or []
+    for img in images:
+        if isinstance(img, dict) and str(img.get('coverType') or '').lower() in ('poster', 'cover'):
+            url = img.get('remoteUrl') or img.get('url')
+            if url:
+                return str(url)
+    if images and isinstance(images[0], dict):
+        url = images[0].get('remoteUrl') or images[0].get('url')
+        if url:
+            return url
+    return None
+
+
 def _series_folder_name(title: str, year: int, tvdbid: int) -> str:
     if year:
         return f"{_sanitize_name(title)} ({year}) {{tvdb-{tvdbid}}}"
@@ -201,7 +244,20 @@ def _movie_fields(entry: Dict, is_4k: bool) -> Dict:
         'physical_release_date': _extract_date(entry.get('physicalRelease')),
         'radarr_monitored': bool(entry.get('monitored')),
         'imdbid': entry.get('imdbId'),
-        'remote_poster': entry.get('remotePoster'),
+        'remote_poster': _extract_poster_url(entry),
+        'remote_fanart': _extract_image_url(entry, ('fanart', 'background')),
+        'radarr_runtime': _as_int(entry.get('runtime') or 0, 0) or None,
+        'radarr_certification': entry.get('certification'),
+        'radarr_genres': entry.get('genres') if isinstance(entry.get('genres'), list) else None,
+        'radarr_studio': entry.get('studio'),
+        'radarr_ratings': entry.get('ratings') if isinstance(entry.get('ratings'), dict) else None,
+        'radarr_collection': entry.get('collection') if isinstance(entry.get('collection'), dict) else None,
+        'radarr_actors': entry.get('actors') if isinstance(entry.get('actors'), list) else None,
+        'radarr_directors': entry.get('directors') if isinstance(entry.get('directors'), list) else None,
+        'radarr_credits': entry.get('writers') if isinstance(entry.get('writers'), list) else None,
+        'radarr_trailer': entry.get('youTubeTrailerId') or entry.get('trailer'),
+        'radarr_premiered': _extract_date(entry.get('inCinemas') or entry.get('physicalRelease')),
+        'radarr_payload_raw': entry,
         'radarr_overview': entry.get('overview'),
         'last_found_in_radarr': datetime.now(timezone.utc),
         'is_deleted': False,
@@ -228,7 +284,19 @@ def _series_fields(entry: Dict, is_4k: bool) -> Dict:
         'sonarr_status': entry.get('status'),
         'sonarr_monitored': bool(entry.get('monitored')),
         'imdbid': entry.get('imdbId'),
-        'remote_poster': entry.get('remotePoster'),
+        'remote_poster': _extract_poster_url(entry),
+        'remote_fanart': _extract_image_url(entry, ('fanart', 'background')),
+        'remote_banner': _extract_image_url(entry, ('banner',)),
+        'sonarr_runtime': _as_int(entry.get('runtime') or 0, 0) or None,
+        'sonarr_certification': entry.get('certification'),
+        'sonarr_genres': entry.get('genres') if isinstance(entry.get('genres'), list) else None,
+        'sonarr_network': entry.get('network') or entry.get('studio'),
+        'sonarr_ratings': entry.get('ratings') if isinstance(entry.get('ratings'), dict) else None,
+        'sonarr_tmdbid': _as_int(entry.get('tmdbId') or 0, 0) or None,
+        'sonarr_tvmazeid': _as_int(entry.get('tvMazeId') or 0, 0) or None,
+        'sonarr_first_aired': _extract_date(entry.get('firstAired')),
+        'sonarr_actors': entry.get('actors') if isinstance(entry.get('actors'), list) else None,
+        'sonarr_payload_raw': entry,
         'last_found_in_sonarr': datetime.now(timezone.utc),
         'is_deleted': False,
     }
@@ -250,6 +318,12 @@ def _episode_fields(series: Series, season: Season, entry: Dict, episode_file: D
         'sonarr_filepath': sonarr_filepath,
         'episodefile_size': episode_file.get('size') or episode_file.get('sizeOnDisk'),
         'sonarr_episode_overview': entry.get('overview'),
+        'sonarr_episode_tvdbid': _as_int(entry.get('tvdbId') or 0, 0) or None,
+        'sonarr_episode_still': _extract_image_url(entry, ('screenshot', 'still', 'cover')),
+        'sonarr_episode_directors': entry.get('directors') if isinstance(entry.get('directors'), list) else None,
+        'sonarr_episode_credits': entry.get('writers') if isinstance(entry.get('writers'), list) else None,
+        'sonarr_payload_raw': entry,
+        'sonarr_episodefile_payload_raw': episode_file if isinstance(episode_file, dict) else None,
         'has_file': bool(entry.get('hasFile') or sonarr_filepath or entry.get('episodeFileId')),
         'sonarr_quality': _extract_quality_name(episode_file.get('quality'))
         or _extract_quality_name(entry.get('quality')),

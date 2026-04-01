@@ -44,6 +44,19 @@ class Movie(Base):
     imdbid = Column(String, nullable=True)
     # Remote poster URL reported by Radarr (useful for NFO/poster downloads)
     remote_poster = Column(String, nullable=True)
+    remote_fanart = Column(String, nullable=True)
+    radarr_runtime = Column(Integer, nullable=True)
+    radarr_certification = Column(String, nullable=True)
+    radarr_genres = Column(JSON, nullable=True)
+    radarr_studio = Column(String, nullable=True)
+    radarr_ratings = Column(JSON, nullable=True)
+    radarr_collection = Column(JSON, nullable=True)
+    radarr_actors = Column(JSON, nullable=True)
+    radarr_directors = Column(JSON, nullable=True)
+    radarr_credits = Column(JSON, nullable=True)
+    radarr_trailer = Column(String, nullable=True)
+    radarr_premiered = Column(Date, nullable=True)
+    radarr_payload_raw = Column(JSON, nullable=True)
     action = Column(String, nullable=True)
     status = Column(String, default='PENDING')
     current_step_name = Column(String, nullable=True)
@@ -305,6 +318,18 @@ class Series(Base):
     imdbid = Column(String, nullable=True)
     # Remote poster URL reported by Sonarr (useful for NFO/poster downloads)
     remote_poster = Column(String, nullable=True)
+    remote_fanart = Column(String, nullable=True)
+    remote_banner = Column(String, nullable=True)
+    sonarr_runtime = Column(Integer, nullable=True)
+    sonarr_certification = Column(String, nullable=True)
+    sonarr_genres = Column(JSON, nullable=True)
+    sonarr_network = Column(String, nullable=True)
+    sonarr_ratings = Column(JSON, nullable=True)
+    sonarr_tmdbid = Column(Integer, nullable=True)
+    sonarr_tvmazeid = Column(Integer, nullable=True)
+    sonarr_first_aired = Column(Date, nullable=True)
+    sonarr_actors = Column(JSON, nullable=True)
+    sonarr_payload_raw = Column(JSON, nullable=True)
     # Whether Sonarr is monitoring this series
     sonarr_monitored = Column(Boolean, default=False)
     status = Column(String, default='PENDING')
@@ -387,6 +412,12 @@ class Episode(Base):
     episodefile_size = Column(BigInteger, nullable=True)
     # Episode-level overview (if provided by Sonarr)
     sonarr_episode_overview = Column(String, nullable=True)
+    sonarr_episode_tvdbid = Column(Integer, nullable=True)
+    sonarr_episode_still = Column(String, nullable=True)
+    sonarr_episode_directors = Column(JSON, nullable=True)
+    sonarr_episode_credits = Column(JSON, nullable=True)
+    sonarr_payload_raw = Column(JSON, nullable=True)
+    sonarr_episodefile_payload_raw = Column(JSON, nullable=True)
     # boolean indicating Sonarr reports a file exists for this episode
     has_file = Column(Boolean, default=False)
     sonarr_quality = Column(String, nullable=True)
@@ -450,5 +481,5 @@ class Episode(Base):
     def __repr__(self):
         return (
            f"<Episode(id={self.id}, title={self.title!r}, year={self.year}, "
-            f"tvdbid={self.tvdbid})>"
+            f"tvdbid={self.sonarr_episode_tvdbid})>"
         )

@@ -1,37 +1,12 @@
 services:
-  placeholdarr: 
-    container_name: placeholdarr
-    image: !reset null
-    build: !override
-      context: .
-      dockerfile: dockerfile
-    env_file:
-      - .env
-    volumes: !override
-      - debridmedia_mnt:/mnt
-      - /opt/placeholdarr/logs:/logs
-    ports: !override
-      - "127.0.0.1:18843:8000"
-    restart: !override always
-  
-  placeholdarr_postgres:
-    container_name: placeholdarr_postgress
-    image: postgres:15-alpine
-    restart: always
-    environment:
-      POSTGRES_USER: "placeholdarr"
-      POSTGRES_PASSWORD: "placeholdarr"
-      POSTGRES_DB: "placeholdarr"
-    volumes:
-      - /opt/placeholdarr/data:/var/lib/postgresql/data
+  # This file is intentionally for local machine overrides only.
+  # Keep repo-default runtime config in docker-compose.yml.
+  placeholdarr:
+    # Example local-only override: bind web UI to localhost and custom port.
     # ports:
-      # - "127.0.0.1:5432:5432"
+    #   - "127.0.0.1:18843:8000"
 
-networks:
-  default:
-    name: shared_network
-    external: true
-
-volumes:
-  debridmedia_mnt:
-    external: true
+  placeholdarr_postgres:
+    # Example local-only override: expose Postgres port for debugging.
+    # ports:
+    #   - "127.0.0.1:5432:5432"

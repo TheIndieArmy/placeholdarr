@@ -9,13 +9,13 @@ from core.config import settings
 from core.logger import logger
 
 
-def refresh_plex_paths(folders: set[str]) -> dict[str, int]:
+def refresh_plex_paths(paths: set[str]) -> dict[str, int]:
     """Request path-scoped Plex refresh for changed folders.
 
     Path-scoped refresh avoids broad library sweeps by targeting only the
     specific folders where placeholder files were created or deleted.
     """
-    if not folders:
+    if not paths:
         return {"refreshed": 0, "failed": 0}
 
     if not getattr(settings, "plex_enabled", False):
@@ -31,7 +31,12 @@ def refresh_plex_paths(folders: set[str]) -> dict[str, int]:
     refreshed = 0
     failed = 0
 
-    for folder in sorted(folders):
+    normalized_folders = []
+    for path in sorted(paths):
+        abs_path = os.path.abspath(path)
+        normalized_folders.append(os.path.dirname(abs_path) if os.path.isfile(abs_path) else abs_path)
+
+    for folder in dict.fromkeys(normalized_folders):
         try:
             abs_folder = os.path.abspath(folder)
 

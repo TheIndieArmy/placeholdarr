@@ -8,7 +8,7 @@ from services.postgres.models import Episode, Job, Movie, Placeholder
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
-from services.source_of_truth.status_reconciler import STATUS_PROJECTION_JOB_TYPE
+from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE, STATUS_PROJECTION_JOB_TYPE
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
@@ -71,6 +71,19 @@ def _enqueue_status_projection_job(session, placeholder_ids: list[int]) -> None:
     )
 
 
+def _enqueue_nfo_refresh_job(session, placeholder_ids: list[int]) -> None:
+    if not placeholder_ids:
+        return
+    session.add(
+        Job(
+            job_type=NFO_REFRESH_JOB_TYPE,
+            payload={"placeholder_ids": placeholder_ids},
+            status="PENDING",
+            run_after=datetime.now(timezone.utc),
+        )
+    )
+
+
 def _set_countdown_status(session, placeholder_ids: list[int], status_text: str) -> list[int]:
     if not placeholder_ids:
         return []
@@ -106,6 +119,7 @@ def _schedule_import_grace(
     initial_status = str(schedule[0]["status_text"])
     active_ids = _set_countdown_status(session, placeholder_ids, initial_status)
     _enqueue_status_projection_job(session, active_ids)
+    _enqueue_nfo_refresh_job(session, active_ids)
 
     for item in schedule[1:]:
         session.add(
@@ -297,6 +311,7 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
     )
     active_ids = _set_countdown_status(session, placeholder_ids, status_text)
     _enqueue_status_projection_job(session, active_ids)
+    _enqueue_nfo_refresh_job(session, active_ids)
 
     logger.debug(
         f"Import grace tick complete: step_index={step_index}, updated {len(active_ids)} placeholder(s)",

@@ -11,9 +11,11 @@ from services.source_of_truth.event_handlers import (
     process_episode_file_deleted_event,
     process_episode_imported_event,
     process_movie_add_event,
+    process_movie_deleted_event,
     process_movie_file_deleted_event,
     process_movie_imported_event,
     process_series_add_event,
+    process_series_deleted_event,
 )
 from services.source_of_truth.observation_trail import (
     TRAIL_JOB_TYPE,
@@ -121,6 +123,20 @@ def _process_webhook_event(session, job: Job):
         result = process_episode_file_deleted_event(payload, instance=instance)
         logger.info(
             f"Processed episode_file_deleted event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
+    elif event_type == 'movie_deleted' or dispatch_type == 'moviedelete':
+        result = process_movie_deleted_event(payload, instance=instance)
+        logger.info(
+            f"Processed movie_deleted event_log_id={event.id} movie_id={result.get('movie_id')}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
+    elif event_type == 'series_deleted' or dispatch_type == 'seriesdelete':
+        result = process_series_deleted_event(payload, instance=instance)
+        logger.info(
+            f"Processed series_deleted event_log_id={event.id} episodes={len(result.get('episode_ids') or [])}",
             extra={'emoji_type': 'success'},
         )
         handled = True

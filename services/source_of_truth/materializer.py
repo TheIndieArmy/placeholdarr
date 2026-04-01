@@ -26,6 +26,7 @@ from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
 )
+from services.source_of_truth.status_reconciler import enqueue_status_projection
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 
 
@@ -182,10 +183,13 @@ def _mark_placeholder_row_active(
     row.display_status = REQUEST_STATUS
     row.display_reason = REQUEST_REASON
     row.display_progress = 0
+    # Reset observation-tracking keys in extra so stale state from a previous
+    # observation round cannot affect the new pass (e.g. plex_metadata_ready_seen).
+    extra = dict(getattr(row, 'extra', {}) or {})
+    extra.pop('plex_metadata_ready_seen', None)
     if calendar_dummy_variant:
-        extra = dict(getattr(row, 'extra', {}) or {})
         extra['calendar_dummy_variant'] = calendar_dummy_variant
-        row.extra = extra
+    row.extra = extra
     row.last_observed_at = func.now()
     row.updated_at = func.now()
     session.add(row)
@@ -440,7 +444,7 @@ def _run_materialization_for_ids(
         "observation_trail_job_id": None,
         "observation_trail_group_id": None,
     }
-    changed_folders: set[str] = set()
+    changed_paths: set[str] = set()
     stats["movies_considered"] = len(movie_ids)
     stats["episodes_considered"] = len(episode_ids)
 
@@ -467,7 +471,7 @@ def _run_materialization_for_ids(
                 stats["files_created"] += 1
                 path = result.get("path")
                 if path:
-                    changed_folders.add(os.path.dirname(path))
+                    changed_paths.add(path)
             if result.get("nfo_written"):
                 stats["nfo_written"] += 1
         elif action == "deleted_or_absent":
@@ -487,7 +491,7 @@ def _run_materialization_for_ids(
             if result.get("series_nfo_deleted"):
                 stats["series_nfo_deleted"] += 1
             for refresh_path in result.get("refresh_paths", []) or []:
-                changed_folders.add(refresh_path)
+                changed_paths.add(refresh_path)
         else:
             stats["noop"] += 1
 
@@ -514,7 +518,7 @@ def _run_materialization_for_ids(
                 stats["files_created"] += 1
                 path = result.get("path")
                 if path:
-                    changed_folders.add(os.path.dirname(path))
+                    changed_paths.add(path)
             # count episode and series-level NFO writes
             if result.get("nfo_written") or result.get("series_nfo_written"):
                 stats["nfo_written"] += 1
@@ -536,11 +540,11 @@ def _run_materialization_for_ids(
             if result.get("series_nfo_deleted"):
                 stats["series_nfo_deleted"] += 1
             for refresh_path in result.get("refresh_paths", []) or []:
-                changed_folders.add(refresh_path)
+                changed_paths.add(refresh_path)
         else:
             stats["noop"] += 1
 
-    refresh_stats = refresh_all_paths(changed_folders)
+    refresh_stats = refresh_all_paths(changed_paths)
     stats["media_refresh_requested"] = refresh_stats.get("refreshed", 0)
     stats["media_refresh_failed"] = refresh_stats.get("failed", 0)
 
@@ -578,6 +582,20 @@ def _run_materialization_for_ids(
         stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
         stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)
         stats["media_id_observe_failed"] = observe_stats.get("observe_failed", 0)
+
+        ready_for_plex_projection = [
+            int(row.id)
+            for row in observed_candidates
+            if getattr(row, "has_placeholder", False)
+            and getattr(row, "plex_placeholder_id", None)
+        ]
+        if ready_for_plex_projection:
+            projection_result = enqueue_status_projection(ready_for_plex_projection, session=session)
+            logger.info(
+                "Post-observation Plex status projection queued "
+                f"placeholders={len(ready_for_plex_projection)} ok={projection_result.get('ok', False)}",
+                extra={"emoji_type": "info"},
+            )
 
         unresolved_ids = unresolved_placeholder_ids(observed_candidates)
         # Always enqueue observation trail for unresolved placeholders

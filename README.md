@@ -82,6 +82,27 @@ Perfect for:
 
 ## Configuration
 
+### Appdata Layout
+
+For Docker deployments, use a single Appdata root for Placeholdarr state and logs.
+
+Recommended host layout:
+- `/mnt/user/appdata/placeholdarr` for Placeholdarr app data and logs
+- `/mnt/user/appdata/placeholdarr/postgres` for Postgres data
+
+Container layout with the repo default compose file:
+- `/config` for Placeholdarr app data
+- `/config/logs/placeholdarr-*.log` for per-run application logs (timestamped files, e.g., `placeholdarr-2026-03-31-143052.log`)
+- `/var/lib/postgresql/data` backed by `${PLACEHOLDARR_APPDATA}/postgres`
+
+The included [docker-compose.yml](docker-compose.yml) now defaults to:
+- `${PLACEHOLDARR_APPDATA:-./.appdata}:/config`
+- `${PLACEHOLDARR_APPDATA:-./.appdata}/postgres:/var/lib/postgresql/data`
+
+The included [docker-compose.override.yml](docker-compose.override.yml) is now intentionally optional and local-only (for machine-specific port/network/path tweaks).
+
+This keeps logs, runtime state, and database storage under one Appdata root while leaving your media libraries mounted separately. Logs are created per app run and old runs are automatically cleaned up to stay under the configured limit.
+
 ### Library Folder Strategies
 
 To use Placeholdarr, create a dedicated folder for placeholders (for example, `/mnt/user/data/placeholder-movies` and `/mnt/user/data/placeholder-tv`).
@@ -112,6 +133,10 @@ Required settings in `.env`:
 - `DUMMY_FILE_PATH`: Path to your dummy.mp4 file
 
 Optional settings:
+- `APPDATA_PATH`: In-container app data root used for defaults such as logs (default `/config`)
+- `LOG_DIR`: Directory for per-run log files (default `${APPDATA_PATH}/logs`)
+- `LOG_FILE`: Full path to log directory (overrides `LOG_DIR` when set)
+- `LOG_MAX_RUN_FILES`: Maximum number of per-run log files to keep before deleting oldest ones (default `10`)
 - `PLACEHOLDER_STRATEGY`: How to create placeholders (`hardlink` or `copy`)
 - `PLACEHOLDER_CREATE_NFO`: Create `.nfo` sidecar metadata next to placeholder files (`true`/`false`, default `true`)
 - `PLACEHOLDER_STATUS_UPDATES`: Controls whether Placeholdarr writes placeholder status text updates (`OFF`, `REQUEST`, `ALL`)

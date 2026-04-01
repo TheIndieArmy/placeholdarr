@@ -2,6 +2,8 @@ import logging
 import os
 import sys
 import traceback
+import glob
+from datetime import datetime
 
 # Try to import settings; if pydantic validation fails (missing paths), print a friendly message and exit
 try:
@@ -69,11 +71,65 @@ if log_level == 'VERBOSE':
 else:
     logger.setLevel(getattr(logging, log_level, logging.INFO))
 
+logger.propagate = False
+
+if logger.handlers:
+    logger.handlers.clear()
+
+
+def _resolve_log_dir() -> str:
+    """Resolve the directory where log files should be stored."""
+    explicit_file = str(getattr(settings, 'LOG_FILE', '') or '').strip()
+    if explicit_file:
+        return os.path.dirname(explicit_file) or '.'
+
+    explicit_dir = str(getattr(settings, 'LOG_DIR', '') or '').strip()
+    if explicit_dir:
+        return explicit_dir
+
+    appdata_path = str(getattr(settings, 'APPDATA_PATH', '/config') or '/config').strip() or '/config'
+    return os.path.join(appdata_path, 'logs')
+
+def _get_timestamped_log_filename(log_dir: str) -> str:
+    """Generate a timestamped log filename for this run."""
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    return os.path.join(log_dir, f"placeholdarr-{timestamp}.log")
+
+def _cleanup_old_log_files(log_dir: str, max_files: int) -> None:
+    """Keep only the most recent max_files log files, deleting older ones."""
+    if max_files <= 0:
+        return
+    
+    pattern = os.path.join(log_dir, "placeholdarr-*.log")
+    log_files = sorted(glob.glob(pattern))
+    
+    # If we have more files than the max, delete the oldest ones
+    if len(log_files) > max_files:
+        files_to_delete = log_files[:len(log_files) - max_files]
+        for old_file in files_to_delete:
+            try:
+                os.remove(old_file)
+                logger.debug(f"Deleted old log file: {old_file}", extra={'emoji_type': 'cleanup'})
+            except Exception as e:
+                # Use basic print since logger might not be ready
+                print(f"Failed to delete old log file {old_file}: {e}", file=sys.stderr)
+
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
-file_handler = logging.FileHandler('media_handler.log')
+log_dir = _resolve_log_dir()
+os.makedirs(log_dir, exist_ok=True)
+
+max_run_files = max(1, int(getattr(settings, 'LOG_MAX_RUN_FILES', 10) or 10))
+_cleanup_old_log_files(log_dir, max_run_files)
+
+log_file_path = _get_timestamped_log_filename(log_dir)
+file_handler = logging.FileHandler(
+    log_file_path,
+    encoding='utf-8',
+)
 file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+logger.debug(f"File logging initialized at {log_file_path} (keeping {max_run_files} run files)", extra={'emoji_type': 'debug'})

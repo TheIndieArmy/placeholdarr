@@ -223,6 +223,7 @@ def _compute_determination(
     is_deleted: bool,
     *,
     target_date: date | None = None,
+    release_status: str | None = None,
     lookahead_days: int | None = None,
     placeholders_enabled: bool | None = None,
     now_date: date | None = None,
@@ -247,8 +248,11 @@ def _compute_determination(
             # Infinite mode keeps normal lifecycle behavior, including unknown dates.
             pass
         elif target_date is None:
-            # Strict mode: unknown selected release date is treated as out-of-window.
-            return DETERMINATION_OBSOLETE if has_placeholder else DETERMINATION_NOT_NEEDED
+            # Strict mode suppresses future placeholders when the selected movie
+            # release date is unknown, but already-released movies should still
+            # participate in normal placeholder lifecycle rules.
+            if str(release_status or "").strip().lower() != 'released':
+                return DETERMINATION_OBSOLETE if has_placeholder else DETERMINATION_NOT_NEEDED
         else:
             days_until = (target_date - effective_now).days
             if lookahead == 0:
@@ -298,6 +302,7 @@ def run_determination_pass() -> dict:
                 bool(getattr(movie, 'has_file', False)),
                 bool(getattr(movie, 'is_deleted', False)),
                 target_date=_preferred_movie_release_date(movie),
+                release_status=getattr(movie, 'radarr_release_status', None),
                 lookahead_days=lookahead_days,
                 placeholders_enabled=placeholders_enabled,
                 now_date=now_date,
@@ -419,6 +424,7 @@ def run_determination_for_entities_in_session(
             bool(getattr(movie, 'has_file', False)),
             bool(getattr(movie, 'is_deleted', False)),
             target_date=_preferred_movie_release_date(movie),
+            release_status=getattr(movie, 'radarr_release_status', None),
             lookahead_days=lookahead_days,
             placeholders_enabled=placeholders_enabled,
             now_date=now_date,

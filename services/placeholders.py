@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -230,6 +231,85 @@ def _atomic_write_text(path: str, content: str) -> bool:
     return True
 
 
+def _to_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split(',') if p.strip()]
+        return parts
+    return []
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _status_text(value: Any) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    return text.replace('_', ' ').title()
+
+
+def _ratings_entries(ratings: Any) -> list[tuple[str, str | None, str | None, bool]]:
+    if not isinstance(ratings, dict):
+        return []
+
+    entries: list[tuple[str, str | None, str | None, bool]] = []
+    for name, payload in ratings.items():
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get('value')
+        votes = payload.get('votes')
+        if value is None and votes is None:
+            continue
+        value_text = str(value) if value is not None else None
+        votes_text = str(votes) if votes is not None else None
+        normalized_name = str(name or '').strip().lower() or 'rating'
+        entries.append((normalized_name, value_text, votes_text, normalized_name in ('imdb', 'tmdb', 'themoviedb')))
+    return entries
+
+
+def _append_actors(lines: list[str], actors: Any) -> None:
+    for idx, actor in enumerate(_to_list(actors)):
+        if isinstance(actor, dict):
+            name = str(actor.get('name') or '').strip()
+            role = str(actor.get('character') or actor.get('role') or '').strip()
+            thumb = str(actor.get('images') or actor.get('image') or actor.get('thumb') or '').strip()
+            order = actor.get('order', idx)
+        else:
+            name = str(actor or '').strip()
+            role = ''
+            thumb = ''
+            order = idx
+        if not name:
+            continue
+        lines.append('  <actor>')
+        lines.append(f"    <name>{escape(name)}</name>")
+        if role:
+            lines.append(f"    <role>{escape(role)}</role>")
+        if order is not None:
+            lines.append(f"    <order>{escape(str(order))}</order>")
+        if thumb:
+            lines.append(f"    <thumb>{escape(thumb)}</thumb>")
+        lines.append('  </actor>')
+
+
+def _append_people_as_tag(lines: list[str], tag_name: str, values: Any) -> None:
+    for value in _to_list(values):
+        if isinstance(value, dict):
+            text = str(value.get('name') or '').strip()
+        else:
+            text = str(value or '').strip()
+        if text:
+            lines.append(f"  <{tag_name}>{escape(text)}</{tag_name}>")
+
+
 def _movie_nfo_xml(movie: Any) -> str:
     status = str(getattr(movie, "placeholder_status", "") or "REQUEST")
     raw_title = str(getattr(movie, "title", "") or "")
@@ -239,6 +319,19 @@ def _movie_nfo_xml(movie: Any) -> str:
     tmdbid = getattr(movie, "tmdbid", None)
     imdbid = getattr(movie, "imdbid", None)
     poster_url = escape(str(getattr(movie, "remote_poster", "") or ""))
+    fanart_url = escape(str(getattr(movie, "remote_fanart", "") or ""))
+    runtime = _to_int(getattr(movie, "radarr_runtime", None))
+    certification = str(getattr(movie, "radarr_certification", "") or "").strip()
+    genres = _to_list(getattr(movie, "radarr_genres", None))
+    studio = str(getattr(movie, "radarr_studio", "") or "").strip()
+    ratings = _ratings_entries(getattr(movie, "radarr_ratings", None))
+    collection = getattr(movie, "radarr_collection", None)
+    release_status = _status_text(getattr(movie, "radarr_release_status", None))
+    premiered = getattr(movie, "radarr_premiered", None)
+    trailer = str(getattr(movie, "radarr_trailer", "") or "").strip()
+    actors = getattr(movie, "radarr_actors", None)
+    directors = getattr(movie, "radarr_directors", None)
+    credits = getattr(movie, "radarr_credits", None)
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
@@ -254,14 +347,70 @@ def _movie_nfo_xml(movie: Any) -> str:
         lines.append(f"  <plot>{overview}</plot>")
     else:
         lines.append(f"  <plot>{escape(project_summary('', status))}</plot>")
+    if ratings:
+        lines.append("  <ratings>")
+        for name, value_text, votes_text, is_default in ratings:
+            default_attr = ' default="true"' if is_default else ''
+            lines.append(f"    <rating name=\"{escape(name)}\" max=\"10\"{default_attr}>")
+            if value_text:
+                lines.append(f"      <value>{escape(value_text)}</value>")
+            if votes_text:
+                lines.append(f"      <votes>{escape(votes_text)}</votes>")
+            lines.append("    </rating>")
+        lines.append("  </ratings>")
+        top_rating = next((r for r in ratings if r[0] in ('tmdb', 'themoviedb')), ratings[0])
+        if top_rating[1]:
+            lines.append(f"  <rating>{escape(top_rating[1])}</rating>")
     if tmdbid:
+        lines.append(f"  <id>{escape(str(tmdbid))}</id>")
         lines.append(f"  <tmdbid>{escape(str(tmdbid))}</tmdbid>")
         lines.append(f"  <uniqueid type=\"tmdb\" default=\"true\">{escape(str(tmdbid))}</uniqueid>")
     if imdbid:
         lines.append(f"  <imdbid>{escape(str(imdbid))}</imdbid>")
         lines.append(f"  <uniqueid type=\"imdb\">{escape(str(imdbid))}</uniqueid>")
+    if runtime:
+        lines.append(f"  <runtime>{runtime}</runtime>")
     if poster_url:
-        lines.append(f"  <thumb aspect=\"poster\">{poster_url}</thumb>")
+        lines.append(f"  <thumb aspect=\"poster\" preview=\"{poster_url}\">{poster_url}</thumb>")
+    if fanart_url:
+        lines.append("  <fanart>")
+        lines.append(f"    <thumb preview=\"{fanart_url}\">{fanart_url}</thumb>")
+        lines.append("  </fanart>")
+    if poster_url or fanart_url:
+        lines.append("  <art>")
+        if poster_url:
+            lines.append(f"    <poster>{poster_url}</poster>")
+            lines.append(f"    <thumb>{poster_url}</thumb>")
+        if fanart_url:
+            lines.append(f"    <fanart>{fanart_url}</fanart>")
+        lines.append("  </art>")
+    if certification:
+        lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
+    for genre in genres:
+        text = str(genre or '').strip()
+        if text:
+            lines.append(f"  <genre>{escape(text)}</genre>")
+    if isinstance(collection, dict) and collection.get('name'):
+        collection_name = str(collection.get('name') or '').strip()
+        collection_id = collection.get('tmdbId')
+        if collection_name:
+            if collection_id:
+                lines.append(f"  <set tmdbcolid=\"{escape(str(collection_id))}\">")
+            else:
+                lines.append("  <set>")
+            lines.append(f"    <name>{escape(collection_name)}</name>")
+            lines.append("  </set>")
+    if release_status:
+        lines.append(f"  <status>{escape(release_status)}</status>")
+    if premiered:
+        lines.append(f"  <premiered>{escape(str(premiered))}</premiered>")
+    if studio:
+        lines.append(f"  <studio>{escape(studio)}</studio>")
+    if trailer:
+        lines.append(f"  <trailer>{escape(trailer)}</trailer>")
+    _append_people_as_tag(lines, 'credits', credits)
+    _append_people_as_tag(lines, 'director', directors)
+    _append_actors(lines, actors)
     lines.append("</movie>")
     lines.append("")
     return "\n".join(lines)
@@ -276,8 +425,12 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     season_number = int(getattr(season, "season_number", 0) or 0)
     episode_number = int(getattr(episode, "episode_number", 0) or 0)
     aired = getattr(episode, "air_date", None)
-    tvdbid = getattr(series, "tvdbid", None)
+    tvdbid = getattr(episode, "sonarr_episode_tvdbid", None) or getattr(series, "tvdbid", None)
     imdbid = getattr(series, "imdbid", None)
+    sonarrid = getattr(episode, "sonarrid", None)
+    still_url = escape(str(getattr(episode, "sonarr_episode_still", "") or ""))
+    directors = getattr(episode, "sonarr_episode_directors", None)
+    credits = getattr(episode, "sonarr_episode_credits", None)
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
@@ -299,9 +452,16 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
         lines.append(f"  <tvdbid>{escape(str(tvdbid))}</tvdbid>")
         # uniqueid lets Emby/Jellyfin match this episode to their databases
         lines.append(f"  <uniqueid type=\"tvdb\" default=\"true\">{escape(str(tvdbid))}</uniqueid>")
+    if sonarrid:
+        lines.append(f"  <uniqueid type=\"sonarr\">{escape(str(sonarrid))}</uniqueid>")
     if imdbid:
         lines.append(f"  <imdbid>{escape(str(imdbid))}</imdbid>")
         lines.append(f"  <uniqueid type=\"imdb\">{escape(str(imdbid))}</uniqueid>")
+    if still_url:
+        lines.append(f"  <thumb>{still_url}</thumb>")
+    _append_people_as_tag(lines, 'credits', credits)
+    _append_people_as_tag(lines, 'director', directors)
+    lines.append("  <watched>false</watched>")
     lines.append("</episodedetails>")
     lines.append("")
     return "\n".join(lines)
@@ -322,7 +482,17 @@ def _series_nfo_xml(series: Any) -> str:
     overview = escape(project_summary(str(getattr(series, "sonarr_series_overview", "") or ""), status))
     tvdbid = getattr(series, "tvdbid", None)
     imdbid = getattr(series, "imdbid", None)
+    tmdbid = getattr(series, "sonarr_tmdbid", None)
+    tvmazeid = getattr(series, "sonarr_tvmazeid", None)
+    first_aired = getattr(series, "sonarr_first_aired", None)
+    network = str(getattr(series, "sonarr_network", "") or "").strip()
+    certification = str(getattr(series, "sonarr_certification", "") or "").strip()
+    ratings = _ratings_entries(getattr(series, "sonarr_ratings", None))
+    genres = _to_list(getattr(series, "sonarr_genres", None))
+    actors = getattr(series, "sonarr_actors", None)
     poster_url = escape(str(getattr(series, "remote_poster", "") or ""))
+    fanart_url = escape(str(getattr(series, "remote_fanart", "") or ""))
+    banner_url = escape(str(getattr(series, "remote_banner", "") or ""))
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
@@ -331,6 +501,15 @@ def _series_nfo_xml(series: Any) -> str:
         "  <tag>placeholder</tag>",
         f"  <tag>status:{escape(status)}</tag>",
     ]
+    year = getattr(series, "year", None)
+    if year:
+        lines.append(f"  <year>{int(year)}</year>")
+    if ratings:
+        top_rating = next((r for r in ratings if r[0] in ('tmdb', 'themoviedb')), ratings[0])
+        if top_rating[1]:
+            lines.append(f"  <rating>{escape(top_rating[1])}</rating>")
+    if tvdbid:
+        lines.append(f"  <id>{escape(str(tvdbid))}</id>")
     if overview:
         lines.append(f"  <plot>{overview}</plot>")
     else:
@@ -341,8 +520,53 @@ def _series_nfo_xml(series: Any) -> str:
     if imdbid:
         lines.append(f"  <imdbid>{escape(str(imdbid))}</imdbid>")
         lines.append(f"  <uniqueid type=\"imdb\">{escape(str(imdbid))}</uniqueid>")
+    if tmdbid:
+        lines.append(f"  <uniqueid type=\"tmdb\">{escape(str(tmdbid))}</uniqueid>")
+    if tvmazeid:
+        lines.append(f"  <uniqueid type=\"tvmaze\">{escape(str(tvmazeid))}</uniqueid>")
     if poster_url:
-        lines.append(f"  <thumb aspect=\"poster\">{poster_url}</thumb>")
+        lines.append(f"  <thumb aspect=\"poster\" preview=\"{poster_url}\">{poster_url}</thumb>")
+    if fanart_url:
+        lines.append("  <fanart>")
+        lines.append(f"    <thumb preview=\"{fanart_url}\">{fanart_url}</thumb>")
+        lines.append("  </fanart>")
+    if banner_url:
+        lines.append(f"  <banner>{banner_url}</banner>")
+    if poster_url or fanart_url or banner_url:
+        lines.append("  <art>")
+        if poster_url:
+            lines.append(f"    <poster>{poster_url}</poster>")
+            lines.append(f"    <thumb>{poster_url}</thumb>")
+        if fanart_url:
+            lines.append(f"    <fanart>{fanart_url}</fanart>")
+        if banner_url:
+            lines.append(f"    <banner>{banner_url}</banner>")
+        lines.append("  </art>")
+    if certification:
+        lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
+    for genre in genres:
+        text = str(genre or '').strip()
+        if text:
+            lines.append(f"  <genre>{escape(text)}</genre>")
+    status_text = _status_text(getattr(series, 'sonarr_status', None))
+    if status_text:
+        lines.append(f"  <status>{escape(status_text)}</status>")
+    if first_aired:
+        lines.append(f"  <premiered>{escape(str(first_aired))}</premiered>")
+    if network:
+        lines.append(f"  <studio>{escape(network)}</studio>")
+    _append_actors(lines, actors)
+    guide: dict[str, str] = {}
+    if tvdbid:
+        guide['tvdb'] = str(tvdbid)
+    if tvmazeid:
+        guide['tvmaze'] = str(tvmazeid)
+    if tmdbid:
+        guide['tmdb'] = str(tmdbid)
+    if imdbid:
+        guide['imdb'] = str(imdbid)
+    if guide:
+        lines.append(f"  <episodeguide>{escape(json.dumps(guide, separators=(',', ':')))}</episodeguide>")
     lines.append("</tvshow>")
     lines.append("")
     return "\n".join(lines)

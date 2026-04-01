@@ -304,19 +304,159 @@ def _record_plex_metadata_ready_observation(placeholder: Placeholder, is_ready: 
 	return False
 
 
-def _build_plex_snapshot() -> dict[str, Any] | None:
-	"""Build a one-attempt in-memory Plex snapshot for fast multi-item matching."""
+def _snapshot_scope_from_placeholders(session, placeholders: list[Placeholder]) -> dict[str, Any]:
+	"""Build the minimal DB-backed scope needed for Plex snapshot indexing."""
+	movie_ids: set[int] = set()
+	episode_ids: set[int] = set()
+
+	for placeholder in placeholders:
+		movie_id = getattr(placeholder, 'movie_id', None)
+		episode_id = getattr(placeholder, 'episode_id', None)
+		if movie_id is not None:
+			movie_ids.add(int(movie_id))
+		if episode_id is not None:
+			episode_ids.add(int(episode_id))
+
+	movies: list[Movie] = []
+	series: list[Series] = []
+
+	if movie_ids:
+		movies = session.query(Movie).filter(Movie.id.in_(movie_ids)).all()
+
+	if episode_ids:
+		episodes = session.query(Episode).filter(Episode.id.in_(episode_ids)).all()
+		season_ids = {int(getattr(ep, 'season_id', 0) or 0) for ep in episodes if getattr(ep, 'season_id', None) is not None}
+		if season_ids:
+			seasons = session.query(Season).filter(Season.id.in_(season_ids)).all()
+			series_ids = {int(getattr(season, 'series_id', 0) or 0) for season in seasons if getattr(season, 'series_id', None) is not None}
+			if series_ids:
+				series = session.query(Series).filter(Series.id.in_(series_ids)).all()
+
+	return {
+		'movies': movies,
+		'series': series,
+	}
+
+
+def _index_movie_item(snapshot: dict[str, Any], m: Any) -> None:
+	tmdb_guid = _extract_guid_numeric(m, 'tmdb')
+	if tmdb_guid and tmdb_guid not in snapshot['movies_by_tmdb']:
+		snapshot['movies_by_tmdb'][tmdb_guid] = m
+
+	tmdb_path = _extract_path_numeric(m, 'tmdb')
+	if tmdb_path and tmdb_path not in snapshot['movies_by_path_tmdb']:
+		snapshot['movies_by_path_tmdb'][tmdb_path] = m
+
+	imdb_guid = str(_extract_guid_numeric(m, 'imdb') or '').strip().lower()
+	if imdb_guid and imdb_guid not in snapshot['movies_by_imdb']:
+		snapshot['movies_by_imdb'][imdb_guid] = m
+
+	norm_title = _normalize_title(getattr(m, 'title', None))
+	year = int(getattr(m, 'year', 0) or 0)
+	for location in getattr(m, 'locations', []) or []:
+		_append_item_to_suffix_index(snapshot['movies_by_path_suffix'], m, location, 3)
+		_append_item_to_suffix_index(snapshot['movies_by_path_suffix'], m, location, 2)
+	if norm_title:
+		snapshot['movies_by_title_year'][(norm_title, year)] = m
+		snapshot['movies_by_title'].setdefault(norm_title, []).append(m)
+
+
+def _index_show_episodes(snapshot: dict[str, Any], show: Any) -> None:
+	tvdb_guid = _extract_guid_numeric(show, 'tvdb')
+	tvdb_path = _extract_path_numeric(show, 'tvdb')
+	show_title = _normalize_title(getattr(show, 'title', None))
+
+	keys: list[str] = []
+	if tvdb_guid:
+		keys.append(tvdb_guid)
+	if tvdb_path and tvdb_path not in keys:
+		keys.append(tvdb_path)
+
+	try:
+		for plex_season in show.seasons():
+			season_num = int(getattr(plex_season, 'index', -1) or -1)
+			if season_num < 0:
+				continue
+			for plex_episode in plex_season.episodes():
+				ep_num = int(getattr(plex_episode, 'index', -1) or -1)
+				if ep_num < 0:
+					continue
+				for tvdb in keys:
+					snapshot['episodes_by_tvdb_sxe'][(tvdb, season_num, ep_num)] = plex_episode
+				if show_title:
+					snapshot['episodes_by_series_title_sxe'][(show_title, season_num, ep_num)] = plex_episode
+	except Exception:
+		return
+
+
+def _scoped_shows_for_series(tv_section: Any, series_row: Series) -> list[Any]:
+	"""Find likely Plex show candidates for one scoped series without scanning the whole section."""
+	target_tvdb = str(getattr(series_row, 'tvdbid', '') or '').strip()
+	target_title = _normalize_title(getattr(series_row, 'title', None))
+
+	search_results: list[Any] = []
+	raw_title = str(getattr(series_row, 'title', '') or '').strip()
+	if raw_title:
+		try:
+			search_results = list(tv_section.search(title=raw_title) or [])
+		except Exception:
+			search_results = []
+
+	if not search_results and raw_title:
+		try:
+			candidate = tv_section.get(raw_title)
+			if candidate is not None:
+				search_results = [candidate]
+		except Exception:
+			pass
+
+	if not search_results:
+		return []
+
+	if target_tvdb:
+		matched = []
+		for show in search_results:
+			guid_id = _extract_guid_numeric(show, 'tvdb')
+			if guid_id and str(guid_id) == target_tvdb:
+				matched.append(show)
+				continue
+			path_id = _extract_path_numeric(show, 'tvdb')
+			if path_id and str(path_id) == target_tvdb:
+				matched.append(show)
+		if matched:
+			return matched
+
+	if target_title:
+		exact_title = [show for show in search_results if _normalize_title(getattr(show, 'title', None)) == target_title]
+		if exact_title:
+			return exact_title
+
+	return search_results
+
+
+def _build_plex_snapshot(session, placeholders: list[Placeholder]) -> dict[str, Any] | None:
+	"""Build a scoped in-memory Plex snapshot for the passed placeholder set."""
 	if not _is_enabled('plex'):
 		return None
 	plex = get_plex_server()
 	if not plex:
 		return None
+	scope = _snapshot_scope_from_placeholders(session, placeholders)
+	scope_movies: list[Movie] = scope.get('movies', [])
+	scope_series: list[Series] = scope.get('series', [])
 
-	try:
-		movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
-		tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
-	except Exception:
-		return None
+	movie_section = None
+	tv_section = None
+	if scope_movies:
+		try:
+			movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
+		except Exception:
+			movie_section = None
+	if scope_series:
+		try:
+			tv_section = plex.library.sectionByID(settings.PLEX_TV_SECTION_ID)
+		except Exception:
+			tv_section = None
 
 	snapshot: dict[str, Any] = {
 		'movies_by_tmdb': {},
@@ -328,63 +468,23 @@ def _build_plex_snapshot() -> dict[str, Any] | None:
 		'episodes_by_tvdb_sxe': {},
 		'episodes_by_series_title_sxe': {},
 	}
-
-	try:
-		all_movies = movie_section.all()
-	except Exception:
-		all_movies = []
-	for m in all_movies:
-		tmdb_guid = _extract_guid_numeric(m, 'tmdb')
-		if tmdb_guid and tmdb_guid not in snapshot['movies_by_tmdb']:
-			snapshot['movies_by_tmdb'][tmdb_guid] = m
-
-		tmdb_path = _extract_path_numeric(m, 'tmdb')
-		if tmdb_path and tmdb_path not in snapshot['movies_by_path_tmdb']:
-			snapshot['movies_by_path_tmdb'][tmdb_path] = m
-
-		imdb_guid = str(_extract_guid_numeric(m, 'imdb') or '').strip().lower()
-		if imdb_guid and imdb_guid not in snapshot['movies_by_imdb']:
-			snapshot['movies_by_imdb'][imdb_guid] = m
-
-		norm_title = _normalize_title(getattr(m, 'title', None))
-		year = int(getattr(m, 'year', 0) or 0)
-		for location in getattr(m, 'locations', []) or []:
-			_append_item_to_suffix_index(snapshot['movies_by_path_suffix'], m, location, 3)
-			_append_item_to_suffix_index(snapshot['movies_by_path_suffix'], m, location, 2)
-		if norm_title:
-			snapshot['movies_by_title_year'][(norm_title, year)] = m
-			snapshot['movies_by_title'].setdefault(norm_title, []).append(m)
-
-	try:
-		all_shows = tv_section.all()
-	except Exception:
-		all_shows = []
-	for show in all_shows:
-		tvdb_guid = _extract_guid_numeric(show, 'tvdb')
-		tvdb_path = _extract_path_numeric(show, 'tvdb')
-		show_title = _normalize_title(getattr(show, 'title', None))
-
-		keys: list[str] = []
-		if tvdb_guid:
-			keys.append(tvdb_guid)
-		if tvdb_path and tvdb_path not in keys:
-			keys.append(tvdb_path)
-
+	if scope_movies and movie_section is not None:
 		try:
-			for plex_season in show.seasons():
-				season_num = int(getattr(plex_season, 'index', -1) or -1)
-				if season_num < 0:
-					continue
-				for plex_episode in plex_season.episodes():
-					ep_num = int(getattr(plex_episode, 'index', -1) or -1)
-					if ep_num < 0:
-						continue
-					for tvdb in keys:
-						snapshot['episodes_by_tvdb_sxe'][(tvdb, season_num, ep_num)] = plex_episode
-					if show_title:
-						snapshot['episodes_by_series_title_sxe'][(show_title, season_num, ep_num)] = plex_episode
+			all_movies = movie_section.all()
 		except Exception:
-			continue
+			all_movies = []
+		for m in all_movies:
+			_index_movie_item(snapshot, m)
+
+	if scope_series and tv_section is not None:
+		seen_show_keys: set[str] = set()
+		for series_row in scope_series:
+			for show in _scoped_shows_for_series(tv_section, series_row):
+				key = str(getattr(show, 'ratingKey', '') or '') or str(id(show))
+				if key in seen_show_keys:
+					continue
+				seen_show_keys.add(key)
+				_index_show_episodes(snapshot, show)
 
 	return snapshot
 
@@ -858,12 +958,212 @@ def _placeholder_display_status(placeholder: Placeholder) -> str | None:
 	return status
 
 
+def _plex_status_intent_for_entity(movie: Movie | None, episode: Episode | None, placeholder: Placeholder) -> dict[str, Any] | None:
+	status = _placeholder_display_status(placeholder)
+	if movie is not None:
+		return {'entity_type': Movie, 'entity_id': int(movie.id), 'status': status}
+	if episode is not None:
+		return {'entity_type': Episode, 'entity_id': int(episode.id), 'status': status}
+	return None
+
+
+def _dedupe_plex_status_intents(intents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	seen: set[tuple[str, int, str | None]] = set()
+	deduped: list[dict[str, Any]] = []
+	for intent in intents:
+		entity_type = intent.get('entity_type')
+		entity_id = int(intent.get('entity_id'))
+		status = intent.get('status')
+		entity_name = getattr(entity_type, '__name__', str(entity_type))
+		key = (entity_name, entity_id, status)
+		if key in seen:
+			continue
+		seen.add(key)
+		deduped.append(intent)
+	return deduped
+
+
+def _observation_pass_chunk_size() -> int:
+	try:
+		return max(1, int(getattr(settings, 'OBSERVATION_PASS_CHUNK_SIZE', 150) or 150))
+	except Exception:
+		return 150
+
+
+def _observation_max_pass_seconds() -> float:
+	try:
+		return max(0.0, float(getattr(settings, 'OBSERVATION_MAX_PASS_SECONDS', 45) or 45))
+	except Exception:
+		return 45.0
+
+
+def _timing_ms(started: float) -> int:
+	return int(round((time.monotonic() - started) * 1000.0))
+
+
+def _build_observation_prefetch(session, placeholders: list[Placeholder]) -> dict[str, Any]:
+	"""Prefetch DB rows needed during a pass to avoid per-item queries."""
+	movie_ids: set[int] = set()
+	episode_ids: set[int] = set()
+	for placeholder in placeholders:
+		movie_id = getattr(placeholder, 'movie_id', None)
+		episode_id = getattr(placeholder, 'episode_id', None)
+		if movie_id is not None:
+			movie_ids.add(int(movie_id))
+		if episode_id is not None:
+			episode_ids.add(int(episode_id))
+
+	movies = session.query(Movie).filter(Movie.id.in_(movie_ids)).all() if movie_ids else []
+	episodes = session.query(Episode).filter(Episode.id.in_(episode_ids)).all() if episode_ids else []
+
+	season_ids = {
+		int(getattr(ep, 'season_id', 0) or 0)
+		for ep in episodes
+		if getattr(ep, 'season_id', None) is not None
+	}
+	seasons = session.query(Season).filter(Season.id.in_(season_ids)).all() if season_ids else []
+
+	series_ids = {
+		int(getattr(season, 'series_id', 0) or 0)
+		for season in seasons
+		if getattr(season, 'series_id', None) is not None
+	}
+	series_list = session.query(Series).filter(Series.id.in_(series_ids)).all() if series_ids else []
+
+	return {
+		'movies_by_id': {int(m.id): m for m in movies},
+		'episodes_by_id': {int(e.id): e for e in episodes},
+		'seasons_by_id': {int(s.id): s for s in seasons},
+		'series_by_id': {int(sr.id): sr for sr in series_list},
+	}
+
+
+def _build_reverse_snapshot_match_maps(
+	prefetch: dict[str, Any],
+	plex_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+	"""Build fast DB-targeted match maps by walking snapshot indexes once."""
+	result: dict[str, Any] = {
+		'movie_plex_item_by_movie_id': {},
+		'episode_plex_item_by_episode_id': {},
+	}
+	if not plex_snapshot:
+		return result
+
+	movies_by_id: dict[int, Movie] = prefetch.get('movies_by_id', {})
+	episodes_by_id: dict[int, Episode] = prefetch.get('episodes_by_id', {})
+	seasons_by_id: dict[int, Season] = prefetch.get('seasons_by_id', {})
+	series_by_id: dict[int, Series] = prefetch.get('series_by_id', {})
+
+	# Build DB-side movie key maps.
+	movies_by_tmdb: dict[str, list[int]] = {}
+	movies_by_imdb: dict[str, list[int]] = {}
+	movies_by_title_year: dict[tuple[str, int], list[int]] = {}
+	movies_by_title: dict[str, list[int]] = {}
+	for movie in movies_by_id.values():
+		movie_id = int(movie.id)
+		tmdb = str(getattr(movie, 'tmdbid', '') or '').strip()
+		if tmdb:
+			movies_by_tmdb.setdefault(tmdb, []).append(movie_id)
+		imdb = str(getattr(movie, 'imdbid', '') or '').strip().lower()
+		if imdb:
+			movies_by_imdb.setdefault(imdb, []).append(movie_id)
+		norm_title = _normalize_title(getattr(movie, 'title', None))
+		year = int(getattr(movie, 'year', 0) or 0)
+		if norm_title and year:
+			movies_by_title_year.setdefault((norm_title, year), []).append(movie_id)
+		if norm_title:
+			movies_by_title.setdefault(norm_title, []).append(movie_id)
+
+	# Walk unique movie items discovered in snapshot indexes.
+	seen_movie_keys: set[str] = set()
+	movie_candidates: list[Any] = []
+	for bucket in (
+		plex_snapshot.get('movies_by_tmdb', {}),
+		plex_snapshot.get('movies_by_path_tmdb', {}),
+		plex_snapshot.get('movies_by_imdb', {}),
+		plex_snapshot.get('movies_by_title_year', {}),
+	):
+		for item in bucket.values():
+			key = str(getattr(item, 'ratingKey', '') or '') or str(id(item))
+			if key in seen_movie_keys:
+				continue
+			seen_movie_keys.add(key)
+			movie_candidates.append(item)
+
+	for item in movie_candidates:
+		matched_movie_id: int | None = None
+		tmdb = _extract_guid_numeric(item, 'tmdb') or _extract_path_numeric(item, 'tmdb')
+		if tmdb:
+			ids = movies_by_tmdb.get(str(tmdb), [])
+			if len(ids) == 1:
+				matched_movie_id = ids[0]
+
+		if matched_movie_id is None:
+			imdb = str(_extract_guid_numeric(item, 'imdb') or '').strip().lower()
+			if imdb:
+				ids = movies_by_imdb.get(imdb, [])
+				if len(ids) == 1:
+					matched_movie_id = ids[0]
+
+		if matched_movie_id is None:
+			norm_title = _normalize_title(getattr(item, 'title', None))
+			year = int(getattr(item, 'year', 0) or 0)
+			if norm_title and year:
+				ids = movies_by_title_year.get((norm_title, year), [])
+				if len(ids) == 1:
+					matched_movie_id = ids[0]
+
+		if matched_movie_id is None:
+			norm_title = _normalize_title(getattr(item, 'title', None))
+			if norm_title:
+				ids = movies_by_title.get(norm_title, [])
+				if len(ids) == 1:
+					matched_movie_id = ids[0]
+
+		if matched_movie_id is not None and matched_movie_id not in result['movie_plex_item_by_movie_id']:
+			result['movie_plex_item_by_movie_id'][matched_movie_id] = item
+
+	# Build DB-side episode key maps.
+	episodes_by_tvdb_sxe: dict[tuple[str, int, int], list[int]] = {}
+	episodes_by_title_sxe: dict[tuple[str, int, int], list[int]] = {}
+	for episode in episodes_by_id.values():
+		episode_id = int(episode.id)
+		season = seasons_by_id.get(int(getattr(episode, 'season_id', 0) or 0))
+		if season is None:
+			continue
+		series = series_by_id.get(int(getattr(season, 'series_id', 0) or 0))
+		if series is None:
+			continue
+		season_num = int(getattr(season, 'season_number', 0) or 0)
+		ep_num = int(getattr(episode, 'episode_number', 0) or 0)
+		tvdb = str(getattr(series, 'tvdbid', '') or '').strip()
+		if tvdb:
+			episodes_by_tvdb_sxe.setdefault((tvdb, season_num, ep_num), []).append(episode_id)
+		series_title = _normalize_title(getattr(series, 'title', None))
+		if series_title:
+			episodes_by_title_sxe.setdefault((series_title, season_num, ep_num), []).append(episode_id)
+
+	for key, item in (plex_snapshot.get('episodes_by_tvdb_sxe', {}) or {}).items():
+		ids = episodes_by_tvdb_sxe.get(key, [])
+		if len(ids) == 1 and ids[0] not in result['episode_plex_item_by_episode_id']:
+			result['episode_plex_item_by_episode_id'][ids[0]] = item
+
+	for key, item in (plex_snapshot.get('episodes_by_series_title_sxe', {}) or {}).items():
+		ids = episodes_by_title_sxe.get(key, [])
+		if len(ids) == 1 and ids[0] not in result['episode_plex_item_by_episode_id']:
+			result['episode_plex_item_by_episode_id'][ids[0]] = item
+
+	return result
+
+
 def observe_placeholder_media_ids(
 	session,
 	placeholder: Placeholder,
 	movie: Movie | None,
 	episode: Episode | None,
 	plex_snapshot: dict[str, Any] | None = None,
+	observation_context: dict[str, Any] | None = None,
 	allow_title_fallback: bool = True,
 ) -> dict[str, Any]:
 	"""Attempt to observe IDs for all enabled media servers for one placeholder.
@@ -878,6 +1178,7 @@ def observe_placeholder_media_ids(
 		'observed_jellyfin': 0,
 		'observed_emby': 0,
 		'status_updates_plex': 0,
+		'plex_status_intents': [],
 		'plex_progress': 0,
 		'resolved_all': False,
 	}
@@ -885,8 +1186,14 @@ def observe_placeholder_media_ids(
 	season = None
 	series = None
 	if episode is not None:
-		season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
-		series = session.query(Series).filter(Series.id == int(season.series_id)).first() if season else None
+		if observation_context:
+			seasons_by_id = observation_context.get('seasons_by_id', {})
+			series_by_id = observation_context.get('series_by_id', {})
+			season = seasons_by_id.get(int(getattr(episode, 'season_id', 0) or 0))
+			series = series_by_id.get(int(getattr(season, 'series_id', 0) or 0)) if season else None
+		else:
+			season = session.query(Season).filter(Season.id == int(episode.season_id)).first()
+			series = session.query(Series).filter(Series.id == int(season.series_id)).first() if season else None
 
 	if _is_enabled('plex'):
 		has_plex_id = bool(getattr(placeholder, 'plex_placeholder_id', None))
@@ -898,8 +1205,12 @@ def observe_placeholder_media_ids(
 			plex_ready = False
 			plex_item = None
 			observed_path = str(getattr(placeholder, 'path', '') or '') or None
+			movie_plex_item_by_movie_id = (observation_context or {}).get('movie_plex_item_by_movie_id', {})
+			episode_plex_item_by_episode_id = (observation_context or {}).get('episode_plex_item_by_episode_id', {})
 			if movie is not None:
-				if plex_snapshot is not None:
+				if int(movie.id) in movie_plex_item_by_movie_id:
+					plex_item = movie_plex_item_by_movie_id.get(int(movie.id))
+				elif plex_snapshot is not None:
 					plex_item = _resolve_plex_movie_item_from_snapshot(
 						plex_snapshot,
 						movie,
@@ -923,7 +1234,9 @@ def observe_placeholder_media_ids(
 					plex_id = str(getattr(plex_item, 'ratingKey', '') or '') or None
 					plex_ready = _plex_item_metadata_ready(plex_item) if plex_snapshot is not None else bool(plex_id)
 			elif episode is not None and season and series:
-				if plex_snapshot is not None:
+				if int(episode.id) in episode_plex_item_by_episode_id:
+					plex_item = episode_plex_item_by_episode_id.get(int(episode.id))
+				elif plex_snapshot is not None:
 					plex_item = _resolve_plex_episode_item_from_snapshot(plex_snapshot, episode, season, series)
 					if plex_item is None:
 						# Snapshot miss fallback for naming/metadata-agent edge cases.
@@ -947,19 +1260,9 @@ def observe_placeholder_media_ids(
 					pass
 				confirmed_ready = _record_plex_metadata_ready_observation(placeholder, plex_ready)
 				if confirmed_ready and _should_send_status_updates():
-					try:
-						intents = []
-						status = _placeholder_display_status(placeholder)
-						if movie is not None:
-							intents.append({'entity_type': Movie, 'entity_id': int(movie.id), 'status': status})
-							result['status_updates_plex'] = 1
-						elif episode is not None:
-							intents.append({'entity_type': Episode, 'entity_id': int(episode.id), 'status': status})
-							result['status_updates_plex'] = 1
-						if intents:
-							batch_update_plex_statuses(session, intents)
-					except Exception:
-						pass
+					intent = _plex_status_intent_for_entity(movie, episode, placeholder)
+					if intent is not None:
+						result['plex_status_intents'].append(intent)
 				if not confirmed_ready:
 					placeholder.media_lookup_error = 'plex_metadata_pending'
 
@@ -983,19 +1286,9 @@ def observe_placeholder_media_ids(
 					result['observed_plex'] = 1
 					placeholder.media_lookup_error = None
 					if _should_send_status_updates():
-						try:
-							intents = []
-							status = _placeholder_display_status(placeholder)
-							if movie is not None:
-								intents.append({'entity_type': Movie, 'entity_id': int(movie.id), 'status': status})
-								result['status_updates_plex'] = 1
-							elif episode is not None:
-								intents.append({'entity_type': Episode, 'entity_id': int(episode.id), 'status': status})
-								result['status_updates_plex'] = 1
-							if intents:
-								batch_update_plex_statuses(session, intents)
-						except Exception:
-							pass
+						intent = _plex_status_intent_for_entity(movie, episode, placeholder)
+						if intent is not None:
+							result['plex_status_intents'].append(intent)
 				else:
 					if phase2_ready:
 						result['plex_progress'] = 1
@@ -1097,11 +1390,12 @@ def _run_observation_pass(
 	session,
 	placeholders: list[Placeholder],
 	allow_title_fallback: bool = True,
-) -> tuple[list[Placeholder], dict[str, Any], int, int]:
+	plex_snapshot: dict[str, Any] | None = None,
+) -> tuple[list[Placeholder], dict[str, Any], int, int, dict[str, Any] | None]:
 	"""Build a single Plex snapshot then probe every placeholder in the list.
 
 	Returns:
-	    (still_unresolved, pass_stats, resolved_delta, progress_delta)
+	    (still_unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot)
 	    resolved_delta — items that became fully resolved this pass.
 	    progress_delta — items that made *any* Plex advancement (identity found
 	                    or metadata confirmed), used to reset the sleep cadence.
@@ -1112,49 +1406,94 @@ def _run_observation_pass(
 		'observed_emby': 0,
 		'status_updates_plex': 0,
 		'plex_progress': 0,
+		'chunks_processed': 0,
+		'pass_capped': False,
+		'snapshot_build_ms': 0,
+		'match_lookup_ms': 0,
+		'status_projection_ms': 0,
+		'db_commit_ms': 0,
 	}
 	still_unresolved: list[Placeholder] = []
 	resolved_delta = 0
+	chunk_size = _observation_pass_chunk_size()
+	max_pass_seconds = _observation_max_pass_seconds()
+	pass_started = time.monotonic()
 
-	plex_snapshot: dict[str, Any] | None = _build_plex_snapshot() if _is_enabled('plex') else None
+	if _is_enabled('plex') and plex_snapshot is None:
+		snapshot_started = time.monotonic()
+		plex_snapshot = _build_plex_snapshot(session, placeholders)
+		pass_stats['snapshot_build_ms'] += _timing_ms(snapshot_started)
 
-	for placeholder in placeholders:
-		movie: Movie | None = None
-		episode: Episode | None = None
-		movie_id = getattr(placeholder, 'movie_id', None)
-		episode_id = getattr(placeholder, 'episode_id', None)
-		if movie_id is not None:
-			movie = session.query(Movie).filter(Movie.id == int(movie_id)).first()
-		elif episode_id is not None:
-			episode = session.query(Episode).filter(Episode.id == int(episode_id)).first()
+	prefetch = _build_observation_prefetch(session, placeholders)
+	reverse_matches = _build_reverse_snapshot_match_maps(prefetch, plex_snapshot)
+	observation_context: dict[str, Any] = {
+		**prefetch,
+		**reverse_matches,
+	}
 
-		result = observe_placeholder_media_ids(
-			session,
-			placeholder,
-			movie,
-			episode,
-			plex_snapshot=plex_snapshot,
-			allow_title_fallback=allow_title_fallback,
-		)
-		pass_stats['observed_plex'] += result['observed_plex']
-		pass_stats['observed_jellyfin'] += result['observed_jellyfin']
-		pass_stats['observed_emby'] += result['observed_emby']
-		pass_stats['status_updates_plex'] += result.get('status_updates_plex', 0)
-		pass_stats['plex_progress'] += result.get('plex_progress', 0)
+	for chunk_start in range(0, len(placeholders), chunk_size):
+		if max_pass_seconds > 0 and (time.monotonic() - pass_started) >= max_pass_seconds:
+			still_unresolved.extend(placeholders[chunk_start:])
+			pass_stats['pass_capped'] = True
+			break
 
-		if result['resolved_all']:
-			resolved_delta += 1
-		else:
-			still_unresolved.append(placeholder)
+		chunk = placeholders[chunk_start:chunk_start + chunk_size]
+		pending_status_intents: list[dict[str, Any]] = []
+		match_started = time.monotonic()
+		for placeholder in chunk:
+			movie: Movie | None = None
+			episode: Episode | None = None
+			movie_id = getattr(placeholder, 'movie_id', None)
+			episode_id = getattr(placeholder, 'episode_id', None)
+			if movie_id is not None:
+				movie = observation_context.get('movies_by_id', {}).get(int(movie_id))
+			elif episode_id is not None:
+				episode = observation_context.get('episodes_by_id', {}).get(int(episode_id))
 
-	try:
-		session.commit()
-	except Exception:
-		session.rollback()
-		raise
+			result = observe_placeholder_media_ids(
+				session,
+				placeholder,
+				movie,
+				episode,
+				plex_snapshot=plex_snapshot,
+				observation_context=observation_context,
+				allow_title_fallback=allow_title_fallback,
+			)
+			pass_stats['observed_plex'] += result['observed_plex']
+			pass_stats['observed_jellyfin'] += result['observed_jellyfin']
+			pass_stats['observed_emby'] += result['observed_emby']
+			pass_stats['plex_progress'] += result.get('plex_progress', 0)
+			pending_status_intents.extend(result.get('plex_status_intents', []))
+
+			if result['resolved_all']:
+				resolved_delta += 1
+			else:
+				still_unresolved.append(placeholder)
+		pass_stats['match_lookup_ms'] += _timing_ms(match_started)
+
+		projection_started = time.monotonic()
+		if pending_status_intents and _should_send_status_updates():
+			try:
+				projection_stats = batch_update_plex_statuses(session, _dedupe_plex_status_intents(pending_status_intents))
+				pass_stats['status_updates_plex'] += int(projection_stats.get('status_updates', 0) or 0)
+			except Exception as exc:
+				logger.warning(
+					f"Batched Plex status projection failed during observation pass: {exc}",
+					extra={'emoji_type': 'warning'},
+				)
+		pass_stats['status_projection_ms'] += _timing_ms(projection_started)
+
+		commit_started = time.monotonic()
+		try:
+			session.commit()
+		except Exception:
+			session.rollback()
+			raise
+		pass_stats['db_commit_ms'] += _timing_ms(commit_started)
+		pass_stats['chunks_processed'] += 1
 
 	progress_delta = pass_stats['plex_progress']
-	return still_unresolved, pass_stats, resolved_delta, progress_delta
+	return still_unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot
 
 
 def observe_placeholders_with_polling(
@@ -1174,6 +1513,13 @@ def observe_placeholders_with_polling(
 		'resolved_total': 0,
 		'stopped_early': False,
 		'stop_reason': None,
+		'passes_capped': 0,
+		'timing': {
+			'snapshot_build_ms': 0,
+			'match_lookup_ms': 0,
+			'status_projection_ms': 0,
+			'db_commit_ms': 0,
+		},
 	}
 	if not placeholders:
 		return stats
@@ -1188,7 +1534,7 @@ def observe_placeholders_with_polling(
 
 	if not _is_enabled('plex'):
 		stats['attempts'] = 1
-		unresolved, pass_stats, resolved_delta, _ = _run_observation_pass(
+		unresolved, pass_stats, resolved_delta, _, _ = _run_observation_pass(
 			session,
 			unresolved,
 			allow_title_fallback=allow_title_fallback,
@@ -1197,6 +1543,10 @@ def observe_placeholders_with_polling(
 		stats['observed_jellyfin'] += pass_stats.get('observed_jellyfin', 0)
 		stats['observed_emby'] += pass_stats.get('observed_emby', 0)
 		stats['status_updates_plex'] += pass_stats.get('status_updates_plex', 0)
+		stats['timing']['snapshot_build_ms'] += int(pass_stats.get('snapshot_build_ms', 0) or 0)
+		stats['timing']['match_lookup_ms'] += int(pass_stats.get('match_lookup_ms', 0) or 0)
+		stats['timing']['status_projection_ms'] += int(pass_stats.get('status_projection_ms', 0) or 0)
+		stats['timing']['db_commit_ms'] += int(pass_stats.get('db_commit_ms', 0) or 0)
 		stats['resolved_total'] = resolved_delta
 		stats['observe_failed'] = max(0, len(unresolved))
 		stats['stop_reason'] = 'single_pass_non_plex'
@@ -1220,6 +1570,8 @@ def observe_placeholders_with_polling(
 	# Polling loop: adaptive interval 5→10→20→20, stop on 5th consecutive no-progress.
 	# Any progress resets the interval back to 5 s.
 	no_progress_count = 0
+	plex_snapshot_cache: dict[str, Any] | None = None
+	snapshot_reuse_streak = 0
 
 	while unresolved:
 		stats['attempts'] += 1
@@ -1228,10 +1580,11 @@ def observe_placeholders_with_polling(
 			f"Observation poll pass #{stats['attempts']} starting with {len(unresolved)} unresolved item(s).",
 			extra={'emoji_type': 'info'},
 		)
-		unresolved, pass_stats, resolved_delta, progress_delta = _run_observation_pass(
+		unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot_cache = _run_observation_pass(
 			session,
 			unresolved,
 			allow_title_fallback=allow_title_fallback,
+			plex_snapshot=plex_snapshot_cache,
 		)
 		pass_elapsed = time.monotonic() - pass_started
 		logger.info(
@@ -1243,8 +1596,23 @@ def observe_placeholders_with_polling(
 		stats['observed_jellyfin'] += pass_stats['observed_jellyfin']
 		stats['observed_emby'] += pass_stats['observed_emby']
 		stats['status_updates_plex'] += pass_stats['status_updates_plex']
+		stats['timing']['snapshot_build_ms'] += int(pass_stats.get('snapshot_build_ms', 0) or 0)
+		stats['timing']['match_lookup_ms'] += int(pass_stats.get('match_lookup_ms', 0) or 0)
+		stats['timing']['status_projection_ms'] += int(pass_stats.get('status_projection_ms', 0) or 0)
+		stats['timing']['db_commit_ms'] += int(pass_stats.get('db_commit_ms', 0) or 0)
 		resolved_total += resolved_delta
 		stats['resolved_total'] = resolved_total
+		if pass_stats.get('pass_capped'):
+			stats['passes_capped'] += 1
+		logger.info(
+			f"Observation pass timing: snapshot_build_ms={int(pass_stats.get('snapshot_build_ms', 0) or 0)} "
+			f"match_lookup_ms={int(pass_stats.get('match_lookup_ms', 0) or 0)} "
+			f"status_projection_ms={int(pass_stats.get('status_projection_ms', 0) or 0)} "
+			f"db_commit_ms={int(pass_stats.get('db_commit_ms', 0) or 0)} "
+			f"chunks={int(pass_stats.get('chunks_processed', 0) or 0)} "
+			f"pass_capped={bool(pass_stats.get('pass_capped', False))}.",
+			extra={'emoji_type': 'info'},
+		)
 
 		if not unresolved:
 			stats['stop_reason'] = 'all_resolved'
@@ -1264,6 +1632,18 @@ def observe_placeholders_with_polling(
 				f"Plex status updates applied for {pass_stats['status_updates_plex']} item(s) this pass.",
 				extra={'emoji_type': 'update'},
 			)
+
+		# Reuse scoped snapshots briefly for speed, but force periodic refresh so
+		# newly scanned Plex content can be discovered on subsequent passes.
+		if _is_enabled('plex'):
+			if progress_delta <= 0:
+				plex_snapshot_cache = None
+				snapshot_reuse_streak = 0
+			else:
+				snapshot_reuse_streak += 1
+				if snapshot_reuse_streak >= 2:
+					plex_snapshot_cache = None
+					snapshot_reuse_streak = 0
 
 		if progress_delta > 0:
 			# Progress: identity found or metadata confirmed — reset escalation state.

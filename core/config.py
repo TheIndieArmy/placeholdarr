@@ -44,6 +44,10 @@ else:
 
 class Settings(BaseSettings):
     LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
+    APPDATA_PATH: str = os.getenv("APPDATA_PATH", "/config").split('#')[0].strip()
+    LOG_DIR: str = os.getenv("LOG_DIR", "").split('#')[0].strip()
+    LOG_FILE: str = os.getenv("LOG_FILE", "").split('#')[0].strip()
+    LOG_MAX_RUN_FILES: int = int(os.getenv("LOG_MAX_RUN_FILES", "10").split('#')[0].strip())
     WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
     SCHEDULED_TIME_FAILED: Optional[str] = None  # Add this line to avoid AttributeError
 
@@ -60,6 +64,15 @@ class Settings(BaseSettings):
     # Emby
     EMBY_URL: Optional[str] = None
     EMBY_TOKEN: Optional[str] = None
+    EMBY_ITEM_REFRESH_RETRY_ATTEMPTS: int = int(os.getenv("EMBY_ITEM_REFRESH_RETRY_ATTEMPTS", "6").split('#')[0].strip())
+    EMBY_ITEM_REFRESH_RETRY_DELAY_SECONDS: float = float(os.getenv("EMBY_ITEM_REFRESH_RETRY_DELAY_SECONDS", "2").split('#')[0].strip())
+    EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
+    EMBY_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("EMBY_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
+    EMBY_TARGETED_REFRESH_POLL_SECONDS: float = float(os.getenv("EMBY_TARGETED_REFRESH_POLL_SECONDS", "1").split('#')[0].strip())
+
+    JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
+    JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
+    JELLYFIN_TARGETED_REFRESH_POLL_SECONDS: float = float(os.getenv("JELLYFIN_TARGETED_REFRESH_POLL_SECONDS", "1").split('#')[0].strip())
 
     # Services
     RADARR_URL: str
@@ -163,6 +176,8 @@ class Settings(BaseSettings):
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
     PLEX_METADATA_READY_CONFIRM_POLLS: int = int(os.getenv("PLEX_METADATA_READY_CONFIRM_POLLS", "2").split('#')[0].strip())
+    OBSERVATION_PASS_CHUNK_SIZE: int = int(os.getenv("OBSERVATION_PASS_CHUNK_SIZE", "150").split('#')[0].strip())
+    OBSERVATION_MAX_PASS_SECONDS: int = int(os.getenv("OBSERVATION_MAX_PASS_SECONDS", "45").split('#')[0].strip())
     ENABLE_STATUS_ORCHESTRATOR_CALENDAR: bool = os.getenv("ENABLE_STATUS_ORCHESTRATOR_CALENDAR", "true").split('#')[0].strip().lower() == "true"
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.

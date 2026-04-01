@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_
+from sqlalchemy import func
 
 from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Season, Series, Movie
+from services.postgres.models import Episode, Season, Series, Movie, Placeholder
+from services.placeholders import episode_placeholder_path, movie_placeholder_path
+from services.source_of_truth.observation_trail import enqueue_observation_trail
+from services.source_of_truth.status_reconciler import enqueue_status_projection
 from services.source_of_truth.arr_api import (
     fetch_radarr_movie,
     fetch_sonarr_episodes,
@@ -148,6 +153,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         season_rollups: dict[int, dict[str, int | bool | str | None]] = {}
         season_overview_by_number: dict[int, str] = {}
         touched_episode_rows: list[Episode] = []
+        missing_placeholder_episode_rows: list[Episode] = []
 
         for ep in episodes:
             season_number = int(ep.get("seasonNumber") or 0)
@@ -178,6 +184,16 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
                 rollup["status"] = ep_fields.get("sonarr_status")
 
             ep_row, ep_created = _upsert_episode(session, ep_fields)
+
+            # Event-scoped FS truth check: if users manually removed placeholder files
+            # out-of-band, clear stale DB placeholder flags for this episode before determination.
+            expected_path = episode_placeholder_path(ep_row, season_row, series_row)
+            exists_on_disk = os.path.isfile(expected_path)
+            ep_row.has_placeholder = bool(exists_on_disk)
+            ep_row.placeholder_filepath = expected_path if exists_on_disk else None
+            if not exists_on_disk:
+                missing_placeholder_episode_rows.append(ep_row)
+
             touched_episode_rows.append(ep_row)
             if ep_created:
                 stats["episodes_upserted"] += 1
@@ -195,6 +211,31 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             season_row.is_deleted = False
             session.add(season_row)
 
+        missing_episode_ids = [
+            int(ep.id) for ep in missing_placeholder_episode_rows if getattr(ep, "id", None)
+        ]
+        if missing_episode_ids:
+            stale_rows = (
+                session.query(Placeholder)
+                .filter(Placeholder.episode_id.in_(missing_episode_ids), Placeholder.has_placeholder == True)  # noqa: E712
+                .all()
+            )
+            for row in stale_rows:
+                row.has_placeholder = False
+                if hasattr(row, "lifecycle_status"):
+                    row.lifecycle_status = "MISSING"
+                row.plex_placeholder_id = None
+                row.jellyfin_placeholder_id = None
+                row.emby_placeholder_id = None
+                row.plex_id_observed_at = None
+                row.jellyfin_id_observed_at = None
+                row.emby_id_observed_at = None
+                row.media_lookup_error = None
+                row.media_lookup_last_attempt_at = None
+                row.last_observed_at = func.now()
+                row.updated_at = func.now()
+                session.add(row)
+
         session.flush()
         episode_ids = [int(ep.id) for ep in touched_episode_rows if getattr(ep, "id", None)]
         stats["episodes_touched"] = len(episode_ids)
@@ -206,6 +247,34 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             observation_source="event_series_add",
         )
 
+        followup = {"observation_trail_enqueued": 0, "status_projection_enqueued": 0, "placeholder_ids": []}
+
+        # Gap fix parity with movie-add: when placeholders already exist, scoped
+        # materialization is a no-op, so enqueue observation + status projection.
+        if int(determination_stats.get("placeholder_exists", 0) or 0) > 0:
+            follow_session = get_session()
+            try:
+                active_rows = (
+                    follow_session.query(Placeholder)
+                    .filter(Placeholder.episode_id.in_(episode_ids), Placeholder.has_placeholder == True)  # noqa: E712
+                    .all()
+                )
+                placeholder_ids = [int(row.id) for row in active_rows if getattr(row, "id", None)]
+                followup["placeholder_ids"] = placeholder_ids
+                if placeholder_ids:
+                    obs_result = enqueue_observation_trail(
+                        follow_session,
+                        placeholder_ids=placeholder_ids,
+                        source="event_series_add_existing_placeholder",
+                        delay_seconds=0,
+                    )
+                    followup["observation_trail_enqueued"] = 1 if obs_result.get("enqueued") else 0
+
+                    proj_result = enqueue_status_projection(placeholder_ids, session=follow_session)
+                    followup["status_projection_enqueued"] = 1 if proj_result.get("ok") else 0
+            finally:
+                follow_session.close()
+
         return {
             "ok": True,
             "event": "seriesadd",
@@ -215,6 +284,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             "upsert_stats": stats,
             "determination": determination_stats,
             "materialization": materialization_stats,
+            "followup": followup,
         }
     except Exception:
         session.rollback()
@@ -252,6 +322,35 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
 
         movie_row, _ = _upsert_movie(session, fields)
         movie_row.last_found_in_radarr = datetime.now(timezone.utc)
+
+        # Event-scoped FS truth check: if users manually removed placeholder files
+        # out-of-band, clear stale DB placeholder flags for this movie before determination.
+        expected_path = movie_placeholder_path(movie_row)
+        exists_on_disk = os.path.isfile(expected_path)
+        movie_row.has_placeholder = bool(exists_on_disk)
+        movie_row.placeholder_filepath = expected_path if exists_on_disk else None
+        if not exists_on_disk:
+            stale_rows = (
+                session.query(Placeholder)
+                .filter(Placeholder.movie_id == movie_row.id, Placeholder.has_placeholder == True)  # noqa: E712
+                .all()
+            )
+            for row in stale_rows:
+                row.has_placeholder = False
+                if hasattr(row, "lifecycle_status"):
+                    row.lifecycle_status = "MISSING"
+                row.plex_placeholder_id = None
+                row.jellyfin_placeholder_id = None
+                row.emby_placeholder_id = None
+                row.plex_id_observed_at = None
+                row.jellyfin_id_observed_at = None
+                row.emby_id_observed_at = None
+                row.media_lookup_error = None
+                row.media_lookup_last_attempt_at = None
+                row.last_observed_at = func.now()
+                row.updated_at = func.now()
+                session.add(row)
+
         session.add(movie_row)
         session.flush()
         movie_row_id = int(movie_row.id)
@@ -263,6 +362,34 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             observation_source="event_movie_add",
         )
 
+        followup = {"observation_trail_enqueued": 0, "status_projection_enqueued": 0, "placeholder_ids": []}
+
+        # Gap fix: when placeholder already exists, scoped materialization is a no-op,
+        # so we still enqueue observation + status projection for this movie's active placeholders.
+        if int(determination_stats.get("placeholder_exists", 0) or 0) > 0:
+            follow_session = get_session()
+            try:
+                active_rows = (
+                    follow_session.query(Placeholder)
+                    .filter(Placeholder.movie_id == movie_row_id, Placeholder.has_placeholder == True)  # noqa: E712
+                    .all()
+                )
+                placeholder_ids = [int(row.id) for row in active_rows if getattr(row, "id", None)]
+                followup["placeholder_ids"] = placeholder_ids
+                if placeholder_ids:
+                    obs_result = enqueue_observation_trail(
+                        follow_session,
+                        placeholder_ids=placeholder_ids,
+                        source="event_movie_add_existing_placeholder",
+                        delay_seconds=0,
+                    )
+                    followup["observation_trail_enqueued"] = 1 if obs_result.get("enqueued") else 0
+
+                    proj_result = enqueue_status_projection(placeholder_ids, session=follow_session)
+                    followup["status_projection_enqueued"] = 1 if proj_result.get("ok") else 0
+            finally:
+                follow_session.close()
+
         return {
             "ok": True,
             "event": "movieadd",
@@ -270,6 +397,7 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             "movie_id": movie_row_id,
             "determination": determination_stats,
             "materialization": materialization_stats,
+            "followup": followup,
         }
     except Exception:
         session.rollback()
@@ -466,6 +594,67 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         session.close()
 
 
+def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
+    """Process movie delete event by marking deleted and running targeted determination/materialization."""
+    movie_id = _extract_movie_id(payload)
+    inferred_is_4k = _infer_is_4k_from_instance(instance)
+
+    session = get_session()
+    try:
+        movie_row = None
+        if movie_id:
+            movie_row = session.query(Movie).filter(
+                Movie.radarrid == movie_id,
+                Movie.is_4k == inferred_is_4k,
+            ).first()
+            if not movie_row:
+                movie_row = session.query(Movie).filter(Movie.radarrid == movie_id).first()
+
+        if not movie_row:
+            movie_payload = payload.get("movie") if isinstance(payload.get("movie"), dict) else {}
+            tmdb_id = movie_payload.get("tmdbId")
+            try:
+                tmdb_id_int = int(tmdb_id) if tmdb_id is not None else None
+            except Exception:
+                tmdb_id_int = None
+            if tmdb_id_int:
+                movie_row = session.query(Movie).filter(
+                    Movie.tmdbid == tmdb_id_int,
+                    Movie.is_4k == inferred_is_4k,
+                ).first()
+
+        if not movie_row:
+            raise ValueError(f"moviedelete_movie_not_found:radarrid={movie_id}:is_4k={inferred_is_4k}")
+
+        movie_row.is_deleted = True
+        movie_row.has_file = False
+        movie_row.radarr_filepath = None
+        session.add(movie_row)
+        session.flush()
+        movie_row_id = int(movie_row.id)
+        session.commit()
+
+        determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
+        materialization_stats = run_materialization_for_entities(
+            movie_ids=[movie_row_id],
+            observation_source="event_movie_deleted",
+        )
+
+        return {
+            "ok": True,
+            "event": "movie_deleted",
+            "is_4k": inferred_is_4k,
+            "movie_id": movie_row_id,
+            "determination": determination_stats,
+            "materialization": materialization_stats,
+        }
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
     """Process episode file-deleted event by resetting has_file and rerunning determination/materialization."""
     series_id = _extract_series_id(payload)
@@ -533,6 +722,99 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         return {
             "ok": True,
             "event": "episode_file_deleted",
+            "is_4k": inferred_is_4k,
+            "series_id": int(series_row.id),
+            "episode_ids": episode_ids,
+            "determination": determination_stats,
+            "materialization": materialization_stats,
+        }
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def process_series_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
+    """Process series delete event by marking deleted and running targeted determination/materialization."""
+    sonarr_series_id = _extract_series_id(payload)
+    if not sonarr_series_id:
+        raise ValueError("seriesdelete_missing_series_id")
+
+    inferred_is_4k = _infer_is_4k_from_instance(instance)
+
+    session = get_session()
+    try:
+        series_row = session.query(Series).filter(
+            Series.sonarrid == sonarr_series_id,
+            Series.is_4k == inferred_is_4k,
+        ).first()
+
+        if not series_row:
+            series_row = session.query(Series).filter(Series.sonarrid == sonarr_series_id).first()
+
+        if not series_row:
+            series_payload = payload.get("series") if isinstance(payload.get("series"), dict) else {}
+            tvdb_id = series_payload.get("tvdbId") or series_payload.get("tvdbid")
+            try:
+                tvdb_id_int = int(tvdb_id) if tvdb_id is not None else None
+            except Exception:
+                tvdb_id_int = None
+            if tvdb_id_int:
+                series_row = session.query(Series).filter(
+                    Series.tvdbid == tvdb_id_int,
+                    Series.is_4k == inferred_is_4k,
+                ).first()
+
+        if not series_row:
+            raise ValueError(f"seriesdelete_series_not_found:sonarrid={sonarr_series_id}:is_4k={inferred_is_4k}")
+
+        series_row.is_deleted = True
+        series_row.has_files = False
+        series_row.seriesfile_count = 0
+        session.add(series_row)
+        session.flush()
+
+        season_ids = [
+            int(row[0])
+            for row in session.query(Season.id).filter(Season.series_id == series_row.id).all()
+        ]
+        episode_ids: list[int] = []
+        if season_ids:
+            episode_ids = [
+                int(row[0])
+                for row in session.query(Episode.id).filter(Episode.season_id.in_(season_ids)).all()
+            ]
+
+            session.query(Season).filter(Season.id.in_(season_ids)).update(
+                {
+                    Season.is_deleted: True,
+                    Season.has_files: False,
+                    Season.seasonfile_count: 0,
+                },
+                synchronize_session=False,
+            )
+
+            session.query(Episode).filter(Episode.id.in_(episode_ids)).update(
+                {
+                    Episode.is_deleted: True,
+                    Episode.has_file: False,
+                    Episode.sonarr_filepath: None,
+                },
+                synchronize_session=False,
+            )
+
+        session.commit()
+
+        determination_stats = run_determination_for_entities(episode_ids=episode_ids)
+        materialization_stats = run_materialization_for_entities(
+            episode_ids=episode_ids,
+            observation_source="event_series_deleted",
+        )
+
+        return {
+            "ok": True,
+            "event": "series_deleted",
             "is_4k": inferred_is_4k,
             "series_id": int(series_row.id),
             "episode_ids": episode_ids,

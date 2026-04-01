@@ -12,9 +12,20 @@ from services.media_servers.plex_lookup import get_plex_server
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 
 
-def _prepend_status_to_summary(summary: str | None, status: str | None) -> str:
+def _prepend_status_to_summary(
+    summary: str | None,
+    status: str | None,
+    fallback: str | None = None,
+    secondary_fallback: str | None = None,
+) -> str:
     text = str(summary or "")
     text = re.sub(r"^\[.*?\]\s*", "", text)
+    if not text.strip():
+        for candidate in (fallback, secondary_fallback):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text:
+                text = candidate_text
+                break
     if status:
         return f"[{status}] {text}".strip()
     return text.strip()
@@ -126,7 +137,12 @@ def batch_update_plex_statuses(
             continue
 
         current_summary = str(getattr(plex_item, "summary", "") or "")
-        desired_summary = _prepend_status_to_summary(current_summary, desired_status)
+        desired_summary = _prepend_status_to_summary(
+            current_summary,
+            desired_status,
+            fallback=getattr(movie, "plex_overview", None),
+            secondary_fallback=getattr(movie, "radarr_overview", None),
+        )
         if current_summary == desired_summary:
             stats["unchanged"] += 1
             stats["details"].append({"entity_id": entity_id, "title": movie.title, "result": "unchanged"})
@@ -193,7 +209,12 @@ def batch_update_plex_statuses(
                     continue
 
                 current_summary = str(getattr(plex_episode, "summary", "") or "")
-                desired_summary = _prepend_status_to_summary(current_summary, intent.get("status"))
+                desired_summary = _prepend_status_to_summary(
+                    current_summary,
+                    intent.get("status"),
+                    fallback=getattr(episode, "plex_overview", None),
+                    secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
+                )
                 if current_summary == desired_summary:
                     stats["unchanged"] += 1
                     stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "unchanged"})
@@ -234,7 +255,12 @@ def batch_update_plex_statuses(
                 continue
 
             current_summary = str(getattr(plex_episode, "summary", "") or "")
-            desired_summary = _prepend_status_to_summary(current_summary, desired_status)
+            desired_summary = _prepend_status_to_summary(
+                current_summary,
+                desired_status,
+                fallback=getattr(episode, "plex_overview", None),
+                secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
+            )
             if current_summary == desired_summary:
                 stats["unchanged"] += 1
                 stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "unchanged"})
@@ -261,7 +287,12 @@ def batch_update_plex_statuses(
             continue
 
         current_summary = str(getattr(plex_episode, "summary", "") or "")
-        desired_summary = _prepend_status_to_summary(current_summary, desired_status)
+        desired_summary = _prepend_status_to_summary(
+            current_summary,
+            desired_status,
+            fallback=getattr(episode, "plex_overview", None),
+            secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
+        )
         if current_summary == desired_summary:
             stats["unchanged"] += 1
             stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "unchanged"})

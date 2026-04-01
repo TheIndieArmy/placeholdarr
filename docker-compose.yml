@@ -1,28 +1,43 @@
 version: "3.8"
 services:
   placeholdarr:
-    image: ghcr.io/theindiearmy/placeholdarr:queue_monitoring-latest
+    build:
+      context: .
+      dockerfile: dockerfile
+    container_name: placeholdarr
     env_file:
       - .env
+    environment:
+      APPDATA_PATH: /config
+      LOG_DIR: /config/logs
+      DB_HOST: placeholdarr_postgres
+      DB_PORT: 5432
+      DB_USER: placeholdarr
+      DB_PASS: placeholdarr
+      DB_NAME: placeholdarr
     volumes:
-      # Update these paths to match your actual placeholder library locations and dummy files
-      # Mount your movie placeholder folder (MOVIE_LIBRARY_FOLDER)
+      # Placeholdarr app state + logs + Postgres data root
+      - ${PLACEHOLDARR_APPDATA:-./.appdata}:/config
+      # Update these paths to match your actual placeholder library locations
       - /path/to/your/movie-library:/movies
-      # Mount your TV placeholder folder (TV_LIBRARY_FOLDER)
       - /path/to/your/tv-library:/tv
       # Uncomment the following lines if using 4K placeholder libraries:
       # - /path/to/your/movie-library-4k:/movies-4k  # MOVIE_LIBRARY_4K_FOLDER
       # - /path/to/your/tv-library-4k:/tv-4k        # TV_LIBRARY_4K_FOLDER
-      # Mount your standard dummy file
-      - ./dummy.mp4:/app/dummy.mp4
-      # Mount your "coming soon" dummy file (optional)
-      - ./coming_soon_dummy.mp4:/app/coming_soon_dummy.mp4
+      # Optional dummy files (match DUMMY_FILE_PATH / COMING_SOON_DUMMY_FILE_PATH)
+      - ./dummy.mp4:/data/dummy.mp4
+      - ./coming_soon_dummy.mp4:/data/coming_soon_dummy.mp4
     ports:
       - "8000:8000"
     restart: unless-stopped
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-# Note: Update the /path/to/your/movie-library and /path/to/your/tv-library to match your MOVIE_LIBRARY_FOLDER and TV_LIBRARY_FOLDER settings in .env.
-# Dummy file paths should match DUMMY_FILE_PATH and COMING_SOON_DUMMY_FILE_PATH in .env.
+
+  placeholdarr_postgres:
+    container_name: placeholdarr_postgres
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "placeholdarr"
+      POSTGRES_PASSWORD: "placeholdarr"
+      POSTGRES_DB: "placeholdarr"
+    volumes:
+      - ${PLACEHOLDARR_APPDATA:-./.appdata}/postgres:/var/lib/postgresql/data
