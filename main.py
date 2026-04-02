@@ -277,6 +277,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Dashboard UI
+from routes.dashboard import router as dashboard_router
+app.include_router(dashboard_router)
+
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:

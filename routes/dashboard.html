@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Placeholdarr</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232633;
+    --border: #2e3141;
+    --text: #e1e3ea;
+    --text-dim: #8b8fa3;
+    --accent: #6c8cff;
+    --green: #4ade80;
+    --yellow: #facc15;
+    --red: #f87171;
+    --orange: #fb923c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    font-size: 14px;
+  }
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .header .sync-info {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  /* Stats cards */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    padding: 16px 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .stat-card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .stat-card .value {
+    font-size: 24px;
+    font-weight: 700;
+  }
+  .stat-card .breakdown {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+  .stat-card .breakdown span { margin-right: 10px; }
+  .pill-green { color: var(--green); }
+  .pill-yellow { color: var(--yellow); }
+  .pill-red { color: var(--red); }
+  .pill-orange { color: var(--orange); }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 0;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .tab {
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab .badge {
+    display: inline-block;
+    background: var(--red);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 8px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
+  /* Content panels */
+  .content { padding: 16px 24px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* Activity & error tables */
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    padding: 10px 14px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: var(--surface2); }
+  .status-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .status-DONE, .status-PROCESSED { background: rgba(74,222,128,0.15); color: var(--green); }
+  .status-PENDING, .status-CLAIMED, .status-WORKING { background: rgba(250,204,21,0.15); color: var(--yellow); }
+  .status-FAILED { background: rgba(248,113,113,0.15); color: var(--red); }
+  .error-text {
+    color: var(--red);
+    font-size: 12px;
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .source-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--surface2);
+    color: var(--text-dim);
+  }
+  .time-ago { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+
+  /* Log viewer */
+  .log-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .log-controls input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 12px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .log-controls input:focus { border-color: var(--accent); }
+  .log-controls select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 10px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .log-viewer {
+    background: #0a0b0f;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    max-height: 70vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .log-line { padding: 1px 0; }
+  .log-line.log-WARNING { color: var(--yellow); }
+  .log-line.log-ERROR, .log-line.log-CRITICAL { color: var(--red); }
+  .log-line.log-DEBUG { color: var(--text-dim); }
+  .log-file-label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .empty-state {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-dim);
+  }
+
+  /* Auto-refresh indicator */
+  .refresh-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    margin-right: 6px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Placeholdarr</h1>
+  <div class="sync-info">
+    <span class="refresh-dot"></span>
+    Auto-refresh 5s &middot; Last sync: <span id="last-sync">--</span>
+  </div>
+</div>
+
+<div class="stats" id="stats-grid">
+  <div class="stat-card">
+    <div class="label">Movies</div>
+    <div class="value" id="s-movies-total">--</div>
+    <div class="breakdown">
+      <span class="pill-green" id="s-movies-dl">-- downloaded</span>
+      <span class="pill-yellow" id="s-movies-ph">-- placeholders</span>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Series</div>
+    <div class="value" id="s-series-total">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Episodes</div>
+    <div class="value" id="s-episodes-total">--</div>
+    <div class="breakdown">
+      <span class="pill-green" id="s-episodes-dl">-- downloaded</span>
+      <span class="pill-yellow" id="s-episodes-ph">-- placeholders</span>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Placeholders on Disk</div>
+    <div class="value pill-yellow" id="s-ph-disk">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Jobs</div>
+    <div class="value" id="s-jobs-pending">--</div>
+    <div class="breakdown">
+      <span class="pill-green" id="s-jobs-done">-- done</span>
+      <span class="pill-red" id="s-jobs-failed">-- failed</span>
+    </div>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="activity">Activity</div>
+  <div class="tab" data-tab="errors">Errors <span class="badge" id="error-count" style="display:none">0</span></div>
+  <div class="tab" data-tab="logs">Logs</div>
+</div>
+
+<div class="content">
+  <!-- Activity panel -->
+  <div class="panel active" id="panel-activity">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Type</th><th>Detail</th><th>Status</th></tr></thead>
+        <tbody id="activity-body"></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="activity-empty" style="display:none">No recent activity</div>
+  </div>
+
+  <!-- Errors panel -->
+  <div class="panel" id="panel-errors">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Source</th><th>Label</th><th>Error</th></tr></thead>
+        <tbody id="errors-body"></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="errors-empty" style="display:none">No errors found</div>
+  </div>
+
+  <!-- Logs panel -->
+  <div class="panel" id="panel-logs">
+    <div class="log-controls">
+      <input type="text" id="log-filter" placeholder="Filter logs...">
+      <select id="log-level">
+        <option value="all">All levels</option>
+        <option value="warn">Warnings + Errors</option>
+        <option value="error">Errors only</option>
+      </select>
+      <span class="log-file-label" id="log-file-label"></span>
+    </div>
+    <div class="log-viewer" id="log-viewer"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const REFRESH_MS = 5000;
+  let currentTab = 'activity';
+
+  // --- Tabs ---
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      const id = tab.dataset.tab;
+      currentTab = id;
+      document.getElementById('panel-' + id).classList.add('active');
+      refresh();
+    });
+  });
+
+  // --- Time formatting ---
+  function timeAgo(iso) {
+    if (!iso) return '--';
+    const d = new Date(iso);
+    const now = new Date();
+    const s = Math.floor((now - d) / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+
+  function esc(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  // --- Stats ---
+  async function loadStats() {
+    try {
+      const r = await fetch('api/stats');
+      const d = await r.json();
+      document.getElementById('s-movies-total').textContent = d.movies.total;
+      document.getElementById('s-movies-dl').textContent = d.movies.downloaded + ' downloaded';
+      document.getElementById('s-movies-ph').textContent = d.movies.placeholders + ' placeholders';
+      document.getElementById('s-series-total').textContent = d.series.total;
+      document.getElementById('s-episodes-total').textContent = d.episodes.total;
+      document.getElementById('s-episodes-dl').textContent = d.episodes.downloaded + ' downloaded';
+      document.getElementById('s-episodes-ph').textContent = d.episodes.placeholders + ' placeholders';
+      document.getElementById('s-ph-disk').textContent = d.placeholders_on_disk;
+      document.getElementById('s-jobs-pending').textContent = d.jobs.pending;
+      document.getElementById('s-jobs-done').textContent = d.jobs.done + ' done';
+      document.getElementById('s-jobs-failed').textContent = d.jobs.failed + ' failed';
+      document.getElementById('last-sync').textContent = d.last_sync ? timeAgo(d.last_sync) : 'never';
+    } catch(e) { console.error('stats', e); }
+  }
+
+  // --- Activity ---
+  async function loadActivity() {
+    try {
+      const r = await fetch('api/activity?limit=100');
+      const items = await r.json();
+      const body = document.getElementById('activity-body');
+      const empty = document.getElementById('activity-empty');
+      if (!items.length) {
+        body.innerHTML = '';
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+      body.innerHTML = items.map(i => `<tr>
+        <td class="time-ago">${esc(timeAgo(i.time))}</td>
+        <td><span class="source-badge">${esc(i.type === 'event' ? i.event_type : i.job_type)}</span></td>
+        <td>${esc(i.source || i.job_type || '')}</td>
+        <td><span class="status-badge status-${esc(i.status)}">${esc(i.status)}</span></td>
+      </tr>`).join('');
+    } catch(e) { console.error('activity', e); }
+  }
+
+  // --- Errors ---
+  async function loadErrors() {
+    try {
+      const r = await fetch('api/errors?limit=100');
+      const items = await r.json();
+      const body = document.getElementById('errors-body');
+      const empty = document.getElementById('errors-empty');
+      const badge = document.getElementById('error-count');
+      if (!items.length) {
+        body.innerHTML = '';
+        empty.style.display = '';
+        badge.style.display = 'none';
+        return;
+      }
+      empty.style.display = 'none';
+      badge.style.display = '';
+      badge.textContent = items.length;
+      body.innerHTML = items.map(i => `<tr>
+        <td class="time-ago">${esc(timeAgo(i.time))}</td>
+        <td><span class="source-badge">${esc(i.source)}</span></td>
+        <td>${esc(i.label)}</td>
+        <td class="error-text" title="${esc(i.error)}">${esc(i.error)}</td>
+      </tr>`).join('');
+    } catch(e) { console.error('errors', e); }
+  }
+
+  // --- Logs ---
+  let lastLogLevel = 'all';
+  async function loadLogs() {
+    try {
+      const level = document.getElementById('log-level').value;
+      lastLogLevel = level;
+      const r = await fetch('api/logs?tail=500&level=' + level);
+      const d = await r.json();
+      const viewer = document.getElementById('log-viewer');
+      const filter = document.getElementById('log-filter').value.toLowerCase();
+      document.getElementById('log-file-label').textContent = d.file ? d.file : '';
+
+      let lines = d.lines || [];
+      if (filter) {
+        lines = lines.filter(l => l.toLowerCase().includes(filter));
+      }
+
+      viewer.innerHTML = lines.map(l => {
+        let cls = 'log-line';
+        if (l.includes('ERROR') || l.includes('CRITICAL')) cls += ' log-ERROR';
+        else if (l.includes('WARNING')) cls += ' log-WARNING';
+        else if (l.includes('DEBUG')) cls += ' log-DEBUG';
+        return '<div class="' + cls + '">' + esc(l) + '</div>';
+      }).join('');
+
+      // Auto-scroll to bottom
+      viewer.scrollTop = viewer.scrollHeight;
+    } catch(e) { console.error('logs', e); }
+  }
+
+  // Log filter and level change handlers
+  document.getElementById('log-filter').addEventListener('input', () => { if (currentTab === 'logs') loadLogs(); });
+  document.getElementById('log-level').addEventListener('change', () => { if (currentTab === 'logs') loadLogs(); });
+
+  // --- Refresh loop ---
+  async function refresh() {
+    loadStats();
+    if (currentTab === 'activity') loadActivity();
+    else if (currentTab === 'errors') loadErrors();
+    else if (currentTab === 'logs') loadLogs();
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
