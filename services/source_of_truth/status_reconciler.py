@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from core.config import settings
 from core.logger import logger
@@ -21,6 +21,123 @@ from services.source_of_truth.media_observation import (
 
 STATUS_PROJECTION_JOB_TYPE = "status_projection"
 NFO_REFRESH_JOB_TYPE = "nfo_refresh"
+
+
+def _job_batch_size() -> int:
+    return max(1, int(getattr(settings, "STATUS_JOB_BATCH_SIZE", 250) or 250))
+
+
+def _job_debounce_seconds() -> float:
+    return max(0.0, float(getattr(settings, "STATUS_JOB_DEBOUNCE_SECONDS", 0.5) or 0.5))
+
+
+def _normalize_placeholder_ids(placeholder_ids: list[int] | tuple[int, ...] | None) -> list[int]:
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for value in placeholder_ids or []:
+        if value is None:
+            continue
+        pid = int(value)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        normalized.append(pid)
+    return normalized
+
+
+def _job_placeholder_ids(job: Job) -> list[int]:
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    return _normalize_placeholder_ids(payload.get("placeholder_ids") or [])
+
+
+def _set_job_placeholder_ids(job: Job, placeholder_ids: list[int]) -> None:
+    payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
+    payload["placeholder_ids"] = placeholder_ids
+    job.payload = payload
+
+
+def _enqueue_batched_placeholder_job(job_type: str, placeholder_ids: list[int], session) -> dict:
+    ids_remaining = _normalize_placeholder_ids(placeholder_ids)
+    if not ids_remaining:
+        return {"ok": False, "reason": "no_placeholder_ids"}
+
+    batch_size = _job_batch_size()
+    debounce_seconds = _job_debounce_seconds()
+    now = datetime.now(timezone.utc)
+    run_after = now if debounce_seconds <= 0 else now + timedelta(seconds=debounce_seconds)
+
+    touched_job_ids: list[int] = []
+    created_jobs = 0
+    updated_jobs = 0
+
+    pending_jobs = (
+        session.query(Job)
+        .filter(Job.job_type == job_type, Job.status == "PENDING")
+        .order_by(Job.run_after.asc().nullsfirst(), Job.id.asc())
+        .with_for_update(skip_locked=True)
+        .all()
+    )
+
+    for job in pending_jobs:
+        if not ids_remaining:
+            break
+        existing_ids = _job_placeholder_ids(job)
+        if len(existing_ids) >= batch_size:
+            continue
+
+        additions: list[int] = []
+        existing_set = set(existing_ids)
+        capacity = batch_size - len(existing_ids)
+        for pid in ids_remaining:
+            if pid in existing_set:
+                continue
+            additions.append(pid)
+            existing_set.add(pid)
+            if len(additions) >= capacity:
+                break
+
+        if not additions:
+            continue
+
+        _set_job_placeholder_ids(job, existing_ids + additions)
+        job.updated_at = now
+        session.add(job)
+        touched_job_ids.append(int(job.id))
+        updated_jobs += 1
+        added_set = set(additions)
+        ids_remaining = [pid for pid in ids_remaining if pid not in added_set]
+
+    while ids_remaining:
+        chunk = ids_remaining[:batch_size]
+        ids_remaining = ids_remaining[batch_size:]
+        job = Job(
+            job_type=job_type,
+            payload={"placeholder_ids": chunk},
+            status="PENDING",
+            run_after=run_after,
+        )
+        session.add(job)
+        session.flush()
+        touched_job_ids.append(int(job.id))
+        created_jobs += 1
+
+    session.commit()
+
+    logger.debug(
+        f"Queued {job_type} placeholders={len(_normalize_placeholder_ids(placeholder_ids))} "
+        f"jobs_touched={len(touched_job_ids)} jobs_created={created_jobs} jobs_updated={updated_jobs} "
+        f"batch_size={batch_size} debounce_seconds={debounce_seconds:.3f}",
+        extra={"emoji_type": "processing"},
+    )
+
+    return {
+        "ok": True,
+        "job_id": touched_job_ids[0] if touched_job_ids else None,
+        "job_ids": touched_job_ids,
+        "jobs_created": created_jobs,
+        "jobs_updated": updated_jobs,
+        "placeholder_count": len(_normalize_placeholder_ids(placeholder_ids)),
+    }
 
 
 def _status_updates_enabled() -> bool:
@@ -324,25 +441,11 @@ def enqueue_status_projection(placeholder_ids: list[int], session=None) -> dict:
     session = session or get_session()
     
     try:
-        if not placeholder_ids:
+        normalized_ids = _normalize_placeholder_ids(placeholder_ids)
+        if not normalized_ids:
             return {"ok": False, "reason": "no_placeholder_ids"}
-        
-        # Create a job to project these statuses
-        job = Job(
-            job_type=STATUS_PROJECTION_JOB_TYPE,
-            payload={"placeholder_ids": placeholder_ids},
-            status="PENDING",
-            run_after=datetime.now(timezone.utc),
-        )
-        session.add(job)
-        session.commit()
-        
-        logger.debug(
-            f"Enqueued status projection job: job_id={job.id}, "
-            f"placeholder_ids={len(placeholder_ids)}"
-        )
-        
-        return {"ok": True, "job_id": job.id}
+
+        return _enqueue_batched_placeholder_job(STATUS_PROJECTION_JOB_TYPE, normalized_ids, session)
     
     except Exception as e:
         logger.error(f"Failed to enqueue status projection job: {e}", exc_info=True)
@@ -360,21 +463,11 @@ def enqueue_nfo_refresh(placeholder_ids: list[int], session=None) -> dict:
     session = session or get_session()
 
     try:
-        if not placeholder_ids:
+        normalized_ids = _normalize_placeholder_ids(placeholder_ids)
+        if not normalized_ids:
             return {"ok": False, "reason": "no_placeholder_ids"}
 
-        job = Job(
-            job_type=NFO_REFRESH_JOB_TYPE,
-            payload={"placeholder_ids": placeholder_ids},
-            status="PENDING",
-            run_after=datetime.now(timezone.utc),
-        )
-        session.add(job)
-        session.commit()
-        logger.debug(
-            f"Enqueued NFO refresh job: job_id={job.id}, placeholder_ids={len(placeholder_ids)}"
-        )
-        return {"ok": True, "job_id": job.id}
+        return _enqueue_batched_placeholder_job(NFO_REFRESH_JOB_TYPE, normalized_ids, session)
     except Exception as e:
         logger.error(f"Failed to enqueue NFO refresh job: {e}", exc_info=True)
         session.rollback()

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -8,31 +9,36 @@ from services.postgres.db import get_session
 from services.postgres.models import EventLog, Job
 
 
-ALLOWED_WEBHOOK_INSTANCES = (
-    'radarr_std',
-    'radarr_4k',
-    'sonarr_std',
-    'sonarr_4k',
-    'tautulli',
-    'jellyfin',
-    'emby',
-)
+def _payload_preview(payload: Dict[str, Any], max_chars: int = 2000) -> str:
+    """Return a compact, bounded payload preview for log lines."""
+    try:
+        text = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+    except Exception:
+        text = str(payload)
+
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...<truncated:{len(text) - max_chars} chars>"
+
+
+def _allowed_webhook_instances() -> tuple[str, ...]:
+    return tuple(getattr(settings, 'allowed_webhook_instance_keys', ()) or ())
 
 
 def get_configured_webhook_instances() -> dict[str, bool]:
     return {
-        'radarr_std': bool(settings.RADARR_URL and settings.RADARR_API_KEY),
-        'radarr_4k': bool(settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY),
-        'sonarr_std': bool(settings.SONARR_URL and settings.SONARR_API_KEY),
-        'sonarr_4k': bool(settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY),
-        'tautulli': bool(getattr(settings, 'plex_enabled', False)),
-        'jellyfin': bool(getattr(settings, 'jellyfin_enabled', False)),
-        'emby': bool(getattr(settings, 'emby_enabled', False)),
+        settings.RADARR_STD_INSTANCE_KEY: bool(settings.RADARR_URL and settings.RADARR_API_KEY),
+        settings.RADARR_4K_INSTANCE_KEY: bool(settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY),
+        settings.SONARR_STD_INSTANCE_KEY: bool(settings.SONARR_URL and settings.SONARR_API_KEY),
+        settings.SONARR_4K_INSTANCE_KEY: bool(settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY),
+        settings.TAUTULLI_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_PLEX', False)),
+        settings.JELLYFIN_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_JELLYFIN', False)),
+        settings.EMBY_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_EMBY', False)),
     }
 
 
 def _allowed_instance_list() -> str:
-    return ', '.join(ALLOWED_WEBHOOK_INSTANCES)
+    return ', '.join(_allowed_webhook_instances())
 
 
 def validate_webhook_instance(instance: str | None) -> str | None:
@@ -44,7 +50,7 @@ def validate_webhook_instance(instance: str | None) -> str | None:
             f'Allowed values: {_allowed_instance_list()}.'
         )
 
-    if normalized not in ALLOWED_WEBHOOK_INSTANCES:
+    if normalized not in _allowed_webhook_instances():
         return (
             f'Invalid webhook instance query parameter: {normalized}. '
             'Check the webhook URL query parameters. '
@@ -112,6 +118,17 @@ def validate_webhook_payload(
     reason = validate_webhook_instance(instance)
     if reason:
         return False, reason, event_type, event_meta
+
+    normalized_instance = str(instance or '').strip().lower()
+    playback_sources = set(getattr(settings, 'playback_source_instance_keys', ()) or ())
+    if event_type == 'playback_start' and normalized_instance not in playback_sources:
+        return (
+            False,
+            'Playback events must use a configured media-server webhook instance key.',
+            event_type,
+            event_meta,
+        )
+
     return True, None, event_type, event_meta
 
 
@@ -160,7 +177,7 @@ def handle_webhook(
         _enqueue_event_job(session, event.id, event_type)
         session.commit()
         logger.info(
-            f'Accepted webhook event {event_type} as event_log_id={event.id} instance={instance}',
+            f'Accepted webhook event {event_type} as event_log_id={event.id} instance={instance} payload={_payload_preview(payload_to_store)}',
             extra={'emoji_type': 'info'},
         )
         return {'status': 'accepted', 'event_log_id': event.id, 'event_type': event_type}

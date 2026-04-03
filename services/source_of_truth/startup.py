@@ -49,7 +49,7 @@ def _configured_arr_instances() -> list[dict]:
     if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
         instances.append(
             {
-                'instance_key': 'radarr_std',
+                'instance_key': settings.RADARR_STD_INSTANCE_KEY,
                 'arr_type': 'radarr',
                 'content_type': 'movie',
                 'base_url': settings.RADARR_URL,
@@ -60,7 +60,7 @@ def _configured_arr_instances() -> list[dict]:
     if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
         instances.append(
             {
-                'instance_key': 'radarr_4k',
+                'instance_key': settings.RADARR_4K_INSTANCE_KEY,
                 'arr_type': 'radarr',
                 'content_type': 'movie',
                 'base_url': settings.RADARR_4K_URL,
@@ -71,7 +71,7 @@ def _configured_arr_instances() -> list[dict]:
     if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
         instances.append(
             {
-                'instance_key': 'sonarr_std',
+                'instance_key': settings.SONARR_STD_INSTANCE_KEY,
                 'arr_type': 'sonarr',
                 'content_type': 'series',
                 'base_url': settings.SONARR_URL,
@@ -82,7 +82,7 @@ def _configured_arr_instances() -> list[dict]:
     if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None):
         instances.append(
             {
-                'instance_key': 'sonarr_4k',
+                'instance_key': settings.SONARR_4K_INSTANCE_KEY,
                 'arr_type': 'sonarr',
                 'content_type': 'series',
                 'base_url': settings.SONARR_4K_URL,
@@ -209,6 +209,7 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             base_url=instance['base_url'],
                             api_key=instance['api_key'],
                             is_4k=bool(instance['is_4k']),
+                            instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
                         logger.info(
@@ -224,6 +225,7 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             base_url=instance['base_url'],
                             api_key=instance['api_key'],
                             is_4k=bool(instance['is_4k']),
+                            instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
                         logger.info(

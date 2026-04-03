@@ -9,13 +9,13 @@ import requests
 def _configured_arr_instances() -> list[tuple[str, str, str]]:
     instances: list[tuple[str, str, str]] = []
     if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
-        instances.append(('radarr_std', 'radarr', settings.RADARR_URL))
+        instances.append((settings.RADARR_STD_INSTANCE_KEY, 'radarr', settings.RADARR_URL))
     if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
-        instances.append(('radarr_4k', 'radarr', settings.RADARR_4K_URL))
+        instances.append((settings.RADARR_4K_INSTANCE_KEY, 'radarr', settings.RADARR_4K_URL))
     if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
-        instances.append(('sonarr_std', 'sonarr', settings.SONARR_URL))
+        instances.append((settings.SONARR_STD_INSTANCE_KEY, 'sonarr', settings.SONARR_URL))
     if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None):
-        instances.append(('sonarr_4k', 'sonarr', settings.SONARR_4K_URL))
+        instances.append((settings.SONARR_4K_INSTANCE_KEY, 'sonarr', settings.SONARR_4K_URL))
     return instances
 
 
@@ -28,11 +28,13 @@ def _build_endpoint(base_url: str, resource: str) -> str:
 
 def _probe_arr_instance_live(instance_key: str, arr_type: str) -> bool:
     if arr_type == 'radarr':
-        url = settings.RADARR_4K_URL if instance_key == 'radarr_4k' else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if instance_key == 'radarr_4k' else settings.RADARR_API_KEY
+        is_4k = instance_key == settings.RADARR_4K_INSTANCE_KEY
+        url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
+        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
     else:
-        url = settings.SONARR_4K_URL if instance_key == 'sonarr_4k' else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if instance_key == 'sonarr_4k' else settings.SONARR_API_KEY
+        is_4k = instance_key == settings.SONARR_4K_INSTANCE_KEY
+        url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
+        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
 
     if not url or not api_key:
         return False

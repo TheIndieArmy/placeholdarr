@@ -958,6 +958,82 @@ def _placeholder_display_status(placeholder: Placeholder) -> str | None:
 	return status
 
 
+def _placeholder_customer_labels(session, placeholders: list[Placeholder]) -> dict[int, str]:
+	"""Build customer-facing labels for placeholders.
+
+	Episode labels prefer: "Show Title s00e00".
+	Movie labels prefer: "Movie Title (Year)".
+	"""
+	labels: dict[int, str] = {}
+	if not placeholders:
+		return labels
+
+	episode_ids = [int(getattr(p, 'episode_id')) for p in placeholders if getattr(p, 'episode_id', None)]
+	movie_ids = [int(getattr(p, 'movie_id')) for p in placeholders if getattr(p, 'movie_id', None)]
+
+	if episode_ids:
+		episode_rows = (
+			session.query(
+				Episode.id,
+				Episode.episode_number,
+				Season.season_number,
+				Series.title,
+			)
+			.join(Season, Episode.season_id == Season.id)
+			.join(Series, Season.series_id == Series.id)
+			.filter(Episode.id.in_(episode_ids))
+			.all()
+		)
+		episode_map = {int(row[0]): row for row in episode_rows}
+		for p in placeholders:
+			pid = int(getattr(p, 'id', 0) or 0)
+			episode_id = getattr(p, 'episode_id', None)
+			if not pid or not episode_id:
+				continue
+			row = episode_map.get(int(episode_id))
+			if not row:
+				continue
+			season_num = int(row[2] or 0)
+			episode_num = int(row[1] or 0)
+			show_title = str(row[3] or 'Unknown Show').strip() or 'Unknown Show'
+			labels[pid] = f"{show_title} s{season_num:02d}e{episode_num:02d}"
+
+	if movie_ids:
+		movie_rows = (
+			session.query(Movie.id, Movie.title, Movie.year)
+			.filter(Movie.id.in_(movie_ids))
+			.all()
+		)
+		movie_map = {int(row[0]): row for row in movie_rows}
+		for p in placeholders:
+			pid = int(getattr(p, 'id', 0) or 0)
+			movie_id = getattr(p, 'movie_id', None)
+			if not pid or not movie_id or pid in labels:
+				continue
+			row = movie_map.get(int(movie_id))
+			if not row:
+				continue
+			title = str(row[1] or 'Unknown Movie').strip() or 'Unknown Movie'
+			year = row[2]
+			labels[pid] = f"{title} ({year})" if year else title
+
+	for p in placeholders:
+		pid = int(getattr(p, 'id', 0) or 0)
+		if pid and pid not in labels:
+			labels[pid] = f"Placeholder[{pid}]"
+
+	return labels
+
+
+def _format_label_list(labels: list[str], *, max_items: int = 12) -> str:
+	if not labels:
+		return "none"
+	if len(labels) <= max_items:
+		return ', '.join(labels)
+	visible = labels[:max_items]
+	return f"{', '.join(visible)} (+{len(labels) - max_items} more)"
+
+
 def _plex_status_intent_for_entity(movie: Movie | None, episode: Episode | None, placeholder: Placeholder) -> dict[str, Any] | None:
 	status = _placeholder_display_status(placeholder)
 	if movie is not None:
@@ -1576,10 +1652,7 @@ def observe_placeholders_with_polling(
 	while unresolved:
 		stats['attempts'] += 1
 		pass_started = time.monotonic()
-		logger.info(
-			f"Observation poll pass #{stats['attempts']} starting with {len(unresolved)} unresolved item(s).",
-			extra={'emoji_type': 'info'},
-		)
+		start_unresolved = len(unresolved)
 		unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot_cache = _run_observation_pass(
 			session,
 			unresolved,
@@ -1587,11 +1660,6 @@ def observe_placeholders_with_polling(
 			plex_snapshot=plex_snapshot_cache,
 		)
 		pass_elapsed = time.monotonic() - pass_started
-		logger.info(
-			f"Observation poll pass #{stats['attempts']} finished in {pass_elapsed:.1f}s: "
-			f"resolved_delta={resolved_delta}, progress_delta={progress_delta}, remaining={len(unresolved)}.",
-			extra={'emoji_type': 'info'},
-		)
 		stats['observed_plex'] += pass_stats['observed_plex']
 		stats['observed_jellyfin'] += pass_stats['observed_jellyfin']
 		stats['observed_emby'] += pass_stats['observed_emby']
@@ -1605,10 +1673,15 @@ def observe_placeholders_with_polling(
 		if pass_stats.get('pass_capped'):
 			stats['passes_capped'] += 1
 		logger.info(
-			f"Observation pass timing: snapshot_build_ms={int(pass_stats.get('snapshot_build_ms', 0) or 0)} "
-			f"match_lookup_ms={int(pass_stats.get('match_lookup_ms', 0) or 0)} "
-			f"status_projection_ms={int(pass_stats.get('status_projection_ms', 0) or 0)} "
-			f"db_commit_ms={int(pass_stats.get('db_commit_ms', 0) or 0)} "
+			f"Observation poll pass #{stats['attempts']}: "
+			f"start={start_unresolved} remaining={len(unresolved)} "
+			f"resolved_delta={resolved_delta} progress_delta={progress_delta} "
+			f"status_updates_plex={pass_stats['status_updates_plex']} "
+			f"elapsed={pass_elapsed:.1f}s "
+			f"timing_ms[snapshot={int(pass_stats.get('snapshot_build_ms', 0) or 0)} "
+			f"match={int(pass_stats.get('match_lookup_ms', 0) or 0)} "
+			f"project={int(pass_stats.get('status_projection_ms', 0) or 0)} "
+			f"commit={int(pass_stats.get('db_commit_ms', 0) or 0)}] "
 			f"chunks={int(pass_stats.get('chunks_processed', 0) or 0)} "
 			f"pass_capped={bool(pass_stats.get('pass_capped', False))}.",
 			extra={'emoji_type': 'info'},
@@ -1620,18 +1693,7 @@ def observe_placeholders_with_polling(
 				f"Observation complete: all expected items are ready ({resolved_total}/{total_expected}).",
 				extra={'emoji_type': 'success'},
 			)
-			if pass_stats['status_updates_plex'] > 0:
-				logger.info(
-					f"Plex status updates were applied for {pass_stats['status_updates_plex']} item(s) in this completion pass.",
-					extra={'emoji_type': 'update'},
-				)
 			break
-
-		if pass_stats['status_updates_plex'] > 0:
-			logger.info(
-				f"Plex status updates applied for {pass_stats['status_updates_plex']} item(s) this pass.",
-				extra={'emoji_type': 'update'},
-			)
 
 		# Reuse scoped snapshots briefly for speed, but force periodic refresh so
 		# newly scanned Plex content can be discovered on subsequent passes.
@@ -1648,11 +1710,6 @@ def observe_placeholders_with_polling(
 		if progress_delta > 0:
 			# Progress: identity found or metadata confirmed — reset escalation state.
 			no_progress_count = 0
-			logger.info(
-				f"Content polling progress: +{resolved_delta} fully resolved, +{progress_delta} advanced "
-				f"this pass ({resolved_total}/{total_expected} done). Polling again in {_NO_PROGRESS_SLEEP_SCHEDULE[0]}s.",
-				extra={'emoji_type': 'info'},
-			)
 			time.sleep(_NO_PROGRESS_SLEEP_SCHEDULE[0])
 			continue
 
@@ -1696,6 +1753,28 @@ def observe_placeholders_with_polling(
 			p for p in unresolved
 			if not bool(getattr(p, 'plex_placeholder_id', None))
 		]
+		found_identity = [p for p in unresolved if bool(getattr(p, 'plex_placeholder_id', None))]
+
+		labels_by_id = _placeholder_customer_labels(session, unresolved)
+		metadata_labels = [labels_by_id.get(int(getattr(p, 'id', 0) or 0), 'unknown') for p in metadata_pending]
+		missing_identity_labels = [labels_by_id.get(int(getattr(p, 'id', 0) or 0), 'unknown') for p in no_identity]
+
+		logger.warning(
+			"Polling exhausted with unresolved placeholders: "
+			f"total_unresolved={len(unresolved)} "
+			f"found_identity={len(found_identity)} "
+			f"missing_metadata={len(metadata_pending)} "
+			f"missing_identity={len(no_identity)}.",
+			extra={'emoji_type': 'warning'},
+		)
+		logger.info(
+			f"Unresolved missing metadata (show + code): {_format_label_list(metadata_labels)}",
+			extra={'emoji_type': 'info'},
+		)
+		logger.info(
+			f"Unresolved missing identity (show + code): {_format_label_list(missing_identity_labels)}",
+			extra={'emoji_type': 'info'},
+		)
 
 		if metadata_pending and _should_send_status_updates():
 			fallback_intents: list[dict[str, Any]] = []

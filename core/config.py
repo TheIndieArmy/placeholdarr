@@ -64,15 +64,11 @@ class Settings(BaseSettings):
     # Emby
     EMBY_URL: Optional[str] = None
     EMBY_TOKEN: Optional[str] = None
-    EMBY_ITEM_REFRESH_RETRY_ATTEMPTS: int = int(os.getenv("EMBY_ITEM_REFRESH_RETRY_ATTEMPTS", "6").split('#')[0].strip())
-    EMBY_ITEM_REFRESH_RETRY_DELAY_SECONDS: float = float(os.getenv("EMBY_ITEM_REFRESH_RETRY_DELAY_SECONDS", "2").split('#')[0].strip())
     EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
     EMBY_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("EMBY_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
-    EMBY_TARGETED_REFRESH_POLL_SECONDS: float = float(os.getenv("EMBY_TARGETED_REFRESH_POLL_SECONDS", "1").split('#')[0].strip())
 
     JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
     JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
-    JELLYFIN_TARGETED_REFRESH_POLL_SECONDS: float = float(os.getenv("JELLYFIN_TARGETED_REFRESH_POLL_SECONDS", "1").split('#')[0].strip())
 
     # Services
     RADARR_URL: str
@@ -85,6 +81,15 @@ class Settings(BaseSettings):
     RADARR_4K_API_KEY: str = ""
     SONARR_4K_URL: str = ""
     SONARR_4K_API_KEY: str = ""
+
+    # Webhook/sync instance keys (customizable labels used in webhook query params and DB instance_key columns)
+    RADARR_STD_INSTANCE_KEY: str = os.getenv("RADARR_STD_INSTANCE_KEY", "radarr_std").split('#')[0].strip().lower()
+    RADARR_4K_INSTANCE_KEY: str = os.getenv("RADARR_4K_INSTANCE_KEY", "radarr_4k").split('#')[0].strip().lower()
+    SONARR_STD_INSTANCE_KEY: str = os.getenv("SONARR_STD_INSTANCE_KEY", "sonarr_std").split('#')[0].strip().lower()
+    SONARR_4K_INSTANCE_KEY: str = os.getenv("SONARR_4K_INSTANCE_KEY", "sonarr_4k").split('#')[0].strip().lower()
+    TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
+    JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
+    EMBY_INSTANCE_KEY: str = os.getenv("EMBY_INSTANCE_KEY", "emby").split('#')[0].strip().lower()
 
     # Startup sync mode:
     # - auto: first successful ARR startup run is full, then lite on later startups
@@ -128,6 +133,10 @@ class Settings(BaseSettings):
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
+    EPISODES_LOOKAHEAD: int = int(os.getenv("EPISODES_LOOKAHEAD", "5").split('#')[0].strip())
+    PLAYBACK_SEARCH_PREFERENCE: Literal["standard", "4k", "both"] = os.getenv("PLAYBACK_SEARCH_PREFERENCE", "both").split('#')[0].strip().lower()
+    TV_PLAYBACK_INSTANCE_MODE: Literal["match", "preference", "both"] = os.getenv("TV_PLAYBACK_INSTANCE_MODE", "match").split('#')[0].strip().lower()
+    PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = int(os.getenv("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", "30").split('#')[0].strip())
     # Backward-compat alias for legacy modules still reading TITLE_UPDATES.
     TITLE_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
@@ -175,6 +184,8 @@ class Settings(BaseSettings):
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
+    STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "250").split('#')[0].strip())
+    STATUS_JOB_DEBOUNCE_SECONDS: float = float(os.getenv("STATUS_JOB_DEBOUNCE_SECONDS", "0.5").split('#')[0].strip())
     PLEX_METADATA_READY_CONFIRM_POLLS: int = int(os.getenv("PLEX_METADATA_READY_CONFIRM_POLLS", "2").split('#')[0].strip())
     OBSERVATION_PASS_CHUNK_SIZE: int = int(os.getenv("OBSERVATION_PASS_CHUNK_SIZE", "150").split('#')[0].strip())
     OBSERVATION_MAX_PASS_SECONDS: int = int(os.getenv("OBSERVATION_MAX_PASS_SECONDS", "45").split('#')[0].strip())
@@ -334,6 +345,45 @@ class Settings(BaseSettings):
     @property
     def host(self) -> str:
         return self.PLACEHOLDARR_HOST
+
+    @property
+    def radarr_instance_keys(self) -> tuple[str, str]:
+        return (self.RADARR_STD_INSTANCE_KEY, self.RADARR_4K_INSTANCE_KEY)
+
+    @property
+    def sonarr_instance_keys(self) -> tuple[str, str]:
+        return (self.SONARR_STD_INSTANCE_KEY, self.SONARR_4K_INSTANCE_KEY)
+
+    @property
+    def playback_source_instance_keys(self) -> tuple[str, str, str]:
+        return (self.TAUTULLI_INSTANCE_KEY, self.JELLYFIN_INSTANCE_KEY, self.EMBY_INSTANCE_KEY)
+
+    @property
+    def allowed_webhook_instance_keys(self) -> tuple[str, ...]:
+        ordered = [
+            self.RADARR_STD_INSTANCE_KEY,
+            self.RADARR_4K_INSTANCE_KEY,
+            self.SONARR_STD_INSTANCE_KEY,
+            self.SONARR_4K_INSTANCE_KEY,
+            self.TAUTULLI_INSTANCE_KEY,
+            self.JELLYFIN_INSTANCE_KEY,
+            self.EMBY_INSTANCE_KEY,
+        ]
+        deduped: list[str] = []
+        for value in ordered:
+            key = str(value or '').strip().lower()
+            if key and key not in deduped:
+                deduped.append(key)
+        return tuple(deduped)
+
+    @property
+    def instance_is_4k(self) -> dict[str, bool]:
+        return {
+            self.RADARR_STD_INSTANCE_KEY: False,
+            self.RADARR_4K_INSTANCE_KEY: True,
+            self.SONARR_STD_INSTANCE_KEY: False,
+            self.SONARR_4K_INSTANCE_KEY: True,
+        }
 
     class Config:
         env_file = str(dotenv_path)

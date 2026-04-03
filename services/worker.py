@@ -17,6 +17,11 @@ from services.source_of_truth.event_handlers import (
     process_series_add_event,
     process_series_deleted_event,
 )
+from services.source_of_truth.event_playback import (
+    PLAYBACK_FALLBACK_JOB_TYPE,
+    process_playback_fallback_job,
+    process_playback_start_event,
+)
 from services.source_of_truth.observation_trail import (
     TRAIL_JOB_TYPE,
     process_observation_trail_job,
@@ -140,6 +145,13 @@ def _process_webhook_event(session, job: Job):
             extra={'emoji_type': 'success'},
         )
         handled = True
+    elif event_type == 'playback_start' or dispatch_type in ('playback.start', 'playbackstart'):
+        result = process_playback_start_event(payload, instance=instance)
+        logger.info(
+            f"Processed playback_start event_log_id={event.id} result={result}",
+            extra={'emoji_type': 'success'},
+        )
+        handled = True
 
     if not handled:
         event.error_message = f'unhandled_event_type:{event_type}'
@@ -160,12 +172,29 @@ def _mark_job_done(session, job: Job):
     session.add(job)
 
 
+def _is_non_retriable_webhook_error(error: Exception) -> bool:
+    message = str(error or '').strip().lower()
+    if not message:
+        return False
+
+    # Permanent payload-shape / validation failures will not improve by retrying
+    # the same stored webhook payload.
+    if message == 'missing_event_log_id':
+        return True
+    if message == 'unresolved_playback_media_type':
+        return True
+    if '_missing_' in message:
+        return True
+    return False
+
+
 def _mark_job_failed(session, job: Job, error: Exception):
     attempts = int(job.attempts or 0)
     max_attempts = int(job.max_attempts or 5)
+    non_retriable = bool(job.job_type == 'webhook_event' and _is_non_retriable_webhook_error(error))
     job.error_message = str(error)
     job.updated_at = datetime.now(timezone.utc)
-    if attempts >= max_attempts:
+    if non_retriable or attempts >= max_attempts:
         job.status = 'FAILED'
     else:
         job.status = 'PENDING'
@@ -179,7 +208,7 @@ def _mark_job_failed(session, job: Job, error: Exception):
             event.attempts = int(event.attempts or 0) + 1
             event.error_message = str(error)
             event.updated_at = datetime.now(timezone.utc)
-            if event.attempts >= int(event.max_attempts or 10):
+            if non_retriable or event.attempts >= int(event.max_attempts or 10):
                 event.status = 'FAILED'
             session.add(event)
 
@@ -219,6 +248,17 @@ def _process_claimed_job(session, job: Job):
             logger.warning(f"import_grace job failed: job_id={getattr(job, 'id', '?')}, reason={reason}", extra={'emoji_type': 'warning'})
             raise ValueError(reason)
         logger.info(f"import_grace job completed: job_id={getattr(job, 'id', '?')}, phase={result.get('phase')}", extra={'emoji_type': 'success'})
+        _mark_job_done(session, job)
+        return
+
+    if job.job_type == PLAYBACK_FALLBACK_JOB_TYPE:
+        result = process_playback_fallback_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'playback_fallback_failed'))
+        logger.info(
+            f"Processed playback fallback job_id={getattr(job, 'id', '?')} result={result}",
+            extra={'emoji_type': 'success'},
+        )
         _mark_job_done(session, job)
         return
 

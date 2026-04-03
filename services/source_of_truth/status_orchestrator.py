@@ -525,9 +525,10 @@ class StatusOrchestrator:
             for intent in intents
             if intent.trigger_nfo_refresh
         ]
+        nfo_refresh_ids = list(dict.fromkeys(int(pid) for pid in nfo_refresh_ids if pid is not None))
         
         if nfo_refresh_ids:
-            logger.info(f"Triggering NFO refresh for {len(nfo_refresh_ids)} placeholders")
+            logger.debug(f"Triggering NFO refresh for {len(nfo_refresh_ids)} placeholders")
             from services.source_of_truth.status_reconciler import enqueue_nfo_refresh
             try:
                 enqueue_nfo_refresh(nfo_refresh_ids, session=session)
@@ -536,11 +537,11 @@ class StatusOrchestrator:
         
         # Stage 3: Enqueue status projection job
         from services.source_of_truth.status_reconciler import enqueue_status_projection
-        projection_ids = [intent.placeholder_id for intent in intents]
+        projection_ids = list(dict.fromkeys(int(intent.placeholder_id) for intent in intents if intent.placeholder_id is not None))
         
         try:
             enqueue_status_projection(projection_ids, session=session)
-            logger.info(f"Enqueued status projection for {len(projection_ids)} placeholders")
+            logger.debug(f"Enqueued status projection for {len(projection_ids)} placeholders")
         except Exception as e:
             logger.error(f"Failed to enqueue status projection: {e}", exc_info=True)
         

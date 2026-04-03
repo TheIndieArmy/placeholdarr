@@ -41,7 +41,20 @@ def _infer_is_4k_from_instance(instance: str | None) -> bool:
     """Return True if instance identifier indicates 4K variant."""
     if not instance:
         return False
-    return instance.lower().endswith('_4k') or instance.lower().endswith('4k')
+    normalized = str(instance).strip().lower()
+    mapping = getattr(settings, 'instance_is_4k', {}) or {}
+    if normalized in mapping:
+        return bool(mapping[normalized])
+    return normalized.endswith('_4k') or normalized.endswith('4k')
+
+
+def _resolve_instance_key(content_type: str, instance: str | None, is_4k: bool) -> str:
+    normalized = str(instance or '').strip().lower()
+    if normalized:
+        return normalized
+    if content_type == 'movie':
+        return settings.RADARR_4K_INSTANCE_KEY if is_4k else settings.RADARR_STD_INSTANCE_KEY
+    return settings.SONARR_4K_INSTANCE_KEY if is_4k else settings.SONARR_STD_INSTANCE_KEY
 
 
 def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
@@ -117,6 +130,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         raise ValueError("seriesadd_missing_series_id")
 
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('series', instance, inferred_is_4k)
     base_url, api_key = _resolve_endpoint("series", inferred_is_4k)
     if not base_url or not api_key:
         raise ValueError("seriesadd_missing_sonarr_config")
@@ -133,7 +147,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
 
     session = get_session()
     try:
-        s_fields = _series_fields(series_entry, inferred_is_4k)
+        s_fields = _series_fields(series_entry, inferred_is_4k, resolved_instance_key)
         if not s_fields.get("tvdbid"):
             raise ValueError("seriesadd_missing_tvdbid")
 
@@ -300,6 +314,7 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
         raise ValueError("movieadd_missing_movie_id")
 
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('movie', instance, inferred_is_4k)
     base_url, api_key = _resolve_endpoint("movie", inferred_is_4k)
     if not base_url or not api_key:
         raise ValueError("movieadd_missing_radarr_config")
@@ -316,7 +331,7 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
 
     session = get_session()
     try:
-        fields = _movie_fields(movie_entry, inferred_is_4k)
+        fields = _movie_fields(movie_entry, inferred_is_4k, resolved_instance_key)
         if not fields.get("tmdbid"):
             raise ValueError("movieadd_missing_tmdbid")
 
@@ -413,6 +428,7 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
         raise ValueError("movieimport_missing_movie_id")
 
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('movie', instance, inferred_is_4k)
     movie_file = payload.get("movieFile", {}) if isinstance(payload.get("movieFile"), dict) else {}
     file_path = movie_file.get("path") if movie_file else None
 
@@ -421,7 +437,7 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
         # Strict match: radarrid + is_4k
         movie_row = session.query(Movie).filter(
             Movie.radarrid == movie_id,
-            Movie.is_4k == inferred_is_4k
+            Movie.instance_key == resolved_instance_key,
         ).first()
 
         # Lenient fallback: radarrid only
@@ -461,51 +477,84 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
 
 def process_episode_imported_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
     """Process episode import by scheduling a delayed grace cleanup workflow."""
-    episode_id = _extract_episode_id(payload)
-    if not episode_id:
+    episode_ids = _extract_episode_ids(payload)
+    if not episode_ids:
         raise ValueError("episodeimport_missing_episode_id")
 
     series_id = _extract_series_id(payload)
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('series', instance, inferred_is_4k)
     episode_file = payload.get("episodeFile") if isinstance(payload.get("episodeFile"), dict) else {}
     file_path = episode_file.get("path") if episode_file else None
 
     session = get_session()
     try:
-        # Strict match: episode sonarrid ID
-        episode_row = session.query(Episode).filter(Episode.sonarrid == episode_id).first()
-
-        # Lenient fallback: series_id + season/episode pair from payload
-        if not episode_row and series_id:
-            first_pair = _extract_first_episode_pair(payload)
-            if first_pair:
-                season_num, episode_num = first_pair
-                episode_row = session.query(Episode).filter(
-                    Episode.series_id == series_id,
-                    Episode.season_number == season_num,
-                    Episode.episode_number == episode_num,
-                ).first()
-
-        if not episode_row:
-            raise ValueError(f"episodeimport_not_found:id={episode_id}")
-
-        # Do not mark has_file immediately. A delayed grace job finalizes state and cleanup.
-        session.add(episode_row)
-        session.flush()
-        episode_row_id = int(episode_row.id)
-
-        grace_stats = schedule_episode_import_grace(
-            session,
-            episode_row_id=episode_row_id,
-            file_path=file_path,
+        # Strict match: episode sonarrid(s) + source instance key
+        episode_rows = (
+            session.query(Episode)
+            .join(Season, Episode.season_id == Season.id)
+            .join(Series, Season.series_id == Series.id)
+            .filter(Episode.sonarrid.in_(episode_ids), Series.instance_key == resolved_instance_key)
+            .all()
         )
+
+        # Lenient fallback: series_id + season/episode pair(s) from payload.
+        if not episode_rows and series_id:
+            for season_num, episode_num in _extract_episode_pairs(payload):
+                matched = (
+                    session.query(Episode)
+                    .join(Season, Episode.season_id == Season.id)
+                    .join(Series, Season.series_id == Series.id)
+                    .filter(
+                        Series.sonarrid == series_id,
+                        Series.instance_key == resolved_instance_key,
+                        Season.season_number == season_num,
+                        Episode.episode_number == episode_num,
+                    )
+                    .all()
+                )
+                if matched:
+                    episode_rows.extend(matched)
+
+        # Final lenient fallback: sonarr episode ids without instance-key scoping.
+        if not episode_rows:
+            episode_rows = session.query(Episode).filter(Episode.sonarrid.in_(episode_ids)).all()
+
+        deduped_episode_rows: list[Episode] = []
+        seen_row_ids: set[int] = set()
+        for episode_row in episode_rows:
+            row_id = int(getattr(episode_row, 'id', 0) or 0)
+            if not row_id or row_id in seen_row_ids:
+                continue
+            seen_row_ids.add(row_id)
+            deduped_episode_rows.append(episode_row)
+
+        if not deduped_episode_rows:
+            raise ValueError(f"episodeimport_not_found:ids={episode_ids}")
+
+        episode_row_ids: list[int] = []
+        grace_stats: list[dict[str, Any]] = []
+        for episode_row in deduped_episode_rows:
+            # Do not mark has_file immediately. A delayed grace job finalizes state and cleanup.
+            session.add(episode_row)
+            session.flush()
+            episode_row_id = int(episode_row.id)
+            episode_row_ids.append(episode_row_id)
+            grace_stats.append(
+                schedule_episode_import_grace(
+                    session,
+                    episode_row_id=episode_row_id,
+                    file_path=file_path,
+                )
+            )
         session.commit()
 
         return {
             "ok": True,
             "event": "episode_imported",
             "is_4k": inferred_is_4k,
-            "episode_id": episode_row_id,
+            "episode_id": episode_row_ids[0],
+            "episode_ids": episode_row_ids,
             "grace": grace_stats,
         }
     except Exception:
@@ -517,16 +566,39 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
 
 def _extract_episode_id(payload: dict[str, Any]) -> int | None:
     """Extract episode sonarr ID from payload."""
+    episode_ids = _extract_episode_ids(payload)
+    return episode_ids[0] if episode_ids else None
+
+
+def _extract_episode_ids(payload: dict[str, Any]) -> list[int]:
+    """Extract one or more episode sonarr IDs from payload."""
     episode = payload.get("episode") if isinstance(payload.get("episode"), dict) else {}
-    val = (
-        episode.get("id")
-        or payload.get("episodeId")
-        or payload.get("episode_id")
-    )
-    try:
-        return int(val) if val is not None else None
-    except Exception:
-        return None
+    episode_ids: list[int] = []
+
+    candidates = [
+        episode.get("id"),
+        payload.get("episodeId"),
+        payload.get("episode_id"),
+    ]
+
+    episodes = payload.get("episodes") if isinstance(payload.get("episodes"), list) else []
+    for item in episodes:
+        if isinstance(item, dict):
+            candidates.append(item.get("id"))
+            candidates.append(item.get("episodeId"))
+            candidates.append(item.get("episode_id"))
+
+    seen: set[int] = set()
+    for value in candidates:
+        try:
+            normalized = int(value) if value is not None else None
+        except Exception:
+            normalized = None
+        if normalized is None or normalized in seen:
+            continue
+        seen.add(normalized)
+        episode_ids.append(normalized)
+    return episode_ids
 
 
 def _extract_first_episode_pair(payload: dict[str, Any]) -> tuple[int, int] | None:
@@ -553,13 +625,14 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         raise ValueError("moviefiledelete_missing_movie_id")
 
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('movie', instance, inferred_is_4k)
 
     session = get_session()
     try:
         # Strict match: radarrid + is_4k (instance-aware)
         movie_row = session.query(Movie).filter(
             Movie.radarrid == movie_id,
-            Movie.is_4k == inferred_is_4k
+            Movie.instance_key == resolved_instance_key,
         ).first()
 
         if not movie_row:
@@ -598,6 +671,7 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
     """Process movie delete event by marking deleted and running targeted determination/materialization."""
     movie_id = _extract_movie_id(payload)
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('movie', instance, inferred_is_4k)
 
     session = get_session()
     try:
@@ -605,7 +679,7 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
         if movie_id:
             movie_row = session.query(Movie).filter(
                 Movie.radarrid == movie_id,
-                Movie.is_4k == inferred_is_4k,
+                Movie.instance_key == resolved_instance_key,
             ).first()
             if not movie_row:
                 movie_row = session.query(Movie).filter(Movie.radarrid == movie_id).first()
@@ -620,7 +694,7 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
             if tmdb_id_int:
                 movie_row = session.query(Movie).filter(
                     Movie.tmdbid == tmdb_id_int,
-                    Movie.is_4k == inferred_is_4k,
+                    Movie.instance_key == resolved_instance_key,
                 ).first()
 
         if not movie_row:
@@ -662,13 +736,14 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         raise ValueError("episodefiledelete_missing_series_id")
 
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('series', instance, inferred_is_4k)
 
     session = get_session()
     try:
         # Strict match: sonarrid + is_4k (instance-aware)
         series_row = session.query(Series).filter(
             Series.sonarrid == series_id,
-            Series.is_4k == inferred_is_4k
+            Series.instance_key == resolved_instance_key,
         ).first()
 
         if not series_row:
@@ -679,10 +754,13 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         # Strict match: episode sonarrid + is_4k
         episode_id = _extract_episode_id(payload)
         if episode_id:
-            ep_row = session.query(Episode).filter(
-                Episode.sonarrid == episode_id,
-                Episode.is_4k == inferred_is_4k
-            ).first()
+            ep_row = (
+                session.query(Episode)
+                .join(Season, Episode.season_id == Season.id)
+                .join(Series, Season.series_id == Series.id)
+                .filter(Episode.sonarrid == episode_id, Series.instance_key == resolved_instance_key)
+                .first()
+            )
             if ep_row:
                 episode_rows = [ep_row]
 
@@ -697,7 +775,6 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
                     Season.series_id == series_row.id,
                     Season.season_number == season_num,
                     Episode.episode_number == episode_num,
-                    Episode.is_4k == inferred_is_4k,
                 ).all()
 
         if not episode_rows:
@@ -742,12 +819,13 @@ def process_series_deleted_event(payload: dict[str, Any], instance: str | None =
         raise ValueError("seriesdelete_missing_series_id")
 
     inferred_is_4k = _infer_is_4k_from_instance(instance)
+    resolved_instance_key = _resolve_instance_key('series', instance, inferred_is_4k)
 
     session = get_session()
     try:
         series_row = session.query(Series).filter(
             Series.sonarrid == sonarr_series_id,
-            Series.is_4k == inferred_is_4k,
+            Series.instance_key == resolved_instance_key,
         ).first()
 
         if not series_row:
@@ -763,7 +841,7 @@ def process_series_deleted_event(payload: dict[str, Any], instance: str | None =
             if tvdb_id_int:
                 series_row = session.query(Series).filter(
                     Series.tvdbid == tvdb_id_int,
-                    Series.is_4k == inferred_is_4k,
+                    Series.instance_key == resolved_instance_key,
                 ).first()
 
         if not series_row:

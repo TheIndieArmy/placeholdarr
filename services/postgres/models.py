@@ -14,11 +14,14 @@ class Movie(Base):
     __tablename__ = "movie"
     __table_args__ = (
         Index('ix_movie_determination', 'determination'),
+        Index('ux_movie_tmdbid_instance_key', 'tmdbid', 'instance_key', unique=True),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
-    tmdbid = Column(Integer, unique=True, nullable=False)
+    tmdbid = Column(Integer, nullable=False)
+    # ARR instance key for this row (for example: radarr_std, radarr_4k)
+    instance_key = Column(String, nullable=False, default='radarr_std')
     is_4k  = Column(Boolean, default=False)
     # New preferred placeholder folder (where we'd create a placeholder)
     placeholder_folder = Column(String, nullable=True)
@@ -296,11 +299,14 @@ class Series(Base):
     __tablename__ = "series"
     __table_args__ = (
         Index('ix_series_plex_dummy_id', 'plex_dummy_id'),
+        Index('ux_series_tvdbid_instance_key', 'tvdbid', 'instance_key', unique=True),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
-    tvdbid = Column(Integer, unique=True, nullable=False)
+    tvdbid = Column(Integer, nullable=False)
+    # ARR instance key for this row (for example: sonarr_std, sonarr_4k)
+    instance_key = Column(String, nullable=False, default='sonarr_std')
     is_4k  = Column(Boolean, default=False)
     # preferred placeholder folder for series-level placeholders
     placeholder_folder = Column(String, nullable=True)

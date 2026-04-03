@@ -1,6 +1,7 @@
 import logging
 import re
 from sqlalchemy.orm import Session
+from core.config import settings
 from services.postgres.models import Episode, Series, Season
 
 # Set up logger
@@ -58,8 +59,10 @@ class SeriesRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_by_tvdbid(self, tvdbid: int, is_4k: bool) -> Series | None:
-        return self.session.query(Series).filter_by(tvdbid=tvdbid,is_4k=is_4k).first()
+    def get_by_tvdbid(self, tvdbid: int, is_4k: bool, instance_key: str | None = None) -> Series | None:
+        if instance_key:
+            return self.session.query(Series).filter_by(tvdbid=tvdbid, instance_key=str(instance_key).strip().lower()).first()
+        return self.session.query(Series).filter_by(tvdbid=tvdbid, is_4k=is_4k).first()
     
     def get_by_id(self, seriesid: int) -> Series | None:
         return self.session.query(Series).filter_by(id=seriesid).first()
@@ -85,13 +88,17 @@ class SeriesRepository:
             logger.error("Attempting to create Series without tvdbid. Mapped: %s Raw: %s", mapped, kwargs)
             raise ValueError("tvdbid is required to create Series")
 
+        if 'instance_key' not in mapped:
+            is_4k = bool(mapped.get('is_4k', False))
+            mapped['instance_key'] = settings.SONARR_4K_INSTANCE_KEY if is_4k else settings.SONARR_STD_INSTANCE_KEY
+
         series = Series(**mapped)
         self.session.add(series)
         self.session.commit()
         return series
 
-    def delete_by_tvdbid(self, tvdbid: int, is_4k: bool = False) -> bool:
-        series = self.get_by_tvdbid(tvdbid, is_4k)
+    def delete_by_tvdbid(self, tvdbid: int, is_4k: bool = False, instance_key: str | None = None) -> bool:
+        series = self.get_by_tvdbid(tvdbid, is_4k, instance_key=instance_key)
         if series:
             self.session.delete(series)
             self.session.commit()

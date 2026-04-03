@@ -117,31 +117,6 @@ def _refresh_emby_item_by_path(sess: requests.Session, path: str) -> bool:
     return refreshed_any
 
 
-def _refresh_emby_item_by_path_with_retries(
-    sess: requests.Session,
-    path: str,
-    *,
-    max_wait_seconds: float,
-    poll_seconds: float,
-) -> tuple[bool, int, float]:
-    """Retry path lookup+item refresh for a bounded time window while Emby indexes."""
-    safe_max_wait = max(0.0, float(max_wait_seconds or 0.0))
-    safe_poll = max(0.1, float(poll_seconds or 0.1))
-
-    attempts_used = 0
-    started = time.monotonic()
-    while True:
-        attempts_used += 1
-        if _refresh_emby_item_by_path(sess, path):
-            elapsed = time.monotonic() - started
-            return True, attempts_used, elapsed
-
-        elapsed = time.monotonic() - started
-        if elapsed >= safe_max_wait:
-            return False, attempts_used, elapsed
-        time.sleep(min(safe_poll, max(0.0, safe_max_wait - elapsed)))
-
-
 def _post_media_updated(sess: requests.Session, paths: list[str], update_type: str = "Created") -> bool:
     """Post to Library/Media/Updated for changed media paths."""
     try:
@@ -174,7 +149,7 @@ def _post_library_refresh(sess: requests.Session, primary_path: str = "") -> boo
     return False
 
 
-def refresh_emby_paths(paths: set[str]) -> dict[str, int]:
+def refresh_emby_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
     """Notify Emby about changed paths and trigger exact item refresh when possible."""
     if not getattr(settings, "emby_enabled", False):
         return {"refreshed": 0, "failed": 0}
@@ -186,15 +161,16 @@ def refresh_emby_paths(paths: set[str]) -> dict[str, int]:
     sess = _session()
 
     logger.info(
-        f"Emby scan triggered for {len(abs_paths)} item(s) in single batched request.",
+        f"Emby scan triggered for {len(abs_paths)} item(s) ({update_type}) in single batched request.",
         extra={"emoji_type": "refresh"},
     )
 
-    batch_ok = _post_media_updated(sess, abs_paths, update_type="Created")
+    batch_ok = _post_media_updated(sess, abs_paths, update_type=update_type)
+    # Only attempt targeted item refresh for existing files (creates). For deletes the
+    # file is already gone so path lookup will always fail — skip straight to fallback.
     exact_paths = [path for path in abs_paths if os.path.isfile(path)]
 
-    targeted_wait_seconds = float(getattr(settings, "EMBY_TARGETED_REFRESH_WAIT_SECONDS", 5.0) or 5.0)
-    targeted_poll_seconds = float(getattr(settings, "EMBY_TARGETED_REFRESH_POLL_SECONDS", 1.0) or 1.0)
+    targeted_wait_seconds = float(getattr(settings, "EMBY_TARGETED_REFRESH_WAIT_SECONDS", 1.0) or 1.0)
     force_library_refresh_on_item_miss = bool(
         getattr(settings, "EMBY_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", True)
     )
@@ -205,34 +181,28 @@ def refresh_emby_paths(paths: set[str]) -> dict[str, int]:
     total_targeted_wait_seconds = 0.0
     forced_library_refresh = False
     for path in exact_paths:
-        refreshed_now, attempts_used, elapsed = _refresh_emby_item_by_path_with_retries(
-            sess,
-            path,
-            max_wait_seconds=targeted_wait_seconds,
-            poll_seconds=targeted_poll_seconds,
-        )
-        total_targeted_wait_seconds += elapsed
+        refreshed_now = _refresh_emby_item_by_path(sess, path)
         if refreshed_now:
             succeeded[path] = True
             item_refresh_count += 1
-            if attempts_used > 1:
-                retried_item_refresh_count += 1
-                logger.info(
-                    f"Emby delayed item refresh succeeded after {attempts_used} attempts for path={path}",
-                    extra={"emoji_type": "info"},
-                )
+        else:
+            retried_item_refresh_count += 1
 
-    # In some Emby deployments path-targeted refresh accepts quickly but queueing delays
-    # item visibility. When this happens, forcing a plain library refresh tends to
-    # kick the monitor queue immediately (similar to manual "Scan Library Files").
-    if force_library_refresh_on_item_miss and exact_paths and item_refresh_count == 0:
+    # Fire fallback library refresh when:
+    #   - no exact file paths exist (delete events: files already gone, paths are dirs), OR
+    #   - targeted item refresh found nothing on existing files.
+    # Guarded by abs_paths so we always have a root hint to pass.
+    if force_library_refresh_on_item_miss and abs_paths and (not exact_paths or item_refresh_count == 0):
+        if targeted_wait_seconds > 0:
+            time.sleep(targeted_wait_seconds)
+            total_targeted_wait_seconds = targeted_wait_seconds
         forced_library_refresh = _post_library_refresh(sess, abs_paths[0])
         if forced_library_refresh:
             for path in abs_paths:
                 succeeded[path] = True
             logger.info(
                 f"Emby fallback library refresh accepted after waiting {total_targeted_wait_seconds:.1f}s "
-                "for item-level refresh.",
+                f"(update_type={update_type}).",
                 extra={"emoji_type": "info"},
             )
 
@@ -240,13 +210,17 @@ def refresh_emby_paths(paths: set[str]) -> dict[str, int]:
     failed = len(abs_paths) - refreshed
 
     if refreshed:
+        sample_paths = ', '.join(abs_paths[:5])
         logger.info(
             f"Emby refresh accepted for {refreshed}/{len(abs_paths)} path(s); "
-            f"batch_ok={batch_ok} item_refreshes={item_refresh_count} retried_item_refreshes={retried_item_refresh_count} "
+            f"batch_ok={batch_ok} item_refreshes={item_refresh_count} targeted_misses={retried_item_refresh_count} "
             f"targeted_wait_seconds={total_targeted_wait_seconds:.1f} "
-            f"forced_library_refresh={forced_library_refresh}: "
-            f"{', '.join(abs_paths)}",
+            f"forced_library_refresh={forced_library_refresh}",
             extra={"emoji_type": "success"},
+        )
+        logger.debug(
+            f"Emby refreshed path sample (showing up to 5/{len(abs_paths)}): {sample_paths}",
+            extra={"emoji_type": "debug"},
         )
         return {"refreshed": refreshed, "failed": failed}
     else:

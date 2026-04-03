@@ -146,6 +146,17 @@ Optional settings:
 - `PLACEHOLDER_DIR_MODE`: Octal directory mode applied to placeholder folders (default `777`)
 - `TV_PLAY_MODE`: Download scope (`episode`, `season`, or `series`)
 - 4K support settings (if needed)
+- `RADARR_STD_INSTANCE_KEY`, `RADARR_4K_INSTANCE_KEY`, `SONARR_STD_INSTANCE_KEY`, `SONARR_4K_INSTANCE_KEY`: Optional webhook/sync instance key overrides (defaults: `radarr_std`, `radarr_4k`, `sonarr_std`, `sonarr_4k`)
+- `TAUTULLI_INSTANCE_KEY`, `JELLYFIN_INSTANCE_KEY`, `EMBY_INSTANCE_KEY`: Optional playback webhook source key overrides (defaults: `tautulli`, `jellyfin`, `emby`)
+- **Playback event handler settings** (requires a Tautulli/Jellyfin/Emby webhook; disabled by default):
+  - `ENABLE_PLAYBACK_EVENT_HANDLERS`: Activate playback-driven ARR searches (`true`/`false`, default `false`)
+  - `PLAYBACK_SEARCH_PREFERENCE`: Which ARR instance to search when a placeholder is played (`standard`, `4k`, `both`, default `both`)
+  - `TV_PLAYBACK_INSTANCE_MODE`: How to select the Sonarr instance for TV episodes (`match`, `preference`, `both`, default `match`)
+    - `match` — use the instance whose library path matches the played file path
+    - `preference` — always follow `PLAYBACK_SEARCH_PREFERENCE`
+    - `both` — always trigger both standard and 4K Sonarr instances
+  - `PLAYBACK_FALLBACK_TIMEOUT_MINUTES`: Minutes before a delayed fallback ARR search fires if the preferred instance has not yet imported the title (default `30`; `0` disables fallback)
+  - `PLAYBACK_COOLDOWN`: Seconds to suppress duplicate playback events for the same item (default `30`; `0` disables)
 - `INCLUDE_SPECIALS`: Include specials in TV placeholder creation (`true`/`false`)
 - `EPISODES_LOOKAHEAD`: Number of episodes to look ahead and download (integer)
 - `MAX_MONITOR_TIME`: Maximum time to monitor for file in seconds (integer)
@@ -204,14 +215,16 @@ Placeholdarr receives all webhook traffic on `/webhook` and routes each request 
 Use this URL format for every sender:
 - `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<value>`
 
-Allowed `instance` values:
-- `radarr_std`
-- `radarr_4k`
-- `sonarr_std`
-- `sonarr_4k`
-- `tautulli`
-- `jellyfin`
-- `emby`
+Allowed `instance` values are configurable via ENV instance-key settings.
+
+Default values:
+- `radarr_std` (`RADARR_STD_INSTANCE_KEY`)
+- `radarr_4k` (`RADARR_4K_INSTANCE_KEY`)
+- `sonarr_std` (`SONARR_STD_INSTANCE_KEY`)
+- `sonarr_4k` (`SONARR_4K_INSTANCE_KEY`)
+- `tautulli` (`TAUTULLI_INSTANCE_KEY`)
+- `jellyfin` (`JELLYFIN_INSTANCE_KEY`)
+- `emby` (`EMBY_INSTANCE_KEY`)
 
 Current behavior:
 - Requests without a valid configured `instance` value are rejected with HTTP 400.
@@ -228,8 +241,8 @@ Current behavior:
 2. Select "Webhook"
 3. Configure:
    - Name: PlaceholdARR
-   - Standard Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=radarr_std`
-   - 4K Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=radarr_4k`
+  - Standard Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<RADARR_STD_INSTANCE_KEY>`
+  - 4K Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<RADARR_4K_INSTANCE_KEY>`
    - Method: POST
    - Triggers (enable only):
      - On Grab
@@ -246,8 +259,8 @@ Current behavior:
 2. Select "Webhook"
 3. Configure:
    - Name: PlaceholdARR
-   - Standard Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=sonarr_std`
-   - 4K Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=sonarr_4k`
+  - Standard Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<SONARR_STD_INSTANCE_KEY>`
+  - 4K Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<SONARR_4K_INSTANCE_KEY>`
    - Method: POST
    - Triggers (enable only):
      - On Grab
@@ -261,12 +274,12 @@ Current behavior:
 ### Tautulli Webhook Setup
 
 Required Tautulli webhook URL pattern:
-- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=tautulli`
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<TAUTULLI_INSTANCE_KEY>`
 
 1. In Tautulli, go to Settings → Notification Agents
 2. Add a new Webhook notification agent
 3. Configure the webhook:
-   - Webhook URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=tautulli`
+  - Webhook URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<TAUTULLI_INSTANCE_KEY>`
    - Trigger: Playback Start
    - Payload Format: JSON
 4. Use this JSON payload:
@@ -299,13 +312,13 @@ Required Tautulli webhook URL pattern:
 ### Jellyfin Webhook Setup
 
 Required Jellyfin webhook URL pattern:
-- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=jellyfin`
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<JELLYFIN_INSTANCE_KEY>`
 
 1. In Jellyfin, go to **Dashboard → Plugins → Catalog** and install the **Webhook** plugin if not already installed.
 2. Go to **Dashboard → Plugins → Webhook** and click **Add Webhook**.
 3. Set the **Webhook URL** to:
    ```
-   http://your-server:PLACEHOLDARR_PORT/webhook?instance=jellyfin
+  http://your-server:PLACEHOLDARR_PORT/webhook?instance=<JELLYFIN_INSTANCE_KEY>
    ```
    Replace `your-server` and `PLACEHOLDARR_PORT` with your actual address and configured Placeholdarr port.
 4. Under **Events**, enable **Playback Start**.
@@ -335,17 +348,37 @@ Required Jellyfin webhook URL pattern:
 ### Emby Webhook Setup
 
 Required Emby webhook URL pattern:
-- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=emby`
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<EMBY_INSTANCE_KEY>`
 
 1. In Emby, go to **Settings → Notifications**.
 2. Add or edit your webhook notification.
 3. Set the **Webhook URL** to:
    ```
-   http://your-server:PLACEHOLDARR_PORT/webhook?instance=emby
+  http://your-server:PLACEHOLDARR_PORT/webhook?instance=<EMBY_INSTANCE_KEY>
    ```
    Replace `your-server` and `PLACEHOLDARR_PORT` with your actual address and configured Placeholdarr port.
 4. Enable the playback-start event you want Placeholdarr to receive.
 5. Save the webhook.
+
+---
+
+### Playback Behavior Settings
+
+Placeholdarr's playback event handlers are opt-in.  After configuring one or more of the webhook sources above, enable the feature and tune how searches are triggered:
+
+| Setting | Default | Description |
+|---|---|---|
+| `ENABLE_PLAYBACK_EVENT_HANDLERS` | `false` | Set to `true` to activate playback-driven ARR searches |
+| `PLAYBACK_SEARCH_PREFERENCE` | `both` | `standard`, `4k`, or `both` — which ARR instance to search for movies |
+| `TV_PLAYBACK_INSTANCE_MODE` | `match` | `match` (path-based), `preference` (follow above), or `both` |
+| `PLAYBACK_FALLBACK_TIMEOUT_MINUTES` | `30` | Minutes before fallback fires if preferred instance has not imported; `0` disables |
+| `PLAYBACK_COOLDOWN` | `30` | Seconds to deduplicate repeated playback events for the same item; `0` disables |
+
+**How it works:**
+- **Placeholder played:** Placeholdarr immediately triggers an ARR search on the selected instance(s) according to `PLAYBACK_SEARCH_PREFERENCE` / `TV_PLAYBACK_INSTANCE_MODE`.
+- **Real file played:** If the other (standard vs. 4K) instance does not yet have the file, a search can optionally be triggered there too.
+- **Fallback:** If the preferred instance does not import within `PLAYBACK_FALLBACK_TIMEOUT_MINUTES`, a fallback job searches the alternate instance.
+- **Deleted/ignored titles:** Content marked `is_deleted=True` in Placeholdarr is always skipped.
 
 ---
 

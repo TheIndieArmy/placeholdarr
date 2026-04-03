@@ -180,7 +180,7 @@ def scan_once_if_needed(run_id: Optional[str] = None):
             logger.warning('No library roots configured; skipping FS scan', extra={'emoji_type': 'warning'})
             return 0, {'reason': 'no_roots'}
         created = scan_placeholder_roots(roots)
-        logger.info(f'FS scan completed; placeholders created={created}', extra={'emoji_type': 'placeholder'})
+        logger.debug(f'FS scan completed; placeholders created={created}', extra={'emoji_type': 'placeholder'})
         return created, {'reason': 'ok', 'roots': roots}
     except Exception as e:
         logger.error(f'FS scan failed: {e}', extra={'emoji_type': 'error'})

@@ -131,6 +131,13 @@ def init_db(engine=None, convert_ts: bool | None = None):
             except Exception as ex:
                 logger.error(f"Runtime add-only column migration failed: {ex}", extra={'emoji_type': 'error'})
 
+            # Migrate instance_key composite unique constraints (drop legacy single-col,
+            # backfill instance_key, create composite indexes).
+            try:
+                _migrate_instance_key_constraints(engine)
+            except Exception as ex:
+                logger.error(f"Runtime instance_key constraint migration failed: {ex}", extra={'emoji_type': 'error'})
+
             # Optionally perform timestamp conversions if configured
             try:
                 if os.getenv('CONVERT_TS') == '1':
@@ -222,6 +229,93 @@ def init_db(engine=None, convert_ts: bool | None = None):
     inspector = inspect(engine)
     created_tables = inspector.get_table_names()
     logger.info(f"Tables AFTER create_all(): {created_tables}", extra={'emoji_type': 'info'})
+
+
+def _migrate_instance_key_constraints(engine):
+    """Drop legacy single-column unique constraints on tmdbid/tvdbid, backfill instance_key,
+    and create the composite unique indexes (tmdbid, instance_key) / (tvdbid, instance_key).
+
+    Safe to call repeatedly — all operations are idempotent.
+    """
+    from sqlalchemy import text
+    from core.config import settings
+
+    steps = [
+        # (description, SQL)
+        # 1. Backfill instance_key from is_4k for movie rows where it is NULL
+        (
+            "Backfill movie.instance_key from is_4k",
+            f"""
+            UPDATE movie
+               SET instance_key = CASE WHEN is_4k THEN '{settings.RADARR_4K_INSTANCE_KEY}'
+                                        ELSE '{settings.RADARR_STD_INSTANCE_KEY}'
+                                   END
+             WHERE instance_key IS NULL OR instance_key = ''
+            """,
+        ),
+        # 2. Backfill instance_key from is_4k for series rows where it is NULL
+        (
+            "Backfill series.instance_key from is_4k",
+            f"""
+            UPDATE series
+               SET instance_key = CASE WHEN is_4k THEN '{settings.SONARR_4K_INSTANCE_KEY}'
+                                        ELSE '{settings.SONARR_STD_INSTANCE_KEY}'
+                                   END
+             WHERE instance_key IS NULL OR instance_key = ''
+            """,
+        ),
+        # 3. Drop old single-column unique constraint on movie.tmdbid (if present)
+        (
+            "Drop legacy movie_tmdbid_key constraint",
+            "ALTER TABLE movie DROP CONSTRAINT IF EXISTS movie_tmdbid_key",
+        ),
+        # 4. Drop old single-column unique constraint on series.tvdbid (if present)
+        (
+            "Drop legacy series_tvdbid_key constraint",
+            "ALTER TABLE series DROP CONSTRAINT IF EXISTS series_tvdbid_key",
+        ),
+        # 5. Also drop any unique index (not constraint) on just movie.tmdbid
+        (
+            "Drop legacy ux_movie_tmdbid index (single-col)",
+            "DROP INDEX IF EXISTS ux_movie_tmdbid",
+        ),
+        # 6. Also drop any unique index (not constraint) on just series.tvdbid
+        (
+            "Drop legacy ux_series_tvdbid index (single-col)",
+            "DROP INDEX IF EXISTS ux_series_tvdbid",
+        ),
+    ]
+
+    for desc, sql in steps:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(sql.strip()))
+                conn.commit()
+                logger.debug(f"instance_key migration: {desc} — OK", extra={'emoji_type': 'debug'})
+        except Exception as ex:
+            logger.warning(f"instance_key migration step '{desc}' failed (may be harmless): {ex}", extra={'emoji_type': 'warning'})
+
+    # Create composite unique indexes via CONCURRENTLY (must be outside a transaction)
+    composite_indexes = [
+        (
+            "ux_movie_tmdbid_instance_key",
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_movie_tmdbid_instance_key "
+            "ON movie(tmdbid, instance_key)",
+        ),
+        (
+            "ux_series_tvdbid_instance_key",
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_series_tvdbid_instance_key "
+            "ON series(tvdbid, instance_key)",
+        ),
+    ]
+    for idx_name, idx_sql in composite_indexes:
+        try:
+            with engine.connect() as conn:
+                conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+                conn.execute(text(idx_sql))
+                logger.info(f"Ensured composite unique index: {idx_name}", extra={'emoji_type': 'success'})
+        except Exception as ex:
+            logger.warning(f"Could not ensure composite index {idx_name}: {ex}", extra={'emoji_type': 'warning'})
 
 
 def _migrate_columns(engine, inspector):

@@ -9,7 +9,7 @@ from core.config import settings
 from core.logger import logger
 
 
-def refresh_plex_paths(paths: set[str]) -> dict[str, int]:
+def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
     """Request path-scoped Plex refresh for changed folders.
 
     Path-scoped refresh avoids broad library sweeps by targeting only the

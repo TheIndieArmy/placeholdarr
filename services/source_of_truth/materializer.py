@@ -445,6 +445,7 @@ def _run_materialization_for_ids(
         "observation_trail_group_id": None,
     }
     changed_paths: set[str] = set()
+    delete_refresh_paths: set[str] = set()
     stats["movies_considered"] = len(movie_ids)
     stats["episodes_considered"] = len(episode_ids)
 
@@ -461,7 +462,7 @@ def _run_materialization_for_ids(
         action = result.get("action")
         if action == "created_or_exists":
             stats["created"] += 1
-            logger.info(
+            logger.debug(
                 f"Placeholder materialized for movie_id={movie_id}: "
                 f"state={'created' if result.get('created') else 'already_present'} "
                 f"path={result.get('path')}",
@@ -476,7 +477,7 @@ def _run_materialization_for_ids(
                 stats["nfo_written"] += 1
         elif action == "deleted_or_absent":
             stats["deleted"] += 1
-            logger.info(
+            logger.debug(
                 f"Placeholder cleanup for movie_id={movie_id}: "
                 f"state={'deleted' if result.get('deleted') else 'already_absent'} "
                 f"path={result.get('path')} "
@@ -491,7 +492,7 @@ def _run_materialization_for_ids(
             if result.get("series_nfo_deleted"):
                 stats["series_nfo_deleted"] += 1
             for refresh_path in result.get("refresh_paths", []) or []:
-                changed_paths.add(refresh_path)
+                delete_refresh_paths.add(refresh_path)
         else:
             stats["noop"] += 1
 
@@ -508,7 +509,7 @@ def _run_materialization_for_ids(
         action = result.get("action")
         if action == "created_or_exists":
             stats["created"] += 1
-            logger.info(
+            logger.debug(
                 f"Placeholder materialized for episode_id={episode_id}: "
                 f"state={'created' if result.get('created') else 'already_present'} "
                 f"path={result.get('path')}",
@@ -524,7 +525,7 @@ def _run_materialization_for_ids(
                 stats["nfo_written"] += 1
         elif action == "deleted_or_absent":
             stats["deleted"] += 1
-            logger.info(
+            logger.debug(
                 f"Placeholder cleanup for episode_id={episode_id}: "
                 f"state={'deleted' if result.get('deleted') else 'already_absent'} "
                 f"path={result.get('path')} "
@@ -540,18 +541,26 @@ def _run_materialization_for_ids(
             if result.get("series_nfo_deleted"):
                 stats["series_nfo_deleted"] += 1
             for refresh_path in result.get("refresh_paths", []) or []:
-                changed_paths.add(refresh_path)
+                delete_refresh_paths.add(refresh_path)
         else:
             stats["noop"] += 1
 
+    logger.info(
+        "Materialization batch summary: "
+        f"created={stats['created']} deleted={stats['deleted']} noop={stats['noop']} errors={stats['errors']} "
+        f"files_created={stats['files_created']} files_deleted={stats['files_deleted']} nfo_written={stats['nfo_written']}",
+        extra={"emoji_type": "success"},
+    )
+
     refresh_stats = refresh_all_paths(changed_paths)
-    stats["media_refresh_requested"] = refresh_stats.get("refreshed", 0)
-    stats["media_refresh_failed"] = refresh_stats.get("failed", 0)
+    delete_refresh_stats = refresh_all_paths(delete_refresh_paths, update_type="Deleted")
+    stats["media_refresh_requested"] = refresh_stats.get("refreshed", 0) + delete_refresh_stats.get("refreshed", 0)
+    stats["media_refresh_failed"] = refresh_stats.get("failed", 0) + delete_refresh_stats.get("failed", 0)
 
     logger.info(
         f"Media server refreshes completed after placeholder materialization: "
-        f"refreshed={refresh_stats.get('refreshed', 0)} "
-        f"failed={refresh_stats.get('failed', 0)}",
+        f"refreshed={stats['media_refresh_requested']} "
+        f"failed={stats['media_refresh_failed']}",
         extra={"emoji_type": "success"},
     )
 
@@ -569,20 +578,19 @@ def _run_materialization_for_ids(
         observed_candidates_q = observed_candidates_q.filter(Placeholder.id == -1)
     observed_candidates = observed_candidates_q.all()
 
-    if getattr(settings, "ENABLE_PLEX", False):
-        # Check if Plex is busy before starting observation polling
-        plex_is_busy = False
-        # Always perform immediate polling
-        observe_stats = observe_placeholders_with_polling(
-            session,
-            observed_candidates,
-            allow_title_fallback=False,
-        )
-        stats["media_id_observed_plex"] = observe_stats.get("observed_plex", 0)
-        stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
-        stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)
-        stats["media_id_observe_failed"] = observe_stats.get("observe_failed", 0)
+    # Always perform immediate polling for all enabled media servers so IDs can
+    # be captured even when Plex is disabled.
+    observe_stats = observe_placeholders_with_polling(
+        session,
+        observed_candidates,
+        allow_title_fallback=False,
+    )
+    stats["media_id_observed_plex"] = observe_stats.get("observed_plex", 0)
+    stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
+    stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)
+    stats["media_id_observe_failed"] = observe_stats.get("observe_failed", 0)
 
+    if getattr(settings, "ENABLE_PLEX", False):
         ready_for_plex_projection = [
             int(row.id)
             for row in observed_candidates
@@ -597,29 +605,24 @@ def _run_materialization_for_ids(
                 extra={"emoji_type": "info"},
             )
 
-        unresolved_ids = unresolved_placeholder_ids(observed_candidates)
-        # Always enqueue observation trail for unresolved placeholders
-        if unresolved_ids:
-            enqueue_result = enqueue_observation_trail(
-                session,
-                placeholder_ids=unresolved_ids,
-                source=observation_source,
-            )
-            if enqueue_result.get("enqueued"):
-                stats["observation_trail_enqueued"] = 1
-                stats["observation_trail_job_id"] = enqueue_result.get("job_id")
-                stats["observation_trail_group_id"] = enqueue_result.get("group_id")
-                logger.info(
-                    "Deferred observation trail enqueued "
-                    f"job_id={enqueue_result.get('job_id')} "
-                    f"unresolved={len(unresolved_ids)}",
-                    extra={"emoji_type": "info"},
-                )
-    else:
-        logger.info(
-            "Skipping observation polling and trail enqueue because Plex is disabled.",
-            extra={"emoji_type": "info"},
+    unresolved_ids = unresolved_placeholder_ids(observed_candidates)
+    # Always enqueue observation trail for unresolved placeholders
+    if unresolved_ids:
+        enqueue_result = enqueue_observation_trail(
+            session,
+            placeholder_ids=unresolved_ids,
+            source=observation_source,
         )
+        if enqueue_result.get("enqueued"):
+            stats["observation_trail_enqueued"] = 1
+            stats["observation_trail_job_id"] = enqueue_result.get("job_id")
+            stats["observation_trail_group_id"] = enqueue_result.get("group_id")
+            logger.info(
+                "Deferred observation trail enqueued "
+                f"job_id={enqueue_result.get('job_id')} "
+                f"unresolved={len(unresolved_ids)}",
+                extra={"emoji_type": "info"},
+            )
 
     return stats
 

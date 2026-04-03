@@ -168,6 +168,12 @@ def _tv_library_root(is_4k: bool) -> str:
     return settings.TV_LIBRARY_4K_FOLDER if is_4k and settings.TV_LIBRARY_4K_FOLDER else settings.TV_LIBRARY_FOLDER
 
 
+def _default_instance_key(content_type: str, is_4k: bool) -> str:
+    if content_type == 'movie':
+        return settings.RADARR_4K_INSTANCE_KEY if is_4k else settings.RADARR_STD_INSTANCE_KEY
+    return settings.SONARR_4K_INSTANCE_KEY if is_4k else settings.SONARR_STD_INSTANCE_KEY
+
+
 def _movie_folder_name(title: str, year: int, tmdbid: int) -> str:
     if year:
         return f"{_sanitize_name(title)} ({year}) {{tmdb-{tmdbid}}}"
@@ -218,7 +224,7 @@ def _placeholder_series_folder(entry: Dict, *, title: str, year: int, tvdbid: in
     return os.path.join(root, folder_name)
 
 
-def _movie_fields(entry: Dict, is_4k: bool) -> Dict:
+def _movie_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     movie_file = entry.get('movieFile') or {}
     movie_file_path = movie_file.get('path')
     title = entry.get('title') or 'Unknown'
@@ -229,6 +235,7 @@ def _movie_fields(entry: Dict, is_4k: bool) -> Dict:
         'title': title,
         'year': year,
         'tmdbid': tmdbid,
+        'instance_key': str(instance_key).strip().lower(),
         'is_4k': is_4k,
         'radarrid': entry.get('id'),
         'placeholder_folder': placeholder_folder,
@@ -264,7 +271,7 @@ def _movie_fields(entry: Dict, is_4k: bool) -> Dict:
     }
 
 
-def _series_fields(entry: Dict, is_4k: bool) -> Dict:
+def _series_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     stats = entry.get('statistics') or {}
     title = entry.get('title') or 'Unknown'
     year = _extract_year(entry.get('year') or entry.get('firstAired'), 0)
@@ -274,6 +281,7 @@ def _series_fields(entry: Dict, is_4k: bool) -> Dict:
         'title': title,
         'year': year,
         'tvdbid': tvdbid,
+        'instance_key': str(instance_key).strip().lower(),
         'is_4k': is_4k,
         'sonarrid': entry.get('id'),
         'placeholder_folder': placeholder_folder,
@@ -338,7 +346,7 @@ def _episode_fields(series: Series, season: Season, entry: Dict, episode_file: D
 def _upsert_movie(session, fields: Dict):
     existing = (
         session.query(Movie)
-        .filter(and_(Movie.tmdbid == fields['tmdbid'], Movie.is_4k == fields['is_4k']))
+        .filter(and_(Movie.tmdbid == fields['tmdbid'], Movie.instance_key == fields['instance_key']))
         .first()
     )
     if existing:
@@ -353,7 +361,7 @@ def _upsert_movie(session, fields: Dict):
 def _upsert_series(session, fields: Dict):
     existing = (
         session.query(Series)
-        .filter(and_(Series.tvdbid == fields['tvdbid'], Series.is_4k == fields['is_4k']))
+        .filter(and_(Series.tvdbid == fields['tvdbid'], Series.instance_key == fields['instance_key']))
         .first()
     )
     if existing:
@@ -420,22 +428,22 @@ def _upsert_episode(session, fields: Dict):
     return created, True
 
 
-def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool) -> Iterable[Tuple[str, str, str, bool]]:
+def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool) -> Iterable[Tuple[str, str, str, bool, str]]:
     if 'movie' in types:
         if is_4k:
             if settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY:
-                yield ('movie', settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY, True)
+                yield ('movie', settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY, True, settings.RADARR_4K_INSTANCE_KEY)
         else:
             if settings.RADARR_URL and settings.RADARR_API_KEY:
-                yield ('movie', settings.RADARR_URL, settings.RADARR_API_KEY, False)
+                yield ('movie', settings.RADARR_URL, settings.RADARR_API_KEY, False, settings.RADARR_STD_INSTANCE_KEY)
 
     if 'series' in types:
         if is_4k:
             if settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY:
-                yield ('series', settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY, True)
+                yield ('series', settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY, True, settings.SONARR_4K_INSTANCE_KEY)
         else:
             if settings.SONARR_URL and settings.SONARR_API_KEY:
-                yield ('series', settings.SONARR_URL, settings.SONARR_API_KEY, False)
+                yield ('series', settings.SONARR_URL, settings.SONARR_API_KEY, False, settings.SONARR_STD_INSTANCE_KEY)
 
 
 def run_full_sync(
@@ -466,12 +474,12 @@ def run_full_sync(
 
     session = get_session()
     try:
-        for content_type, base_url, api_key, sync_is_4k in _iter_arr_endpoints(types, is_4k):
+        for content_type, base_url, api_key, sync_is_4k, sync_instance_key in _iter_arr_endpoints(types, is_4k):
             if content_type == 'movie':
                 movies = fetch_radarr_movies(base_url, api_key)
                 seen_tmdbids = set()
                 for movie in movies:
-                    fields = _movie_fields(movie, sync_is_4k)
+                    fields = _movie_fields(movie, sync_is_4k, sync_instance_key)
                     if not fields['tmdbid']:
                         continue
                     seen_tmdbids.add(fields['tmdbid'])
@@ -485,7 +493,7 @@ def run_full_sync(
                 if not dry_run and seen_tmdbids:
                     marked_movies = (
                         session.query(Movie)
-                        .filter(and_(Movie.is_4k == sync_is_4k, ~Movie.tmdbid.in_(seen_tmdbids)))
+                        .filter(and_(Movie.instance_key == sync_instance_key, ~Movie.tmdbid.in_(seen_tmdbids)))
                         .update({'is_deleted': True}, synchronize_session=False)
                     )
                     stats['movies_marked_deleted'] += int(marked_movies or 0)
@@ -496,7 +504,7 @@ def run_full_sync(
                 seen_tvdbids = set()
 
                 for series_entry in series_items:
-                    s_fields = _series_fields(series_entry, sync_is_4k)
+                    s_fields = _series_fields(series_entry, sync_is_4k, sync_instance_key)
                     if not s_fields['tvdbid']:
                         continue
 
@@ -564,7 +572,7 @@ def run_full_sync(
                 if not dry_run and seen_tvdbids:
                     deleted_series_rows = (
                         session.query(Series.id)
-                        .filter(and_(Series.is_4k == sync_is_4k, ~Series.tvdbid.in_(seen_tvdbids)))
+                        .filter(and_(Series.instance_key == sync_instance_key, ~Series.tvdbid.in_(seen_tvdbids)))
                         .all()
                     )
                     deleted_series_ids = [row[0] for row in deleted_series_rows]
@@ -618,6 +626,7 @@ def sync_radarr_movies_by_ids(
     base_url: str,
     api_key: str,
     is_4k: bool,
+    instance_key: str | None = None,
 ) -> dict:
     """Targeted movie sync for a specific Radarr instance and movie IDs."""
     ids = sorted({int(mid) for mid in (movie_ids or []) if mid})
@@ -631,6 +640,8 @@ def sync_radarr_movies_by_ids(
     if not ids:
         return stats
 
+    effective_instance_key = str(instance_key or _default_instance_key('movie', is_4k)).strip().lower()
+
     session = get_session()
     try:
         for movie_id in ids:
@@ -638,13 +649,13 @@ def sync_radarr_movies_by_ids(
             if not isinstance(movie, dict):
                 marked = (
                     session.query(Movie)
-                    .filter(and_(Movie.radarrid == movie_id, Movie.is_4k == is_4k))
+                    .filter(and_(Movie.radarrid == movie_id, Movie.instance_key == effective_instance_key))
                     .update({'is_deleted': True}, synchronize_session=False)
                 )
                 stats['movies_marked_deleted'] += int(marked or 0)
                 continue
 
-            fields = _movie_fields(movie, is_4k)
+            fields = _movie_fields(movie, is_4k, effective_instance_key)
             if not fields['tmdbid']:
                 continue
             stats['movies_seen'] += 1
@@ -669,6 +680,7 @@ def sync_sonarr_series_by_ids(
     base_url: str,
     api_key: str,
     is_4k: bool,
+    instance_key: str | None = None,
 ) -> dict:
     """Targeted series+episode sync for a specific Sonarr instance and series IDs."""
     ids = sorted({int(sid) for sid in (series_ids or []) if sid})
@@ -686,6 +698,8 @@ def sync_sonarr_series_by_ids(
     if not ids:
         return stats
 
+    effective_instance_key = str(instance_key or _default_instance_key('series', is_4k)).strip().lower()
+
     session = get_session()
     try:
         include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
@@ -694,13 +708,13 @@ def sync_sonarr_series_by_ids(
             if not isinstance(series_entry, dict):
                 marked = (
                     session.query(Series)
-                    .filter(and_(Series.sonarrid == series_id, Series.is_4k == is_4k))
+                    .filter(and_(Series.sonarrid == series_id, Series.instance_key == effective_instance_key))
                     .update({'is_deleted': True}, synchronize_session=False)
                 )
                 stats['series_marked_deleted'] += int(marked or 0)
                 continue
 
-            s_fields = _series_fields(series_entry, is_4k)
+            s_fields = _series_fields(series_entry, is_4k, effective_instance_key)
             if not s_fields['tvdbid']:
                 continue
 

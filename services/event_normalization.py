@@ -110,6 +110,8 @@ def legacy_dispatch_event_type(canonical_event_type: str, raw_event_type: str | 
     if canonical == "movie_added":
         # Preserve the legacy raw variant for logs where possible.
         return raw if raw in {"movieadd", "movieadded"} else "movieadd"
+    if canonical == "playback_start":
+        return raw if raw in {"playback.start", "playbackstart"} else "playbackstart"
 
     # Unknown/unsupported canonical events keep their raw value for observability.
     return raw or canonical or "unknown"

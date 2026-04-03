@@ -128,31 +128,7 @@ def _refresh_jellyfin_item_by_path(sess: requests.Session, path: str) -> bool:
     return refreshed_any
 
 
-def _refresh_jellyfin_item_by_path_with_timeout(
-    sess: requests.Session,
-    path: str,
-    *,
-    max_wait_seconds: float,
-    poll_seconds: float,
-) -> tuple[bool, int, float]:
-    safe_max_wait = max(0.0, float(max_wait_seconds or 0.0))
-    safe_poll = max(0.1, float(poll_seconds or 0.1))
-
-    attempts_used = 0
-    started = time.monotonic()
-    while True:
-        attempts_used += 1
-        if _refresh_jellyfin_item_by_path(sess, path):
-            elapsed = time.monotonic() - started
-            return True, attempts_used, elapsed
-
-        elapsed = time.monotonic() - started
-        if elapsed >= safe_max_wait:
-            return False, attempts_used, elapsed
-        time.sleep(min(safe_poll, max(0.0, safe_max_wait - elapsed)))
-
-
-def refresh_jellyfin_paths(paths: set[str]) -> dict[str, int]:
+def refresh_jellyfin_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
     """Notify Jellyfin about changed paths and trigger exact item refresh when possible."""
     if not getattr(settings, "jellyfin_enabled", False):
         return {"refreshed": 0, "failed": 0}
@@ -160,13 +136,14 @@ def refresh_jellyfin_paths(paths: set[str]) -> dict[str, int]:
         return {"refreshed": 0, "failed": 0}
 
     abs_paths = [os.path.abspath(path) for path in sorted(paths)]
+    # Only attempt targeted item refresh for existing files (creates). For deletes the
+    # file is already gone so path lookup will always fail — skip straight to fallback.
     exact_paths = [path for path in abs_paths if os.path.isfile(path)]
 
     sess = _session()
-    batch_ok = _post_media_updated(sess, abs_paths)
+    batch_ok = _post_media_updated(sess, abs_paths, update_type=update_type)
 
-    targeted_wait_seconds = float(getattr(settings, "JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS", 5.0) or 5.0)
-    targeted_poll_seconds = float(getattr(settings, "JELLYFIN_TARGETED_REFRESH_POLL_SECONDS", 1.0) or 1.0)
+    targeted_wait_seconds = float(getattr(settings, "JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS", 1.0) or 1.0)
     force_library_refresh_on_item_miss = bool(
         getattr(settings, "JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", True)
     )
@@ -178,27 +155,28 @@ def refresh_jellyfin_paths(paths: set[str]) -> dict[str, int]:
     forced_library_refresh = False
 
     for path in exact_paths:
-        refreshed_now, attempts_used, elapsed = _refresh_jellyfin_item_by_path_with_timeout(
-            sess,
-            path,
-            max_wait_seconds=targeted_wait_seconds,
-            poll_seconds=targeted_poll_seconds,
-        )
-        total_targeted_wait_seconds += elapsed
+        refreshed_now = _refresh_jellyfin_item_by_path(sess, path)
         if refreshed_now:
             succeeded[path] = True
             item_refresh_count += 1
-            if attempts_used > 1:
-                retried_item_refresh_count += 1
+        else:
+            retried_item_refresh_count += 1
 
-    if force_library_refresh_on_item_miss and exact_paths and item_refresh_count == 0:
+    # Fire fallback library refresh when:
+    #   - no exact file paths exist (delete events: files already gone, paths are dirs), OR
+    #   - targeted item refresh found nothing on existing files.
+    # Guarded by abs_paths so we always have a root hint to pass.
+    if force_library_refresh_on_item_miss and abs_paths and (not exact_paths or item_refresh_count == 0):
+        if targeted_wait_seconds > 0:
+            time.sleep(targeted_wait_seconds)
+            total_targeted_wait_seconds = targeted_wait_seconds
         forced_library_refresh = _post_library_refresh(sess, abs_paths[0])
         if forced_library_refresh:
             for path in abs_paths:
                 succeeded[path] = True
             logger.info(
                 f"Jellyfin fallback library refresh accepted after waiting {total_targeted_wait_seconds:.1f}s "
-                "for item-level refresh.",
+                f"(update_type={update_type}).",
                 extra={"emoji_type": "info"},
             )
 
