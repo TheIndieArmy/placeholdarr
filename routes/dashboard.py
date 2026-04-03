@@ -1,14 +1,15 @@
 """Dashboard routes: lightweight UI showing stats, activity, errors, and live logs."""
 
+import calendar as _calendar
 import os
 import glob as _glob
 import re
 import unicodedata
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import case, func, text
+from sqlalchemy import case, func, or_, text
 
 from core.config import settings
 from services.app_config import get_onboarding_status, get_settings_payload, save_settings
@@ -17,6 +18,7 @@ from services.postgres.db import get_session
 from services.postgres.models import (
     Movie, Series, Season, Episode, Placeholder, Job, EventLog, ObservationTrailAttempt,
 )
+from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
 router = APIRouter()
 
@@ -62,6 +64,95 @@ def _arr_item_link(item_type: str, instance_key: str, is_4k: bool, title: str, p
         return None
     route = "movie" if item_type == "movie" else "series"
     return f"{base_url}/{route}/{slug}"
+
+
+def _parse_calendar_month(month_token: str | None) -> date:
+    raw = str(month_token or "").strip()
+    if not raw:
+        today = datetime.now().date()
+        return today.replace(day=1)
+
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m").date()
+    except ValueError:
+        raise ValueError("month must be in YYYY-MM format")
+    return parsed.replace(day=1)
+
+
+def _format_calendar_month(month_start: date) -> str:
+    return month_start.strftime("%Y-%m")
+
+
+def _calendar_nav_month(month_start: date, offset: int) -> date:
+    year = month_start.year + ((month_start.month - 1 + offset) // 12)
+    month = ((month_start.month - 1 + offset) % 12) + 1
+    return date(year, month, 1)
+
+
+def _calendar_window_mode(lookahead_days: int) -> str:
+    if lookahead_days == 0:
+        return "disabled"
+    if lookahead_days < 0:
+        return "infinite"
+    return "bounded"
+
+
+def _date_in_lookahead_window(target_date: date | None, today: date, lookahead_days: int) -> bool:
+    if not target_date or lookahead_days == 0:
+        return False
+    if target_date < today:
+        return False
+    if lookahead_days < 0:
+        return True
+    return target_date <= (today + timedelta(days=lookahead_days))
+
+
+def _calendar_grid(month_start: date) -> tuple[list[list[date]], date, date]:
+    month_days = _calendar.Calendar(firstweekday=6).monthdatescalendar(month_start.year, month_start.month)
+    return month_days, month_days[0][0], month_days[-1][-1]
+
+
+def _movie_calendar_release(movie: Movie) -> tuple[date | None, str | None, bool]:
+    preferred = str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas").strip()
+    candidates = {
+        "inCinemas": getattr(movie, "theater_release_date", None),
+        "digitalRelease": getattr(movie, "digital_release_date", None),
+        "physicalRelease": getattr(movie, "physical_release_date", None),
+    }
+    order = [preferred] + [release_type for release_type in ("inCinemas", "digitalRelease", "physicalRelease") if release_type != preferred]
+    for release_type in order:
+        target_date = candidates.get(release_type)
+        if target_date:
+            return target_date, release_type, release_type == preferred
+    return None, preferred, True
+
+
+def _episode_calendar_subtitle(season_number: int | None, episode_number: int | None, title: str | None) -> str:
+    bits = []
+    if season_number is not None and episode_number is not None:
+        bits.append(f"S{int(season_number):02d}E{int(episode_number):02d}")
+    if title:
+        bits.append(title)
+    return " • ".join(bit for bit in bits if bit)
+
+
+def _calendar_lookahead_payload(today: date, lookahead_days: int) -> dict:
+    mode = _calendar_window_mode(lookahead_days)
+    end_date = None
+    label = "Lookahead disabled"
+    if mode == "infinite":
+        label = "Lookahead covers all future dates"
+    elif mode == "bounded":
+        end_date = today + timedelta(days=lookahead_days)
+        label = f"Lookahead covers today through {end_date.isoformat()}"
+
+    return {
+        "days": lookahead_days,
+        "mode": mode,
+        "start_date": today.isoformat(),
+        "end_date": end_date.isoformat() if end_date else None,
+        "label": label,
+    }
 
 # ---------------------------------------------------------------------------
 # HTML page
@@ -399,6 +490,221 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
         )
 
         return {"items": items[:limit], "count": min(len(items), limit)}
+    finally:
+        session.close()
+
+
+@router.get("/api/calendar")
+async def calendar_view(month: str = Query("")):
+    try:
+        month_start = _parse_calendar_month(month)
+    except ValueError as exc:
+        return JSONResponse(content={"ok": False, "message": str(exc)}, status_code=400)
+
+    today = datetime.now().date()
+    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
+    placeholders_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True))
+
+    month_grid, visible_start, visible_end = _calendar_grid(month_start)
+    items_by_date: dict[str, list[dict]] = {}
+    movie_count = 0
+    episode_count = 0
+    in_window_count = 0
+
+    session = get_session()
+    try:
+        movies = (
+            session.query(Movie)
+            .filter(
+                Movie.is_deleted == False,
+                or_(
+                    Movie.theater_release_date.between(visible_start, visible_end),
+                    Movie.digital_release_date.between(visible_start, visible_end),
+                    Movie.physical_release_date.between(visible_start, visible_end),
+                ),
+            )
+            .order_by(Movie.title.asc(), Movie.year.asc())
+            .all()
+        )
+
+        for movie in movies:
+            release_date, release_type, is_preferred = _movie_calendar_release(movie)
+            if not release_date or release_date < visible_start or release_date > visible_end:
+                continue
+
+            in_window = _date_in_lookahead_window(release_date, today, lookahead_days)
+            decision = _compute_calendar_decision(
+                target_date=release_date,
+                has_file=bool(movie.has_file),
+                media_type="movie",
+                lookahead_days=lookahead_days,
+                countdown_enabled=countdown_enabled,
+                placeholders_enabled=placeholders_enabled,
+                now_date=today,
+                release_type=release_type,
+                release_type_preferred=is_preferred,
+            )
+            arr_link = _arr_item_link(
+                item_type="movie",
+                instance_key=movie.instance_key,
+                is_4k=bool(movie.is_4k),
+                title=movie.title,
+                payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
+            )
+            items_by_date.setdefault(release_date.isoformat(), []).append(
+                {
+                    "id": f"movie-{movie.id}",
+                    "item_id": movie.id,
+                    "media_type": "movie",
+                    "title": movie.title,
+                    "subtitle": f"{movie.year}" if movie.year else "Movie",
+                    "release_date": release_date.isoformat(),
+                    "in_lookahead_window": in_window,
+                    "days_until": decision.days_until,
+                    "status": decision.status,
+                    "reason": decision.reason,
+                    "has_file": bool(movie.has_file),
+                    "has_placeholder": bool(movie.has_placeholder),
+                    "is_4k": bool(movie.is_4k),
+                    "instance_key": movie.instance_key,
+                    "arr_link": arr_link,
+                    "release_type": release_type,
+                    "release_type_label": _release_type_label(release_type),
+                    "release_type_preferred": is_preferred,
+                }
+            )
+            if release_date.month == month_start.month and release_date.year == month_start.year:
+                movie_count += 1
+                if in_window:
+                    in_window_count += 1
+
+        episodes = (
+            session.query(
+                Episode.id.label("episode_id"),
+                Episode.title.label("episode_title"),
+                Episode.air_date.label("air_date"),
+                Episode.has_file.label("has_file"),
+                Episode.has_placeholder.label("has_placeholder"),
+                Episode.episode_number.label("episode_number"),
+                Season.season_number.label("season_number"),
+                Series.id.label("series_id"),
+                Series.title.label("series_title"),
+                Series.instance_key.label("instance_key"),
+                Series.is_4k.label("is_4k"),
+                Series.sonarr_payload_raw.label("sonarr_payload_raw"),
+            )
+            .join(Season, Season.id == Episode.season_id)
+            .join(Series, Series.id == Season.series_id)
+            .filter(
+                Episode.is_deleted == False,
+                Series.is_deleted == False,
+                Episode.air_date.between(visible_start, visible_end),
+            )
+            .order_by(Episode.air_date.asc(), Series.title.asc(), Season.season_number.asc(), Episode.episode_number.asc())
+            .all()
+        )
+
+        for episode in episodes:
+            air_date = episode.air_date
+            if not air_date:
+                continue
+
+            in_window = _date_in_lookahead_window(air_date, today, lookahead_days)
+            decision = _compute_calendar_decision(
+                target_date=air_date,
+                has_file=bool(episode.has_file),
+                media_type="episode",
+                lookahead_days=lookahead_days,
+                countdown_enabled=countdown_enabled,
+                placeholders_enabled=placeholders_enabled,
+                now_date=today,
+            )
+            arr_link = _arr_item_link(
+                item_type="series",
+                instance_key=episode.instance_key,
+                is_4k=bool(episode.is_4k),
+                title=episode.series_title,
+                payload=episode.sonarr_payload_raw if isinstance(episode.sonarr_payload_raw, dict) else None,
+            )
+            items_by_date.setdefault(air_date.isoformat(), []).append(
+                {
+                    "id": f"episode-{episode.episode_id}",
+                    "item_id": episode.episode_id,
+                    "series_id": episode.series_id,
+                    "media_type": "episode",
+                    "title": episode.series_title or episode.episode_title,
+                    "subtitle": _episode_calendar_subtitle(
+                        episode.season_number,
+                        episode.episode_number,
+                        episode.episode_title,
+                    ),
+                    "release_date": air_date.isoformat(),
+                    "in_lookahead_window": in_window,
+                    "days_until": decision.days_until,
+                    "status": decision.status,
+                    "reason": decision.reason,
+                    "has_file": bool(episode.has_file),
+                    "has_placeholder": bool(episode.has_placeholder),
+                    "is_4k": bool(episode.is_4k),
+                    "instance_key": episode.instance_key,
+                    "arr_link": arr_link,
+                }
+            )
+            if air_date.month == month_start.month and air_date.year == month_start.year:
+                episode_count += 1
+                if in_window:
+                    in_window_count += 1
+
+        for day_items in items_by_date.values():
+            day_items.sort(key=lambda item: (0 if item.get("media_type") == "movie" else 1, str(item.get("title") or "").lower()))
+
+        weeks = []
+        for week in month_grid:
+            week_days = []
+            for day in week:
+                iso_date = day.isoformat()
+                week_days.append(
+                    {
+                        "iso_date": iso_date,
+                        "day_number": day.day,
+                        "is_current_month": day.month == month_start.month,
+                        "is_today": day == today,
+                        "in_lookahead_window": _date_in_lookahead_window(day, today, lookahead_days),
+                        "item_count": len(items_by_date.get(iso_date, [])),
+                        "items": items_by_date.get(iso_date, []),
+                    }
+                )
+            weeks.append(week_days)
+
+        return {
+            "ok": True,
+            "month": _format_calendar_month(month_start),
+            "month_label": month_start.strftime("%B %Y"),
+            "today_month": _format_calendar_month(today.replace(day=1)),
+            "previous_month": _format_calendar_month(_calendar_nav_month(month_start, -1)),
+            "next_month": _format_calendar_month(_calendar_nav_month(month_start, 1)),
+            "weekday_labels": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+            "lookahead": _calendar_lookahead_payload(today, lookahead_days),
+            "legend": {
+                "movie_release_types": [
+                    {"key": "inCinemas", "label": _release_type_label("inCinemas")},
+                    {"key": "digitalRelease", "label": _release_type_label("digitalRelease")},
+                    {"key": "physicalRelease", "label": _release_type_label("physicalRelease")},
+                ],
+                "media_types": [
+                    {"key": "movie", "label": "Movie", "icon": "🎬"},
+                    {"key": "episode", "label": "TV", "icon": "📺"},
+                ],
+            },
+            "summary": {
+                "movie_count": movie_count,
+                "episode_count": episode_count,
+                "total_count": movie_count + episode_count,
+                "in_window_count": in_window_count,
+            },
+            "weeks": weeks,
+        }
     finally:
         session.close()
 

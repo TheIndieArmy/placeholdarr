@@ -654,6 +654,207 @@
     font-weight: 700;
   }
 
+  .calendar-toolbar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .calendar-toolbar-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .calendar-month-label {
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .calendar-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .calendar-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .calendar-legend {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .calendar-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 11px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  button.calendar-legend-item {
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s, opacity 0.15s;
+  }
+  button.calendar-legend-item:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  button.calendar-legend-item.inactive {
+    opacity: 0.5;
+    background: var(--surface3);
+  }
+  .calendar-legend-item.info {
+    cursor: default;
+  }
+  .calendar-legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    display: inline-block;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+  }
+  .calendar-legend-swatch.release-inCinemas { background: #f59e0b; }
+  .calendar-legend-swatch.release-digitalRelease { background: #38bdf8; }
+  .calendar-legend-swatch.release-physicalRelease { background: #c084fc; }
+  .calendar-legend-swatch.lookahead { background: rgba(74, 222, 128, 0.22); border-color: rgba(74, 222, 128, 0.5); }
+  .calendar-month-scroll {
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .calendar-month-grid {
+    min-width: 960px;
+  }
+  .calendar-weekdays,
+  .calendar-week {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .calendar-weekdays {
+    margin-bottom: 10px;
+  }
+  .calendar-weekday {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    padding: 0 4px;
+  }
+  .calendar-week {
+    margin-bottom: 10px;
+  }
+  .calendar-day {
+    min-height: 146px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .calendar-day.other-month {
+    opacity: 0.52;
+    background: var(--surface3);
+  }
+  .calendar-day.in-window {
+    border-color: rgba(74, 222, 128, 0.5);
+    box-shadow: inset 0 0 0 1px rgba(74, 222, 128, 0.18);
+    background: linear-gradient(180deg, rgba(74, 222, 128, 0.08), rgba(26, 29, 39, 0.98));
+  }
+  .calendar-day.today {
+    border-color: rgba(108, 140, 255, 0.6);
+    box-shadow: inset 0 0 0 1px rgba(108, 140, 255, 0.3);
+  }
+  .calendar-day-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .calendar-day-number {
+    font-size: 15px;
+    font-weight: 700;
+  }
+  .calendar-day-count {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .calendar-day-items {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .calendar-item {
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    padding: 7px 8px;
+    font-size: 12px;
+  }
+  .calendar-item.media-movie.release-inCinemas {
+    border-left: 3px solid #f59e0b;
+  }
+  .calendar-item.media-movie.release-digitalRelease {
+    border-left: 3px solid #38bdf8;
+  }
+  .calendar-item.media-movie.release-physicalRelease {
+    border-left: 3px solid #c084fc;
+  }
+  .calendar-item.media-episode {
+    border-left: 3px solid var(--accent);
+  }
+  .calendar-item-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .calendar-kind {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 20px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.24);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 11px;
+    line-height: 1;
+  }
+  .calendar-kind.movie { color: var(--yellow); }
+  .calendar-kind.episode { color: var(--accent); }
+  .calendar-item-title {
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .calendar-item-subtitle,
+  .calendar-item-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.35;
+  }
+  .calendar-item-link {
+    color: inherit;
+    text-decoration: none;
+  }
+  .calendar-item-link:hover .calendar-item-title {
+    color: var(--accent);
+  }
+
   @media (max-width: 840px) {
     .header, .tabs, .stats, .content { padding-left: 14px; padding-right: 14px; }
     .onboarding-steps { grid-template-columns: 1fr 1fr; }
@@ -713,6 +914,7 @@
 <div class="tabs">
   <div class="tab active" data-tab="activity">Activity</div>
   <div class="tab" data-tab="library">Library</div>
+  <div class="tab" data-tab="calendar">Calendar</div>
   <div class="tab" data-tab="errors">Errors <span class="badge" id="error-count" style="display:none">0</span></div>
   <div class="tab" data-tab="logs">Logs</div>
   <div class="tab" data-tab="settings">Settings</div>
@@ -752,6 +954,27 @@
     </div>
     <div class="library-grid" id="library-grid"></div>
     <div class="empty-state" id="library-empty" style="display:none">No library items match the current filter</div>
+  </div>
+
+  <div class="panel" id="panel-calendar">
+    <div class="calendar-toolbar">
+      <div class="calendar-toolbar-main">
+        <div>
+          <div class="calendar-month-label" id="calendar-month-label">Loading calendar...</div>
+          <div class="calendar-meta" id="calendar-meta">Fetching releases...</div>
+        </div>
+      </div>
+      <div class="calendar-actions">
+        <button class="button" type="button" data-calendar-nav="prev">Previous</button>
+        <button class="button" type="button" data-calendar-nav="today">Current Month</button>
+        <button class="button" type="button" data-calendar-nav="next">Next</button>
+      </div>
+    </div>
+    <div class="calendar-legend" id="calendar-legend"></div>
+    <div class="calendar-month-scroll">
+      <div class="calendar-month-grid" id="calendar-grid"></div>
+    </div>
+    <div class="empty-state" id="calendar-empty" style="display:none">No movies or episodes are scheduled for this month</div>
   </div>
 
   <div class="panel" id="panel-logs">
@@ -826,6 +1049,12 @@
   let settingsPayload = null;
   let hasUnsavedChanges = false;
   let libraryItems = [];
+  let currentCalendarMonth = currentMonthToken();
+  let calendarPayload = null;
+  let calendarFilters = {
+    mediaTypes: { movie: true, episode: true },
+    releaseTypes: { inCinemas: true, digitalRelease: true, physicalRelease: true },
+  };
   const fieldMap = new Map();
   const baselineMap = new Map();
 
@@ -855,6 +1084,19 @@
     if (s < 3600) return Math.floor(s / 60) + 'm ago';
     if (s < 86400) return Math.floor(s / 3600) + 'h ago';
     return Math.floor(s / 86400) + 'd ago';
+  }
+
+  function currentMonthToken() {
+    const now = new Date();
+    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  }
+
+  function shiftMonthToken(token, delta) {
+    const parts = String(token || currentMonthToken()).split('-');
+    const year = Number(parts[0]);
+    const month = Number(parts[1] || 1);
+    const d = new Date(year, month - 1 + delta, 1);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
   }
 
   function captureInputs(scopeSelector) {
@@ -1103,6 +1345,164 @@
     }).join('');
   }
 
+  function ensureCalendarFilterDefaults(payload) {
+    const legend = payload?.legend || {};
+    (legend.media_types || []).forEach(item => {
+      if (typeof calendarFilters.mediaTypes[item.key] !== 'boolean') {
+        calendarFilters.mediaTypes[item.key] = true;
+      }
+    });
+    (legend.movie_release_types || []).forEach(item => {
+      if (typeof calendarFilters.releaseTypes[item.key] !== 'boolean') {
+        calendarFilters.releaseTypes[item.key] = true;
+      }
+    });
+  }
+
+  function isCalendarItemVisible(item) {
+    const mediaType = item.media_type || 'episode';
+    if (!calendarFilters.mediaTypes[mediaType]) {
+      return false;
+    }
+    if (mediaType === 'movie') {
+      const releaseType = item.release_type || 'inCinemas';
+      return !!calendarFilters.releaseTypes[releaseType];
+    }
+    return true;
+  }
+
+  function calendarLegendHtml(payload) {
+    const legend = payload?.legend || {};
+    const releaseTypes = legend.movie_release_types || [];
+    const mediaTypes = legend.media_types || [];
+    const items = [];
+
+    releaseTypes.forEach(item => {
+      const active = calendarFilters.releaseTypes[item.key] !== false;
+      items.push(
+        '<button class="calendar-legend-item' + (active ? '' : ' inactive') + '" type="button" data-calendar-filter-group="releaseTypes" data-calendar-filter-key="' + esc(item.key) + '">'
+          + '<span class="calendar-legend-swatch release-' + esc(item.key) + '"></span>'
+          + '<span>' + esc(item.label) + ' movie date</span>'
+        + '</button>'
+      );
+    });
+
+    mediaTypes.forEach(item => {
+      const active = calendarFilters.mediaTypes[item.key] !== false;
+      items.push(
+        '<button class="calendar-legend-item' + (active ? '' : ' inactive') + '" type="button" data-calendar-filter-group="mediaTypes" data-calendar-filter-key="' + esc(item.key) + '">'
+          + '<span>' + esc(item.icon) + '</span>'
+          + '<span>' + esc(item.label) + '</span>'
+        + '</button>'
+      );
+    });
+
+    items.push(
+      '<div class="calendar-legend-item info">'
+        + '<span class="calendar-legend-swatch lookahead"></span>'
+        + '<span>Lookahead window highlight</span>'
+      + '</div>'
+    );
+
+    return items.join('');
+  }
+
+  function renderCalendarItem(item) {
+    const mediaType = item.media_type || 'episode';
+    const emoji = mediaType === 'movie' ? '🎬' : '📺';
+    const releaseClass = mediaType === 'movie' && item.release_type ? ' release-' + item.release_type : '';
+    const titleHtml = item.arr_link
+      ? '<a class="calendar-item-link" href="' + esc(item.arr_link) + '" target="_blank" rel="noopener noreferrer"><div class="calendar-item-title">' + esc(item.title) + '</div></a>'
+      : '<div class="calendar-item-title">' + esc(item.title) + '</div>';
+    const metaBits = [];
+    if (mediaType === 'movie' && item.release_type_label) {
+      metaBits.push(item.release_type_label + (item.release_type_preferred ? '' : ' fallback'));
+    }
+    if (item.reason) {
+      metaBits.push(item.reason);
+    }
+
+    return '<div class="calendar-item media-' + esc(mediaType) + releaseClass + '">'
+      + '<div class="calendar-item-top">'
+      + '<span class="calendar-kind ' + esc(mediaType) + '" title="' + esc(mediaType === 'movie' ? 'Movie' : 'TV episode') + '">' + esc(emoji) + '</span>'
+      + titleHtml
+      + '</div>'
+      + '<div class="calendar-item-subtitle">' + esc(item.subtitle || '') + '</div>'
+      + '<div class="calendar-item-meta">' + esc(metaBits.join(' • ')) + '</div>'
+      + '</div>';
+  }
+
+  function renderCalendar() {
+    const payload = calendarPayload;
+    const grid = document.getElementById('calendar-grid');
+    const empty = document.getElementById('calendar-empty');
+    const monthLabel = document.getElementById('calendar-month-label');
+    const meta = document.getElementById('calendar-meta');
+    const legend = document.getElementById('calendar-legend');
+
+    if (!payload || !payload.ok) {
+      monthLabel.textContent = 'Calendar unavailable';
+      meta.textContent = 'Unable to load release calendar';
+      legend.innerHTML = '';
+      grid.innerHTML = '';
+      empty.style.display = '';
+      return;
+    }
+
+    ensureCalendarFilterDefaults(payload);
+
+    let filteredMovieCount = 0;
+    let filteredEpisodeCount = 0;
+    let filteredInWindowCount = 0;
+
+    (payload.weeks || []).forEach(week => {
+      week.forEach(day => {
+        (day.items || []).forEach(item => {
+          if (!isCalendarItemVisible(item)) {
+            return;
+          }
+          if (item.media_type === 'movie') filteredMovieCount += 1;
+          else filteredEpisodeCount += 1;
+          if (item.in_lookahead_window) filteredInWindowCount += 1;
+        });
+      });
+    });
+
+    monthLabel.textContent = payload.month_label || currentCalendarMonth;
+    meta.textContent = filteredMovieCount + ' movies • '
+      + filteredEpisodeCount + ' TV episodes • '
+      + filteredInWindowCount + ' in lookahead • '
+      + (payload.lookahead?.label || '');
+    legend.innerHTML = calendarLegendHtml(payload);
+
+    const hasItems = (filteredMovieCount + filteredEpisodeCount) > 0;
+    empty.style.display = hasItems ? 'none' : '';
+
+    const weekdayRow = '<div class="calendar-weekdays">'
+      + (payload.weekday_labels || []).map(label => '<div class="calendar-weekday">' + esc(label) + '</div>').join('')
+      + '</div>';
+
+    const weeksHtml = (payload.weeks || []).map(week => {
+      return '<div class="calendar-week">' + week.map(day => {
+        const classes = ['calendar-day'];
+        if (!day.is_current_month) classes.push('other-month');
+        if (day.is_today) classes.push('today');
+        if (day.in_lookahead_window) classes.push('in-window');
+        const visibleItems = (day.items || []).filter(isCalendarItemVisible);
+        const items = visibleItems.map(renderCalendarItem).join('');
+        return '<div class="' + classes.join(' ') + '">'
+          + '<div class="calendar-day-head">'
+          + '<div class="calendar-day-number">' + esc(day.day_number) + '</div>'
+          + '<div class="calendar-day-count">' + (visibleItems.length ? esc(visibleItems.length + ' release' + (visibleItems.length === 1 ? '' : 's')) : '') + '</div>'
+          + '</div>'
+          + '<div class="calendar-day-items">' + items + '</div>'
+          + '</div>';
+      }).join('') + '</div>';
+    }).join('');
+
+    grid.innerHTML = weekdayRow + weeksHtml;
+  }
+
   async function loadLibrary() {
     try {
       const r = await fetch('api/library?limit=400');
@@ -1112,6 +1512,23 @@
     } catch (e) {
       console.error('library', e);
       document.getElementById('library-meta').textContent = 'Failed to load library';
+    }
+  }
+
+  async function loadCalendar() {
+    try {
+      const r = await fetch('api/calendar?month=' + encodeURIComponent(currentCalendarMonth));
+      const payload = await r.json();
+      if (!r.ok || !payload.ok) {
+        throw new Error(payload.message || 'Failed to load calendar');
+      }
+      currentCalendarMonth = payload.month || currentCalendarMonth;
+      calendarPayload = payload;
+      renderCalendar();
+    } catch (e) {
+      console.error('calendar', e);
+      calendarPayload = { ok: false };
+      renderCalendar();
     }
   }
 
@@ -1381,6 +1798,7 @@
     loadStats();
     if (currentTab === 'activity') loadActivity();
     else if (currentTab === 'library') loadLibrary();
+    else if (currentTab === 'calendar') loadCalendar();
     else if (currentTab === 'errors') loadErrors();
     else if (currentTab === 'logs') loadLogs();
     else if (currentTab === 'settings') loadSettings(false);
@@ -1424,6 +1842,26 @@
       node.classList.toggle('active', node.dataset.libraryFilter === activeLibraryFilter);
     });
     renderLibrary();
+  });
+
+  document.getElementById('panel-calendar').addEventListener('click', event => {
+    const filterBtn = event.target.closest('[data-calendar-filter-group]');
+    if (filterBtn) {
+      const group = filterBtn.dataset.calendarFilterGroup;
+      const key = filterBtn.dataset.calendarFilterKey;
+      if (calendarFilters[group] && Object.prototype.hasOwnProperty.call(calendarFilters[group], key)) {
+        calendarFilters[group][key] = !calendarFilters[group][key];
+        renderCalendar();
+      }
+      return;
+    }
+    const btn = event.target.closest('[data-calendar-nav]');
+    if (!btn) return;
+    const action = btn.dataset.calendarNav;
+    if (action === 'today') currentCalendarMonth = currentMonthToken();
+    else if (action === 'prev') currentCalendarMonth = shiftMonthToken(currentCalendarMonth, -1);
+    else if (action === 'next') currentCalendarMonth = shiftMonthToken(currentCalendarMonth, 1);
+    loadCalendar();
   });
 
   document.getElementById('settings-subtabs').addEventListener('click', event => {
