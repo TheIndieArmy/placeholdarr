@@ -86,6 +86,18 @@ async def lifespan(app: FastAPI):
         engine = get_engine()
         init_db(engine)
 
+        try:
+            from services.app_config import apply_persisted_settings
+
+            apply_result = apply_persisted_settings()
+            if apply_result.get('count'):
+                logger.info(
+                    f"Applied persisted app settings count={apply_result.get('count')}",
+                    extra={'emoji_type': 'info'},
+                )
+        except Exception as e:
+            logger.warning(f"Failed to apply persisted app settings: {e}", extra={'emoji_type': 'warning'})
+
         # Log a DB summary after initialization so operators can see starting counts
         try:
             log_db_summary()

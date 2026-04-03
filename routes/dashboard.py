@@ -2,18 +2,66 @@
 
 import os
 import glob as _glob
+import re
+import unicodedata
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import func, text
+from sqlalchemy import case, func, text
 
+from core.config import settings
+from services.app_config import get_onboarding_status, get_settings_payload, save_settings
+from services.integrations import test_integration_connection
 from services.postgres.db import get_session
 from services.postgres.models import (
-    Movie, Series, Episode, Placeholder, Job, EventLog, ObservationTrailAttempt,
+    Movie, Series, Season, Episode, Placeholder, Job, EventLog, ObservationTrailAttempt,
 )
 
 router = APIRouter()
+
+
+def _slugify_title(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode("ascii")
+    lowered = normalized.lower()
+    lowered = re.sub(r"[^a-z0-9]+", "-", lowered)
+    lowered = re.sub(r"-{2,}", "-", lowered)
+    return lowered.strip("-")
+
+
+def _arr_base_url(item_type: str, instance_key: str, is_4k: bool) -> str:
+    def _normalize_ui_base(url: str) -> str:
+        normalized = str(url or "").rstrip("/")
+        normalized = re.sub(r"/api(?:/v\d+)?$", "", normalized, flags=re.IGNORECASE)
+        return normalized.rstrip("/")
+
+    key = str(instance_key or "").strip().lower()
+    if item_type == "movie":
+        if is_4k or key == str(getattr(settings, "RADARR_4K_INSTANCE_KEY", "radarr_4k")).strip().lower():
+            return _normalize_ui_base(str(getattr(settings, "RADARR_4K_URL", "") or ""))
+        return _normalize_ui_base(str(getattr(settings, "RADARR_URL", "") or ""))
+    if is_4k or key == str(getattr(settings, "SONARR_4K_INSTANCE_KEY", "sonarr_4k")).strip().lower():
+        return _normalize_ui_base(str(getattr(settings, "SONARR_4K_URL", "") or ""))
+    return _normalize_ui_base(str(getattr(settings, "SONARR_URL", "") or ""))
+
+
+def _title_slug_from_payload(payload: dict | None, title: str) -> str:
+    if isinstance(payload, dict):
+        slug = str(payload.get("titleSlug") or "").strip()
+        if slug:
+            return slug
+    return _slugify_title(title)
+
+
+def _arr_item_link(item_type: str, instance_key: str, is_4k: bool, title: str, payload: dict | None) -> str | None:
+    base_url = _arr_base_url(item_type=item_type, instance_key=instance_key, is_4k=is_4k)
+    if not base_url:
+        return None
+    slug = _title_slug_from_payload(payload=payload, title=title)
+    if not slug:
+        return None
+    route = "movie" if item_type == "movie" else "series"
+    return f"{base_url}/{route}/{slug}"
 
 # ---------------------------------------------------------------------------
 # HTML page
@@ -43,6 +91,12 @@ async def stats():
         movies_with_file = session.query(func.count(Movie.id)).filter(
             Movie.is_deleted == False, Movie.has_file == True
         ).scalar() or 0
+        movies_future_outside_lookahead = session.query(func.count(Movie.id)).filter(
+            Movie.is_deleted == False,
+            func.coalesce(Movie.has_file, False) == False,
+            func.coalesce(Movie.has_placeholder, False) == False,
+            Movie.determination == "not_needed",
+        ).scalar() or 0
 
         # Series
         total_series = session.query(func.count(Series.id)).filter(Series.is_deleted == False).scalar() or 0
@@ -54,6 +108,12 @@ async def stats():
         ).scalar() or 0
         episodes_with_file = session.query(func.count(Episode.id)).filter(
             Episode.is_deleted == False, Episode.has_file == True
+        ).scalar() or 0
+        episodes_future_outside_lookahead = session.query(func.count(Episode.id)).filter(
+            Episode.is_deleted == False,
+            func.coalesce(Episode.has_file, False) == False,
+            func.coalesce(Episode.has_placeholder, False) == False,
+            Episode.determination == "not_needed",
         ).scalar() or 0
 
         # Placeholders on disk
@@ -74,9 +134,19 @@ async def stats():
         last_sync = last_sync_row[0].isoformat() if last_sync_row and last_sync_row[0] else None
 
         return {
-            "movies": {"total": total_movies, "placeholders": movies_with_placeholder, "downloaded": movies_with_file},
+            "movies": {
+                "total": total_movies,
+                "placeholders": movies_with_placeholder,
+                "downloaded": movies_with_file,
+                "future_outside_lookahead": movies_future_outside_lookahead,
+            },
             "series": {"total": total_series},
-            "episodes": {"total": total_episodes, "placeholders": episodes_with_placeholder, "downloaded": episodes_with_file},
+            "episodes": {
+                "total": total_episodes,
+                "placeholders": episodes_with_placeholder,
+                "downloaded": episodes_with_file,
+                "future_outside_lookahead": episodes_future_outside_lookahead,
+            },
             "placeholders_on_disk": placeholders_on_disk,
             "jobs": {"pending": jobs_pending, "failed": jobs_failed, "done": jobs_done},
             "last_sync": last_sync,
@@ -215,6 +285,166 @@ async def errors(limit: int = Query(50, ge=1, le=200)):
         return items[:limit]
     finally:
         session.close()
+
+
+@router.get("/api/library")
+async def library(limit: int = Query(300, ge=1, le=1000)):
+    """Return mixed movie/series library rows with poster and placeholder stats."""
+    session = get_session()
+    try:
+        series_episode_counts = {
+            row.series_id: {
+                "episode_total": int(row.episode_total or 0),
+                "episode_files": int(row.episode_files or 0),
+                "episode_placeholders": int(row.episode_placeholders or 0),
+            }
+            for row in session.query(
+                Season.series_id.label("series_id"),
+                func.count(Episode.id).label("episode_total"),
+                func.sum(case((Episode.has_file == True, 1), else_=0)).label("episode_files"),
+                func.sum(case((Episode.has_placeholder == True, 1), else_=0)).label("episode_placeholders"),
+            )
+            .join(Episode, Episode.season_id == Season.id)
+            .group_by(Season.series_id)
+            .all()
+        }
+
+        items: list[dict] = []
+
+        movies = (
+            session.query(Movie)
+            .filter(Movie.is_deleted == False)
+            .order_by(Movie.updated_at.desc(), Movie.title.asc())
+            .limit(limit)
+            .all()
+        )
+        for movie in movies:
+            arr_link = _arr_item_link(
+                item_type="movie",
+                instance_key=movie.instance_key,
+                is_4k=bool(movie.is_4k),
+                title=movie.title,
+                payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
+            )
+            items.append(
+                {
+                    "id": f"movie-{movie.id}",
+                    "item_id": movie.id,
+                    "type": "movie",
+                    "title": movie.title,
+                    "year": movie.year,
+                    "poster_url": movie.remote_poster,
+                    "backdrop_url": movie.remote_fanart,
+                    "is_4k": bool(movie.is_4k),
+                    "instance_key": movie.instance_key,
+                    "arr_link": arr_link,
+                    "determination": movie.determination,
+                    "status": movie.status,
+                    "has_file": bool(movie.has_file),
+                    "has_placeholder": bool(movie.has_placeholder),
+                    "overview": movie.radarr_overview,
+                    "stats": {
+                        "downloaded": 1 if movie.has_file else 0,
+                        "placeholders": 1 if movie.has_placeholder else 0,
+                    },
+                }
+            )
+
+        series_rows = (
+            session.query(Series)
+            .filter(Series.is_deleted == False)
+            .order_by(Series.updated_at.desc(), Series.title.asc())
+            .limit(limit)
+            .all()
+        )
+        for series in series_rows:
+            counts = series_episode_counts.get(
+                series.id,
+                {"episode_total": 0, "episode_files": 0, "episode_placeholders": 0},
+            )
+            arr_link = _arr_item_link(
+                item_type="series",
+                instance_key=series.instance_key,
+                is_4k=bool(series.is_4k),
+                title=series.title,
+                payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
+            )
+            items.append(
+                {
+                    "id": f"series-{series.id}",
+                    "item_id": series.id,
+                    "type": "series",
+                    "title": series.title,
+                    "year": series.year,
+                    "poster_url": series.remote_poster,
+                    "backdrop_url": series.remote_fanart or series.remote_banner,
+                    "is_4k": bool(series.is_4k),
+                    "instance_key": series.instance_key,
+                    "arr_link": arr_link,
+                    "determination": None,
+                    "status": series.status,
+                    "has_file": bool(series.has_files),
+                    "has_placeholder": counts["episode_placeholders"] > 0,
+                    "overview": series.sonarr_series_overview,
+                    "stats": counts,
+                }
+            )
+
+        items.sort(
+            key=lambda item: (
+                0 if item.get("has_placeholder") else 1,
+                0 if item.get("type") == "movie" else 1,
+                str(item.get("title") or "").lower(),
+            )
+        )
+
+        return {"items": items[:limit], "count": min(len(items), limit)}
+    finally:
+        session.close()
+
+
+@router.get("/api/settings/status")
+async def settings_status():
+    return JSONResponse(content=get_onboarding_status())
+
+
+@router.get("/api/settings/current")
+async def settings_current():
+    return JSONResponse(content=get_settings_payload())
+
+
+@router.post("/api/settings/save")
+async def settings_save(request: Request):
+    payload = await request.json()
+    values = payload.get("values") if isinstance(payload, dict) else None
+    if not isinstance(values, dict):
+        return JSONResponse(content={"ok": False, "errors": {"values": "expected an object"}}, status_code=400)
+
+    result = save_settings(values)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@router.post("/api/integrations/test")
+async def integrations_test(request: Request):
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return JSONResponse(content={"ok": False, "message": "expected request object"}, status_code=400)
+
+    service = str(payload.get("service") or "").strip().lower()
+    url = str(payload.get("url") or "").strip()
+    credential = str(payload.get("credential") or "").strip()
+
+    if service not in {"plex", "jellyfin", "emby", "radarr", "sonarr"}:
+        return JSONResponse(content={"ok": False, "message": "unsupported service"}, status_code=400)
+    if not url:
+        return JSONResponse(content={"ok": False, "message": "url is required"}, status_code=400)
+    if not credential:
+        return JSONResponse(content={"ok": False, "message": "credential is required"}, status_code=400)
+
+    result = test_integration_connection(service=service, url=url, token_or_key=credential)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(content=result, status_code=status_code)
 
 
 @router.get("/api/logs")

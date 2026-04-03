@@ -295,6 +295,26 @@ class ArrState(Base):
             f"last_history_id={self.last_history_id})>"
         )
 
+
+class AppConfig(Base):
+    __tablename__ = 'app_config'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String, nullable=False, unique=True)
+    value = Column(JSON, nullable=True)
+    value_type = Column(String, nullable=False, default='string')
+    restart_required = Column(Boolean, nullable=False, default=False)
+    description = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'), onupdate=func.now())
+
+    __table_args__ = (
+        Index('ix_app_config_key', 'key', unique=True),
+    )
+
+    def __repr__(self):
+        return f"<AppConfig(id={self.id}, key={self.key!r})>"
+
 class Series(Base):
     __tablename__ = "series"
     __table_args__ = (

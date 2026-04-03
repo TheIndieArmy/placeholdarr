@@ -2,6 +2,7 @@ from core.config import settings
 from core.logger import logger
 import os
 from urllib.parse import urlsplit, urlunsplit
+from typing import Any
 
 import requests
 
@@ -120,3 +121,71 @@ def delete_dummy_file(path: str | None = None, *args, **kwargs) -> bool:
 def update_placeholder_status(*args, **kwargs) -> bool:
     """Compatibility stub for action flows during rebuild."""
     return True
+
+
+def _normalize_url(url: str) -> str:
+    return str(url or '').strip().rstrip('/')
+
+
+def _safe_url(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
+    except Exception:
+        return url
+
+
+def _test_get(url: str, headers: dict[str, str] | None = None, params: dict[str, str] | None = None) -> tuple[bool, str]:
+    safe_url = _safe_url(url)
+    try:
+        response = requests.get(url, headers=headers or {}, params=params or {}, timeout=5)
+        if response.status_code >= 400:
+            return False, f'HTTP {response.status_code} from {safe_url}'
+        return True, 'Connected'
+    except Exception as exc:
+        return False, f'{type(exc).__name__} while connecting to {safe_url}'
+
+
+def test_plex_connection(url: str, token: str) -> dict[str, Any]:
+    endpoint = _normalize_url(url)
+    ok, message = _test_get(f'{endpoint}/identity', headers={'X-Plex-Token': str(token or '').strip()})
+    return {'ok': ok, 'message': message, 'service': 'plex'}
+
+
+def test_jellyfin_connection(url: str, token: str) -> dict[str, Any]:
+    endpoint = _normalize_url(url)
+    ok, message = _test_get(
+        f'{endpoint}/System/Info',
+        headers={'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'},
+    )
+    return {'ok': ok, 'message': message, 'service': 'jellyfin'}
+
+
+def test_emby_connection(url: str, token: str) -> dict[str, Any]:
+    endpoint = _normalize_url(url)
+    ok, message = _test_get(
+        f'{endpoint}/emby/System/Info',
+        headers={'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'},
+    )
+    return {'ok': ok, 'message': message, 'service': 'emby'}
+
+
+def test_arr_connection(url: str, api_key: str, arr_type: str) -> dict[str, Any]:
+    endpoint = _build_endpoint(_normalize_url(url), 'system/status')
+    ok, message = _test_get(endpoint, params={'apikey': str(api_key or '').strip()})
+    return {'ok': ok, 'message': message, 'service': arr_type}
+
+
+def test_integration_connection(service: str, url: str, token_or_key: str) -> dict[str, Any]:
+    service_key = str(service or '').strip().lower()
+    if service_key == 'plex':
+        return test_plex_connection(url, token_or_key)
+    if service_key == 'jellyfin':
+        return test_jellyfin_connection(url, token_or_key)
+    if service_key == 'emby':
+        return test_emby_connection(url, token_or_key)
+    if service_key == 'radarr':
+        return test_arr_connection(url, token_or_key, 'radarr')
+    if service_key == 'sonarr':
+        return test_arr_connection(url, token_or_key, 'sonarr')
+    return {'ok': False, 'message': 'Unsupported service', 'service': service_key}

@@ -9,6 +9,7 @@
     --bg: #0f1117;
     --surface: #1a1d27;
     --surface2: #232633;
+    --surface3: #12151e;
     --border: #2e3141;
     --text: #e1e3ea;
     --text-dim: #8b8fa3;
@@ -26,6 +27,7 @@
     line-height: 1.5;
     font-size: 14px;
   }
+
   .header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -45,7 +47,18 @@
     color: var(--text-dim);
   }
 
-  /* Stats cards */
+  .setup-banner {
+    display: none;
+    margin: 16px 24px 0;
+    padding: 12px 14px;
+    background: rgba(251, 146, 60, 0.12);
+    border: 1px solid rgba(251, 146, 60, 0.35);
+    border-radius: 8px;
+    color: var(--text);
+  }
+  .setup-banner.visible { display: block; }
+  .setup-banner strong { color: var(--orange); }
+
   .stats {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -74,13 +87,16 @@
     color: var(--text-dim);
     margin-top: 4px;
   }
-  .stat-card .breakdown span { margin-right: 10px; }
+  .stat-card .breakdown span {
+    margin-right: 10px;
+    white-space: nowrap;
+    display: inline-block;
+  }
   .pill-green { color: var(--green); }
   .pill-yellow { color: var(--yellow); }
   .pill-red { color: var(--red); }
   .pill-orange { color: var(--orange); }
 
-  /* Tabs */
   .tabs {
     display: flex;
     gap: 0;
@@ -115,12 +131,10 @@
     vertical-align: middle;
   }
 
-  /* Content panels */
   .content { padding: 16px 24px; }
   .panel { display: none; }
   .panel.active { display: block; }
 
-  /* Activity & error tables */
   .table-wrap {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -149,6 +163,7 @@
   }
   tr:last-child td { border-bottom: none; }
   tr:hover { background: var(--surface2); }
+
   .status-badge {
     display: inline-block;
     font-size: 11px;
@@ -160,14 +175,7 @@
   .status-DONE, .status-PROCESSED { background: rgba(74,222,128,0.15); color: var(--green); }
   .status-PENDING, .status-CLAIMED, .status-WORKING { background: rgba(250,204,21,0.15); color: var(--yellow); }
   .status-FAILED { background: rgba(248,113,113,0.15); color: var(--red); }
-  .error-text {
-    color: var(--red);
-    font-size: 12px;
-    max-width: 400px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+
   .source-badge {
     display: inline-block;
     font-size: 11px;
@@ -176,9 +184,16 @@
     background: var(--surface2);
     color: var(--text-dim);
   }
+  .error-text {
+    color: var(--red);
+    font-size: 12px;
+    max-width: 460px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .time-ago { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
 
-  /* Log viewer */
   .log-controls {
     display: flex;
     gap: 10px;
@@ -226,13 +241,181 @@
     font-size: 12px;
     color: var(--text-dim);
   }
+
   .empty-state {
     text-align: center;
     padding: 40px;
     color: var(--text-dim);
   }
 
-  /* Auto-refresh indicator */
+  .button {
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .button:hover { border-color: var(--accent); }
+  .button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .settings-status {
+    margin-bottom: 12px;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  .settings-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .settings-feedback {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .settings-feedback.error { color: var(--red); }
+  .settings-feedback.success { color: var(--green); }
+  .dirty-indicator {
+    display: none;
+    font-size: 12px;
+    color: var(--yellow);
+    border: 1px solid rgba(250, 204, 21, 0.45);
+    border-radius: 999px;
+    padding: 4px 9px;
+    line-height: 1;
+  }
+  .dirty-indicator.visible {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .settings-subtabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .settings-subtab {
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .settings-subtab.active {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .settings-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .setting-row {
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .setting-row:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+  .setting-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .setting-label {
+    flex: 1 1 auto;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .setting-badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .setting-badge {
+    align-self: flex-start;
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    border: 1px solid;
+    border-radius: 999px;
+    padding: 2px 6px;
+    white-space: nowrap;
+  }
+  .setting-badge.restart {
+    color: var(--orange);
+    border-color: rgba(251, 146, 60, 0.45);
+  }
+  .setting-badge.required {
+    color: var(--yellow);
+    border-color: rgba(250, 204, 21, 0.45);
+  }
+  .setting-badge.secret {
+    color: var(--accent);
+    border-color: rgba(108, 140, 255, 0.45);
+  }
+  .setting-description {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .setting-input {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .setting-input:focus { border-color: var(--accent); }
+  .setting-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+  .setting-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .setting-inline .button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  .test-result {
+    display: block;
+    font-size: 12px;
+    margin-top: 6px;
+    color: var(--text-dim);
+  }
+  .test-result.success { color: var(--green); }
+  .test-result.error { color: var(--red); }
+
   .refresh-dot {
     display: inline-block;
     width: 8px;
@@ -246,6 +429,236 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }
   }
+
+  .onboarding-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: linear-gradient(165deg, rgba(9,11,18,0.96), rgba(18,21,31,0.98));
+    display: none;
+    overflow: auto;
+    padding: 22px;
+  }
+  .onboarding-overlay.visible { display: block; }
+  .onboarding-shell {
+    max-width: 1040px;
+    margin: 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface3);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  }
+  .onboarding-head {
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .onboarding-title {
+    font-size: 18px;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .onboarding-step-label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .onboarding-steps {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .onboarding-step {
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-dim);
+    background: var(--surface2);
+  }
+  .onboarding-step.active {
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px rgba(108, 140, 255, 0.35);
+  }
+  .onboarding-body {
+    padding: 16px 20px;
+  }
+  .onboarding-body .settings-card {
+    background: transparent;
+    border: none;
+    padding: 0;
+  }
+  .onboarding-actions {
+    border-top: 1px solid var(--border);
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .onboarding-feedback {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .onboarding-feedback.error { color: var(--red); }
+  .onboarding-feedback.success { color: var(--green); }
+
+  .library-toolbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .library-filters {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .library-filter {
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .library-filter.active {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .library-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 14px;
+  }
+  .library-card {
+    position: relative;
+    overflow: hidden;
+    min-height: 312px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background:
+      linear-gradient(180deg, rgba(15, 17, 23, 0.05) 0%, rgba(15, 17, 23, 0.88) 66%, rgba(15, 17, 23, 1) 100%),
+      linear-gradient(135deg, rgba(108, 140, 255, 0.16), rgba(251, 146, 60, 0.08)),
+      var(--surface);
+    background-size: cover;
+    background-position: center;
+    display: flex;
+    align-items: flex-end;
+  }
+  .library-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(12, 14, 20, 0.08) 8%, rgba(12, 14, 20, 0.92) 100%);
+    pointer-events: none;
+  }
+  .library-card-content {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    padding: 14px;
+  }
+  .library-card-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .library-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: 999px;
+    padding: 5px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(10, 11, 15, 0.52);
+    color: #f7f8fb;
+  }
+  .library-chip.link {
+    text-decoration: none;
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s, background 0.15s;
+  }
+  .library-chip.link:hover {
+    border-color: rgba(108, 140, 255, 0.72);
+    background: rgba(32, 38, 54, 0.82);
+    transform: translateY(-1px);
+  }
+  .library-chip.type-series { color: var(--accent); }
+  .library-chip.type-movie { color: var(--yellow); }
+  .library-chip.ok { color: var(--green); }
+  .library-chip.warn { color: var(--yellow); }
+  .library-chip.missing { color: var(--red); }
+  .library-title {
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-bottom: 4px;
+  }
+  .library-subtitle {
+    font-size: 12px;
+    color: rgba(225, 227, 234, 0.78);
+    margin-bottom: 10px;
+  }
+  .library-overview {
+    font-size: 12px;
+    color: rgba(225, 227, 234, 0.72);
+    margin-bottom: 12px;
+    display: -webkit-box;
+    line-clamp: 3;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: 54px;
+  }
+  .library-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .library-stat {
+    background: rgba(8, 9, 13, 0.48);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 8px;
+  }
+  .library-stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(225, 227, 234, 0.62);
+    margin-bottom: 4px;
+  }
+  .library-stat-value {
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  @media (max-width: 840px) {
+    .header, .tabs, .stats, .content { padding-left: 14px; padding-right: 14px; }
+    .onboarding-steps { grid-template-columns: 1fr 1fr; }
+    .setting-inline { flex-direction: column; align-items: stretch; }
+  }
 </style>
 </head>
 <body>
@@ -258,6 +671,8 @@
   </div>
 </div>
 
+<div class="setup-banner" id="setup-banner"></div>
+
 <div class="stats" id="stats-grid">
   <div class="stat-card">
     <div class="label">Movies</div>
@@ -265,6 +680,7 @@
     <div class="breakdown">
       <span class="pill-green" id="s-movies-dl">-- downloaded</span>
       <span class="pill-yellow" id="s-movies-ph">-- placeholders</span>
+      <span class="pill-orange" id="s-movies-future">-- future</span>
     </div>
   </div>
   <div class="stat-card">
@@ -277,6 +693,7 @@
     <div class="breakdown">
       <span class="pill-green" id="s-episodes-dl">-- downloaded</span>
       <span class="pill-yellow" id="s-episodes-ph">-- placeholders</span>
+      <span class="pill-orange" id="s-episodes-future">-- future</span>
     </div>
   </div>
   <div class="stat-card">
@@ -295,12 +712,13 @@
 
 <div class="tabs">
   <div class="tab active" data-tab="activity">Activity</div>
+  <div class="tab" data-tab="library">Library</div>
   <div class="tab" data-tab="errors">Errors <span class="badge" id="error-count" style="display:none">0</span></div>
   <div class="tab" data-tab="logs">Logs</div>
+  <div class="tab" data-tab="settings">Settings</div>
 </div>
 
 <div class="content">
-  <!-- Activity panel -->
   <div class="panel active" id="panel-activity">
     <div class="table-wrap">
       <table>
@@ -311,7 +729,6 @@
     <div class="empty-state" id="activity-empty" style="display:none">No recent activity</div>
   </div>
 
-  <!-- Errors panel -->
   <div class="panel" id="panel-errors">
     <div class="table-wrap">
       <table>
@@ -322,7 +739,21 @@
     <div class="empty-state" id="errors-empty" style="display:none">No errors found</div>
   </div>
 
-  <!-- Logs panel -->
+  <div class="panel" id="panel-library">
+    <div class="library-toolbar">
+      <div class="library-filters" id="library-filters">
+        <button class="library-filter active" type="button" data-library-filter="all">All</button>
+        <button class="library-filter" type="button" data-library-filter="movie">Movies</button>
+        <button class="library-filter" type="button" data-library-filter="series">Series</button>
+        <button class="library-filter" type="button" data-library-filter="placeholders">Placeholders</button>
+        <button class="library-filter" type="button" data-library-filter="missing">Missing</button>
+      </div>
+      <div class="library-meta" id="library-meta">Loading library...</div>
+    </div>
+    <div class="library-grid" id="library-grid"></div>
+    <div class="empty-state" id="library-empty" style="display:none">No library items match the current filter</div>
+  </div>
+
   <div class="panel" id="panel-logs">
     <div class="log-controls">
       <input type="text" id="log-filter" placeholder="Filter logs...">
@@ -335,27 +766,86 @@
     </div>
     <div class="log-viewer" id="log-viewer"></div>
   </div>
+
+  <div class="panel" id="panel-settings">
+    <div class="settings-status" id="settings-status">Loading settings...</div>
+    <div class="settings-actions">
+      <button class="button primary" id="settings-save-button" type="button">Save Settings</button>
+      <div class="dirty-indicator" id="settings-dirty-indicator">Unsaved changes</div>
+      <div class="settings-feedback" id="settings-feedback"></div>
+    </div>
+    <div class="settings-subtabs" id="settings-subtabs"></div>
+    <div class="settings-card" id="settings-section-body"></div>
+  </div>
+</div>
+
+<div class="onboarding-overlay" id="onboarding-overlay" aria-hidden="true">
+  <div class="onboarding-shell">
+    <div class="onboarding-head">
+      <div>
+        <div class="onboarding-title">First-Run Setup Wizard</div>
+        <div class="onboarding-step-label" id="onboarding-step-label">Step 1 of 4</div>
+      </div>
+      <div class="onboarding-step-label">Complete setup to unlock full dashboard access.</div>
+    </div>
+    <div class="onboarding-steps" id="onboarding-steps"></div>
+    <div class="onboarding-body">
+      <div class="settings-card" id="onboarding-step-body"></div>
+    </div>
+    <div class="onboarding-actions">
+      <div>
+        <button class="button" id="onboarding-back" type="button">Back</button>
+        <button class="button" id="onboarding-next" type="button">Next</button>
+        <button class="button primary" id="onboarding-save" type="button" style="display:none">Save and Finish</button>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="dirty-indicator" id="onboarding-dirty-indicator">Unsaved changes</div>
+        <div class="onboarding-feedback" id="onboarding-feedback"></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
 (function() {
   const REFRESH_MS = 5000;
+  const SETTINGS_SECTION_ORDER = ['Integrations', 'Paths', 'Calendar', 'Automation', 'Playback', 'Advanced'];
+  const WIZARD_STEPS = [
+    { key: 'paths', name: 'Paths' },
+    { key: 'arr', name: 'ARR Services' },
+    { key: 'media', name: 'Media Servers' },
+    { key: 'behavior', name: 'Behavior' },
+  ];
+
   let currentTab = 'activity';
+  let settingsLoaded = false;
+  let activeSettingsSection = 'Integrations';
+  let activeLibraryFilter = 'all';
+  let onboardingVisible = false;
+  let onboardingStepIndex = 0;
+  let settingsPayload = null;
+  let hasUnsavedChanges = false;
+  let libraryItems = [];
+  const fieldMap = new Map();
+  const baselineMap = new Map();
 
-  // --- Tabs ---
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      const id = tab.dataset.tab;
-      currentTab = id;
-      document.getElementById('panel-' + id).classList.add('active');
-      refresh();
-    });
-  });
+  const URL_TEST_TARGET = {
+    PLEX_URL: { service: 'plex', credentialKey: 'PLEX_TOKEN' },
+    JELLYFIN_URL: { service: 'jellyfin', credentialKey: 'JELLYFIN_TOKEN' },
+    EMBY_URL: { service: 'emby', credentialKey: 'EMBY_TOKEN' },
+    RADARR_URL: { service: 'radarr', credentialKey: 'RADARR_API_KEY' },
+    RADARR_4K_URL: { service: 'radarr', credentialKey: 'RADARR_4K_API_KEY' },
+    SONARR_URL: { service: 'sonarr', credentialKey: 'SONARR_API_KEY' },
+    SONARR_4K_URL: { service: 'sonarr', credentialKey: 'SONARR_4K_API_KEY' },
+  };
 
-  // --- Time formatting ---
+  function esc(str) {
+    if (!str && str !== 0) return '';
+    const d = document.createElement('div');
+    d.textContent = String(str);
+    return d.innerHTML;
+  }
+
   function timeAgo(iso) {
     if (!iso) return '--';
     const d = new Date(iso);
@@ -367,14 +857,359 @@
     return Math.floor(s / 86400) + 'd ago';
   }
 
-  function esc(str) {
-    if (!str) return '';
-    const d = document.createElement('div');
-    d.textContent = str;
-    return d.innerHTML;
+  function captureInputs(scopeSelector) {
+    document.querySelectorAll(scopeSelector + ' [data-key]').forEach(input => {
+      const key = input.dataset.key;
+      const field = fieldMap.get(key);
+      if (!field) return;
+      if (input.type === 'checkbox') {
+        field.value = !!input.checked;
+      } else {
+        field.value = input.value;
+      }
+    });
   }
 
-  // --- Stats ---
+  function comparableValue(field, value) {
+    if (field.type === 'bool') {
+      return !!value;
+    }
+    if (field.type === 'int') {
+      if (value === null || value === undefined || String(value).trim() === '') {
+        return '';
+      }
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? String(value).trim() : parsed;
+    }
+    return String(value ?? '').trim();
+  }
+
+  function rebuildBaselineFromFieldMap() {
+    baselineMap.clear();
+    fieldMap.forEach((field, key) => {
+      baselineMap.set(key, comparableValue(field, field.value));
+    });
+    hasUnsavedChanges = false;
+    updateDirtyIndicators();
+  }
+
+  function recomputeDirtyState() {
+    hasUnsavedChanges = false;
+    fieldMap.forEach((field, key) => {
+      const current = comparableValue(field, field.value);
+      const baseline = baselineMap.get(key);
+      if (current !== baseline) {
+        hasUnsavedChanges = true;
+      }
+    });
+    updateDirtyIndicators();
+  }
+
+  function updateDirtyIndicators() {
+    const settingsIndicator = document.getElementById('settings-dirty-indicator');
+    const onboardingIndicator = document.getElementById('onboarding-dirty-indicator');
+    settingsIndicator.classList.toggle('visible', hasUnsavedChanges);
+    onboardingIndicator.classList.toggle('visible', hasUnsavedChanges);
+  }
+
+  function setupFieldMap(payload) {
+    settingsPayload = payload;
+    fieldMap.clear();
+    const sections = payload.sections || [];
+    sections.forEach(section => {
+      (section.fields || []).forEach(field => {
+        const cloned = Object.assign({}, field);
+        if (cloned.secret && (cloned.value === null || cloned.value === undefined)) {
+          cloned.value = '';
+        }
+        fieldMap.set(cloned.key, cloned);
+      });
+    });
+    rebuildBaselineFromFieldMap();
+  }
+
+  function getSectionsMap() {
+    const out = {};
+    (settingsPayload.sections || []).forEach(section => {
+      out[section.name] = (section.fields || []).map(field => field.key);
+    });
+    return out;
+  }
+
+  function fieldsForWizardStep(stepKey) {
+    const sections = getSectionsMap();
+    const integrations = new Set(sections.Integrations || []);
+    const paths = new Set(sections.Paths || []);
+    const calendar = sections.Calendar || [];
+    const automation = sections.Automation || [];
+    const playback = sections.Playback || [];
+    const advanced = sections.Advanced || [];
+
+    if (stepKey === 'paths') {
+      return [...paths];
+    }
+    if (stepKey === 'arr') {
+      return [...integrations].filter(k => k.startsWith('RADARR') || k.startsWith('SONARR'));
+    }
+    if (stepKey === 'media') {
+      return [...integrations].filter(k => (
+        k.startsWith('PLEX') ||
+        k.startsWith('JELLYFIN') ||
+        k.startsWith('EMBY') ||
+        k === 'ENABLE_PLEX' ||
+        k === 'ENABLE_JELLYFIN' ||
+        k === 'ENABLE_EMBY'
+      ));
+    }
+    if (stepKey === 'behavior') {
+      return [...calendar, ...automation, ...playback, ...advanced];
+    }
+    return [];
+  }
+
+  function getFieldByKey(key) {
+    return fieldMap.get(key) || null;
+  }
+
+  function urlServiceForField(fieldKey) {
+    return URL_TEST_TARGET[fieldKey] || null;
+  }
+
+  function renderField(fieldKey) {
+    const field = getFieldByKey(fieldKey);
+    if (!field) return '';
+
+    const badges = [];
+    if (field.restart_required) badges.push('<span class="setting-badge restart">Restart required</span>');
+    if (field.required) badges.push('<span class="setting-badge required">Required</span>');
+    if (field.secret) badges.push('<span class="setting-badge secret">Secret</span>');
+
+    let control = '';
+    const value = field.value === null || field.value === undefined ? '' : field.value;
+
+    if (field.type === 'bool') {
+      control = '<label class="setting-checkbox"><input data-key="' + esc(field.key) + '" type="checkbox" ' + (value ? 'checked' : '') + '> Enabled</label>';
+    } else {
+      const inputType = field.type === 'int' ? 'number' : (field.secret ? 'password' : 'text');
+      const placeholder = field.secret && field.has_saved_value ? 'Saved value retained unless overwritten' : '';
+      const baseInput = '<input class="setting-input" data-key="' + esc(field.key) + '" type="' + inputType + '" value="' + esc(String(value)) + '" placeholder="' + esc(placeholder) + '">';
+      const target = urlServiceForField(field.key);
+      if (target) {
+        control = '<div class="setting-inline">' +
+          baseInput +
+          '<button class="button" type="button" data-test-service="' + esc(target.service) + '" data-url-key="' + esc(field.key) + '" data-credential-key="' + esc(target.credentialKey) + '">Test Connection</button>' +
+          '</div><span class="test-result" data-test-result="' + esc(field.key) + '"></span>';
+      } else {
+        control = baseInput;
+      }
+    }
+
+    return '<div class="setting-row">'
+      + '<div class="setting-head"><div class="setting-label">' + esc(field.label) + '</div><div class="setting-badges">' + badges.join('') + '</div></div>'
+      + '<div class="setting-description">' + esc(field.description || '') + '</div>'
+      + control
+      + '</div>';
+  }
+
+  function renderSettingsSections() {
+    const tabs = document.getElementById('settings-subtabs');
+    const body = document.getElementById('settings-section-body');
+
+    const sections = SETTINGS_SECTION_ORDER.filter(name => {
+      return (settingsPayload.sections || []).some(s => s.name === name && (s.fields || []).length > 0);
+    });
+
+    if (!sections.length) {
+      tabs.innerHTML = '';
+      body.innerHTML = '<div class="empty-state">No settings available</div>';
+      return;
+    }
+
+    if (!sections.includes(activeSettingsSection)) {
+      activeSettingsSection = sections[0];
+    }
+
+    tabs.innerHTML = sections.map(name => {
+      const active = name === activeSettingsSection ? ' active' : '';
+      return '<button type="button" class="settings-subtab' + active + '" data-settings-section="' + esc(name) + '">' + esc(name) + '</button>';
+    }).join('');
+
+    const section = (settingsPayload.sections || []).find(s => s.name === activeSettingsSection);
+    const html = (section?.fields || []).map(field => renderField(field.key)).join('');
+    body.innerHTML = html || '<div class="empty-state">No settings in this section</div>';
+  }
+
+  function getLibraryStatBlocks(item) {
+    if (item.type === 'series') {
+      return [
+        { label: 'Episodes', value: item.stats.episode_total || 0 },
+        { label: 'Files', value: item.stats.episode_files || 0 },
+        { label: 'Placeholders', value: item.stats.episode_placeholders || 0 },
+        { label: 'Status', value: item.has_placeholder ? 'Covered' : (item.has_file ? 'Files' : 'Missing') },
+      ];
+    }
+    return [
+      { label: 'Downloaded', value: item.has_file ? 'Yes' : 'No' },
+      { label: 'Placeholder', value: item.has_placeholder ? 'Yes' : 'No' },
+      { label: 'Decision', value: item.determination || 'n/a' },
+      { label: 'Status', value: item.status || 'n/a' },
+    ];
+  }
+
+  function renderLibrary() {
+    const grid = document.getElementById('library-grid');
+    const empty = document.getElementById('library-empty');
+    const meta = document.getElementById('library-meta');
+
+    const filtered = libraryItems.filter(item => {
+      if (activeLibraryFilter === 'movie') return item.type === 'movie';
+      if (activeLibraryFilter === 'series') return item.type === 'series';
+      if (activeLibraryFilter === 'placeholders') return !!item.has_placeholder;
+      if (activeLibraryFilter === 'missing') return !item.has_placeholder && !item.has_file;
+      return true;
+    });
+
+    meta.textContent = filtered.length + ' item' + (filtered.length === 1 ? '' : 's') + ' shown';
+    if (!filtered.length) {
+      grid.innerHTML = '';
+      empty.style.display = '';
+      return;
+    }
+
+    empty.style.display = 'none';
+    grid.innerHTML = filtered.map(item => {
+      const posterUrl = item.poster_url || item.backdrop_url || '';
+      const posterStyle = posterUrl ? ' style="background-image: linear-gradient(180deg, rgba(15, 17, 23, 0.05) 0%, rgba(15, 17, 23, 0.88) 66%, rgba(15, 17, 23, 1) 100%), url(\'' + esc(posterUrl) + '\')"' : '';
+      const chips = [
+        '<span class="library-chip type-' + esc(item.type) + '">' + esc(item.type) + '</span>',
+        item.is_4k ? '<span class="library-chip">4K</span>' : '',
+        item.arr_link ? '<a class="library-chip link" href="' + esc(item.arr_link) + '" target="_blank" rel="noopener noreferrer">' + esc(item.instance_key || 'open') + '</a>' : '<span class="library-chip">' + esc(item.instance_key || 'instance') + '</span>',
+        item.has_placeholder ? '<span class="library-chip ok">placeholder</span>' : '',
+        !item.has_placeholder && !item.has_file ? '<span class="library-chip missing">missing</span>' : '',
+        item.has_file ? '<span class="library-chip warn">file</span>' : '',
+      ].filter(Boolean).join('');
+      const stats = getLibraryStatBlocks(item).map(stat => {
+        return '<div class="library-stat"><div class="library-stat-label">' + esc(stat.label) + '</div><div class="library-stat-value">' + esc(stat.value) + '</div></div>';
+      }).join('');
+      return '<article class="library-card"' + posterStyle + '>'
+        + '<div class="library-card-content">'
+        + '<div class="library-card-top">' + chips + '</div>'
+        + '<div class="library-title">' + esc(item.title) + '</div>'
+        + '<div class="library-subtitle">' + esc(String(item.year || '--')) + '</div>'
+        + '<div class="library-overview">' + esc(item.overview || 'No synopsis available.') + '</div>'
+        + '<div class="library-stats">' + stats + '</div>'
+        + '</div>'
+        + '</article>';
+    }).join('');
+  }
+
+  async function loadLibrary() {
+    try {
+      const r = await fetch('api/library?limit=400');
+      const payload = await r.json();
+      libraryItems = payload.items || [];
+      renderLibrary();
+    } catch (e) {
+      console.error('library', e);
+      document.getElementById('library-meta').textContent = 'Failed to load library';
+    }
+  }
+
+  function renderWizard() {
+    const overlay = document.getElementById('onboarding-overlay');
+    const label = document.getElementById('onboarding-step-label');
+    const stepsEl = document.getElementById('onboarding-steps');
+    const bodyEl = document.getElementById('onboarding-step-body');
+    const backBtn = document.getElementById('onboarding-back');
+    const nextBtn = document.getElementById('onboarding-next');
+    const saveBtn = document.getElementById('onboarding-save');
+
+    if (!onboardingVisible) {
+      overlay.classList.remove('visible');
+      overlay.setAttribute('aria-hidden', 'true');
+      return;
+    }
+
+    overlay.classList.add('visible');
+    overlay.setAttribute('aria-hidden', 'false');
+
+    const step = WIZARD_STEPS[onboardingStepIndex];
+    label.textContent = 'Step ' + (onboardingStepIndex + 1) + ' of ' + WIZARD_STEPS.length;
+
+    stepsEl.innerHTML = WIZARD_STEPS.map((s, i) => {
+      const active = i === onboardingStepIndex ? ' active' : '';
+      return '<div class="onboarding-step' + active + '">' + (i + 1) + '. ' + esc(s.name) + '</div>';
+    }).join('');
+
+    const keys = fieldsForWizardStep(step.key);
+    bodyEl.innerHTML = keys.map(renderField).join('') || '<div class="empty-state">No fields for this step</div>';
+
+    backBtn.disabled = onboardingStepIndex === 0;
+    nextBtn.style.display = onboardingStepIndex < WIZARD_STEPS.length - 1 ? '' : 'none';
+    saveBtn.style.display = onboardingStepIndex === WIZARD_STEPS.length - 1 ? '' : 'none';
+  }
+
+  function updateSetupBanner(status) {
+    const banner = document.getElementById('setup-banner');
+    const shouldShowWizard = !!(status && !status.setup_complete);
+
+    if (onboardingVisible && shouldShowWizard) {
+      captureInputs('#onboarding-overlay');
+    }
+
+    if (!status || status.setup_complete) {
+      banner.classList.remove('visible');
+      banner.innerHTML = '';
+      if (onboardingVisible) {
+        onboardingVisible = false;
+        renderWizard();
+      }
+      return;
+    }
+
+    banner.classList.add('visible');
+    banner.innerHTML = '<strong>Onboarding required.</strong> Complete the setup wizard to unlock the full dashboard flow.';
+    if (!onboardingVisible) {
+      onboardingVisible = true;
+      renderWizard();
+    }
+  }
+
+  async function testConnection(service, urlKey, credentialKey, resultEl) {
+    captureInputs('#panel-settings');
+    captureInputs('#onboarding-overlay');
+
+    const urlField = getFieldByKey(urlKey);
+    const credentialField = getFieldByKey(credentialKey);
+    if (!resultEl) return;
+
+    const url = String(urlField?.value || '').trim();
+    const credential = String(credentialField?.value || '').trim();
+
+    resultEl.className = 'test-result';
+    resultEl.textContent = 'Testing...';
+
+    try {
+      const response = await fetch('api/integrations/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service, url, credential }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        resultEl.className = 'test-result error';
+        resultEl.textContent = result.message || 'Connection test failed';
+        return;
+      }
+      resultEl.className = 'test-result success';
+      resultEl.textContent = result.message || 'Connected';
+    } catch (err) {
+      console.error('test-connection', err);
+      resultEl.className = 'test-result error';
+      resultEl.textContent = 'Connection test failed';
+    }
+  }
+
   async function loadStats() {
     try {
       const r = await fetch('api/stats');
@@ -382,10 +1217,12 @@
       document.getElementById('s-movies-total').textContent = d.movies.total;
       document.getElementById('s-movies-dl').textContent = d.movies.downloaded + ' downloaded';
       document.getElementById('s-movies-ph').textContent = d.movies.placeholders + ' placeholders';
+      document.getElementById('s-movies-future').textContent = (d.movies.future_outside_lookahead || 0) + ' future';
       document.getElementById('s-series-total').textContent = d.series.total;
       document.getElementById('s-episodes-total').textContent = d.episodes.total;
       document.getElementById('s-episodes-dl').textContent = d.episodes.downloaded + ' downloaded';
       document.getElementById('s-episodes-ph').textContent = d.episodes.placeholders + ' placeholders';
+      document.getElementById('s-episodes-future').textContent = (d.episodes.future_outside_lookahead || 0) + ' future';
       document.getElementById('s-ph-disk').textContent = d.placeholders_on_disk;
       document.getElementById('s-jobs-pending').textContent = d.jobs.pending;
       document.getElementById('s-jobs-done').textContent = d.jobs.done + ' done';
@@ -394,7 +1231,83 @@
     } catch(e) { console.error('stats', e); }
   }
 
-  // --- Activity ---
+  async function loadSettings(force) {
+    if (settingsLoaded && !force) return;
+
+    try {
+      const r = await fetch('api/settings/current');
+      const payload = await r.json();
+      setupFieldMap(payload);
+      renderSettingsSections();
+
+      const status = payload.status || {};
+      document.getElementById('settings-status').textContent = status.setup_complete
+        ? 'Settings are active. Some changes may still require restart.'
+        : 'Setup is incomplete. Complete onboarding to finish initial configuration.';
+      updateSetupBanner(status);
+      settingsLoaded = true;
+    } catch(e) {
+      console.error('settings', e);
+      document.getElementById('settings-status').textContent = 'Failed to load settings';
+    }
+  }
+
+  async function loadSettingsStatus() {
+    try {
+      const r = await fetch('api/settings/status');
+      const payload = await r.json();
+      updateSetupBanner(payload);
+    } catch(e) {
+      console.error('settings-status', e);
+    }
+  }
+
+  async function saveSettings(feedbackElementId) {
+    captureInputs('#panel-settings');
+    captureInputs('#onboarding-overlay');
+    recomputeDirtyState();
+
+    const feedback = document.getElementById(feedbackElementId);
+    feedback.className = feedbackElementId === 'onboarding-feedback' ? 'onboarding-feedback' : 'settings-feedback';
+    feedback.textContent = 'Saving...';
+
+    const values = {};
+    fieldMap.forEach((field, key) => {
+      values[key] = field.value;
+    });
+
+    try {
+      const r = await fetch('api/settings/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values }),
+      });
+      const result = await r.json();
+      if (!r.ok || !result.ok) {
+        const errors = result.errors || {};
+        const firstError = Object.entries(errors)[0];
+        feedback.className += ' error';
+        feedback.textContent = firstError ? (firstError[0] + ': ' + firstError[1]) : 'Unable to save settings';
+        return false;
+      }
+
+      const restartKeys = result.restart_required_keys || [];
+      feedback.className += ' success';
+      feedback.textContent = restartKeys.length
+        ? 'Saved. Restart recommended for: ' + restartKeys.join(', ')
+        : 'Saved and applied.';
+
+      settingsLoaded = false;
+      await loadSettings(true);
+      return true;
+    } catch (e) {
+      console.error('settings-save', e);
+      feedback.className += ' error';
+      feedback.textContent = 'Unable to save settings';
+      return false;
+    }
+  }
+
   async function loadActivity() {
     try {
       const r = await fetch('api/activity?limit=100');
@@ -407,16 +1320,15 @@
         return;
       }
       empty.style.display = 'none';
-      body.innerHTML = items.map(i => `<tr>
-        <td class="time-ago">${esc(timeAgo(i.time))}</td>
-        <td><span class="source-badge">${esc(i.type === 'event' ? i.event_type : i.job_type)}</span></td>
-        <td>${esc(i.source || i.job_type || '')}</td>
-        <td><span class="status-badge status-${esc(i.status)}">${esc(i.status)}</span></td>
-      </tr>`).join('');
+      body.innerHTML = items.map(i => '<tr>'
+        + '<td class="time-ago">' + esc(timeAgo(i.time)) + '</td>'
+        + '<td><span class="source-badge">' + esc(i.type === 'event' ? i.event_type : i.job_type) + '</span></td>'
+        + '<td>' + esc(i.source || i.job_type || '') + '</td>'
+        + '<td><span class="status-badge status-' + esc(i.status) + '">' + esc(i.status) + '</span></td>'
+        + '</tr>').join('');
     } catch(e) { console.error('activity', e); }
   }
 
-  // --- Errors ---
   async function loadErrors() {
     try {
       const r = await fetch('api/errors?limit=100');
@@ -433,21 +1345,18 @@
       empty.style.display = 'none';
       badge.style.display = '';
       badge.textContent = items.length;
-      body.innerHTML = items.map(i => `<tr>
-        <td class="time-ago">${esc(timeAgo(i.time))}</td>
-        <td><span class="source-badge">${esc(i.source)}</span></td>
-        <td>${esc(i.label)}</td>
-        <td class="error-text" title="${esc(i.error)}">${esc(i.error)}</td>
-      </tr>`).join('');
+      body.innerHTML = items.map(i => '<tr>'
+        + '<td class="time-ago">' + esc(timeAgo(i.time)) + '</td>'
+        + '<td><span class="source-badge">' + esc(i.source) + '</span></td>'
+        + '<td>' + esc(i.label) + '</td>'
+        + '<td class="error-text" title="' + esc(i.error) + '">' + esc(i.error) + '</td>'
+        + '</tr>').join('');
     } catch(e) { console.error('errors', e); }
   }
 
-  // --- Logs ---
-  let lastLogLevel = 'all';
   async function loadLogs() {
     try {
       const level = document.getElementById('log-level').value;
-      lastLogLevel = level;
       const r = await fetch('api/logs?tail=500&level=' + level);
       const d = await r.json();
       const viewer = document.getElementById('log-viewer');
@@ -455,9 +1364,7 @@
       document.getElementById('log-file-label').textContent = d.file ? d.file : '';
 
       let lines = d.lines || [];
-      if (filter) {
-        lines = lines.filter(l => l.toLowerCase().includes(filter));
-      }
+      if (filter) lines = lines.filter(l => l.toLowerCase().includes(filter));
 
       viewer.innerHTML = lines.map(l => {
         let cls = 'log-line';
@@ -466,24 +1373,126 @@
         else if (l.includes('DEBUG')) cls += ' log-DEBUG';
         return '<div class="' + cls + '">' + esc(l) + '</div>';
       }).join('');
-
-      // Auto-scroll to bottom
       viewer.scrollTop = viewer.scrollHeight;
     } catch(e) { console.error('logs', e); }
   }
 
-  // Log filter and level change handlers
-  document.getElementById('log-filter').addEventListener('input', () => { if (currentTab === 'logs') loadLogs(); });
-  document.getElementById('log-level').addEventListener('change', () => { if (currentTab === 'logs') loadLogs(); });
-
-  // --- Refresh loop ---
   async function refresh() {
     loadStats();
     if (currentTab === 'activity') loadActivity();
+    else if (currentTab === 'library') loadLibrary();
     else if (currentTab === 'errors') loadErrors();
     else if (currentTab === 'logs') loadLogs();
+    else if (currentTab === 'settings') loadSettings(false);
+    loadSettingsStatus();
   }
 
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      if (hasUnsavedChanges && (currentTab === 'settings' || onboardingVisible)) {
+        const shouldLeave = window.confirm('You have unsaved settings changes. Leave this section without saving?');
+        if (!shouldLeave) {
+          return;
+        }
+      }
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      const id = tab.dataset.tab;
+      currentTab = id;
+      document.getElementById('panel-' + id).classList.add('active');
+      refresh();
+    });
+  });
+
+  document.getElementById('log-filter').addEventListener('input', () => {
+    if (currentTab === 'logs') loadLogs();
+  });
+  document.getElementById('log-level').addEventListener('change', () => {
+    if (currentTab === 'logs') loadLogs();
+  });
+
+  document.getElementById('settings-save-button').addEventListener('click', () => {
+    saveSettings('settings-feedback');
+  });
+
+  document.getElementById('library-filters').addEventListener('click', event => {
+    const btn = event.target.closest('[data-library-filter]');
+    if (!btn) return;
+    activeLibraryFilter = btn.dataset.libraryFilter;
+    document.querySelectorAll('[data-library-filter]').forEach(node => {
+      node.classList.toggle('active', node.dataset.libraryFilter === activeLibraryFilter);
+    });
+    renderLibrary();
+  });
+
+  document.getElementById('settings-subtabs').addEventListener('click', event => {
+    const btn = event.target.closest('[data-settings-section]');
+    if (!btn) return;
+    captureInputs('#panel-settings');
+    activeSettingsSection = btn.dataset.settingsSection;
+    renderSettingsSections();
+  });
+
+  document.getElementById('onboarding-back').addEventListener('click', () => {
+    if (onboardingStepIndex === 0) return;
+    captureInputs('#onboarding-overlay');
+    onboardingStepIndex -= 1;
+    renderWizard();
+  });
+
+  document.getElementById('onboarding-next').addEventListener('click', () => {
+    if (onboardingStepIndex >= WIZARD_STEPS.length - 1) return;
+    captureInputs('#onboarding-overlay');
+    onboardingStepIndex += 1;
+    renderWizard();
+  });
+
+  document.getElementById('onboarding-save').addEventListener('click', async () => {
+    const ok = await saveSettings('onboarding-feedback');
+    if (ok) {
+      onboardingVisible = false;
+      renderWizard();
+    }
+  });
+
+  document.body.addEventListener('click', event => {
+    const btn = event.target.closest('[data-test-service]');
+    if (!btn) return;
+    const service = btn.dataset.testService;
+    const urlKey = btn.dataset.urlKey;
+    const credentialKey = btn.dataset.credentialKey;
+    const row = btn.closest('.setting-row');
+    const resultEl = row ? row.querySelector('[data-test-result]') : null;
+    testConnection(service, urlKey, credentialKey, resultEl);
+  });
+
+  function onSettingsInput(event) {
+    const input = event.target.closest('[data-key]');
+    if (!input) return;
+    const key = input.dataset.key;
+    const field = fieldMap.get(key);
+    if (!field) return;
+    if (input.type === 'checkbox') {
+      field.value = !!input.checked;
+    } else {
+      field.value = input.value;
+    }
+    recomputeDirtyState();
+  }
+
+  document.body.addEventListener('input', onSettingsInput);
+  document.body.addEventListener('change', onSettingsInput);
+
+  window.addEventListener('beforeunload', event => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
+    event.preventDefault();
+    event.returnValue = '';
+  });
+
+  loadSettings(true);
   refresh();
   setInterval(refresh, REFRESH_MS);
 })();
