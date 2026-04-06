@@ -380,14 +380,7 @@ def _refresh_remote_item_metadata(session, placeholder: Placeholder, movie: Movi
     if jf_id and getattr(settings, "ENABLE_JELLYFIN", False):
         jf_ok = refresh_jellyfin_item_metadata(jf_id)
 
-    # Fallback to targeted path refresh when item-id refresh is unavailable/missed.
-    if getattr(settings, "ENABLE_JELLYFIN", False) and not jf_ok:
-        placeholder_path = str(getattr(placeholder, "path", "") or "").strip()
-        if placeholder_path:
-            result = refresh_jellyfin_paths({placeholder_path}, update_type="Created")
-            if int(result.get("refreshed", 0)) > 0:
-                jf_ok = True
-            jf_attempted = True
+    # Status/NFO updates use direct item refresh only (no path/library fallback).
 
     if jf_attempted:
         if jf_ok:
@@ -401,14 +394,7 @@ def _refresh_remote_item_metadata(session, placeholder: Placeholder, movie: Movi
     if emby_id and getattr(settings, "ENABLE_EMBY", False):
         emby_ok = refresh_emby_item_metadata(emby_id)
 
-    # Fallback to targeted path refresh when item-id refresh is unavailable/missed.
-    if getattr(settings, "ENABLE_EMBY", False) and not emby_ok:
-        placeholder_path = str(getattr(placeholder, "path", "") or "").strip()
-        if placeholder_path:
-            result = refresh_emby_paths({placeholder_path}, update_type="Created")
-            if int(result.get("refreshed", 0)) > 0:
-                emby_ok = True
-            emby_attempted = True
+    # Status/NFO updates use direct item refresh only (no path/library fallback).
 
     if emby_attempted:
         if emby_ok:
