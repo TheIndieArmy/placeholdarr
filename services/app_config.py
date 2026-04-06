@@ -358,6 +358,37 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+            {
+                "section": "Automation",
+                "label": "Enable Playback Fallback Search",
+                "description": "If enabled, schedule a delayed fallback-instance search when the preferred instance did not import.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "ENABLE_QUEUE_MONITOR",
+            {
+                "section": "Automation",
+                "label": "Enable Queue Monitor",
+                "description": "Continuously poll ARR queues after playback-triggered searches and update placeholder statuses.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "QUEUE_MONITOR_RETRY_GRACE_SECONDS",
+            {
+                "section": "Automation",
+                "label": "Queue Retry Grace Seconds",
+                "description": "How long to wait after an item leaves queue before marking it as an error.",
+                "type": "int",
+                "min": 30,
+                "restart_required": False,
+            },
+        ),
+        (
             "PLAYBACK_COOLDOWN",
             {
                 "section": "Playback",

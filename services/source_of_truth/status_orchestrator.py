@@ -466,8 +466,13 @@ class StatusOrchestrator:
             old_status = ph.display_status
             ph.display_status = intent.new_status
             ph.display_reason = intent.reason
-            if intent.progress:
-                ph.display_progress = intent.progress
+            if intent.progress is not None:
+                try:
+                    ph.display_progress = int(intent.progress)
+                except Exception:
+                    ph.display_progress = None
+            elif intent.new_status != DisplayStatus.DOWNLOADING.value:
+                ph.display_progress = None
             ph.updated_at = datetime.now(timezone.utc)
             
             session.commit()

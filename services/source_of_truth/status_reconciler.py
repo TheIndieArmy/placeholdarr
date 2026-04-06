@@ -5,8 +5,8 @@ from datetime import datetime, timezone, timedelta
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.emby import refresh_emby_item_metadata
-from services.media_servers.jellyfin import refresh_jellyfin_item_metadata
+from services.media_servers.emby import refresh_emby_item_metadata, refresh_emby_paths
+from services.media_servers.jellyfin import refresh_jellyfin_item_metadata, refresh_jellyfin_paths
 from services.placeholders import ensure_episode_nfo, ensure_movie_nfo, ensure_series_nfo
 from services.media_servers.plex_status_writer import batch_update_plex_statuses
 from services.postgres.db import get_session
@@ -171,6 +171,14 @@ def _placeholder_display_status(placeholder: Placeholder) -> str | None:
         "COMING_SOON_TODAY",
     } and reason:
         # Keep canonical status in DB while projecting a human-friendly daily label.
+        return reason
+
+    if status == "DOWNLOADING" and reason:
+        # Project human-friendly label (e.g. "Downloading 75%") from display_reason.
+        return reason
+
+    if status == "SEARCHING" and reason and reason.lower() == "queued":
+        # Preserve user-friendly queued text while the queue item has no measurable progress yet.
         return reason
 
     return status
@@ -367,15 +375,43 @@ def _refresh_remote_item_metadata(session, placeholder: Placeholder, movie: Movi
     failed = 0
 
     jf_id = ids.get("jellyfin")
+    jf_ok = False
+    jf_attempted = bool(getattr(settings, "ENABLE_JELLYFIN", False))
     if jf_id and getattr(settings, "ENABLE_JELLYFIN", False):
-        if refresh_jellyfin_item_metadata(jf_id):
+        jf_ok = refresh_jellyfin_item_metadata(jf_id)
+
+    # Fallback to targeted path refresh when item-id refresh is unavailable/missed.
+    if getattr(settings, "ENABLE_JELLYFIN", False) and not jf_ok:
+        placeholder_path = str(getattr(placeholder, "path", "") or "").strip()
+        if placeholder_path:
+            result = refresh_jellyfin_paths({placeholder_path}, update_type="Created")
+            if int(result.get("refreshed", 0)) > 0:
+                jf_ok = True
+            jf_attempted = True
+
+    if jf_attempted:
+        if jf_ok:
             refreshed += 1
         else:
             failed += 1
 
     emby_id = ids.get("emby")
+    emby_ok = False
+    emby_attempted = bool(getattr(settings, "ENABLE_EMBY", False))
     if emby_id and getattr(settings, "ENABLE_EMBY", False):
-        if refresh_emby_item_metadata(emby_id):
+        emby_ok = refresh_emby_item_metadata(emby_id)
+
+    # Fallback to targeted path refresh when item-id refresh is unavailable/missed.
+    if getattr(settings, "ENABLE_EMBY", False) and not emby_ok:
+        placeholder_path = str(getattr(placeholder, "path", "") or "").strip()
+        if placeholder_path:
+            result = refresh_emby_paths({placeholder_path}, update_type="Created")
+            if int(result.get("refreshed", 0)) > 0:
+                emby_ok = True
+            emby_attempted = True
+
+    if emby_attempted:
+        if emby_ok:
             refreshed += 1
         else:
             failed += 1

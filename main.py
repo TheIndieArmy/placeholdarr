@@ -11,6 +11,10 @@ from services.postgres.db import get_engine, init_db, get_session
 from services.postgres.models import Movie, Series, Episode, Job
 import sqlalchemy as sa
 from services.source_of_truth import schedule_all_syncs
+from services.source_of_truth.queue_monitor_producer import (
+    start_queue_monitor_producer,
+    stop_queue_monitor_producer,
+)
 from services.startup_gate import startup_sync_complete
 import asyncio
 import threading
@@ -285,7 +289,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f'Failed to start worker loop(s): {e}', extra={'emoji_type': 'error'})
 
+    try:
+        start_queue_monitor_producer()
+    except Exception as e:
+        logger.error(f'Failed to start queue monitor producer: {e}', extra={'emoji_type': 'error'})
+
     yield
+
+    try:
+        stop_queue_monitor_producer()
+    except Exception as e:
+        logger.warning(f'Failed to stop queue monitor producer cleanly: {e}', extra={'emoji_type': 'warning'})
 
 app = FastAPI(lifespan=lifespan)
 

@@ -136,6 +136,7 @@ class Settings(BaseSettings):
     EPISODES_LOOKAHEAD: int = int(os.getenv("EPISODES_LOOKAHEAD", "5").split('#')[0].strip())
     PLAYBACK_SEARCH_PREFERENCE: Literal["standard", "4k", "both"] = os.getenv("PLAYBACK_SEARCH_PREFERENCE", "both").split('#')[0].strip().lower()
     TV_PLAYBACK_INSTANCE_MODE: Literal["match", "preference", "both"] = os.getenv("TV_PLAYBACK_INSTANCE_MODE", "match").split('#')[0].strip().lower()
+    ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = os.getenv("ENABLE_PLAYBACK_FALLBACK_SEARCH", "false").split('#')[0].strip().lower() == "true"
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = int(os.getenv("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", "30").split('#')[0].strip())
     # Backward-compat alias for legacy modules still reading TITLE_UPDATES.
     TITLE_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
@@ -181,6 +182,8 @@ class Settings(BaseSettings):
     ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
     ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
     ENABLE_PLAYBACK_EVENT_HANDLERS: bool = os.getenv("ENABLE_PLAYBACK_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_QUEUE_MONITOR: bool = os.getenv("ENABLE_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"
+    QUEUE_MONITOR_RETRY_GRACE_SECONDS: int = int(os.getenv("QUEUE_MONITOR_RETRY_GRACE_SECONDS", "300").split('#')[0].strip())
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())

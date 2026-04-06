@@ -45,6 +45,10 @@ def _fallback_timeout_minutes() -> int:
         return 30
 
 
+def _fallback_enabled() -> bool:
+    return bool(getattr(settings, 'ENABLE_PLAYBACK_FALLBACK_SEARCH', False)) and _fallback_timeout_minutes() > 0
+
+
 def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
     if content_type == 'movie':
         if is_4k:
@@ -889,6 +893,8 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
 
 
 def _should_schedule_delayed_fallback(selection: dict[str, Any], chosen_instance: str | None) -> bool:
+    if not _fallback_enabled():
+        return False
     if not chosen_instance:
         return False
     if len(selection.get('chosen_instances') or []) != 1:
@@ -907,6 +913,9 @@ def _enqueue_delayed_fallback(
     fallback_instance: str,
     source_instance: str | None,
 ) -> int | None:
+    if not _fallback_enabled():
+        return None
+
     timeout_minutes = _fallback_timeout_minutes()
     if timeout_minutes <= 0:
         return None
@@ -1071,6 +1080,9 @@ def _preferred_episode_import_succeeded(session, preferred_row: Series | None, p
 
 
 def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
+    if not _fallback_enabled():
+        return {'ok': True, 'skipped': 'playback_fallback_disabled'}
+
     payload = job.payload or {}
     media_type = str(payload.get('media_type') or '').strip().lower()
     preferred_instance = str(payload.get('preferred_instance') or '').strip().lower()

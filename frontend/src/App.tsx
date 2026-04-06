@@ -56,7 +56,7 @@ type CalendarFilters = {
   releaseTypes: Record<string, boolean>;
 };
 
-type Brand = "placeholdarr" | "placeholdarr-neon" | "spectarr" | "phantarr" | "mirarr";
+type Brand = "placeholdarr" | "placeholdarr-neon" | "spectarr" | "phantarr" | "mirarr" | "elfhosted";
 type ThemeMode = "light" | "dark";
 
 type BrandAccent = {
@@ -73,6 +73,7 @@ const BRAND_OPTIONS: Array<{ value: Brand; label: string }> = [
   { value: "spectarr", label: "Spectarr" },
   { value: "phantarr", label: "Phantarr" },
   { value: "mirarr", label: "Mirarr" },
+  { value: "elfhosted", label: "ElfHosted" },
 ];
 
 const THEME_MODE_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
@@ -93,6 +94,7 @@ const BRAND_META: Record<Brand, { label: string; tagline: string }> = {
   spectarr: { label: "Spectarr", tagline: "A specter in your library - present, but not yet real." },
   phantarr: { label: "Phantarr", tagline: "Phantom media, on demand. Real when you need it." },
   mirarr: { label: "Mirarr", tagline: "Your library, reflected in full - even what's not there yet." },
+  elfhosted: { label: "Placeholdarr", tagline: "Your library, complete. No docker, no suffering." },
 };
 
 const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
@@ -170,6 +172,21 @@ const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
     icon: "#e8c890",
     hoverHex: "#a87a2f",
   },
+  // ElfHosted - Forest Green
+  "elfhosted-light": {
+    label: "ElfHosted",
+    hex: "#3d5a22",
+    text: "#e8f5d6",
+    icon: "#50762e",
+    hoverHex: "#2c4418",
+  },
+  "elfhosted-dark": {
+    label: "ElfHosted",
+    hex: "#50762e",
+    text: "#c8e6a0",
+    icon: "#6a9c3e",
+    hoverHex: "#3d5a22",
+  },
 };
 
 function alphaColor(hex: string, alpha: number) {
@@ -191,7 +208,7 @@ function getBrandAccent(brand: Brand, theme: ThemeMode) {
 
 function BrandLogo(props: { brand: Brand; accentHex: string; className?: string }) {
   const stroke = "#ffffff";
-  if (props.brand === "placeholdarr" || props.brand === "placeholdarr-neon") {
+  if (props.brand === "placeholdarr" || props.brand === "placeholdarr-neon" || props.brand === "elfhosted") {
     return (
       <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
         <rect width="72" height="72" rx="16" fill={props.accentHex} />
