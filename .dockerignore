@@ -1,0 +1,23 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+
+# Git/IDE
+.git/
+.github/
+.vscode/
+
+# Runtime logs/data
+logs/
+.appdata/
+
+# Frontend local deps/build cache (rebuilt inside Docker)
+frontend/node_modules/
+frontend/dist/
+
+# OS files
+.DS_Store

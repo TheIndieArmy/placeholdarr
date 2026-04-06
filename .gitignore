@@ -76,3 +76,8 @@ media_handler.log
 # OS
 .DS_Store
 Thumbs.db
+
+# UI
+node_modules/
+dist/
+build/

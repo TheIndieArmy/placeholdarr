@@ -8,8 +8,8 @@ import unicodedata
 from datetime import date, datetime, timezone, timedelta
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import case, func, or_, text
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from sqlalchemy import and_, case, func, or_, text
 
 from core.config import settings
 from services.app_config import get_onboarding_status, get_settings_payload, save_settings
@@ -154,6 +154,19 @@ def _calendar_lookahead_payload(today: date, lookahead_days: int) -> dict:
         "label": label,
     }
 
+
+def _iso(value) -> str | None:
+    """Return an ISO-format date/datetime string regardless of whether value is
+    already a str or a date/datetime object.  Returns None for falsy input."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return value.isoformat()
+    except AttributeError:
+        return str(value)
+
 # ---------------------------------------------------------------------------
 # HTML page
 # ---------------------------------------------------------------------------
@@ -163,6 +176,46 @@ async def dashboard_page():
     html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
     with open(html_path, "r") as f:
         return HTMLResponse(content=f.read())
+
+
+@router.get("/dashboard-next", response_class=HTMLResponse)
+async def dashboard_next_page():
+    """Serve the React + TypeScript dashboard canary app."""
+    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    index_path = os.path.join(dist_dir, "index.html")
+    if not os.path.isfile(index_path):
+        return PlainTextResponse(
+            "dashboard-next is not built yet. Run: cd frontend && npm install && npm run build",
+            status_code=503,
+        )
+    return FileResponse(index_path, media_type="text/html")
+
+
+@router.get("/dashboard-next/{path:path}", response_class=HTMLResponse)
+async def dashboard_next_path(path: str):
+    """Serve React app index for deep links under /dashboard-next."""
+    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    index_path = os.path.join(dist_dir, "index.html")
+    if not os.path.isfile(index_path):
+        return PlainTextResponse(
+            "dashboard-next is not built yet. Run: cd frontend && npm install && npm run build",
+            status_code=503,
+        )
+    return FileResponse(index_path, media_type="text/html")
+
+
+@router.get("/assets/{asset_path:path}")
+async def dashboard_next_assets(asset_path: str):
+    """Serve frontend build assets for the React dashboard."""
+    dist_assets_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "assets")
+    safe_path = os.path.normpath(asset_path).lstrip("/")
+    if safe_path.startswith(".."):
+        return JSONResponse({"ok": False, "message": "invalid asset path"}, status_code=400)
+
+    file_path = os.path.join(dist_assets_dir, safe_path)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"ok": False, "message": "asset not found"}, status_code=404)
+    return FileResponse(file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -388,12 +441,40 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                 "episode_total": int(row.episode_total or 0),
                 "episode_files": int(row.episode_files or 0),
                 "episode_placeholders": int(row.episode_placeholders or 0),
+                "episode_future": int(row.episode_future or 0),
+                "episode_missing": int(row.episode_missing or 0),
             }
             for row in session.query(
                 Season.series_id.label("series_id"),
                 func.count(Episode.id).label("episode_total"),
                 func.sum(case((Episode.has_file == True, 1), else_=0)).label("episode_files"),
                 func.sum(case((Episode.has_placeholder == True, 1), else_=0)).label("episode_placeholders"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                func.coalesce(Episode.has_file, False) == False,
+                                func.coalesce(Episode.has_placeholder, False) == False,
+                                Episode.determination == "not_needed",
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("episode_future"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                func.coalesce(Episode.has_file, False) == False,
+                                func.coalesce(Episode.has_placeholder, False) == False,
+                                or_(Episode.determination.is_(None), Episode.determination != "not_needed"),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("episode_missing"),
             )
             .join(Episode, Episode.season_id == Season.id)
             .group_by(Season.series_id)
@@ -410,6 +491,9 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
             .all()
         )
         for movie in movies:
+            movie_unresolved = (not bool(movie.has_file)) and (not bool(movie.has_placeholder))
+            movie_is_future = movie_unresolved and movie.determination == "not_needed"
+            movie_has_missing = movie_unresolved and not movie_is_future
             arr_link = _arr_item_link(
                 item_type="movie",
                 instance_key=movie.instance_key,
@@ -433,10 +517,14 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                     "status": movie.status,
                     "has_file": bool(movie.has_file),
                     "has_placeholder": bool(movie.has_placeholder),
+                    "is_future": movie_is_future,
+                    "has_missing": movie_has_missing,
                     "overview": movie.radarr_overview,
                     "stats": {
                         "downloaded": 1 if movie.has_file else 0,
                         "placeholders": 1 if movie.has_placeholder else 0,
+                        "future": 1 if movie_is_future else 0,
+                        "missing": 1 if movie_has_missing else 0,
                     },
                 }
             )
@@ -451,8 +539,20 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
         for series in series_rows:
             counts = series_episode_counts.get(
                 series.id,
-                {"episode_total": 0, "episode_files": 0, "episode_placeholders": 0},
+                {
+                    "episode_total": 0,
+                    "episode_files": 0,
+                    "episode_placeholders": 0,
+                    "episode_future": 0,
+                    "episode_missing": 0,
+                },
             )
+            series_unresolved = max(
+                int(counts["episode_total"]) - int(counts["episode_files"]) - int(counts["episode_placeholders"]),
+                0,
+            )
+            series_is_future = series_unresolved > 0 and int(counts["episode_missing"]) == 0 and int(counts["episode_future"]) > 0
+            series_has_missing = int(counts["episode_missing"]) > 0
             arr_link = _arr_item_link(
                 item_type="series",
                 instance_key=series.instance_key,
@@ -476,6 +576,8 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                     "status": series.status,
                     "has_file": bool(series.has_files),
                     "has_placeholder": counts["episode_placeholders"] > 0,
+                    "is_future": series_is_future,
+                    "has_missing": series_has_missing,
                     "overview": series.sonarr_series_overview,
                     "stats": counts,
                 }
@@ -490,6 +592,152 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
         )
 
         return {"items": items[:limit], "count": min(len(items), limit)}
+    finally:
+        session.close()
+
+
+@router.get("/api/detail/movie/{movie_id}")
+async def movie_detail(movie_id: int):
+    """Return full detail for a single movie."""
+    session = get_session()
+    try:
+        movie = session.query(Movie).filter(Movie.id == movie_id, Movie.is_deleted == False).first()
+        if not movie:
+            return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
+        arr_link = _arr_item_link(
+            item_type="movie",
+            instance_key=movie.instance_key,
+            is_4k=bool(movie.is_4k),
+            title=movie.title,
+            payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
+        )
+        return {
+            "ok": True,
+            "type": "movie",
+            "id": movie.id,
+            "title": movie.title,
+            "year": movie.year,
+            "overview": movie.radarr_overview,
+            "poster_url": movie.remote_poster,
+            "backdrop_url": movie.remote_fanart,
+            "runtime": movie.radarr_runtime,
+            "certification": movie.radarr_certification,
+            "genres": movie.radarr_genres or [],
+            "studio": movie.radarr_studio,
+            "ratings": movie.radarr_ratings or {},
+            "collection": movie.radarr_collection,
+            "is_4k": bool(movie.is_4k),
+            "instance_key": movie.instance_key,
+            "arr_link": arr_link,
+            "imdbid": movie.imdbid,
+            "tmdbid": movie.tmdbid,
+            "status": movie.status,
+            "determination": movie.determination,
+            "has_file": bool(movie.has_file),
+            "has_placeholder": bool(movie.has_placeholder),
+            "placeholder_filepath": movie.placeholder_filepath,
+            "radarr_quality": movie.radarr_quality,
+            "radarr_monitored": bool(movie.radarr_monitored),
+            "radarr_release_status": movie.radarr_release_status,
+            "theater_release_date": _iso(movie.theater_release_date),
+            "digital_release_date": _iso(movie.digital_release_date),
+            "physical_release_date": _iso(movie.physical_release_date),
+            "last_search": _iso(movie.last_search),
+            "updated_at": _iso(movie.updated_at),
+            "created_at": _iso(movie.created_at),
+        }
+    finally:
+        session.close()
+
+
+@router.get("/api/detail/series/{series_id}")
+async def series_detail(series_id: int):
+    """Return full detail for a series, including all seasons and their episodes."""
+    session = get_session()
+    try:
+        series = session.query(Series).filter(Series.id == series_id, Series.is_deleted == False).first()
+        if not series:
+            return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
+        arr_link = _arr_item_link(
+            item_type="series",
+            instance_key=series.instance_key,
+            is_4k=bool(series.is_4k),
+            title=series.title,
+            payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
+        )
+        seasons_raw = (
+            session.query(Season)
+            .filter(Season.series_id == series_id, Season.is_deleted == False)
+            .order_by(Season.season_number.asc())
+            .all()
+        )
+        seasons_out = []
+        for season in seasons_raw:
+            episodes_raw = (
+                session.query(Episode)
+                .filter(Episode.season_id == season.id, Episode.is_deleted == False)
+                .order_by(Episode.episode_number.asc())
+                .all()
+            )
+            ep_total = len(episodes_raw)
+            ep_files = sum(1 for e in episodes_raw if e.has_file)
+            ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
+            episodes_out = [
+                {
+                    "id": ep.id,
+                    "episode_number": ep.episode_number,
+                    "title": ep.title,
+                    "air_date": _iso(ep.air_date),
+                    "overview": ep.sonarr_episode_overview,
+                    "still_url": ep.sonarr_episode_still,
+                    "has_file": bool(ep.has_file),
+                    "has_placeholder": bool(ep.has_placeholder),
+                    "determination": ep.determination,
+                    "status": ep.status,
+                    "sonarr_quality": ep.sonarr_quality,
+                    "sonarr_monitored": bool(ep.sonarr_monitored),
+                    "placeholder_filepath": ep.placeholder_filepath,
+                }
+                for ep in episodes_raw
+            ]
+            seasons_out.append({
+                "id": season.id,
+                "season_number": season.season_number,
+                "title": season.title,
+                "overview": season.sonarr_season_overview,
+                "has_files": bool(season.has_files),
+                "episode_total": ep_total,
+                "episode_files": ep_files,
+                "episode_placeholders": ep_placeholders,
+                "episodes": episodes_out,
+            })
+        return {
+            "ok": True,
+            "type": "series",
+            "id": series.id,
+            "title": series.title,
+            "year": series.year,
+            "overview": series.sonarr_series_overview,
+            "poster_url": series.remote_poster,
+            "backdrop_url": series.remote_fanart or series.remote_banner,
+            "runtime": series.sonarr_runtime,
+            "certification": series.sonarr_certification,
+            "genres": series.sonarr_genres or [],
+            "network": series.sonarr_network,
+            "ratings": series.sonarr_ratings or {},
+            "is_4k": bool(series.is_4k),
+            "instance_key": series.instance_key,
+            "arr_link": arr_link,
+            "imdbid": series.imdbid,
+            "tvdbid": series.tvdbid,
+            "status": series.status,
+            "sonarr_status": series.sonarr_status,
+            "sonarr_monitored": bool(series.sonarr_monitored),
+            "first_aired": _iso(series.sonarr_first_aired),
+            "updated_at": _iso(series.updated_at),
+            "created_at": _iso(series.created_at),
+            "seasons": seasons_out,
+        }
     finally:
         session.close()
 
