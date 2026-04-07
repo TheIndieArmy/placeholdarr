@@ -1,6 +1,7 @@
+import json
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 try:
     from dotenv import load_dotenv
 except Exception:
@@ -87,6 +88,7 @@ class Settings(BaseSettings):
     RADARR_4K_INSTANCE_KEY: str = os.getenv("RADARR_4K_INSTANCE_KEY", "radarr_4k").split('#')[0].strip().lower()
     SONARR_STD_INSTANCE_KEY: str = os.getenv("SONARR_STD_INSTANCE_KEY", "sonarr_std").split('#')[0].strip().lower()
     SONARR_4K_INSTANCE_KEY: str = os.getenv("SONARR_4K_INSTANCE_KEY", "sonarr_4k").split('#')[0].strip().lower()
+    ARR_INSTANCES_JSON: str = os.getenv("ARR_INSTANCES_JSON", "").split('#')[0].strip()
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
     EMBY_INSTANCE_KEY: str = os.getenv("EMBY_INSTANCE_KEY", "emby").split('#')[0].strip().lower()
@@ -101,15 +103,19 @@ class Settings(BaseSettings):
     # - off: skip ARR preflight checks
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
-    STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = os.getenv("STARTUP_ARR_CHECK_MODE", "config").split('#')[0].strip().lower()
+    STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = os.getenv("STARTUP_ARR_CHECK_MODE", "live").split('#')[0].strip().lower()
     FULL_SYNC_INTERVAL_HOURS: int = int(os.getenv("FULL_SYNC_INTERVAL_HOURS", "0").split('#')[0].strip())
 
     # Library Paths
     LIBRARY_ROOT: str = os.getenv("LIBRARY_ROOT", "").split('#')[0].strip()
+    ENABLE_STANDARD_PROFILE: bool = os.getenv("ENABLE_STANDARD_PROFILE", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_4K_PROFILE: bool = os.getenv("ENABLE_4K_PROFILE", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_ANIME_PROFILE: bool = os.getenv("ENABLE_ANIME_PROFILE", "false").split('#')[0].strip().lower() == "true"
     MOVIE_LIBRARY_FOLDER: str = os.getenv("MOVIE_LIBRARY_FOLDER", "").split('#')[0].strip()
     TV_LIBRARY_FOLDER: str = os.getenv("TV_LIBRARY_FOLDER", "").split('#')[0].strip()
     MOVIE_LIBRARY_4K_FOLDER: str = os.getenv("MOVIE_LIBRARY_4K_FOLDER", "").split('#')[0].strip()
     TV_LIBRARY_4K_FOLDER: str = os.getenv("TV_LIBRARY_4K_FOLDER", "").split('#')[0].strip()
+    ANIME_LIBRARY_FOLDER: str = os.getenv("ANIME_LIBRARY_FOLDER", "").split('#')[0].strip()
 
     # Application
     PLAYBACK_COOLDOWN: int = int(os.environ.get("PLAYBACK_COOLDOWN", "30").split('#')[0].strip())
@@ -136,7 +142,7 @@ class Settings(BaseSettings):
     EPISODES_LOOKAHEAD: int = int(os.getenv("EPISODES_LOOKAHEAD", "5").split('#')[0].strip())
     PLAYBACK_SEARCH_PREFERENCE: Literal["standard", "4k", "both"] = os.getenv("PLAYBACK_SEARCH_PREFERENCE", "both").split('#')[0].strip().lower()
     TV_PLAYBACK_INSTANCE_MODE: Literal["match", "preference", "both"] = os.getenv("TV_PLAYBACK_INSTANCE_MODE", "match").split('#')[0].strip().lower()
-    ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = os.getenv("ENABLE_PLAYBACK_FALLBACK_SEARCH", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = os.getenv("ENABLE_PLAYBACK_FALLBACK_SEARCH", "true").split('#')[0].strip().lower() == "true"
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = int(os.getenv("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", "30").split('#')[0].strip())
     # Backward-compat alias for legacy modules still reading TITLE_UPDATES.
     TITLE_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
@@ -155,10 +161,11 @@ class Settings(BaseSettings):
     # Calendar scheduler cadence (independent from full sync).
     # <= 0 disables independent calendar scheduler.
     CALENDAR_SYNC_INTERVAL_HOURS: int = int(os.getenv("CALENDAR_SYNC_INTERVAL_HOURS", "12").split('#')[0].strip())
-    ENABLE_COMING_SOON_PLACEHOLDERS: bool = os.getenv("ENABLE_COMING_SOON_PLACEHOLDERS", "true").split('#')[0].strip().lower() == "true"
     PREFERRED_MOVIE_DATE_TYPE: str = os.getenv("PREFERRED_MOVIE_DATE_TYPE", "inCinemas").split('#')[0].strip()
     ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
     CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
+    # For calendar "coming soon" placeholders: use primary dummy only, or prefer coming-soon dummy when configured.
+    CALENDAR_LOOKAHEAD_DUMMY_MODE: str = os.getenv("CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon").split('#')[0].strip().lower()
 
     # Include specials (season 0) when creating episode subflows
     INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").split('#')[0].strip().lower() == "true"
@@ -179,9 +186,9 @@ class Settings(BaseSettings):
     # Job queue / batching
     BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
     JOB_DEBOUNCE_SECONDS: int = int(os.getenv("JOB_DEBOUNCE_SECONDS", "3"))
-    ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
-    ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
-    ENABLE_PLAYBACK_EVENT_HANDLERS: bool = os.getenv("ENABLE_PLAYBACK_EVENT_HANDLERS", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_PLAYBACK_EVENT_HANDLERS: bool = os.getenv("ENABLE_PLAYBACK_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
     ENABLE_QUEUE_MONITOR: bool = os.getenv("ENABLE_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"
     QUEUE_MONITOR_RETRY_GRACE_SECONDS: int = int(os.getenv("QUEUE_MONITOR_RETRY_GRACE_SECONDS", "300").split('#')[0].strip())
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
@@ -220,6 +227,11 @@ class Settings(BaseSettings):
         if path.stat().st_size == 0:
             raise ValueError(f"Dummy file exists but is empty: {v}")
         return str(path.absolute())
+
+    @validator('CALENDAR_LOOKAHEAD_DUMMY_MODE')
+    def validate_calendar_lookahead_dummy_mode(cls, v):
+        text = str(v or "coming_soon").strip().lower()
+        return "primary" if text == "primary" else "coming_soon"
 
     @validator('COMING_SOON_DUMMY_FILE_PATH')
     def validate_coming_soon_dummy_file_path(cls, v):
@@ -262,32 +274,41 @@ class Settings(BaseSettings):
     @root_validator(skip_on_failure=True)
     def configure_library_paths(cls, values):
         library_root = str(values.get('LIBRARY_ROOT') or '').strip()
+        use_standard = bool(values.get('ENABLE_STANDARD_PROFILE', True))
+        use_4k = bool(values.get('ENABLE_4K_PROFILE', True))
+        use_anime = bool(values.get('ENABLE_ANIME_PROFILE', False))
 
         movie_folder = str(values.get('MOVIE_LIBRARY_FOLDER') or '').strip()
         tv_folder = str(values.get('TV_LIBRARY_FOLDER') or '').strip()
         movie_4k_folder = str(values.get('MOVIE_LIBRARY_4K_FOLDER') or '').strip()
         tv_4k_folder = str(values.get('TV_LIBRARY_4K_FOLDER') or '').strip()
+        anime_folder = str(values.get('ANIME_LIBRARY_FOLDER') or '').strip()
 
         if library_root:
-            if not movie_folder:
+            if use_standard and not movie_folder:
                 movie_folder = os.path.join(library_root, 'movies')
-            if not tv_folder:
+            if use_standard and not tv_folder:
                 tv_folder = os.path.join(library_root, 'tv')
 
         # 4K defaults to the main library root. Users can override either path explicitly.
         has_4k_service = bool(values.get('RADARR_4K_URL') or values.get('SONARR_4K_URL'))
-        if has_4k_service and library_root:
+        if use_4k and has_4k_service and library_root:
             if not movie_4k_folder:
                 movie_4k_folder = os.path.join(library_root, 'movies-4k')
             if not tv_4k_folder:
                 tv_4k_folder = os.path.join(library_root, 'tv-4k')
 
-        if not movie_folder or not tv_folder:
-            values['MOVIE_LIBRARY_FOLDER'] = movie_folder
-            values['TV_LIBRARY_FOLDER'] = tv_folder
-            values['MOVIE_LIBRARY_4K_FOLDER'] = movie_4k_folder
-            values['TV_LIBRARY_4K_FOLDER'] = tv_4k_folder
-            return values
+        if use_anime and library_root and not anime_folder:
+            anime_folder = os.path.join(library_root, 'anime')
+
+        if not use_standard:
+            movie_folder = ''
+            tv_folder = ''
+        if not use_4k:
+            movie_4k_folder = ''
+            tv_4k_folder = ''
+        if not use_anime:
+            anime_folder = ''
 
         dir_mode = _parse_octal_mode(values.get('PLACEHOLDER_DIR_MODE', '777'), 0o777)
         folder_values = {
@@ -295,6 +316,7 @@ class Settings(BaseSettings):
             'TV_LIBRARY_FOLDER': tv_folder,
             'MOVIE_LIBRARY_4K_FOLDER': movie_4k_folder,
             'TV_LIBRARY_4K_FOLDER': tv_4k_folder,
+            'ANIME_LIBRARY_FOLDER': anime_folder,
         }
 
         for key, raw in folder_values.items():
@@ -350,6 +372,107 @@ class Settings(BaseSettings):
         return self.PLACEHOLDARR_HOST
 
     @property
+    def coming_soon_placeholders_enabled(self) -> bool:
+        """True when the calendar lookahead window is active (Coming Soon placeholders). Set CALENDAR_LOOKAHEAD_DAYS to 0 to disable."""
+        try:
+            return int(self.CALENDAR_LOOKAHEAD_DAYS) != 0
+        except (TypeError, ValueError):
+            return False
+
+    @property
+    def configured_arr_instances(self) -> list[dict[str, Any]]:
+        parsed_instances: list[dict[str, Any]] = []
+        raw = str(getattr(self, "ARR_INSTANCES_JSON", "") or "").strip()
+
+        if raw:
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, list):
+                    for item in payload:
+                        if not isinstance(item, dict):
+                            continue
+                        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+                        if arr_type not in {"radarr", "sonarr"}:
+                            continue
+                        key_raw = str(item.get("instance_key") or item.get("key") or item.get("name") or "").strip().lower()
+                        instance_key = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in key_raw).strip("_-")
+                        url = str(item.get("url") or "").strip()
+                        api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
+                        if not instance_key or not url or not api_key:
+                            continue
+                        parsed_instances.append(
+                            {
+                                "instance_key": instance_key,
+                                "arr_type": arr_type,
+                                "url": url,
+                                "api_key": api_key,
+                                "label": str(item.get("label") or instance_key).strip() or instance_key,
+                                "is_4k": bool(item.get("is_4k", False)),
+                            }
+                        )
+            except Exception as exc:
+                logger.warning(f"Failed to parse ARR_INSTANCES_JSON; falling back to legacy settings: {exc}")
+
+        if parsed_instances:
+            deduped: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in parsed_instances:
+                key = str(item.get("instance_key") or "").strip().lower()
+                if not key or key in seen:
+                    continue
+                deduped.append(item)
+                seen.add(key)
+            if deduped:
+                return deduped
+
+        instances: list[dict[str, Any]] = []
+        if self.RADARR_URL and self.RADARR_API_KEY:
+            instances.append(
+                {
+                    "instance_key": self.RADARR_STD_INSTANCE_KEY,
+                    "arr_type": "radarr",
+                    "url": self.RADARR_URL,
+                    "api_key": self.RADARR_API_KEY,
+                    "label": self.RADARR_STD_INSTANCE_KEY,
+                    "is_4k": False,
+                }
+            )
+        if self.RADARR_4K_URL and self.RADARR_4K_API_KEY:
+            instances.append(
+                {
+                    "instance_key": self.RADARR_4K_INSTANCE_KEY,
+                    "arr_type": "radarr",
+                    "url": self.RADARR_4K_URL,
+                    "api_key": self.RADARR_4K_API_KEY,
+                    "label": self.RADARR_4K_INSTANCE_KEY,
+                    "is_4k": True,
+                }
+            )
+        if self.SONARR_URL and self.SONARR_API_KEY:
+            instances.append(
+                {
+                    "instance_key": self.SONARR_STD_INSTANCE_KEY,
+                    "arr_type": "sonarr",
+                    "url": self.SONARR_URL,
+                    "api_key": self.SONARR_API_KEY,
+                    "label": self.SONARR_STD_INSTANCE_KEY,
+                    "is_4k": False,
+                }
+            )
+        if self.SONARR_4K_URL and self.SONARR_4K_API_KEY:
+            instances.append(
+                {
+                    "instance_key": self.SONARR_4K_INSTANCE_KEY,
+                    "arr_type": "sonarr",
+                    "url": self.SONARR_4K_URL,
+                    "api_key": self.SONARR_4K_API_KEY,
+                    "label": self.SONARR_4K_INSTANCE_KEY,
+                    "is_4k": True,
+                }
+            )
+        return instances
+
+    @property
     def radarr_instance_keys(self) -> tuple[str, str]:
         return (self.RADARR_STD_INSTANCE_KEY, self.RADARR_4K_INSTANCE_KEY)
 
@@ -364,10 +487,7 @@ class Settings(BaseSettings):
     @property
     def allowed_webhook_instance_keys(self) -> tuple[str, ...]:
         ordered = [
-            self.RADARR_STD_INSTANCE_KEY,
-            self.RADARR_4K_INSTANCE_KEY,
-            self.SONARR_STD_INSTANCE_KEY,
-            self.SONARR_4K_INSTANCE_KEY,
+            *(str(item.get("instance_key") or "").strip().lower() for item in self.configured_arr_instances),
             self.TAUTULLI_INSTANCE_KEY,
             self.JELLYFIN_INSTANCE_KEY,
             self.EMBY_INSTANCE_KEY,
@@ -381,6 +501,14 @@ class Settings(BaseSettings):
 
     @property
     def instance_is_4k(self) -> dict[str, bool]:
+        mapping: dict[str, bool] = {}
+        for item in self.configured_arr_instances:
+            key = str(item.get("instance_key") or "").strip().lower()
+            if not key:
+                continue
+            mapping[key] = bool(item.get("is_4k", False))
+        if mapping:
+            return mapping
         return {
             self.RADARR_STD_INSTANCE_KEY: False,
             self.RADARR_4K_INSTANCE_KEY: True,

@@ -91,6 +91,22 @@ def _apply_dir_chain_permissions(path: str) -> None:
         return
 
 
+def resolve_calendar_variant_dummy_path(variant: str) -> str:
+    """Choose dummy media source for calendar-driven placeholder variants.
+
+    ``coming_soon`` status can use either the primary dummy or the optional
+    coming-soon dummy, depending on ``CALENDAR_LOOKAHEAD_DUMMY_MODE``.
+    """
+    primary = str(getattr(settings, "DUMMY_FILE_PATH", "") or "").strip()
+    alt = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
+    mode = str(getattr(settings, "CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon") or "coming_soon").strip().lower()
+    if variant != "coming_soon":
+        return primary
+    if mode == "primary":
+        return primary
+    return alt if alt else primary
+
+
 def sanitize_filename(value: str | None) -> str:
     text = (value or "unknown").strip()
     text = re.sub(r'[<>:"/\\|?*]', "", text)

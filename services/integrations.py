@@ -8,16 +8,15 @@ import requests
 
 
 def _configured_arr_instances() -> list[tuple[str, str, str]]:
-    instances: list[tuple[str, str, str]] = []
-    if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
-        instances.append((settings.RADARR_STD_INSTANCE_KEY, 'radarr', settings.RADARR_URL))
-    if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
-        instances.append((settings.RADARR_4K_INSTANCE_KEY, 'radarr', settings.RADARR_4K_URL))
-    if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
-        instances.append((settings.SONARR_STD_INSTANCE_KEY, 'sonarr', settings.SONARR_URL))
-    if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None):
-        instances.append((settings.SONARR_4K_INSTANCE_KEY, 'sonarr', settings.SONARR_4K_URL))
-    return instances
+    return [
+        (
+            str(item.get('instance_key') or '').strip().lower(),
+            str(item.get('arr_type') or '').strip().lower(),
+            str(item.get('url') or '').strip(),
+        )
+        for item in (getattr(settings, 'configured_arr_instances', []) or [])
+        if item.get('instance_key') and item.get('arr_type') in {'radarr', 'sonarr'} and item.get('url')
+    ]
 
 
 def _build_endpoint(base_url: str, resource: str) -> str:
@@ -28,14 +27,17 @@ def _build_endpoint(base_url: str, resource: str) -> str:
 
 
 def _probe_arr_instance_live(instance_key: str, arr_type: str) -> bool:
-    if arr_type == 'radarr':
-        is_4k = instance_key == settings.RADARR_4K_INSTANCE_KEY
-        url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
-    else:
-        is_4k = instance_key == settings.SONARR_4K_INSTANCE_KEY
-        url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
+    match = None
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        if str(item.get('instance_key') or '').strip().lower() != str(instance_key or '').strip().lower():
+            continue
+        if str(item.get('arr_type') or '').strip().lower() != str(arr_type or '').strip().lower():
+            continue
+        match = item
+        break
+
+    url = str((match or {}).get('url') or '').strip()
+    api_key = str((match or {}).get('api_key') or '').strip()
 
     if not url or not api_key:
         return False
@@ -68,8 +70,15 @@ def check_all_arr_webhooks() -> bool:
     - config: verify at least one ARR instance is configured
     - live: probe each configured instance with a live API call and require at least one to be reachable
     """
-    mode = str(getattr(settings, 'STARTUP_ARR_CHECK_MODE', 'config') or 'config').strip().lower()
+    mode = str(getattr(settings, 'STARTUP_ARR_CHECK_MODE', 'live') or 'live').strip().lower()
     instances = _configured_arr_instances()
+
+    if mode not in ('off', 'config', 'live'):
+        logger.warning(
+            f'Unknown STARTUP_ARR_CHECK_MODE={mode!r}; using live check',
+            extra={'emoji_type': 'warning'},
+        )
+        mode = 'live'
 
     if mode == 'off':
         logger.info('ARR startup check skipped (STARTUP_ARR_CHECK_MODE=off)', extra={'emoji_type': 'info'})
@@ -81,28 +90,25 @@ def check_all_arr_webhooks() -> bool:
             logger.debug('No ARR sources configured in startup config check mode', extra={'emoji_type': 'debug'})
         return configured
 
-    if mode == 'live':
-        if not instances:
-            logger.debug('No ARR sources configured in startup live check mode', extra={'emoji_type': 'debug'})
-            return False
+    # live (default)
+    if not instances:
+        logger.debug('No ARR sources configured in startup live check mode', extra={'emoji_type': 'debug'})
+        return False
 
-        reachable = 0
-        for instance_key, arr_type, _ in instances:
-            if _probe_arr_instance_live(instance_key, arr_type):
-                reachable += 1
+    reachable = 0
+    for instance_key, arr_type, _ in instances:
+        if _probe_arr_instance_live(instance_key, arr_type):
+            reachable += 1
 
-        if reachable == 0:
-            logger.warning('No ARR instances reachable during startup live check', extra={'emoji_type': 'warning'})
-            return False
+    if reachable == 0:
+        logger.warning('No ARR instances reachable during startup live check', extra={'emoji_type': 'warning'})
+        return False
 
-        logger.info(
-            f'ARR live startup check passed for {reachable}/{len(instances)} configured instance(s)',
-            extra={'emoji_type': 'success'},
-        )
-        return True
-
-    logger.warning(f'Unknown STARTUP_ARR_CHECK_MODE={mode!r}; falling back to config check', extra={'emoji_type': 'warning'})
-    return bool(instances)
+    logger.info(
+        f'ARR live startup check passed for {reachable}/{len(instances)} configured instance(s)',
+        extra={'emoji_type': 'success'},
+    )
+    return True
 
 
 def delete_dummy_file(path: str | None = None, *args, **kwargs) -> bool:

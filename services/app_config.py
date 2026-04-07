@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -47,6 +48,30 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "string",
                 "required": False,
                 "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_MOVIE_SECTION_ID",
+            {
+                "section": "Integrations",
+                "label": "Plex Movie Section ID",
+                "description": "Numeric Plex library section ID for movie refresh calls. Required when Plex is enabled.",
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_TV_SECTION_ID",
+            {
+                "section": "Integrations",
+                "label": "Plex TV Section ID",
+                "description": "Numeric Plex library section ID for TV refresh calls. Required when Plex is enabled.",
+                "type": "int",
+                "required": False,
+                "min": 1,
                 "restart_required": False,
             },
         ),
@@ -209,6 +234,17 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "ARR_INSTANCES_JSON",
+            {
+                "section": "Integrations",
+                "label": "ARR Instances JSON (Advanced)",
+                "description": "Optional JSON array for many named ARR instances. When set, this overrides fixed std/4K ARR URL/API-key pairs.",
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
             "LIBRARY_ROOT",
             {
                 "section": "Paths",
@@ -216,6 +252,36 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": "Optional shared base path for derived folders: movies, tv, movies-4k, and tv-4k. Use this for simple setups; explicit folder fields below can override any derived path.",
                 "type": "path",
                 "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "ENABLE_STANDARD_PROFILE",
+            {
+                "section": "Paths",
+                "label": "Use Standard Profile",
+                "description": "Generate and use standard (non-4K) library folders from Library Root when available.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "ENABLE_4K_PROFILE",
+            {
+                "section": "Paths",
+                "label": "Use 4K Profile",
+                "description": "Generate and use 4K library folders from Library Root. Disable if your setup does not separate 4K media.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "ENABLE_ANIME_PROFILE",
+            {
+                "section": "Paths",
+                "label": "Use Anime Profile",
+                "description": "Generate and use an anime TV folder from Library Root for dedicated anime library targeting.",
+                "type": "bool",
                 "restart_required": False,
             },
         ),
@@ -264,11 +330,22 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "ANIME_LIBRARY_FOLDER",
+            {
+                "section": "Paths",
+                "label": "Anime Library Folder",
+                "description": "Optional explicit anime TV folder. If blank and Library Root is set with Anime profile enabled, Placeholdarr derives an anime path.",
+                "type": "path",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
             "DUMMY_FILE_PATH",
             {
                 "section": "Paths",
                 "label": "Dummy File Path",
-                "description": "Path to the primary dummy media file used when creating placeholders. Recommended for full placeholder functionality.",
+                "description": "Path to the primary dummy media file used when creating placeholders. Defaults to APPDATA_PATH/dummy.mp4 in onboarding.",
                 "type": "path",
                 "required": False,
                 "restart_required": True,
@@ -279,28 +356,54 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Coming Soon Dummy File Path",
-                "description": "Optional alternate dummy file used only for Coming Soon placeholders. If blank, the standard Dummy File Path is used.",
+                "description": "Optional alternate dummy file used only for Coming Soon placeholders. Defaults to APPDATA_PATH/coming_soon_dummy.mp4 in onboarding.",
                 "type": "path",
                 "required": False,
                 "restart_required": True,
             },
         ),
         (
-            "ENABLE_COMING_SOON_PLACEHOLDERS",
+            "STARTUP_SYNC_MODE",
             {
-                "section": "Calendar",
-                "label": "Enable Coming Soon Placeholders",
-                "description": "Enable future placeholders for items inside the calendar lookahead window. Disable to suppress Coming Soon placeholder creation.",
-                "type": "bool",
-                "restart_required": False,
+                "section": "Library sync",
+                "label": "Startup ARR sync mode",
+                "description": (
+                    "Runs when the Placeholdarr process starts, after onboarding is finished—not when you click Save in the wizard. "
+                    "Auto checks each configured ARR instance in the database: if a full library reconcile has never completed for that instance, "
+                    "the next startup runs a full sync once; later startups use a lite history/delta catch-up. "
+                    "Finishing onboarding without restarting does not run this pipeline; restart the app (or recreate the container) "
+                    "so startup sync runs with your saved settings and ArrState."
+                ),
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "auto", "label": "Auto — first qualifying startup: full once per ARR, then lite"},
+                    {"value": "full", "label": "Full — always full ARR sync on every startup"},
+                    {"value": "lite", "label": "Lite — history/delta catch-up only"},
+                    {"value": "off", "label": "Off — skip ARR startup sync"},
+                ],
+            },
+        ),
+        (
+            "FULL_SYNC_INTERVAL_HOURS",
+            {
+                "section": "Library sync",
+                "label": "Recurring full sync interval (hours)",
+                "description": "How often to schedule a full ARR/database reconciliation. Set to 0 to disable recurring full sync jobs.",
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
             },
         ),
         (
             "CALENDAR_LOOKAHEAD_DAYS",
             {
                 "section": "Calendar",
-                "label": "Calendar Lookahead Days",
-                "description": "Future horizon for placeholder eligibility: >0 uses that many days, 0 disables future lookahead, -1 enables infinite lookahead.",
+                "label": "Calendar lookahead days (Coming Soon window)",
+                "description": (
+                    "How far ahead Placeholdarr creates and keeps Coming Soon placeholders for releases that are not yet available in your library. "
+                    "Set to 0 to disable Coming Soon placeholders entirely. Use a positive number for a day cap (e.g. 30). Use -1 for unlimited lookahead within your release-date rules."
+                ),
                 "type": "int",
                 "min": -1,
                 "restart_required": False,
@@ -310,81 +413,82 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "CALENDAR_SYNC_INTERVAL_HOURS",
             {
                 "section": "Calendar",
-                "label": "Calendar Sync Interval Hours",
-                "description": "Independent calendar/date-refresh scheduler cadence in hours. Set to 0 to disable this scheduler.",
+                "label": "Calendar sync interval (hours)",
+                "description": "How often the calendar/date refresh job runs. Set to 0 to disable this scheduler.",
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
             },
         ),
         (
+            "CALENDAR_LOOKAHEAD_DUMMY_MODE",
+            {
+                "section": "Calendar",
+                "label": "Dummy .mp4 for Coming Soon placeholders",
+                "description": (
+                    "Coming Soon placeholders need a small video file to stand in for a real rip. Under Paths you set full paths—often something like dummy.mp4 (standard) "
+                    "and optionally coming_soon_dummy.mp4 (alternate). Here you choose which Paths entry feeds those placeholders: always the standard file, "
+                    "or the Coming Soon path when you have configured one."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "primary", "label": "Standard dummy (e.g. dummy.mp4 — Dummy File Path)"},
+                    {"value": "coming_soon", "label": "Coming Soon dummy (e.g. coming_soon_dummy.mp4 — when that path is set)"},
+                ],
+            },
+        ),
+        (
+            "PREFERRED_MOVIE_DATE_TYPE",
+            {
+                "section": "Calendar",
+                "label": "Movie release type for Coming Soon placeholders",
+                "description": (
+                    "Pick one release-date field from Radarr (theatrical, digital, or physical). Placeholdarr uses only that date for movies: "
+                    "once it falls inside your calendar lookahead window, it can create Coming Soon placeholders; outside the window it stays in Request (or similar) until the date moves in range. "
+                    "Other release types are not used as a fallback—only the type you choose here."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "inCinemas", "label": "Theatrical / in cinemas"},
+                    {"value": "digitalRelease", "label": "Digital release"},
+                    {"value": "physicalRelease", "label": "Physical / home release"},
+                ],
+            },
+        ),
+        (
+            "CALENDAR_PLACEHOLDER_MODE",
+            {
+                "section": "Calendar",
+                "label": "TV placeholder granularity",
+                "description": "Episode: add placeholders as each episode enters the window. Season: add all known episodes in a season when any episode enters the window.",
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "episode", "label": "Episode — per episode as it enters lookahead"},
+                    {"value": "season", "label": "Season — whole season when one episode qualifies"},
+                ],
+            },
+        ),
+        (
             "ENABLE_COMING_SOON_COUNTDOWN",
             {
                 "section": "Calendar",
-                "label": "Enable Coming Soon Countdown",
+                "label": "Enable Coming Soon countdown text",
                 "description": "Show countdown wording in Coming Soon status metadata (for example, \"in 12 days\").",
                 "type": "bool",
                 "restart_required": False,
             },
         ),
         (
-            "ENABLE_IMPORT_EVENT_HANDLERS",
+            "EPISODES_LOOKAHEAD",
             {
-                "section": "Automation",
-                "label": "Enable Import Event Handlers",
-                "description": "Process import webhooks (ARR/media server) and automatically reconcile placeholders when real files arrive.",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "ENABLE_DELETE_EVENT_HANDLERS",
-            {
-                "section": "Automation",
-                "label": "Enable Delete Event Handlers",
-                "description": "Process delete webhooks and recreate placeholders when media files are removed.",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "ENABLE_PLAYBACK_EVENT_HANDLERS",
-            {
-                "section": "Automation",
-                "label": "Enable Playback Event Handlers",
-                "description": "Enable playback-triggered ARR searches from webhook events (Tautulli/Jellyfin/Emby).",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "ENABLE_PLAYBACK_FALLBACK_SEARCH",
-            {
-                "section": "Automation",
-                "label": "Enable Playback Fallback Search",
-                "description": "When playback handlers are enabled, schedule delayed fallback searches if the preferred instance still has not imported the title.",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "ENABLE_QUEUE_MONITOR",
-            {
-                "section": "Automation",
-                "label": "Enable Queue Monitor",
-                "description": "Continuously poll ARR queues after playback searches and update placeholder status as jobs progress.",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "QUEUE_MONITOR_RETRY_GRACE_SECONDS",
-            {
-                "section": "Automation",
-                "label": "Queue Retry Grace Seconds",
-                "description": "Grace period after a queue item disappears before classifying it as failed/missing, to avoid transient false negatives.",
+                "section": "Playback",
+                "label": "Playback search episode lookahead",
+                "description": "How many upcoming episodes Placeholdarr may consider when playback triggers an ARR search for a series.",
                 "type": "int",
-                "min": 30,
+                "min": 1,
                 "restart_required": False,
             },
         ),
@@ -392,8 +496,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLAYBACK_COOLDOWN",
             {
                 "section": "Playback",
-                "label": "Playback Cooldown Seconds",
-                "description": "Deduplication window for repeated playback events on the same title. Set 0 to disable cooldown.",
+                "label": "Playback cooldown (seconds)",
+                "description": "Deduplication window for repeated playback events on the same title. Set to 0 to disable.",
                 "type": "int",
                 "min": 0,
                 "restart_required": False,
@@ -403,8 +507,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "CHECK_INTERVAL",
             {
                 "section": "Advanced",
-                "label": "Queue Check Interval Seconds",
-                "description": "Background queue polling cadence in seconds. Lower values react faster but increase API traffic.",
+                "label": "Queue check interval (seconds)",
+                "description": "Background queue polling cadence. Lower values react faster but increase API traffic.",
                 "type": "int",
                 "min": 1,
                 "restart_required": True,
@@ -414,21 +518,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "WORKER_COUNT",
             {
                 "section": "Advanced",
-                "label": "Worker Threads",
-                "description": "Number of worker threads launched at startup for asynchronous jobs. Increase cautiously based on host resources.",
+                "label": "Worker threads",
+                "description": "Worker threads for asynchronous jobs. Increase cautiously for your host.",
                 "type": "int",
                 "min": 1,
-                "restart_required": True,
-            },
-        ),
-        (
-            "FULL_SYNC_INTERVAL_HOURS",
-            {
-                "section": "Advanced",
-                "label": "Full Sync Interval Hours",
-                "description": "Recurring full-sync cadence in hours. Set 0 to disable recurring full sync jobs.",
-                "type": "int",
-                "min": 0,
                 "restart_required": True,
             },
         ),
@@ -484,6 +577,13 @@ def _validate_value(key: str, raw_value: Any) -> Any:
         value = _coerce_url(raw_value)
     elif value_type == "path":
         value = _coerce_path(raw_value)
+    elif value_type == "choice":
+        value = str(raw_value or "").strip()
+        allowed = [str(o["value"]) for o in meta.get("options", [])]
+        if not allowed:
+            raise ValueError("choice field missing options")
+        if value not in allowed:
+            raise ValueError(f"must be one of: {', '.join(allowed)}")
     else:
         value = str(raw_value or "").strip()
     if bool(meta.get("required", False)) and _is_blank(value):
@@ -547,21 +647,29 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped.setdefault(meta["section"], [])
             row = _get_row(session, key)
             effective_value = getattr(settings, key, row.value if row else None)
-            grouped[meta["section"]].append(
-                {
-                    "key": key,
-                    "section": meta["section"],
-                    "label": meta["label"],
-                    "description": meta["description"],
-                    "type": meta["type"],
-                    "required": bool(meta.get("required", False)),
-                    "secret": bool(meta.get("secret", False)),
-                    "restart_required": bool(meta.get("restart_required", False)),
-                    "value": "" if bool(meta.get("secret", False)) else effective_value,
-                    "saved_value": None if bool(meta.get("secret", False)) else (row.value if row else None),
-                    "has_saved_value": bool((row and row.value not in (None, ""))),
-                }
-            )
+            if _is_blank(effective_value):
+                appdata = str(getattr(settings, "APPDATA_PATH", "/config") or "/config").strip() or "/config"
+                appdata = appdata.rstrip("/")
+                if key == "DUMMY_FILE_PATH":
+                    effective_value = f"{appdata}/dummy.mp4"
+                elif key == "COMING_SOON_DUMMY_FILE_PATH":
+                    effective_value = f"{appdata}/coming_soon_dummy.mp4"
+            entry: dict[str, Any] = {
+                "key": key,
+                "section": meta["section"],
+                "label": meta["label"],
+                "description": meta["description"],
+                "type": meta["type"],
+                "required": bool(meta.get("required", False)),
+                "secret": bool(meta.get("secret", False)),
+                "restart_required": bool(meta.get("restart_required", False)),
+                "value": "" if bool(meta.get("secret", False)) else effective_value,
+                "saved_value": None if bool(meta.get("secret", False)) else (row.value if row else None),
+                "has_saved_value": bool((row and row.value not in (None, ""))),
+            }
+            if meta["type"] == "choice":
+                entry["options"] = list(meta.get("options") or [])
+            grouped[meta["section"]].append(entry)
         return {
             "status": get_onboarding_status(session=session),
             "sections": [{"name": name, "fields": fields} for name, fields in grouped.items()],
@@ -571,7 +679,7 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             session.close()
 
 
-def save_settings(values: dict[str, Any], session=None) -> dict[str, Any]:
+def save_settings(values: dict[str, Any], session=None, partial: bool = False) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     errors: dict[str, str] = {}
@@ -592,10 +700,57 @@ def save_settings(values: dict[str, Any], session=None) -> dict[str, Any]:
                         validated[key] = runtime_value
                     else:
                         validated[key] = _validate_value(key, raw_value)
+                elif key in {"PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"} and _is_blank(raw_value):
+                    validated[key] = None
                 else:
                     validated[key] = _validate_value(key, raw_value)
             except Exception as exc:
                 errors[key] = str(exc)
+
+        enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
+        if enable_plex:
+            plex_required = {
+                "PLEX_URL": "is required when Plex is enabled",
+                "PLEX_TOKEN": "is required when Plex is enabled",
+                "PLEX_MOVIE_SECTION_ID": "is required when Plex is enabled",
+                "PLEX_TV_SECTION_ID": "is required when Plex is enabled",
+            }
+            for required_key, message in plex_required.items():
+                value = validated.get(required_key, getattr(settings, required_key, None))
+                if _is_blank(value):
+                    errors[required_key] = message
+
+            for section_key in ("PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"):
+                value = validated.get(section_key, getattr(settings, section_key, None))
+                if _is_blank(value):
+                    continue
+                try:
+                    if int(value) <= 0:
+                        errors[section_key] = "must be a positive integer"
+                except Exception:
+                    errors[section_key] = "must be a positive integer"
+
+        arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
+        if arr_instances_json:
+            try:
+                payload = json.loads(arr_instances_json)
+                if not isinstance(payload, list):
+                    raise ValueError("must be a JSON array")
+                for index, item in enumerate(payload):
+                    if not isinstance(item, dict):
+                        raise ValueError(f"item {index + 1} must be an object")
+                    arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+                    if arr_type not in {"radarr", "sonarr"}:
+                        raise ValueError(f"item {index + 1} requires arr_type of 'radarr' or 'sonarr'")
+                    instance_key = str(item.get("instance_key") or item.get("key") or item.get("name") or "").strip()
+                    if not instance_key:
+                        raise ValueError(f"item {index + 1} requires instance_key (or key/name)")
+                    url = str(item.get("url") or "").strip()
+                    api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
+                    if not url or not api_key:
+                        raise ValueError(f"item {index + 1} requires url and api_key")
+            except Exception as exc:
+                errors["ARR_INSTANCES_JSON"] = str(exc)
 
         if errors:
             return {"ok": False, "errors": errors}
@@ -625,20 +780,22 @@ def save_settings(values: dict[str, Any], session=None) -> dict[str, Any]:
             if bool(meta.get("restart_required", False)):
                 restart_required_keys.append(key)
 
-        setup_row = _get_row(session, SETUP_COMPLETED_KEY)
-        setup_value = datetime.now(timezone.utc).isoformat()
-        if not setup_row:
-            setup_row = AppConfig(
-                key=SETUP_COMPLETED_KEY,
-                value=setup_value,
-                value_type="string",
-                restart_required=False,
-                description="Marks completion of first-run settings setup.",
-            )
-            session.add(setup_row)
-        else:
-            setup_row.value = setup_value
-            session.add(setup_row)
+        # Only mark onboarding as completed when this is not a partial save.
+        if not partial:
+            setup_row = _get_row(session, SETUP_COMPLETED_KEY)
+            setup_value = datetime.now(timezone.utc).isoformat()
+            if not setup_row:
+                setup_row = AppConfig(
+                    key=SETUP_COMPLETED_KEY,
+                    value=setup_value,
+                    value_type="string",
+                    restart_required=False,
+                    description="Marks completion of first-run settings setup.",
+                )
+                session.add(setup_row)
+            else:
+                setup_row.value = setup_value
+                session.add(setup_row)
 
         session.commit()
         return {

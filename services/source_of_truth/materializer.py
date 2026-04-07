@@ -16,6 +16,7 @@ from services.placeholders import (
     episode_placeholder_path,
     movie_placeholder_path,
     ensure_series_nfo,
+    resolve_calendar_variant_dummy_path,
 )
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
@@ -37,7 +38,7 @@ REQUEST_REASON = "placeholder_request"
 def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
     """Return 'coming_soon' or 'request' for dummy file selection at episode creation time."""
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-    if not bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True)):
+    if not settings.coming_soon_placeholders_enabled:
         return "request"
     if lookahead_days <= 0:
         return "request"
@@ -53,7 +54,7 @@ def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
 def _compute_initial_dummy_variant_for_movie(movie: Movie) -> str:
     """Return 'coming_soon' or 'request' for dummy file selection at movie creation time."""
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-    if not bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True)):
+    if not settings.coming_soon_placeholders_enabled:
         return "request"
     if lookahead_days <= 0:
         return "request"
@@ -74,10 +75,25 @@ def _compute_initial_dummy_variant_for_movie(movie: Movie) -> str:
 
 def _dummy_file_path_for_variant(variant: str) -> str:
     """Return the configured dummy file path for the given variant."""
-    coming_soon_dummy = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
-    if variant == "coming_soon" and coming_soon_dummy:
-        return coming_soon_dummy
-    return str(getattr(settings, "DUMMY_FILE_PATH", "") or "")
+    return resolve_calendar_variant_dummy_path(variant)
+
+
+def _activity_reason_from_observation_source(source: str) -> str:
+    token = str(source or "").strip().lower()
+    mapping = {
+        "full_sync_materialization": "Library sync",
+        "startup_lite_materialization": "Library sync",
+        "event_series_add": "Series added",
+        "event_movie_add": "Movie added",
+        "event_movie_file_deleted": "Real file deleted",
+        "event_episode_file_deleted": "Real file deleted",
+        "event_movie_deleted": "Media deleted",
+        "event_series_deleted": "Media deleted",
+        "event_movie_imported_grace_finalize": "Import completed",
+        "event_episode_imported_grace_finalize": "Import completed",
+        "event_materialization": "Event materialization",
+    }
+    return mapping.get(token, "Materialization run")
 
 
 def _apply_initial_status_for_placeholder(session, *, placeholder_id: int, event_type: str = "creation") -> None:
@@ -133,6 +149,7 @@ def _mark_placeholder_row_active(
     series_id: int | None = None,
     season_id: int | None = None,
     calendar_dummy_variant: str | None = None,
+    activity_reason: str | None = None,
 ) -> None:
     q = session.query(Placeholder)
     if movie_id is not None:
@@ -187,6 +204,10 @@ def _mark_placeholder_row_active(
     # observation round cannot affect the new pass (e.g. plex_metadata_ready_seen).
     extra = dict(getattr(row, 'extra', {}) or {})
     extra.pop('plex_metadata_ready_seen', None)
+    if activity_reason:
+        extra['create_reason'] = str(activity_reason)
+        extra['last_action_reason'] = str(activity_reason)
+        extra['last_action'] = 'created'
     if calendar_dummy_variant:
         extra['calendar_dummy_variant'] = calendar_dummy_variant
     row.extra = extra
@@ -195,7 +216,13 @@ def _mark_placeholder_row_active(
     session.add(row)
 
 
-def _mark_placeholder_rows_deleted(session, *, movie_id: int | None, episode_id: int | None) -> list[str]:
+def _mark_placeholder_rows_deleted(
+    session,
+    *,
+    movie_id: int | None,
+    episode_id: int | None,
+    activity_reason: str | None = None,
+) -> list[str]:
     q = session.query(Placeholder)
     if movie_id is not None:
         q = q.filter(Placeholder.movie_id == movie_id)
@@ -221,12 +248,18 @@ def _mark_placeholder_rows_deleted(session, *, movie_id: int | None, episode_id:
         row.emby_id_observed_at = None
         row.media_lookup_error = None
         row.media_lookup_last_attempt_at = None
+        extra = dict(getattr(row, 'extra', {}) or {})
+        if activity_reason:
+            extra['delete_reason'] = str(activity_reason)
+            extra['last_action_reason'] = str(activity_reason)
+            extra['last_action'] = 'deleted'
+        row.extra = extra
         row.updated_at = func.now()
         session.add(row)
     return paths
 
 
-def apply_movie_materialization(movie_id: int, session=None) -> dict[str, Any]:
+def apply_movie_materialization(movie_id: int, session=None, activity_reason: str | None = None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     try:
@@ -245,7 +278,14 @@ def apply_movie_materialization(movie_id: int, session=None) -> dict[str, Any]:
             movie.has_placeholder = True
             movie.placeholder_filepath = target_path
             movie.updated_at = func.now()
-            _mark_placeholder_row_active(session, movie_id=movie.id, episode_id=None, path=target_path, calendar_dummy_variant=_initial_variant)
+            _mark_placeholder_row_active(
+                session,
+                movie_id=movie.id,
+                episode_id=None,
+                path=target_path,
+                calendar_dummy_variant=_initial_variant,
+                activity_reason=activity_reason,
+            )
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
             
             # Apply initial status for the created placeholder
@@ -269,7 +309,12 @@ def apply_movie_materialization(movie_id: int, session=None) -> dict[str, Any]:
             }
 
         if determination == DETERMINATION_OBSOLETE:
-            candidate_paths = _mark_placeholder_rows_deleted(session, movie_id=movie.id, episode_id=None)
+            candidate_paths = _mark_placeholder_rows_deleted(
+                session,
+                movie_id=movie.id,
+                episode_id=None,
+                activity_reason=activity_reason,
+            )
             if getattr(movie, "placeholder_filepath", None):
                 candidate_paths.append(movie.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
@@ -305,7 +350,7 @@ def apply_movie_materialization(movie_id: int, session=None) -> dict[str, Any]:
             session.close()
 
 
-def apply_episode_materialization(episode_id: int, session=None) -> dict[str, Any]:
+def apply_episode_materialization(episode_id: int, session=None, activity_reason: str | None = None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     try:
@@ -347,6 +392,7 @@ def apply_episode_materialization(episode_id: int, session=None) -> dict[str, An
                 series_id=series.id,
                 season_id=season.id,
                 calendar_dummy_variant=_initial_variant,
+                activity_reason=activity_reason,
             )
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
             
@@ -372,7 +418,12 @@ def apply_episode_materialization(episode_id: int, session=None) -> dict[str, An
             }
 
         if determination == DETERMINATION_OBSOLETE:
-            candidate_paths = _mark_placeholder_rows_deleted(session, movie_id=None, episode_id=episode.id)
+            candidate_paths = _mark_placeholder_rows_deleted(
+                session,
+                movie_id=None,
+                episode_id=episode.id,
+                activity_reason=activity_reason,
+            )
             if getattr(episode, "placeholder_filepath", None):
                 candidate_paths.append(episode.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
@@ -448,9 +499,10 @@ def _run_materialization_for_ids(
     delete_refresh_paths: set[str] = set()
     stats["movies_considered"] = len(movie_ids)
     stats["episodes_considered"] = len(episode_ids)
+    activity_reason = _activity_reason_from_observation_source(observation_source)
 
     for movie_id in movie_ids:
-        result = apply_movie_materialization(movie_id, session=session)
+        result = apply_movie_materialization(movie_id, session=session, activity_reason=activity_reason)
         if not result.get("ok"):
             stats["errors"] += 1
             logger.error(
@@ -497,7 +549,7 @@ def _run_materialization_for_ids(
             stats["noop"] += 1
 
     for episode_id in episode_ids:
-        result = apply_episode_materialization(episode_id, session=session)
+        result = apply_episode_materialization(episode_id, session=session, activity_reason=activity_reason)
         if not result.get("ok"):
             stats["errors"] += 1
             logger.error(

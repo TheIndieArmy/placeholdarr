@@ -58,7 +58,7 @@ class StatusOrchestrator:
         newly created future items are not stuck as REQUEST until a later calendar pass.
         """
         lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-        placeholders_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True))
+        placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
         countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
         now_date = datetime.now(timezone.utc).date()
 

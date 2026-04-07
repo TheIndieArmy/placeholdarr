@@ -78,15 +78,69 @@ def _as_int(value, default: int = 0) -> int:
 
 
 def _extract_image_url(entry: Dict, cover_types: tuple[str, ...]) -> str | None:
+    normalized_cover_types = {str(ct or '').strip().lower() for ct in cover_types}
+
+    # Some ARR payloads expose artwork as top-level convenience fields.
+    if {'fanart', 'background', 'backdrop'} & normalized_cover_types:
+        top_fanart = entry.get('remoteFanart') or entry.get('fanart') or entry.get('backdrop')
+        if top_fanart:
+            return str(top_fanart)
+    if 'banner' in normalized_cover_types:
+        top_banner = entry.get('remoteBanner') or entry.get('banner')
+        if top_banner:
+            return str(top_banner)
+
     images = entry.get('images') or []
     for img in images:
         if not isinstance(img, dict):
             continue
-        if str(img.get('coverType') or '').lower() in cover_types:
+        cover_type = str(img.get('coverType') or '').strip().lower()
+        if cover_type in normalized_cover_types:
             url = img.get('remoteUrl') or img.get('url')
             if url:
                 return str(url)
     return None
+
+
+def _fill_missing_movie_art(fields: Dict, movie_entry: Dict, base_url: str, api_key: str) -> Dict:
+    if fields.get('remote_poster') and fields.get('remote_fanart'):
+        return fields
+    movie_id = movie_entry.get('id')
+    if not movie_id:
+        return fields
+    detail_entry = fetch_radarr_movie(int(movie_id), base_url, api_key)
+    if not isinstance(detail_entry, dict):
+        return fields
+
+    if not fields.get('remote_poster'):
+        fields['remote_poster'] = _extract_poster_url(detail_entry)
+    if not fields.get('remote_fanart'):
+        fields['remote_fanart'] = _extract_image_url(detail_entry, ('fanart', 'background', 'backdrop'))
+    if isinstance(fields.get('radarr_payload_raw'), dict):
+        fields['radarr_payload_raw'] = detail_entry
+    return fields
+
+
+def _fill_missing_series_art(fields: Dict, series_entry: Dict, base_url: str, api_key: str) -> Dict:
+    has_backdrop_like = bool(fields.get('remote_fanart') or fields.get('remote_banner'))
+    if fields.get('remote_poster') and has_backdrop_like:
+        return fields
+    series_id = series_entry.get('id')
+    if not series_id:
+        return fields
+    detail_entry = fetch_sonarr_series_item(int(series_id), base_url, api_key)
+    if not isinstance(detail_entry, dict):
+        return fields
+
+    if not fields.get('remote_poster'):
+        fields['remote_poster'] = _extract_poster_url(detail_entry)
+    if not fields.get('remote_fanart'):
+        fields['remote_fanart'] = _extract_image_url(detail_entry, ('fanart', 'background', 'backdrop'))
+    if not fields.get('remote_banner'):
+        fields['remote_banner'] = _extract_image_url(detail_entry, ('banner',))
+    if isinstance(fields.get('sonarr_payload_raw'), dict):
+        fields['sonarr_payload_raw'] = detail_entry
+    return fields
 
 
 def _resolve_episode_file_payload(entry: Dict, base_url: str, api_key: str) -> Dict:
@@ -480,6 +534,7 @@ def run_full_sync(
                 seen_tmdbids = set()
                 for movie in movies:
                     fields = _movie_fields(movie, sync_is_4k, sync_instance_key)
+                    fields = _fill_missing_movie_art(fields, movie, base_url, api_key)
                     if not fields['tmdbid']:
                         continue
                     seen_tmdbids.add(fields['tmdbid'])
@@ -505,6 +560,7 @@ def run_full_sync(
 
                 for series_entry in series_items:
                     s_fields = _series_fields(series_entry, sync_is_4k, sync_instance_key)
+                    s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
                     if not s_fields['tvdbid']:
                         continue
 

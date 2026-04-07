@@ -6,6 +6,7 @@ import glob as _glob
 import re
 import unicodedata
 from datetime import date, datetime, timezone, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -38,6 +39,14 @@ def _arr_base_url(item_type: str, instance_key: str, is_4k: bool) -> str:
         return normalized.rstrip("/")
 
     key = str(instance_key or "").strip().lower()
+    target_type = "radarr" if item_type == "movie" else "sonarr"
+
+    for item in (getattr(settings, "configured_arr_instances", []) or []):
+        item_key = str(item.get("instance_key") or "").strip().lower()
+        item_type_key = str(item.get("arr_type") or "").strip().lower()
+        if key and item_key == key and item_type_key == target_type:
+            return _normalize_ui_base(str(item.get("url") or ""))
+
     if item_type == "movie":
         if is_4k or key == str(getattr(settings, "RADARR_4K_INSTANCE_KEY", "radarr_4k")).strip().lower():
             return _normalize_ui_base(str(getattr(settings, "RADARR_4K_URL", "") or ""))
@@ -338,12 +347,497 @@ async def stats():
         session.close()
 
 
+def _humanize_job_type(job_type: str) -> str:
+    """Convert internal job type names to user-friendly display names."""
+    mapping = {
+        "full_sync": "Full Library Sync",
+        "lite_sync": "Quick Sync",
+        "placeholder_sweep": "Placeholder Maintenance",
+        "fs_scan": "Filesystem Scan",
+        "calendar_date_refresh": "Calendar Update",
+        "enrich_series": "Series Enrichment",
+        "determination": "Status Analysis",
+        "status_reconcile": "Status Reconciliation",
+        "materialization": "Placeholder Creation",
+        "webhook_event": "Webhook Event",
+        "status_projection": "Status Projection",
+        "nfo_refresh": "Metadata Refresh",
+        "import_grace": "Import Grace Check",
+        "playback_fallback": "Playback Fallback",
+    }
+    normalized = str(job_type or "").strip().lower()
+    return mapping.get(normalized, _humanize_snake_case(normalized))
+
+
+def _humanize_snake_case(value: str | None) -> str:
+    token = str(value or "").strip().replace("-", "_")
+    if not token:
+        return "Unknown"
+    return " ".join(part.capitalize() for part in token.split("_") if part)
+
+
+def _humanize_event_type(event_type: str | None) -> str:
+    mapping = {
+        "series_add": "Series Added",
+        "seriesadd": "Series Added",
+        "movie_added": "Movie Added",
+        "movie_imported": "Movie Imported",
+        "episode_imported": "Episode Imported",
+        "movie_file_deleted": "Movie File Removed",
+        "episode_file_deleted": "Episode File Removed",
+        "movie_deleted": "Movie Removed",
+        "series_deleted": "Series Removed",
+        "playback_start": "Playback Started",
+        "playback_stop": "Playback Stopped",
+    }
+    normalized = str(event_type or "").strip().lower()
+    return mapping.get(normalized, _humanize_snake_case(normalized))
+
+
+def _humanize_placeholder_status(status: str | None) -> str:
+    mapping = {
+        "created": "Created",
+        "active": "Active",
+        "activated": "Activated",
+        "deleted": "Deleted",
+        "missing": "Missing",
+        "replaced": "Replaced",
+        "obsolete": "Obsolete",
+        "pending_observation": "Awaiting Confirmation",
+        "resolved": "Resolved",
+        "unresolved": "Unresolved",
+    }
+    normalized = str(status or "").strip().lower()
+    if not normalized:
+        return "Unknown"
+    return mapping.get(normalized, _humanize_snake_case(normalized))
+
+
+def _humanize_placeholder_reason(reason: str | None, *, action: str | None = None) -> str:
+    mapping = {
+        "file_acquired": "Real file acquired",
+        "no_longer_needed": "No longer needed",
+        "manual_removal": "Manually removed",
+        "replaced_by_file": "Replaced by file",
+        "cleanup": "System cleanup",
+        "obsolete": "Marked obsolete",
+        "fs_deleted": "File removed from disk",
+        "media_server_deleted": "Removed from media server",
+        "placeholder_requested": "Placeholder requested",
+        "import_grace": "Import grace period",
+    }
+    normalized = str(reason or "").strip().lower()
+    if normalized:
+        return mapping.get(normalized, _humanize_snake_case(normalized))
+    return "Placeholder removed" if action == "Deleted" else "Placeholder created"
+
+
+def _is_user_relevant_event(event_type: str) -> bool:
+    """Return True if event is user-relevant; hide noisy internal events."""
+    hidden_types = {
+        "queue_monitor",
+        "api_connectivity",
+        "heartbeat",
+        "health_check",
+        "polling",
+        "internal_state_update",
+        "cache_refresh",
+        "db_check",
+        "worker_ping",
+        "unknown",
+        "playback_start",
+        "playback_stop",
+    }
+    return str(event_type or "").strip().lower() not in hidden_types
+
+
+def _is_user_relevant_job(job_type: str, status: str | None = None) -> bool:
+    token = str(job_type or "").strip().lower()
+    if str(status or "").upper() == "FAILED":
+        return True
+    noisy = {
+        "webhook_event",
+        "status_projection",
+        "nfo_refresh",
+        "determination",
+        "materialization",
+        "status_reconcile",
+        "calendar_date_refresh",
+        "import_grace",
+        "playback_fallback",
+        "observation_trail",
+        "placeholder_observation_trail",
+    }
+    return token not in noisy
+
+
+def _humanize_activity_reason(reason: str | None) -> str:
+    mapping = {
+        "library sync": "Library sync",
+        "series added": "Series added",
+        "movie added": "Movie added",
+        "real file deleted": "Real file deleted",
+        "media deleted": "Media deleted",
+        "import completed": "Import completed",
+        "event materialization": "Event processing",
+        "materialization run": "Materialization",
+    }
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "Unknown"
+    return mapping.get(text, _humanize_snake_case(text))
+
+
+def _infer_reason_from_recent_events(
+    session,
+    *,
+    when_dt: datetime | None,
+    movie: Movie | None,
+    episode: Episode | None,
+) -> str | None:
+    anchor = _to_utc(when_dt)
+    if not anchor:
+        return None
+    window_start = anchor - timedelta(minutes=45)
+    window_end = anchor + timedelta(minutes=45)
+    candidates = (
+        session.query(EventLog.event_type, EventLog.payload, EventLog.created_at)
+        .filter(EventLog.created_at >= window_start, EventLog.created_at <= window_end)
+        .order_by(EventLog.created_at.desc())
+        .limit(80)
+        .all()
+    )
+    movie_arr_id = int(getattr(movie, "radarrid", 0) or 0) if movie else 0
+    episode_arr_id = int(getattr(episode, "sonarrid", 0) or 0) if episode else 0
+    for event_type, payload, _ in candidates:
+        p = payload if isinstance(payload, dict) else {}
+        normalized = str(event_type or "").strip().lower()
+        if movie_arr_id:
+            movie_obj = p.get("movie") if isinstance(p.get("movie"), dict) else {}
+            payload_movie_id = movie_obj.get("id") or p.get("movieId") or p.get("movie_id")
+            if payload_movie_id and int(payload_movie_id) == movie_arr_id:
+                if normalized == "movie_file_deleted":
+                    return "Real file deleted"
+                if normalized in {"movie_added", "movie_imported"}:
+                    return "Movie added"
+        if episode_arr_id:
+            episodes = p.get("episodes") if isinstance(p.get("episodes"), list) else []
+            episode_match = False
+            for ep in episodes:
+                if not isinstance(ep, dict):
+                    continue
+                ep_id = ep.get("id") or ep.get("episodeId") or ep.get("episode_id")
+                if ep_id and int(ep_id) == episode_arr_id:
+                    episode_match = True
+                    break
+            if episode_match:
+                if normalized == "episode_file_deleted":
+                    return "Real file deleted"
+                if normalized == "episode_imported":
+                    return "Import completed"
+                if normalized in {"series_added", "series_add", "seriesadd"}:
+                    return "Series added"
+    return None
+
+
+def _to_utc(value: datetime | None) -> datetime | None:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _safe_window(start: datetime | None, end: datetime | None) -> tuple[datetime | None, datetime | None]:
+    start_utc = _to_utc(start)
+    end_utc = _to_utc(end)
+    if start_utc and end_utc and end_utc < start_utc:
+        return end_utc, start_utc
+    return start_utc, end_utc
+
+
+def _extract_series_ids_from_payload(payload: dict[str, Any]) -> tuple[int | None, int | None]:
+    series_id_db = None
+    series_id_arr = None
+    for key in ("series_id", "seriesId"):
+        raw = payload.get(key)
+        if raw is not None:
+            try:
+                series_id_db = int(raw)
+                break
+            except Exception:
+                pass
+    series_obj = payload.get("series") if isinstance(payload.get("series"), dict) else {}
+    for key in ("id", "series_id", "seriesId"):
+        raw = series_obj.get(key)
+        if raw is not None:
+            try:
+                series_id_arr = int(raw)
+                break
+            except Exception:
+                pass
+    if series_id_arr is None:
+        for key in ("sonarr_series_id", "sonarrSeriesId"):
+            raw = payload.get(key)
+            if raw is not None:
+                try:
+                    series_id_arr = int(raw)
+                    break
+                except Exception:
+                    pass
+    return series_id_db, series_id_arr
+
+
+def _extract_placeholder_ids(payload: dict[str, Any]) -> set[int]:
+    raw_ids = payload.get("placeholder_ids") if isinstance(payload.get("placeholder_ids"), list) else []
+    result: set[int] = set()
+    for pid in raw_ids:
+        try:
+            result.add(int(pid))
+        except Exception:
+            continue
+    return result
+
+
+def _coerce_step_status(raw_status: str | None) -> str:
+    token = str(raw_status or "").strip().upper()
+    if token in {"FAILED", "ERROR"}:
+        return "failed"
+    if token in {"DONE", "SUCCESS", "COMPLETED"}:
+        return "done"
+    if token in {"CLAIMED", "WORKING", "RUNNING", "PENDING", "IN_PROGRESS"}:
+        return "working"
+    return "pending"
+
+
+def _merge_step_status(current: str, incoming: str) -> str:
+    if incoming == "failed" or current == "failed":
+        return "failed"
+    if incoming == "working" and current in {"pending", "done"}:
+        return "working"
+    if incoming == "done" and current == "pending":
+        return "done"
+    return current
+
+
+def _build_series_add_summary_row(session, event_row: dict[str, Any]) -> dict[str, Any]:
+    payload = event_row.get("payload") if isinstance(event_row.get("payload"), dict) else {}
+    series_payload = payload.get("series") if isinstance(payload.get("series"), dict) else {}
+    series_title = str(series_payload.get("title") or "Series").strip() or "Series"
+    sonarr_series_id = series_payload.get("id")
+
+    series_db_id = None
+    if sonarr_series_id is not None:
+        row = session.query(Series.id).filter(Series.sonarrid == sonarr_series_id).order_by(Series.updated_at.desc()).first()
+        if row:
+            series_db_id = row[0]
+
+    event_time = _to_utc(event_row.get("created_at"))
+    window_end = (event_time + timedelta(minutes=45)) if event_time else None
+
+    created_episode_count = 0
+    created_placeholder_ids: set[int] = set()
+    if series_db_id is not None and event_time and window_end:
+        created_rows = (
+            session.query(Placeholder.id)
+            .filter(
+                Placeholder.series_id == int(series_db_id),
+                Placeholder.created_at >= event_time,
+                Placeholder.created_at <= window_end,
+            )
+            .all()
+        )
+        created_placeholder_ids = {int(row[0]) for row in created_rows}
+        created_episode_count = len(created_placeholder_ids)
+
+    step_status = {
+        "materialization": "pending",
+        "observation": "pending",
+        "status_update": "pending",
+    }
+    step_labels = {
+        "materialization": "Materialization",
+        "observation": "Observation",
+        "status_update": "Status update",
+    }
+    step_job_types = {
+        "materialization": {"materialization"},
+        "observation": {"placeholder_observation_trail", "observation_trail"},
+        "status_update": {"status_projection", "status_reconcile"},
+    }
+
+    matched_jobs = 0
+    if event_time and window_end:
+        related_jobs = (
+            session.query(Job.job_type, Job.status, Job.payload, Job.created_at, Job.updated_at)
+            .filter(
+                or_(
+                    and_(Job.created_at >= event_time, Job.created_at <= window_end),
+                    and_(Job.updated_at >= event_time, Job.updated_at <= window_end),
+                )
+            )
+            .all()
+        )
+        for job_type, job_status, job_payload, _, _ in related_jobs:
+            payload = job_payload if isinstance(job_payload, dict) else {}
+            payload_series_db_id, payload_series_arr_id = _extract_series_ids_from_payload(payload)
+            payload_placeholders = _extract_placeholder_ids(payload)
+            source = str(payload.get("source") or "").strip().lower()
+
+            matches_series = False
+            if series_db_id is not None and payload_series_db_id is not None and payload_series_db_id == int(series_db_id):
+                matches_series = True
+            if sonarr_series_id is not None and payload_series_arr_id is not None and int(payload_series_arr_id) == int(sonarr_series_id):
+                matches_series = True
+            if created_placeholder_ids and payload_placeholders and (payload_placeholders & created_placeholder_ids):
+                matches_series = True
+            if source.startswith("event_series_add"):
+                matches_series = True
+
+            if not matches_series:
+                continue
+
+            matched_jobs += 1
+            normalized_job_type = str(job_type or "").strip().lower()
+            normalized_status = _coerce_step_status(job_status)
+            for step_key, accepted_job_types in step_job_types.items():
+                if normalized_job_type in accepted_job_types:
+                    step_status[step_key] = _merge_step_status(step_status[step_key], normalized_status)
+                    break
+
+    if created_episode_count > 0 and step_status["materialization"] == "pending":
+        step_status["materialization"] = "done"
+    if created_episode_count == 0 and step_status["materialization"] == "pending":
+        step_status["materialization"] = "skipped"
+
+    status_parts = []
+    for step_key in ("materialization", "observation", "status_update"):
+        token = step_status[step_key]
+        label = step_labels[step_key]
+        if token == "done":
+            status_parts.append(f"{label}: Complete")
+        elif token == "working":
+            status_parts.append(f"{label}: Running")
+        elif token == "failed":
+            status_parts.append(f"{label}: Failed")
+        elif token == "skipped":
+            status_parts.append(f"{label}: Not needed")
+        else:
+            status_parts.append(f"{label}: Pending")
+
+    event_status = str(event_row.get("status") or "").strip().upper()
+    any_failed = any(state == "failed" for state in step_status.values())
+    required_steps = ["observation", "status_update"]
+    if created_episode_count > 0:
+        required_steps.insert(0, "materialization")
+    all_required_done = all(step_status[k] in {"done", "skipped"} for k in required_steps)
+
+    final_status = "WORKING"
+    if event_status == "FAILED" or any_failed:
+        final_status = "FAILED"
+    elif all_required_done:
+        final_status = "DONE"
+    elif event_status == "DONE" and matched_jobs == 0:
+        final_status = "DONE"
+
+    details = f"Placeholder(s) created: {created_episode_count} • " + " • ".join(status_parts)
+    return {
+        "id": event_row.get("id"),
+        "type": "event",
+        "event_type": event_row.get("event_type"),
+        "display_name": f"Series Added: {series_title}",
+        "source": event_row.get("source"),
+        "status": final_status,
+        "error": event_row.get("error_message"),
+        "details": details,
+        "time": event_row.get("created_at").isoformat() if event_row.get("created_at") else None,
+    }
+
+
+def _build_sync_placeholder_rows(session, sync_job: dict[str, Any]) -> list[dict[str, Any]]:
+    start, end = _safe_window(sync_job.get("created_at"), sync_job.get("updated_at"))
+    if not start or not end:
+        return []
+
+    created_movies = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.movie_id.isnot(None),
+            Placeholder.created_at >= start,
+            Placeholder.created_at <= end,
+        )
+        .count()
+    )
+    created_episodes = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.episode_id.isnot(None),
+            Placeholder.created_at >= start,
+            Placeholder.created_at <= end,
+        )
+        .count()
+    )
+    deleted_movies = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.movie_id.isnot(None),
+            Placeholder.has_placeholder == False,  # noqa: E712
+            Placeholder.updated_at >= start,
+            Placeholder.updated_at <= end,
+        )
+        .count()
+    )
+    deleted_episodes = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.episode_id.isnot(None),
+            Placeholder.has_placeholder == False,  # noqa: E712
+            Placeholder.updated_at >= start,
+            Placeholder.updated_at <= end,
+        )
+        .count()
+    )
+
+    sync_label = _humanize_job_type(str(sync_job.get("job_type") or "sync"))
+    result: list[dict[str, Any]] = []
+    created_total = created_movies + created_episodes
+    if created_total > 0:
+        result.append(
+            {
+                "id": sync_job.get("id"),
+                "type": "job",
+                "job_type": "sync_placeholder_created",
+                "display_name": f"{sync_label}: Placeholders Created",
+                "status": sync_job.get("status"),
+                "error": sync_job.get("error_message"),
+                "details": f"Movies {created_movies} • Episodes {created_episodes} • Total {created_total}",
+                "time": end.isoformat(),
+            }
+        )
+
+    deleted_total = deleted_movies + deleted_episodes
+    if deleted_total > 0:
+        result.append(
+            {
+                "id": sync_job.get("id"),
+                "type": "job",
+                "job_type": "sync_placeholder_deleted",
+                "display_name": f"{sync_label}: Placeholders Deleted",
+                "status": sync_job.get("status"),
+                "error": sync_job.get("error_message"),
+                "details": f"Movies {deleted_movies} • Episodes {deleted_episodes} • Total {deleted_total}",
+                "time": end.isoformat(),
+            }
+        )
+    return result
+
+
 @router.get("/api/activity")
 async def activity(limit: int = Query(50, ge=1, le=200)):
-    """Return recent activity: events and completed jobs."""
+    """Return recent user-relevant activity: syncs, errors, and meaningful jobs."""
     session = get_session()
     try:
-        # Recent events
+        # Recent events (filtered for user relevance)
         events = session.query(
             EventLog.id,
             EventLog.event_type,
@@ -351,22 +845,119 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             EventLog.status,
             EventLog.created_at,
             EventLog.error_message,
-        ).order_by(EventLog.created_at.desc()).limit(limit).all()
-
-        event_list = [
-            {
+            EventLog.payload,
+        ).order_by(EventLog.created_at.desc()).limit(limit * 2).all()  # Over-fetch to account for filtering
+        event_list = []
+        grouped_event_types = {
+            "movie_added",
+            "movie_imported",
+            "episode_imported",
+            "movie_file_deleted",
+            "episode_file_deleted",
+        }
+        grouped_counters: dict[str, dict[str, Any]] = {}
+        for e in events:
+            event_type = str(e.event_type or "").strip().lower()
+            if not _is_user_relevant_event(event_type):
+                continue
+            if event_type in grouped_event_types:
+                entry = grouped_counters.setdefault(
+                    event_type,
+                    {
+                        "count": 0,
+                        "latest": e.created_at,
+                        "failed": 0,
+                    },
+                )
+                entry["count"] = int(entry.get("count") or 0) + 1
+                if str(e.status or "").upper() == "FAILED":
+                    entry["failed"] = int(entry.get("failed") or 0) + 1
+                latest = entry.get("latest")
+                if e.created_at and (not latest or e.created_at > latest):
+                    entry["latest"] = e.created_at
+                continue
+            row_data = {
                 "id": e.id,
-                "type": "event",
                 "event_type": e.event_type,
                 "source": e.source,
                 "status": e.status,
-                "error": e.error_message,
-                "time": e.created_at.isoformat() if e.created_at else None,
+                "created_at": e.created_at,
+                "error_message": e.error_message,
+                "payload": e.payload,
             }
-            for e in events
-        ]
+            if event_type in {"series_added", "series_add", "seriesadd"}:
+                event_list.append(_build_series_add_summary_row(session, row_data))
+                continue
+            status_text = str(e.status or "")
+            display_name = _humanize_event_type(e.event_type)
+            if status_text.upper() == "FAILED":
+                display_name = f"[Failed] {display_name}"
+            event_list.append(
+                {
+                    "id": e.id,
+                    "type": "event",
+                    "event_type": e.event_type,
+                    "display_name": display_name,
+                    "source": e.source,
+                    "status": e.status,
+                    "error": e.error_message,
+                    "time": e.created_at.isoformat() if e.created_at else None,
+                }
+            )
 
-        # Recent jobs
+        for event_type, info in grouped_counters.items():
+            count = int(info.get("count") or 0)
+            failed = int(info.get("failed") or 0)
+            latest = info.get("latest")
+            display_name = _humanize_event_type(event_type)
+            if failed > 0:
+                display_name = f"[Failed] {display_name}"
+            event_list.append(
+                {
+                    "id": f"group:{event_type}",
+                    "type": "event",
+                    "event_type": event_type,
+                    "display_name": f"{display_name} (x{count})",
+                    "status": "FAILED" if failed > 0 else "DONE",
+                    "details": f"Grouped from recent events • Failures {failed}",
+                    "time": latest.isoformat() if latest else None,
+                }
+            )
+
+        # Always include a few recent series-added summaries, even if they are older
+        # than the primary event window.
+        series_events = (
+            session.query(
+                EventLog.id,
+                EventLog.event_type,
+                EventLog.source,
+                EventLog.status,
+                EventLog.created_at,
+                EventLog.error_message,
+                EventLog.payload,
+            )
+            .filter(EventLog.event_type.in_(["series_added", "series_add", "seriesadd"]))
+            .order_by(EventLog.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        for e in series_events:
+            event_list.append(
+                _build_series_add_summary_row(
+                    session,
+                    {
+                        "id": e.id,
+                        "event_type": e.event_type,
+                        "source": e.source,
+                        "status": e.status,
+                        "created_at": e.created_at,
+                        "error_message": e.error_message,
+                        "payload": e.payload,
+                    },
+                )
+            )
+
+        # Recent jobs (all user-relevant by default)
         jobs = session.query(
             Job.id,
             Job.job_type,
@@ -376,21 +967,210 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             Job.error_message,
         ).order_by(Job.updated_at.desc()).limit(limit).all()
 
-        job_list = [
-            {
-                "id": j.id,
-                "type": "job",
-                "job_type": j.job_type,
-                "status": j.status,
-                "error": j.error_message,
-                "time": j.updated_at.isoformat() if j.updated_at else (j.created_at.isoformat() if j.created_at else None),
-            }
-            for j in jobs
-        ]
+        job_list = []
+        for j in jobs:
+            normalized_job_type = str(j.job_type or "").strip().lower()
+            if normalized_job_type in {"full_sync", "lite_sync"}:
+                job_list.extend(
+                    _build_sync_placeholder_rows(
+                        session,
+                        {
+                            "id": j.id,
+                            "job_type": j.job_type,
+                            "status": j.status,
+                            "created_at": j.created_at,
+                            "updated_at": j.updated_at,
+                            "error_message": j.error_message,
+                        },
+                    )
+                )
+            if not _is_user_relevant_job(normalized_job_type, j.status):
+                continue
+            display_name = _humanize_job_type(j.job_type)
+            if str(j.status or "").upper() == "FAILED":
+                display_name = f"[Failed] {display_name}"
+            job_list.append(
+                {
+                    "id": j.id,
+                    "type": "job",
+                    "job_type": j.job_type,
+                    "display_name": display_name,
+                    "status": j.status,
+                    "error": j.error_message,
+                    "time": j.updated_at.isoformat() if j.updated_at else (j.created_at.isoformat() if j.created_at else None),
+                }
+            )
 
-        # Merge and sort by time descending
+        # Ensure recent sync summaries are present even when sync jobs are outside
+        # the latest generic job window.
+        sync_jobs = (
+            session.query(
+                Job.id,
+                Job.job_type,
+                Job.status,
+                Job.created_at,
+                Job.updated_at,
+                Job.error_message,
+            )
+            .filter(Job.job_type.in_(["full_sync", "lite_sync"]))
+            .order_by(Job.updated_at.desc())
+            .limit(10)
+            .all()
+        )
+        for j in sync_jobs:
+            job_list.extend(
+                _build_sync_placeholder_rows(
+                    session,
+                    {
+                        "id": j.id,
+                        "job_type": j.job_type,
+                        "status": j.status,
+                        "created_at": j.created_at,
+                        "updated_at": j.updated_at,
+                        "error_message": j.error_message,
+                    },
+                )
+            )
+
+        # Merge and sort by time descending: show recent + high-priority (failures)
         combined = sorted(event_list + job_list, key=lambda x: x.get("time") or "", reverse=True)
-        return combined[:limit]
+        unique = []
+        seen_keys = set()
+        for row in combined:
+            key = (row.get("type"), row.get("id"), row.get("display_name"), row.get("time"))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique.append(row)
+        
+        # Prioritize failures: put any FAILED status near the top
+        failed = [x for x in unique if x.get("status") == "FAILED"]
+        rest = [x for x in unique if x.get("status") != "FAILED"]
+        prioritized = failed + rest
+
+        top = prioritized[:limit]
+        top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
+        grouped_candidates = [
+            row
+            for row in prioritized
+            if (
+                str(row.get("job_type") or "").startswith("sync_placeholder_")
+                or str(row.get("display_name") or "").startswith("Series Added:")
+            )
+        ]
+        missing_grouped = [
+            row
+            for row in grouped_candidates
+            if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
+        ]
+        if missing_grouped and top:
+            inject = missing_grouped[: min(3, len(top))]
+            top = top[: max(0, len(top) - len(inject))] + inject
+            top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
+
+        return top
+    finally:
+        session.close()
+
+
+@router.get("/api/activity/placeholders")
+async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
+    """Return placeholder timeline (created/deleted) with humanized context."""
+    session = get_session()
+    try:
+        # Pull a larger window, then derive up to two timeline events per row.
+        placeholders = session.query(Placeholder)\
+         .order_by(Placeholder.updated_at.desc())\
+         .limit(limit * 4)\
+         .all()
+
+        activity_list = []
+        for ph in placeholders:
+            # Resolve title context once for both create/delete events.
+            movie = session.query(Movie).filter(Movie.id == ph.movie_id).first() if ph.movie_id else None
+            episode = session.query(Episode).filter(Episode.id == ph.episode_id).first() if ph.episode_id else None
+            series = session.query(Series).filter(Series.id == ph.series_id).first() if ph.series_id else None
+            
+            # If episode exists but series wasn't directly set, try to get it from episode
+            if episode and not series and hasattr(episode, 'series_id') and episode.series_id:
+                series = session.query(Series).filter(Series.id == episode.series_id).first()
+            
+            item_type = "movie" if ph.movie_id else "episode"
+            if item_type == "movie":
+                item_title = movie.title if movie else "Unknown Movie"
+                series_title = None
+            else:
+                if episode:
+                    season_num = getattr(episode, 'season_number', 0) or 0
+                    ep_num = getattr(episode, 'episode_number', 0) or 0
+                    ep_title = getattr(episode, 'title', 'Unknown') or 'Unknown'
+                    item_title = f"S{season_num:02d}E{ep_num:02d} - {ep_title}"
+                else:
+                    item_title = "Unknown Episode"
+                series_title = series.title if series else None
+
+            created_at = ph.created_at
+            updated_at = ph.updated_at or ph.created_at
+            lifecycle = str(ph.lifecycle_status or "").strip().lower()
+            file_exists_now = bool(getattr(ph, "path", None) and os.path.exists(ph.path))
+            deleted_like = (not bool(ph.has_placeholder)) and (not file_exists_now) and lifecycle in {"deleted", "missing", "obsolete", "replaced", ""}
+
+            extra_meta = ph.extra if isinstance(ph.extra, dict) else {}
+            inferred_reason = _infer_reason_from_recent_events(
+                session,
+                when_dt=updated_at or created_at,
+                movie=movie,
+                episode=episode,
+            )
+            created_reason = _humanize_activity_reason(extra_meta.get("create_reason") or inferred_reason)
+            deleted_reason = _humanize_activity_reason(extra_meta.get("delete_reason") or inferred_reason)
+
+            if created_at:
+                if created_reason == "Unknown":
+                    created_reason = "Library materialization"
+                activity_list.append({
+                    "id": ph.id,
+                    "type": "placeholder",
+                    "action": "Created",
+                    "item_type": item_type,
+                    "item_title": item_title,
+                    "series_title": series_title,
+                    "path": ph.path,
+                    "reason": created_reason,
+                    "status": _humanize_placeholder_status(ph.lifecycle_status),
+                    "time": created_at.isoformat(),
+                })
+
+            if deleted_like and updated_at:
+                if deleted_reason == "Unknown":
+                    if lifecycle in {"missing", "deleted", "obsolete", "replaced"}:
+                        deleted_reason = "Library cleanup"
+                    else:
+                        deleted_reason = _humanize_placeholder_reason(lifecycle or "deleted", action="Deleted")
+                activity_list.append({
+                    "id": ph.id,
+                    "type": "placeholder",
+                    "action": "Deleted",
+                    "item_type": item_type,
+                    "item_title": item_title,
+                    "series_title": series_title,
+                    "path": ph.path,
+                    "reason": deleted_reason,
+                    "status": _humanize_placeholder_status(ph.lifecycle_status),
+                    "time": updated_at.isoformat(),
+                })
+
+        # If a single-row lifecycle never changed, avoid duplicate created/deleted timestamps.
+        deduped = []
+        seen = set()
+        for row in sorted(activity_list, key=lambda x: x.get("time") or "", reverse=True):
+            key = (row.get("id"), row.get("action"), row.get("time"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+
+        return deduped[:limit]
     finally:
         session.close()
 
@@ -791,7 +1571,7 @@ async def calendar_view(month: str = Query("")):
     today = datetime.now().date()
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
-    placeholders_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True))
+    placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
 
     month_grid, visible_start, visible_end = _calendar_grid(month_start)
     items_by_date: dict[str, list[dict]] = {}
@@ -1010,10 +1790,11 @@ async def settings_current():
 async def settings_save(request: Request):
     payload = await request.json()
     values = payload.get("values") if isinstance(payload, dict) else None
+    partial = bool(payload.get("partial", False)) if isinstance(payload, dict) else False
     if not isinstance(values, dict):
         return JSONResponse(content={"ok": False, "errors": {"values": "expected an object"}}, status_code=400)
 
-    result = save_settings(values)
+    result = save_settings(values, partial=partial)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

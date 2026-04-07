@@ -26,15 +26,21 @@ def _allowed_webhook_instances() -> tuple[str, ...]:
 
 
 def get_configured_webhook_instances() -> dict[str, bool]:
-    return {
-        settings.RADARR_STD_INSTANCE_KEY: bool(settings.RADARR_URL and settings.RADARR_API_KEY),
-        settings.RADARR_4K_INSTANCE_KEY: bool(settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY),
-        settings.SONARR_STD_INSTANCE_KEY: bool(settings.SONARR_URL and settings.SONARR_API_KEY),
-        settings.SONARR_4K_INSTANCE_KEY: bool(settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY),
-        settings.TAUTULLI_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_PLEX', False)),
-        settings.JELLYFIN_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_JELLYFIN', False)),
-        settings.EMBY_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_EMBY', False)),
-    }
+    configured: dict[str, bool] = {}
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        key = str(item.get('instance_key') or '').strip().lower()
+        if not key:
+            continue
+        configured[key] = bool(str(item.get('url') or '').strip() and str(item.get('api_key') or '').strip())
+
+    configured.update(
+        {
+            settings.TAUTULLI_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_PLEX', False)),
+            settings.JELLYFIN_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_JELLYFIN', False)),
+            settings.EMBY_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_EMBY', False)),
+        }
+    )
+    return configured
 
 
 def _allowed_instance_list() -> str:

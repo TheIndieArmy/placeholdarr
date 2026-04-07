@@ -187,8 +187,15 @@ a { color: inherit; }
   border-radius: 12px;
   padding: 14px;
 }
+.stat-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  white-space: nowrap;
+}
 .stat-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-.stat-value { font-size: 30px; font-weight: 700; margin-top: 8px; }
+.stat-value { font-size: 30px; font-weight: 700; margin-top: 0; line-height: 1; white-space: nowrap; }
 .stat-sub { color: var(--muted); margin-top: 8px; font-size: 13px; }
 
 .tabs { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }

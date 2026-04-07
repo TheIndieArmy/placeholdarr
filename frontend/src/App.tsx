@@ -7,6 +7,7 @@ import {
   getLibrary,
   getLogs,
   getMovieDetail,
+  getPlaceholderActivity,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
@@ -29,34 +30,66 @@ import type {
 } from "./types/api";
 
 const REFRESH_MS = 5000;
-const SETTINGS_SECTION_ORDER = ["Integrations", "Paths", "Calendar", "Automation", "Playback", "Advanced"];
+const SETTINGS_SECTION_ORDER = ["Integrations", "Paths", "Library sync", "Calendar", "Playback", "Advanced"];
+const BEHAVIOR_WIZARD_SECTIONS = ["Library sync", "Calendar", "Playback", "Advanced"] as const;
 const WIZARD_STEPS = [
   { key: "paths", name: "Paths" },
-  { key: "arr", name: "ARR Services" },
+  { key: "paths_review", name: "Confirm Paths" },
   { key: "media", name: "Media Servers" },
+  { key: "arr", name: "ARR Services" },
   { key: "behavior", name: "Behavior" },
 ] as const;
 
+const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
+const PATH_PROFILE_KEYS = [
+  "ENABLE_STANDARD_PROFILE",
+  "ENABLE_4K_PROFILE",
+  "ENABLE_ANIME_PROFILE",
+] as const;
+const PATH_PER_LIBRARY_OVERRIDE_KEYS = [
+  "MOVIE_LIBRARY_FOLDER",
+  "TV_LIBRARY_FOLDER",
+  "MOVIE_LIBRARY_4K_FOLDER",
+  "TV_LIBRARY_4K_FOLDER",
+  "ANIME_LIBRARY_FOLDER",
+] as const;
+
+function partitionLibraryPathFields(fields: SettingsField[]) {
+  const profileSet = new Set<string>(PATH_PROFILE_KEYS as unknown as string[]);
+  const overrideSet = new Set<string>(PATH_PER_LIBRARY_OVERRIDE_KEYS as unknown as string[]);
+  const byKey = new Map(fields.map((f) => [f.key, f]));
+  const root = byKey.get(PATH_LIBRARY_ROOT_KEY);
+  const profiles = PATH_PROFILE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
+  const overrides = PATH_PER_LIBRARY_OVERRIDE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
+  const rest = fields.filter((f) => f.key !== PATH_LIBRARY_ROOT_KEY && !profileSet.has(f.key) && !overrideSet.has(f.key));
+  return { root, profiles, overrides, rest };
+}
+
 const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title: string; detail: string }> = {
   paths: {
-    title: "Paths are flexible",
+    title: "Start with Library Root",
     detail:
-      "Library Root is optional. If set, Placeholdarr can derive movies/tv (and 4K) folders from it. Movie/TV folder fields are optional overrides when you want paths different from the derived defaults.",
+      "Choose which path profiles you want (Standard, 4K, Anime), then set Library Root. Placeholdarr derives only the selected profile folders from that root.",
   },
-  arr: {
-    title: "ARR connections",
+  paths_review: {
+    title: "Create libraries before continuing",
     detail:
-      "Configure whichever ARR instances you use. Standard Radarr/Sonarr are typical; 4K instances are optional. Leave any unused instance blank.",
+      "Use the derived/override paths below to create libraries in Plex/Jellyfin/Emby. After that, continue to Media Services and ARR setup.",
   },
   media: {
     title: "Media server targets",
     detail:
       "Enable at least one media server you actually run. You can use Plex, Jellyfin, Emby, or a combination. Disabled services can stay blank.",
   },
-  behavior: {
-    title: "Automation and scheduling",
+  arr: {
+    title: "ARR connections",
     detail:
-      "These controls tune lookahead, webhook handling, playback behavior, queue checks, and sync cadence. Defaults are safe, and you can fine-tune after first save.",
+      "Add one or more Radarr/Sonarr instances, give each a label, and test connectivity. This replaces fixed standard/4K-only setup.",
+  },
+  behavior: {
+    title: "Sync, calendar, and playback",
+    detail:
+      "Tune how often ARR data and the calendar refresh, which dummy file Coming Soon items use, lookahead horizons, and playback search behavior. Safe defaults work for most setups.",
   },
 };
 
@@ -224,6 +257,21 @@ function alphaColor(hex: string, alpha: number) {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
+function titleSortKey(title: string | null | undefined): string {
+  const raw = String(title || "").trim().toLowerCase();
+  // Ignore leading punctuation/quotes and leading articles for alpha sorting.
+  return raw
+    .replace(/^[^a-z0-9]+/i, "")
+    .replace(/^(the|an|a)\s+/i, "")
+    .replace(/^[^a-z0-9]+/i, "");
+}
+
+function titleSortLetter(title: string | null | undefined): string {
+  const key = titleSortKey(title);
+  const first = key.charAt(0).toUpperCase();
+  return /[A-Z]/.test(first) ? first : "#";
+}
+
 function getBrandAccent(brand: Brand, theme: ThemeMode) {
   const key = `${brand}-${theme}` as const;
   return BRAND_ACCENTS[key];
@@ -287,6 +335,7 @@ function getBrandSelectionClass(brand: Brand, theme: ThemeMode) {
 export function App() {
   const location = useLocation();
   const navigate = useNavigate();
+  const contentScrollRef = useRef<HTMLElement | null>(null);
 
   const [theme, setTheme] = useState<"standard" | "glassmorphism" | "minimalist-dark" | "studio-dark">("studio-dark");
   const [brand, setBrand] = useState<Brand>("placeholdarr");
@@ -301,6 +350,8 @@ export function App() {
   const [logFile, setLogFile] = useState<string>("");
   const [logLevel, setLogLevel] = useState<"all" | "warn" | "error">("all");
   const [logFilter, setLogFilter] = useState("");
+  const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
+  const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
 
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
@@ -337,6 +388,7 @@ export function App() {
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandMeta = BRAND_META[brand];
   const hasUnsavedChanges = useMemo(() => !deepEqualValues(fieldValues, baselineValues), [fieldValues, baselineValues]);
+  const hasUnsavedChangesRef = useRef(false);
   const selectedCalendarItem = useMemo(
     () => findCalendarItem(calendar, calendarSelectedId),
     [calendar, calendarSelectedId],
@@ -362,8 +414,8 @@ export function App() {
         return title.includes(query) || overview.includes(query);
       })
       .sort((left, right) => {
-        const leftTitle = left.title.toLowerCase();
-        const rightTitle = right.title.toLowerCase();
+        const leftTitle = titleSortKey(left.title);
+        const rightTitle = titleSortKey(right.title);
         const leftStarts = leftTitle.startsWith(query) ? 0 : 1;
         const rightStarts = rightTitle.startsWith(query) ? 0 : 1;
         if (leftStarts !== rightStarts) return leftStarts - rightStarts;
@@ -371,6 +423,10 @@ export function App() {
       })
       .slice(0, 8);
   }, [library, titleSearch]);
+
+  useEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+  }, [hasUnsavedChanges]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -392,6 +448,8 @@ export function App() {
         if (currentTab === "activity") {
           const rows = await getActivity(100);
           if (!stopped) setActivity(rows || []);
+          const placeholderRows = await getPlaceholderActivity(100);
+          if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
           const payload = await getLibrary(400);
           if (!stopped) setLibrary(payload.items || []);
@@ -411,7 +469,10 @@ export function App() {
             setLogFile(payload.file || "");
           }
         } else if (currentTab === "settings") {
-          await loadSettings(stopped);
+          // Avoid clobbering in-progress edits from the periodic refresh loop.
+          if (!hasUnsavedChangesRef.current) {
+            await loadSettings(stopped);
+          }
         }
 
         const status = await getSettingsStatus();
@@ -567,14 +628,16 @@ export function App() {
   }, [location.pathname, navigate, setupStatus]);
 
   const filteredLibrary = useMemo(() => {
-    return library.filter((item) => {
+    return library
+      .filter((item) => {
       if (libraryFilter === "movie") return item.type === "movie";
       if (libraryFilter === "series") return item.type === "series";
       if (libraryFilter === "placeholders") return item.has_placeholder;
       if (libraryFilter === "future") return item.is_future;
       if (libraryFilter === "missing") return item.has_missing;
       return true;
-    });
+      })
+      .sort((left, right) => titleSortKey(left.title).localeCompare(titleSortKey(right.title)));
   }, [library, libraryFilter]);
 
   const visibleLogs = useMemo(() => {
@@ -629,6 +692,24 @@ export function App() {
     }
   }
 
+  async function handlePartialSave(result: any, partialValues: Record<string, unknown>) {
+    if (!result) return;
+    if (!result.ok) {
+      const first = Object.entries(result.errors || {})[0];
+      setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
+      setSettingsFeedbackKind("error");
+      return;
+    }
+    // Merge partial values into baseline so UI no longer flags them as unsaved
+    setBaselineValues((prev) => ({ ...prev, ...partialValues }));
+    const payload = await getSettingsCurrent();
+    setSettingsPayload(payload);
+    setSetupStatus(payload.status);
+    const restartKeys = result.restart_required_keys || [];
+    setSettingsFeedback(restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved.");
+    setSettingsFeedbackKind("success");
+  }
+
   function tryNavigate(path: string) {
     if (!hasUnsavedChanges || currentTab !== "settings") {
       navigate(path);
@@ -640,9 +721,29 @@ export function App() {
     }
   }
 
+  function getActiveScrollTop() {
+    const container = contentScrollRef.current;
+    if (container) return container.scrollTop;
+    return window.scrollY || 0;
+  }
+
+  function setActiveScrollTop(top: number) {
+    const nextTop = Number.isFinite(top) ? Math.max(0, top) : 0;
+    const container = contentScrollRef.current;
+    if (container) {
+      container.scrollTop = nextTop;
+      return;
+    }
+    window.scrollTo(0, nextTop);
+  }
+
   function openLibraryDetail(item: { type: "movie" | "series"; item_id: number; title?: string }) {
+    if (currentTab === "library") {
+      const currentScrollTop = getActiveScrollTop();
+      sessionStorage.setItem("libraryScrollTop", String(currentScrollTop));
+      sessionStorage.setItem("libraryScrollRestorePending", "1");
+    }
     navigate(`/library/${item.type}/${item.item_id}`);
-    setTitleSearch(item.title || "");
     setTitleSearchOpen(false);
   }
 
@@ -669,11 +770,42 @@ export function App() {
     openLibraryDetail({ type: result.type, item_id: result.item_id, title: result.title });
   }
 
+  useEffect(() => {
+    if (currentTab !== "library") return;
+    if (sessionStorage.getItem("libraryScrollRestorePending") !== "1") return;
+
+    const rawTop = sessionStorage.getItem("libraryScrollTop");
+    const savedTop = rawTop == null ? 0 : Number(rawTop);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setActiveScrollTop(savedTop);
+      });
+    });
+
+    sessionStorage.removeItem("libraryScrollRestorePending");
+  }, [currentTab, location.pathname, library.length]);
+
+  useEffect(() => {
+    const isDetailRoute = location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
+    if (!isDetailRoute) return;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const container = contentScrollRef.current;
+        if (container) container.scrollTop = 0;
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      });
+    });
+  }, [location.pathname]);
+
   function renderTabBody() {
     if (loading) return <div className="empty">Loading dashboard data...</div>;
 
     if (location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"))) {
-      return <DetailRoutePage brand={brand} themeMode={themeMode} />;
+      return <DetailRoutePage brand={brand} themeMode={themeMode} scrollContainerRef={contentScrollRef} />;
     }
 
     const openLibraryWithFilter = (filter: LibraryFilter) => {
@@ -681,7 +813,7 @@ export function App() {
       navigate("/library");
     };
 
-    if (currentTab === "activity") return <ActivityPanel rows={activity} stats={stats} brand={brand} themeMode={themeMode} onOpenLibraryFilter={openLibraryWithFilter} />;
+    if (currentTab === "activity") return <ActivityPanel rows={activity} placeholderRows={placeholderActivity} activityTab={activityTab} onActivityTabChange={setActivityTab} stats={stats} brand={brand} themeMode={themeMode} onOpenLibraryFilter={openLibraryWithFilter} />;
 
     if (currentTab === "library") {
       return (
@@ -1003,7 +1135,7 @@ export function App() {
           ) : null}
 
           {/* Content */}
-          <main className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : "bg-[#eef3f8]"}`}>
+          <main ref={(el) => { contentScrollRef.current = el; }} className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : "bg-[#eef3f8]"}`}>
             {renderTabBody()}
           </main>
 
@@ -1023,7 +1155,13 @@ export function App() {
             themeMode={themeMode}
             onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
             onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
+            onPartialSave={handlePartialSave}
             onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+            onTestConnection={async ({ service, urlKey, credentialKey }) => {
+              const url = String(fieldValues[urlKey] || "").trim();
+              const credential = String(fieldValues[credentialKey] || "").trim();
+              return testIntegrationConnection({ service, url, credential });
+            }}
             onSave={async () => {
               setSettingsFeedback("Saving...");
               setSettingsFeedbackKind("");
@@ -1093,9 +1231,9 @@ export function App() {
       ) : null}
 
       <section className="stats-grid">
-        <StatCard accent={brandAccent} title="Movies" value={stats?.movies.total} sub={`Files ${stats?.movies.downloaded ?? "--"} • Placeholders ${stats?.movies.placeholders ?? "--"}`} />
+        <StatCard accent={brandAccent} title="Movies" value={stats?.movies.total} sub={`Downloaded ${stats?.movies.downloaded ?? "--"} • Placeholders ${stats?.movies.placeholders ?? "--"}`} />
         <StatCard accent={brandAccent} title="Series" value={stats?.series.total} sub="Tracked series" />
-        <StatCard accent={brandAccent} title="Episodes" value={stats?.episodes.total} sub={`Files ${stats?.episodes.downloaded ?? "--"} • Placeholders ${stats?.episodes.placeholders ?? "--"}`} />
+        <StatCard accent={brandAccent} title="Episodes" value={stats?.episodes.total} sub={`Downloaded ${stats?.episodes.downloaded ?? "--"} • Placeholders ${stats?.episodes.placeholders ?? "--"}`} />
         <StatCard accent={brandAccent} title="Placeholders" value={stats?.placeholders_on_disk} sub="On disk" />
         <StatCard accent={brandAccent} title="Jobs" value={stats?.jobs.pending} sub={`Done ${stats?.jobs.done ?? "--"} • Failed ${stats?.jobs.failed ?? "--"}`} />
       </section>
@@ -1109,7 +1247,7 @@ export function App() {
         <TabLink path="/settings" currentPath={location.pathname} label="Settings" onNavigate={tryNavigate} />
       </nav>
 
-      <main className="panel">{renderTabBody()}</main>
+      <main ref={(el) => { contentScrollRef.current = el; }} className="panel">{renderTabBody()}</main>
       {errorMessage ? <div className="error-box" style={{ marginTop: 12 }}>{errorMessage}</div> : null}
 
       {onboardingVisible && settingsPayload ? (
@@ -1122,7 +1260,13 @@ export function App() {
           themeMode={themeMode}
           onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
           onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
-          onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+            onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+            onPartialSave={handlePartialSave}
+          onTestConnection={async ({ service, urlKey, credentialKey }) => {
+            const url = String(fieldValues[urlKey] || "").trim();
+            const credential = String(fieldValues[credentialKey] || "").trim();
+            return testIntegrationConnection({ service, url, credential });
+          }}
           onSave={async () => {
             setSettingsFeedback("Saving...");
             setSettingsFeedbackKind("");
@@ -1198,128 +1342,242 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
       onMouseLeave={() => setHover(false)}
       onClick={props.onClick}
     >
-      <div className="stat-title" style={{ color: accent.text }}>{props.title}</div>
-      <div className="stat-value" style={{ color: accent.hex }}>{props.value ?? "--"}</div>
+      <div className="stat-head">
+        <div className="stat-title" style={{ color: accent.text }}>{props.title}</div>
+        <div className="stat-value" style={{ color: accent.hex }}>{props.value ?? "--"}</div>
+      </div>
       <div className="stat-sub" style={{ color: alphaColor(accent.hex, 0.8) }}>{props.sub}</div>
     </article>
   );
 }
 
-function ActivityPanel(props: { rows: ActivityRow[]; stats: StatsResponse | null; brand: Brand; themeMode: ThemeMode; onOpenLibraryFilter?: (f: LibraryFilter) => void }) {
+function ActivityPanel(props: {
+  rows: ActivityRow[];
+  placeholderRows?: any[];
+  activityTab?: "system" | "placeholders";
+  onActivityTabChange?: (tab: "system" | "placeholders") => void;
+  stats: StatsResponse | null;
+  brand: Brand;
+  themeMode: ThemeMode;
+  onOpenLibraryFilter?: (f: LibraryFilter) => void;
+}) {
   const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const tab = props.activityTab || "system";
+  const placeholderRows = props.placeholderRows || [];
+
+  // Check if there are any failures
+  const failedCount = props.rows.filter(r => r.status === "FAILED").length;
+  const hasFailures = failedCount > 0;
+
+  // For placeholder tab: count active vs deleted
+  const createdCount = placeholderRows.filter(r => r.action === "Created").length;
+  const deletedCount = placeholderRows.filter(r => r.action === "Deleted").length;
+
   return (
     <div>
       {/* Status pill */}
       <div className="flex items-center gap-2 mb-4">
-        <div className="w-2 h-2 rounded-full bg-green-500" />
-        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">System Online</span>
+        <div className={`w-2 h-2 rounded-full ${tab === "system" && hasFailures ? "bg-red-500" : "bg-green-500"}`} />
+        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">
+          {tab === "system"
+            ? hasFailures
+              ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
+              : "System Online"
+            : `${createdCount} Created • ${deletedCount} Deleted`}
+        </span>
       </div>
 
-      {/* Top stat cards (original dashboard stats) */}
+      {/* Alert banner if there are system failures */}
+      {tab === "system" && hasFailures && (
+        <div className="mb-6 p-4 rounded-lg border border-red-600/40 bg-red-900/20">
+          <div className="flex items-start gap-3">
+            <span className="material-symbols-outlined text-red-400 flex-shrink-0" style={{ fontSize: 20 }}>error</span>
+            <div>
+              <div className="font-headline text-sm font-bold text-red-300">Recent Failures Detected</div>
+              <div className="text-xs text-red-200/80 mt-1">Check the list below or view logs for details.</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Top stat cards (shown on both system and placeholder tabs) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
         <StatCard
           accent={accent}
           title="Movies"
           value={s?.movies.total}
-          sub={`Files ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
+          sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
           onClick={() => props.onOpenLibraryFilter?.("movie")}
         />
         <StatCard accent={accent} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
-        <StatCard accent={accent} title="Episodes" value={s?.episodes.total} sub={`Files ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
+        <StatCard accent={accent} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
         <StatCard accent={accent} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
         <StatCard accent={accent} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
       </div>
 
-      {/* Recent Activity table */}
-      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
-        <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
-          <div>
-            <h2 className="text-xl font-bold text-white font-headline">Recent Activity</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Real-time log of background studio operations</p>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" className="flex items-center gap-1.5 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/50 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider">
-              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>filter_list</span> Filters
-            </button>
-            <button type="button" className="flex items-center gap-1.5 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/50 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider">
-              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>upload</span> Export
-            </button>
-          </div>
-        </div>
-        {!props.rows.length ? (
-          <div className="p-10 text-center text-slate-500 text-sm">No recent activity.</div>
-        ) : (
-          <>
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-[#424753]/20">
-                  {["Time", "Event Type", "Detail", "Status", "Action"].map(h => (
-                    <th key={h} className="px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#424753]/15">
-                {props.rows.map((row, idx) => {
-                  const eventType = row.type === "event" ? row.event_type : row.job_type;
-                  const status = String(row.status || "").toLowerCase();
-                  const statusColor = status === "success" ? "text-[var(--studio-accent-text)]" : status === "failed" ? "text-red-400" : "text-slate-400";
-                  const dotColor = status === "success" ? "bg-[var(--studio-accent)]" : status === "failed" ? "bg-red-500" : "bg-slate-500";
-                  return (
-                    <tr key={`${row.type}-${row.time || idx}`} className="hover:bg-[#1e2430]/40 transition-colors" style={{ ["--studio-accent" as string]: accent.hex, ["--studio-accent-text" as string]: accent.icon }}>
-                      <td className="px-5 py-4 text-sm text-slate-400 whitespace-nowrap">{timeAgo(row.time || null)}</td>
-                      <td className="px-5 py-4">
-                        <span className="px-2.5 py-1 rounded text-xs font-medium bg-[#252e3a] border border-[#424753]/40 text-slate-200 font-headline whitespace-nowrap">{eventType || "--"}</span>
-                      </td>
-                      <td className="px-5 py-4 text-sm text-slate-300 max-w-xs truncate">{row.job_type || row.event_type || "--"}</td>
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                          <span className={`text-xs font-medium font-headline uppercase tracking-wider ${statusColor}`}>{row.status || "--"}</span>
-                        </div>
-                      </td>
-                      <td className="px-5 py-4">
-                        <button type="button" className="text-slate-500 hover:text-slate-300 transition-colors">
-                          <span className="material-symbols-outlined" style={{ fontSize: 20 }}>more_vert</span>
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
-              Showing {props.rows.length} of {props.rows.length} items
-            </div>
-          </>
-        )}
+      {/* Tab buttons */}
+      <div className="flex gap-2 mb-6 border-b border-[#424753]/30 pb-4">
+        <button
+          type="button"
+          onClick={() => props.onActivityTabChange?.("system")}
+          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-xs font-headline uppercase tracking-wider transition-colors ${
+            tab === "system"
+              ? "text-white font-bold border-b-2"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+          style={tab === "system" ? { borderBottomColor: accent.hex, backgroundColor: accent.hex + "15" } : {}}
+        >
+          System Activity
+        </button>
+        <button
+          type="button"
+          onClick={() => props.onActivityTabChange?.("placeholders")}
+          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-xs font-headline uppercase tracking-wider transition-colors ${
+            tab === "placeholders"
+              ? "text-white font-bold border-b-2"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+          style={tab === "placeholders" ? { borderBottomColor: accent.hex, backgroundColor: accent.hex + "15" } : {}}
+        >
+          Placeholder History
+        </button>
       </div>
 
-      {/* Console Stream + Storage Insight */}
-      <div className="grid grid-cols-2 gap-5">
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
-          <div className="flex justify-between items-center mb-4">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.icon }}>terminal</span>
-              <span className="font-headline text-xs font-bold text-white uppercase tracking-widest">Console Stream</span>
+      {/* System Activity table */}
+      {tab === "system" && (
+        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+          <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
+            <div>
+              <h2 className="text-xl font-bold text-white font-headline">Recent Operations</h2>
+              <p className="text-xs text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
             </div>
-            <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
           </div>
-          <div className="font-mono text-xs space-y-1.5 text-slate-400">
-            <div><span style={{ color: accent.icon }}>[INFO]</span> System polling active — interval 5s</div>
-            <div><span className="text-green-400">[SUCCESS]</span> API heartbeat OK</div>
-            <div><span style={{ color: accent.icon }}>[INFO]</span> Checking database consistency...</div>
-            <div><span className="text-yellow-400">[WARN]</span> {s?.jobs.failed ? `${s.jobs.failed} job(s) failed` : "No warnings"}</div>
-          </div>
+          {!props.rows.length ? (
+            <div className="p-10 text-center text-slate-500 text-sm">No recent activity.</div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+              <table className="min-w-[520px] w-full">
+                <thead>
+                  <tr className="border-b border-[#424753]/20">
+                    {["When", "Operation", "Status"].map(h => (
+                      <th key={h} className="px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#424753]/15">
+                  {props.rows.map((row, idx) => {
+                    const displayName = (row as any).display_name || row.event_type || row.job_type || "--";
+                    const detailLine = (row as any).details || "";
+                    const status = String(row.status || "").toLowerCase();
+                    const statusColor = status === "done" || status === "success" ? "text-green-400" : status === "failed" ? "text-red-400" : "text-slate-400";
+                    const dotColor = status === "done" || status === "success" ? "bg-green-500" : status === "failed" ? "bg-red-500" : "bg-slate-500";
+                    const errorMessage = row.error ? ` — ${row.error}` : "";
+
+                    return (
+                      <tr key={`${row.type}-${row.time || idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
+                        <td className="px-5 py-4 text-sm text-slate-400 whitespace-nowrap">{timeAgo(row.time || null)}</td>
+                        <td className="px-5 py-4 text-sm text-slate-300">
+                          <span className="font-medium">{displayName}</span>
+                          {detailLine && <div className="text-xs text-slate-500 mt-0.5">{detailLine}</div>}
+                          {errorMessage && <span className="text-xs text-red-300/70">{errorMessage}</span>}
+                        </td>
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-2">
+                            <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                            <span className={`text-xs font-medium font-headline uppercase tracking-wider ${statusColor}`}>
+                              {status === "done" || status === "success" ? "Complete" : status === "failed" ? "Failed" : "Running"}
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              </div>
+              <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+                Showing {props.rows.length} items
+              </div>
+            </>
+          )}
         </div>
+      )}
+
+      {/* Placeholder history table */}
+      {tab === "placeholders" && (
+        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+          <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
+            <div>
+              <h2 className="text-xl font-bold text-white font-headline">Placeholder History</h2>
+              <p className="text-xs text-slate-400 mt-0.5">{placeholderRows.length} recent placeholder changes</p>
+            </div>
+          </div>
+          {!placeholderRows.length ? (
+            <div className="p-10 text-center text-slate-500 text-sm">No placeholder history yet.</div>
+          ) : (
+            <>
+              <div className="overflow-hidden">
+              <table className="w-full table-fixed">
+                <colgroup>
+                  <col className="w-[78px] sm:w-[96px]" />
+                  <col />
+                  <col className="w-[78px] sm:w-[92px]" />
+                  <col className="w-[96px] sm:w-[132px]" />
+                </colgroup>
+                <thead>
+                  <tr className="border-b border-[#424753]/20">
+                    {["When", "Content", "Action", "Reason"].map(h => (
+                      <th key={h} className="px-2 sm:px-3 py-3 text-left text-[10px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#424753]/15">
+                  {placeholderRows.map((row, idx) => {
+                    const actionColor = row.action === "Created" ? "text-green-400" : "text-orange-400";
+                    const actionBg = row.action === "Created" ? "bg-green-500/20" : "bg-orange-500/20";
+                    const contentDisplay = row.series_title
+                      ? `${row.series_title} • ${row.item_title}`
+                      : row.item_title;
+
+                    return (
+                      <tr key={`placeholder-${row.id}-${idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
+                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-400 whitespace-nowrap truncate" title={timeAgo(row.time || null)}>{timeAgo(row.time || null)}</td>
+                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-300 min-w-0">
+                          <span className="font-medium block truncate" title={contentDisplay}>{contentDisplay}</span>
+                          <div className="text-[10px] text-slate-500 mt-0.5 truncate hidden lg:block" title={row.path || undefined}>{row.path}</div>
+                        </td>
+                        <td className="px-2 sm:px-3 py-4">
+                          <span className={`inline-flex items-center px-2 py-1 rounded text-[10px] sm:text-xs font-medium font-headline uppercase tracking-wider whitespace-nowrap ${actionColor} ${actionBg}`}>
+                            {row.action}
+                          </span>
+                        </td>
+                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-400 truncate" title={row.reason || undefined}>{row.reason}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              </div>
+              <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+                Showing {placeholderRows.length} items
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Storage Progress (system tab only) */}
+      {tab === "system" && (
         <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
           <div className="mb-4">
-            <span className="font-headline text-xs font-bold text-white uppercase tracking-widest">Storage Insight</span>
+            <span className="font-headline text-xs font-bold text-white uppercase tracking-widest">Storage Progress</span>
           </div>
           <div className="space-y-4">
             <div>
               <div className="flex justify-between text-[10px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
-                <span>Movies on Disk</span><span>{s?.movies.downloaded ?? "--"}</span>
+                <span>Movies on Disk</span><span>{s?.movies.downloaded ?? "--"} / {s?.movies.total ?? "--"}</span>
               </div>
               <div className="h-1.5 bg-[#252e3a] rounded-full">
                 <div className="h-full rounded-full" style={{ backgroundColor: accent.hex, width: s ? `${Math.min(100, (s.movies.downloaded / Math.max(s.movies.total, 1)) * 100).toFixed(0)}%` : "0%" }} />
@@ -1327,19 +1585,15 @@ function ActivityPanel(props: { rows: ActivityRow[]; stats: StatsResponse | null
             </div>
             <div>
               <div className="flex justify-between text-[10px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
-                <span>Episodes on Disk</span><span>{s?.episodes.downloaded ?? "--"}</span>
+                <span>Episodes on Disk</span><span>{s?.episodes.downloaded ?? "--"} / {s?.episodes.total ?? "--"}</span>
               </div>
               <div className="h-1.5 bg-[#252e3a] rounded-full">
                 <div className="h-full rounded-full" style={{ backgroundColor: accent.hex, width: s ? `${Math.min(100, (s.episodes.downloaded / Math.max(s.episodes.total, 1)) * 100).toFixed(0)}%` : "0%" }} />
               </div>
             </div>
-            <div className="pt-2 border-t border-[#424753]/20 flex justify-between text-xs text-slate-400">
-              <span>Total Items</span>
-              <span className="text-white font-bold">{s ? (s.movies.total + s.series.total) : "--"}</span>
-            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -1362,6 +1616,21 @@ function LibraryPanel(props: {
     { id: "missing", label: "Missing" },
   ];
   const totalMissing = props.items.filter(i => i.has_missing).length;
+  const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const groupedItems = useMemo(() => {
+    const groups: Record<string, LibraryItem[]> = {};
+    props.items.forEach((item) => {
+      const letter = titleSortLetter(item.title);
+      if (!groups[letter]) groups[letter] = [];
+      groups[letter].push(item);
+    });
+    const letters = Object.keys(groups).sort((a, b) => {
+      if (a === "#") return 1;
+      if (b === "#") return -1;
+      return a.localeCompare(b);
+    });
+    return { groups, letters };
+  }, [props.items]);
 
   function statusBadge(item: LibraryItem) {
     if (item.has_missing) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white font-headline uppercase tracking-wider">Missing</span>;
@@ -1394,34 +1663,68 @@ function LibraryPanel(props: {
         </div>
       </div>
 
-      {/* Poster grid */}
+      {/* Poster grid with alphabet sections */}
       {props.items.length === 0 ? (
         <div className="text-center text-slate-500 py-16">No library items match the current filter.</div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 mb-8">
-          {props.items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => props.onOpenDetail(item)}
-              className="relative rounded-xl overflow-hidden bg-[#1e2430] border border-[#424753]/30 group cursor-pointer text-left transition-transform hover:scale-[1.02] hover:border-[#424753]/70"
-              style={{
-                aspectRatio: "2/3",
-                ...(item.poster_url ? {
-                  backgroundImage: `linear-gradient(180deg, rgba(15,20,25,0.05) 0%, rgba(15,20,25,0.65) 55%, rgba(15,20,25,1) 100%), url(${item.poster_url})`,
-                  backgroundSize: "cover",
-                  backgroundPosition: "center",
-                } : {}),
-              }}
-            >
-              <div className="absolute top-2 left-2">{statusBadge(item)}</div>
-              <div className="absolute bottom-0 left-0 right-0 p-3">
-                <div className="text-[10px] text-slate-400 font-headline uppercase tracking-wider mb-0.5">{item.type}</div>
-                <div className="font-bold text-white text-sm leading-tight truncate">{item.title}</div>
-                <div className="text-[11px] text-slate-400 mt-0.5">{item.year || "--"}</div>
+        <div className="flex items-start gap-4 mb-8">
+          <div className="flex-1 space-y-8">
+            {groupedItems.letters.map((letter) => (
+              <div key={letter} ref={(el) => { sectionRefs.current[letter] = el; }}>
+                <div className="mb-3 text-xs font-headline uppercase tracking-widest text-slate-500 border-b border-[#424753]/25 pb-2">{letter}</div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                  {(groupedItems.groups[letter] || []).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => props.onOpenDetail(item)}
+                      className="relative isolate rounded-xl overflow-hidden bg-[#1e2430] group cursor-pointer text-left transition-transform hover:scale-[1.02]"
+                      style={{
+                        aspectRatio: "2/3",
+                        border: `2px solid ${accent.hex}`,
+                      }}
+                    >
+                      {item.poster_url ? (
+                        <img
+                          src={item.poster_url}
+                          alt=""
+                          className="absolute inset-0 h-full w-full object-cover scale-[1.01]"
+                        />
+                      ) : null}
+                      <div
+                        className="absolute pointer-events-none bottom-0 left-0 right-0 h-[34%]"
+                        style={{
+                          background:
+                            "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
+                        }}
+                      />
+                      <div className="absolute top-2 left-2">{statusBadge(item)}</div>
+                      <div className="absolute bottom-0 left-0 right-0 p-3">
+                        <div className="font-bold text-white text-sm leading-tight truncate">{item.title}</div>
+                        <div className="mt-0.5 flex items-center justify-between gap-2">
+                          <div className="text-[11px] text-slate-400">{item.year || "--"}</div>
+                          <div className="px-1.5 py-0.5 rounded bg-black/45 border border-white/20 text-[9px] text-slate-200 font-headline uppercase tracking-wider">{item.type}</div>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </button>
-          ))}
+            ))}
+          </div>
+          <div className="hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border border-[#424753]/35 bg-[#111722]/90 px-2 py-2">
+            {groupedItems.letters.map((letter) => (
+              <button
+                key={`alpha-${letter}`}
+                type="button"
+                onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                className="w-6 h-6 rounded text-[10px] font-headline font-bold text-slate-400 hover:text-white hover:bg-[#293346] transition-colors"
+                title={`Jump to ${letter}`}
+              >
+                {letter}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -1463,7 +1766,7 @@ function LibraryPanel(props: {
   );
 }
 
-function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode }) {
+function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollContainerRef: React.RefObject<HTMLElement | null> }) {
   const navigate = useNavigate();
   const location = useLocation();
   const accent = getBrandAccent(props.brand, props.themeMode);
@@ -1476,6 +1779,25 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode }) {
   const pathParts = location.pathname.split("/");
   const entityType = pathParts[2] || "";
   const itemId = pathParts[3] || "";
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const container = props.scrollContainerRef.current;
+        if (container) container.scrollTop = 0;
+        window.scrollTo(0, 0);
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      });
+    });
+  }, [entityType, itemId, props.scrollContainerRef]);
+
+  useEffect(() => {
+    if (loading) return;
+    const container = props.scrollContainerRef.current;
+    if (container) container.scrollTop = 0;
+    window.scrollTo(0, 0);
+  }, [loading, props.scrollContainerRef]);
 
   useEffect(() => {
     let stopped = false;
@@ -1497,7 +1819,7 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode }) {
           const result = await getSeriesDetail(Number(itemId));
           if (result.ok && result.type === "series" && !stopped) {
             setPayload(result);
-            setOpenSeasons(result.seasons?.length ? [result.seasons[0].id] : []);
+            setOpenSeasons([]);
           } else if (!stopped && !result.ok) {
             setError((result as { message?: string }).message || "Series not found");
           } else if (!stopped) {
@@ -1519,7 +1841,10 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode }) {
   return (
     <div className={`min-h-screen ${isLight ? "bg-[#eef3f8]" : "bg-[#0f1419]"}`}>
       <div className={`px-6 py-4 border-b flex items-center gap-3 ${isLight ? "border-[#d7e2f0]" : "border-[#424753]/30"}`}>
-        <button type="button" onClick={() => navigate(-1)}
+        <button type="button" onClick={() => {
+          sessionStorage.setItem("libraryScrollRestorePending", "1");
+          navigate(-1);
+        }}
           className={`flex items-center gap-1.5 text-xs font-headline uppercase tracking-wider transition-colors ${isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"}`}>
           <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_back</span>
           Library
@@ -1556,34 +1881,42 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
   const p = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
+  const heroArtUrl = p.backdrop_url || p.poster_url;
   return (
     <div>
       {/* Hero banner */}
-      <div className="relative h-52 overflow-hidden"
-        style={p.poster_url ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.94)" : "rgba(15,20,25,0.9)"} 40%, ${isLight ? "rgba(238,243,248,0.4)" : "rgba(15,20,25,0.4)"}), url(${p.poster_url})`, backgroundSize: "cover", backgroundPosition: "center top" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
-        <div className={`absolute inset-0 ${isLight ? "bg-gradient-to-t from-[#eef3f8] via-transparent to-transparent" : "bg-gradient-to-t from-[#0f1419] via-transparent to-transparent"}`} />
+      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] overflow-hidden"
+        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.90)" : "rgba(8,12,18,0.78)"} 18%, ${isLight ? "rgba(238,243,248,0.52)" : "rgba(8,12,18,0.45)"} 42%, ${isLight ? "rgba(238,243,248,0.10)" : "rgba(8,12,18,0.08)"}), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
+        <div
+          className="absolute inset-0"
+          style={{
+            background: isLight
+              ? "linear-gradient(180deg, rgba(238,243,248,0) 38%, rgba(238,243,248,0.28) 70%, rgba(238,243,248,0.64) 100%)"
+              : "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)",
+          }}
+        />
       </div>
 
-      <div className="px-8 -mt-16 relative pb-8">
-        <div className="flex gap-6 items-end mb-6">
-          <div className={`flex-none w-24 h-36 rounded-xl overflow-hidden border-2 shadow-xl ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
+      <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
+        <div className="flex gap-6 md:gap-10 items-end mb-8">
+          <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
             {p.poster_url ? <img src={p.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
           </div>
-          <div className="flex-1 pb-2">
-            <h1 className={`text-3xl font-black font-headline tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>{p.title}</h1>
-            <div className="flex items-center gap-3 mt-2 flex-wrap">
-              {p.year && <span className="text-sm text-slate-400">{p.year}</span>}
-              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text }}>Movie</span>
-              {p.is_4k && <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>4K</span>}
-              {p.has_placeholder && <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
+          <div className="flex-1 pb-1 md:pb-2">
+            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{p.title}</h1>
+            <div className="flex items-center gap-3 mt-4 flex-wrap">
+              {p.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{p.year}</span>}
+              <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text }}>Movie</span>
+              {p.is_4k && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>4K</span>}
+              {p.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
               {p.has_file
-                ? <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Has File</span>
-                : <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>}
+                ? <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
+                : <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>}
             </div>
             {p.arr_link && (
-              <div className="mt-3">
+              <div className="mt-4">
                 <a href={p.arr_link} target="_blank" rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
+                  className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   Open in Radarr
                 </a>
@@ -1592,7 +1925,7 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           </div>
         </div>
 
-        {p.overview && <p className="text-sm text-slate-400 leading-relaxed max-w-3xl mb-6">{p.overview}</p>}
+        {p.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{p.overview}</p>}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {[
@@ -1603,9 +1936,9 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
             { label: "Digital", value: p.digital_release_date },
             { label: "Physical", value: p.physical_release_date },
           ].filter(m => m.value).map(m => (
-            <div key={m.label} className={`rounded-xl border p-4 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
+            <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
               <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className="text-sm font-semibold text-white">{m.value}</div>
+              <div className={`text-base font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
             </div>
           ))}
         </div>
@@ -1618,37 +1951,45 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
   const p = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
+  const heroArtUrl = p.backdrop_url || p.poster_url;
+  const seasonsDesc = useMemo(
+    () => [...(p.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
+    [p.seasons],
+  );
   return (
     <div>
       {/* Hero banner */}
-      <div className="relative h-52 bg-gradient-to-r from-[#0a0e14] to-[#1a2233] overflow-hidden"
-        style={p.poster_url ? { backgroundImage: `linear-gradient(to right, rgba(10,14,20,0.95) 35%, rgba(10,14,20,0.5)), url(${p.poster_url})`, backgroundSize: "cover", backgroundPosition: "center 20%" } : {}}>
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0f1419] via-transparent to-transparent" />
+      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] bg-gradient-to-r from-[#0a0e14] to-[#1a2233] overflow-hidden"
+        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, rgba(8,12,18,0.78) 18%, rgba(8,12,18,0.45) 42%, rgba(8,12,18,0.08)), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : {}}>
+        <div
+          className="absolute inset-0"
+          style={{ background: "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)" }}
+        />
       </div>
 
-      <div className="px-8 -mt-16 relative pb-8">
-        <div className="flex gap-6 items-end mb-6">
-          <div className="flex-none w-24 h-36 rounded-xl overflow-hidden border-2 border-[#424753]/40 bg-[#1e2430] shadow-xl">
+      <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
+        <div className="flex gap-6 md:gap-10 items-end mb-8">
+          <div className="flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 border-[#424753]/40 bg-[#1e2430] shadow-[0_30px_80px_rgba(0,0,0,0.5)]">
             {p.poster_url ? <img src={p.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
           </div>
-          <div className="flex-1 pb-2">
-            <h1 className="text-3xl font-black text-white font-headline tracking-tight">{p.title}</h1>
-            <div className="flex items-center gap-3 mt-2 flex-wrap">
-              {p.year && <span className="text-sm text-slate-400">{p.year}</span>}
-              {p.network && <span className="text-sm text-slate-500">{p.network}</span>}
-              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
-              {p.is_4k && <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>4K</span>}
+          <div className="flex-1 pb-1 md:pb-2">
+            <h1 className="text-4xl md:text-6xl lg:text-7xl font-black text-white font-headline tracking-tight leading-[0.95]">{p.title}</h1>
+            <div className="flex items-center gap-3 mt-4 flex-wrap">
+              {p.year && <span className="text-lg text-slate-200">{p.year}</span>}
+              {p.network && <span className="text-lg text-slate-300">{p.network}</span>}
+              <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
+              {p.is_4k && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>4K</span>}
               {p.sonarr_monitored != null && (
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase ${p.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
+                <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${p.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
                   style={p.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
                   {p.sonarr_monitored ? "Monitored" : "Unmonitored"}
                 </span>
               )}
             </div>
             {p.arr_link && (
-              <div className="mt-3">
+              <div className="mt-4">
                 <a href={p.arr_link} target="_blank" rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
+                  className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   Open in Sonarr
                 </a>
@@ -1657,7 +1998,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           </div>
         </div>
 
-        {p.overview && <p className="text-sm text-slate-400 leading-relaxed max-w-3xl mb-6">{p.overview}</p>}
+        {p.overview && <p className="text-lg text-slate-200 leading-relaxed max-w-5xl mb-8">{p.overview}</p>}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
           {[
@@ -1666,9 +2007,9 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
             { label: "First Aired", value: p.first_aired },
             { label: "Network", value: p.network },
           ].filter(m => m.value).map(m => (
-            <div key={m.label} className={`rounded-xl border p-4 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
+            <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
               <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className="text-sm font-semibold text-white">{m.value}</div>
+              <div className={`text-base font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
             </div>
           ))}
         </div>
@@ -1677,7 +2018,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           <h3 className="text-xs font-headline uppercase tracking-widest text-slate-500 mb-3">Seasons &amp; Episodes</h3>
         </div>
         <div className="space-y-2">
-          {p.seasons.map(season => {
+          {seasonsDesc.map(season => {
             const open = props.openSeasons.includes(season.id);
             return (
               <div key={season.id} className={`border rounded-xl overflow-hidden ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
@@ -1686,10 +2027,14 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                   <div className="flex items-center gap-3">
                     <span className="material-symbols-outlined text-slate-500 transition-transform" style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>chevron_right</span>
                     <span className="text-sm font-bold text-white font-headline">
-                      {season.season_number === 0 ? "Specials" : season.title || `Season ${season.season_number}`}
+                      {season.season_number === 0 ? "Specials" : `Season ${season.season_number}`}
                     </span>
                   </div>
-                  <span className="text-xs text-slate-500 font-headline uppercase tracking-wider">{season.episode_total} episodes</span>
+                  <div className="flex items-center gap-2 text-xs font-headline uppercase tracking-wider">
+                    <span className="text-slate-500">{season.episode_total} episodes</span>
+                    <span className="px-2 py-0.5 rounded bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder {season.episode_placeholders}</span>
+                    <span className="px-2 py-0.5 rounded bg-green-600/20 border border-green-500/30 text-green-300">Downloaded {season.episode_files}</span>
+                  </div>
                 </button>
                 {open && (
                   <div className="border-t border-[#424753]/30 divide-y divide-[#424753]/15">
@@ -1704,7 +2049,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                           {ep.has_placeholder
                             ? <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder</span>
                             : ep.has_file
-                              ? <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">File</span>
+                              ? <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
                               : <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
                           }
                         </div>
@@ -1741,24 +2086,79 @@ function CalendarPanel(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   const calendarGridRef = useRef<HTMLDivElement>(null);
+  const overlayContainerRef = useRef<HTMLDivElement>(null);
+  const releaseMenuRef = useRef<HTMLDivElement>(null);
   const [overlayOpen, setOverlayOpen] = useState(false);
   const [overlayExpanded, setOverlayExpanded] = useState(false);
-  const [overlayDelta, setOverlayDelta] = useState({ dx: 0, dy: 0 });
+  const [overlayAnchor, setOverlayAnchor] = useState({ x: 0, y: 0 });
+  const [overlayPosition, setOverlayPosition] = useState({ top: 12, left: 12, width: 680 });
+  const [releaseMenuOpen, setReleaseMenuOpen] = useState(false);
+
+  function calculateOverlayPosition(anchorX: number, anchorY: number) {
+    const container = overlayContainerRef.current;
+    if (!container) {
+      return { top: 12, left: 12, width: 680 };
+    }
+    const rect = container.getBoundingClientRect();
+    const maxWidth = Math.max(320, Math.min(760, rect.width - 24));
+    const estimatedHeight = Math.min(Math.max(420, rect.height * 0.72), 620);
+
+    let left = anchorX + 18;
+    if (left + maxWidth > rect.width - 12) {
+      left = anchorX - maxWidth - 18;
+    }
+    left = Math.max(12, Math.min(left, rect.width - maxWidth - 12));
+
+    let top = anchorY - estimatedHeight * 0.35;
+    top = Math.max(12, Math.min(top, rect.height - estimatedHeight - 12));
+
+    return { top, left, width: maxWidth };
+  }
 
   useEffect(() => {
-    if (!overlayOpen || !props.selectedItem) return;
+    if (!overlayOpen || !props.selectedItem) {
+      return;
+    }
+    setOverlayPosition(calculateOverlayPosition(overlayAnchor.x, overlayAnchor.y));
     setOverlayExpanded(false);
-    // Wait for the selected-item render so the card animates from click origin reliably
+    // Wait for selected-item render so the card animates from click origin reliably.
     requestAnimationFrame(() => requestAnimationFrame(() => setOverlayExpanded(true)));
-  }, [overlayOpen, props.selectedItem?.id]);
+  }, [overlayOpen, props.selectedItem?.id, overlayAnchor.x, overlayAnchor.y]);
+
+  useEffect(() => {
+    if (!overlayOpen) {
+      return;
+    }
+    const onResize = () => {
+      setOverlayPosition(calculateOverlayPosition(overlayAnchor.x, overlayAnchor.y));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [overlayOpen, overlayAnchor.x, overlayAnchor.y]);
+
+  useEffect(() => {
+    if (!releaseMenuOpen) {
+      return;
+    }
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (releaseMenuRef.current && target && !releaseMenuRef.current.contains(target)) {
+        setReleaseMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [releaseMenuOpen]);
 
   function handleLocalSelectItem(itemId: string, e: React.MouseEvent) {
-    const grid = calendarGridRef.current;
-    if (grid) {
-      const rect = grid.getBoundingClientRect();
-      const dx = e.clientX - rect.left - rect.width / 2;
-      const dy = e.clientY - rect.top - rect.height / 2;
-      setOverlayDelta({ dx, dy });
+    const container = overlayContainerRef.current;
+    if (container) {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const anchorX = targetRect.left - containerRect.left + targetRect.width / 2;
+      const anchorY = targetRect.top - containerRect.top + targetRect.height / 2;
+      setOverlayAnchor({ x: anchorX, y: anchorY });
+      setOverlayPosition(calculateOverlayPosition(anchorX, anchorY));
     }
     setOverlayExpanded(false);
     setOverlayOpen(true);
@@ -1787,9 +2187,9 @@ function CalendarPanel(props: {
     );
   }
 
-  const spotlightImage = props.spotlight?.type === "movie"
-    ? props.spotlight.backdrop_url || props.spotlight.poster_url
-    : props.spotlight?.poster_url;
+  const spotlightImage = props.spotlight
+    ? (props.spotlight.backdrop_url || props.spotlight.poster_url)
+    : null;
 
   // For episode cards, find the specific episode overview inside the series detail
   const episodeOverview = (() => {
@@ -1804,6 +2204,7 @@ function CalendarPanel(props: {
 
   const spotlightOverview = episodeOverview || props.spotlight?.overview || props.selectedItem?.reason || "Select a release on the calendar to inspect it here.";
   const spotlightArrLink = props.spotlight?.arr_link || props.selectedItem?.arr_link;
+  const spotlightPoster = props.spotlight?.poster_url || null;
   const spotlightMeta = props.selectedItem ? formatCalendarItemMeta(props.selectedItem) : [];
   const activeMediaFilters = Object.values(props.filters.mediaTypes).filter(Boolean).length;
   const activeReleaseFilters = Object.values(props.filters.releaseTypes).filter(Boolean).length;
@@ -1840,24 +2241,48 @@ function CalendarPanel(props: {
         <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500 self-center mr-2">Filter by</span>
         {payload.legend.media_types.map(item => {
           const active = props.filters.mediaTypes[item.key] !== false;
+          const mediaIcon = item.key === "movie" ? "movie" : "tv";
           return (
             <button key={`media-${item.key}`} type="button" onClick={() => props.onToggleFilter("mediaTypes", item.key)}
               className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-headline uppercase tracking-wider border transition-colors ${active ? "" : "bg-[#252e3a] border-[#424753]/40 text-slate-500 hover:text-slate-300"}`}
               style={active ? { backgroundColor: alphaColor(accent.hex, 0.18), borderColor: alphaColor(accent.hex, 0.45), color: accent.text } : undefined}>
-              {item.icon && <span>{item.icon}</span>}
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{mediaIcon}</span>
               {item.label}
             </button>
           );
         })}
-        {payload.legend.movie_release_types.map(item => {
-          const active = props.filters.releaseTypes[item.key] !== false;
-          return (
-            <button key={`rel-${item.key}`} type="button" onClick={() => props.onToggleFilter("releaseTypes", item.key)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-headline uppercase tracking-wider border transition-colors ${active ? "bg-teal-600/20 border-teal-500/50 text-teal-300" : "bg-[#252e3a] border-[#424753]/40 text-slate-500 hover:text-slate-300"}`}>
-              {item.label}
-            </button>
-          );
-        })}
+        <div className="relative" ref={releaseMenuRef}>
+          <button
+            type="button"
+            onClick={() => setReleaseMenuOpen((prev) => !prev)}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-headline uppercase tracking-wider border transition-colors ${releaseMenuOpen ? "bg-teal-600/20 border-teal-500/50 text-teal-300" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>tune</span>
+            Movie release types
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>expand_more</span>
+          </button>
+          {releaseMenuOpen ? (
+            <div className="absolute left-0 mt-2 w-64 rounded-xl border border-[#424753]/40 bg-[#111722] shadow-2xl z-20 p-2">
+              {payload.legend.movie_release_types.map((item) => {
+                const active = props.filters.releaseTypes[item.key] !== false;
+                return (
+                  <label
+                    key={`rel-menu-${item.key}`}
+                    className="flex items-center gap-2 px-2 py-2 rounded-md text-xs text-slate-300 hover:bg-[#1b2433] cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={active}
+                      onChange={() => props.onToggleFilter("releaseTypes", item.key)}
+                      className="h-3.5 w-3.5 rounded border-[#424753]/60 bg-[#0f141c] text-teal-400 focus:ring-0"
+                    />
+                    <span className="font-headline uppercase tracking-wider">{item.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
         <span className="ml-auto text-[10px] font-headline text-slate-500 self-center">
           {props.summary.movieCount} movies · {props.summary.episodeCount} TV episodes
         </span>
@@ -1877,7 +2302,7 @@ function CalendarPanel(props: {
       </div>
 
       {/* Calendar grid — full width, overlay hovers above it */}
-      <div className="relative">
+      <div className="relative" ref={overlayContainerRef}>
         <div className="overflow-x-auto rounded-xl border border-[#424753]/40 bg-[#171c22]" ref={calendarGridRef}>
           <div className="min-w-[980px] overflow-hidden rounded-xl">
             <div className="grid grid-cols-7 border-b border-[#424753]/30">
@@ -1916,29 +2341,28 @@ function CalendarPanel(props: {
             <div
               className="absolute pointer-events-auto calendar-spotlight-overlay"
               style={{
-                top: "50%",
-                left: "50%",
-                width: 600,
-                maxWidth: "90%",
+                top: overlayPosition.top,
+                left: overlayPosition.left,
+                width: overlayPosition.width,
+                maxWidth: "calc(100% - 24px)",
                 zIndex: 50,
-                borderRadius: 16,
+                borderRadius: 20,
                 overflow: "hidden",
-                background: "#0c1118",
+                background: "#0b1017",
                 border: `1px solid ${alphaColor(accent.hex, 0.3)}`,
                 boxShadow: `0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px ${alphaColor(accent.hex, 0.15)}`,
-                transform: overlayExpanded
-                  ? "translate(-50%, -50%) scale(1)"
-                  : `translate(calc(-50% + ${overlayDelta.dx}px), calc(-50% + ${overlayDelta.dy}px)) scale(0.3)`,
+                transformOrigin: `${Math.max(0, Math.min(100, ((overlayAnchor.x - overlayPosition.left) / Math.max(overlayPosition.width, 1)) * 100))}% ${Math.max(0, Math.min(100, ((overlayAnchor.y - overlayPosition.top) / 560) * 100))}%`,
+                transform: overlayExpanded ? "scale(1)" : "scale(0.84)",
                 opacity: overlayExpanded ? 1 : 0,
-                transition: "transform 0.38s cubic-bezier(0.34,1.56,0.64,1), opacity 0.22s ease",
+                transition: "transform 0.34s cubic-bezier(0.2,0.9,0.2,1), opacity 0.2s ease",
               }}
             >
               {/* Hero image */}
-              <div className="relative h-48 bg-[#0a0e14]">
+              <div className="relative h-64 md:h-72 bg-[#0a0e14]">
                 {spotlightImage ? (
                   <div
                     className="absolute inset-0 bg-cover bg-center"
-                    style={{ backgroundImage: `linear-gradient(180deg, rgba(5,8,14,0.1) 0%, rgba(5,8,14,0.75) 65%, rgba(5,8,14,1) 100%), url(${spotlightImage})` }}
+                    style={{ backgroundImage: `linear-gradient(180deg, rgba(5,8,14,0.06) 0%, rgba(5,8,14,0.7) 64%, rgba(5,8,14,1) 100%), url(${spotlightImage})` }}
                   />
                 ) : (
                   <div className="absolute inset-0" style={{ background: `linear-gradient(135deg, ${alphaColor(accent.hex, 0.18)}, rgba(5,8,14,0.9))` }} />
@@ -1951,32 +2375,45 @@ function CalendarPanel(props: {
                 >
                   <span className="material-symbols-outlined" style={{ fontSize: 18 }}>close</span>
                 </button>
-                <div className="absolute inset-x-0 bottom-0 p-4">
-                  <div className="mb-1 flex flex-wrap items-center gap-2">
-                    <span
-                      className="rounded px-2 py-0.5 text-[10px] font-bold font-headline uppercase tracking-wider"
-                      style={{ backgroundColor: alphaColor(accent.hex, 0.28), borderColor: alphaColor(accent.hex, 0.45), border: `1px solid ${alphaColor(accent.hex, 0.45)}`, color: accent.text }}
-                    >
-                      {props.selectedItem.media_type === "movie" ? "Movie" : "Episode"}
-                    </span>
-                    {props.selectedItem.release_type_label ? (
-                      <span className="rounded border border-teal-500/30 bg-teal-600/20 px-2 py-0.5 text-[10px] font-bold font-headline uppercase tracking-wider text-teal-200">
-                        {props.selectedItem.release_type_label}
-                      </span>
-                    ) : null}
+                <div className="absolute inset-x-0 bottom-0 p-5 md:p-6">
+                  <div className="flex items-end gap-4 md:gap-5">
+                    <div className="hidden md:block flex-none w-24 h-36 rounded-xl overflow-hidden border border-white/20 shadow-2xl bg-[#151b25]">
+                      {spotlightPoster ? (
+                        <img src={spotlightPoster} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="h-full w-full flex items-center justify-center text-slate-500 font-headline text-xs uppercase">
+                          {props.selectedItem.media_type === "movie" ? "MOV" : "TV"}
+                        </div>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span
+                          className="rounded px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider"
+                          style={{ backgroundColor: alphaColor(accent.hex, 0.28), borderColor: alphaColor(accent.hex, 0.45), border: `1px solid ${alphaColor(accent.hex, 0.45)}`, color: accent.text }}
+                        >
+                          {props.selectedItem.media_type === "movie" ? "Movie" : "Episode"}
+                        </span>
+                        {props.selectedItem.release_type_label ? (
+                          <span className="rounded border border-teal-500/30 bg-teal-600/20 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-teal-200">
+                            {props.selectedItem.release_type_label}
+                          </span>
+                        ) : null}
+                      </div>
+                      <h3 className="text-2xl md:text-3xl font-black tracking-tight text-white font-headline leading-tight">
+                        {props.selectedItem.title}
+                      </h3>
+                      {props.selectedItem.subtitle ? (
+                        <p className="mt-1 text-sm text-slate-300 truncate">{props.selectedItem.subtitle}</p>
+                      ) : null}
+                    </div>
                   </div>
-                  <h3 className="text-xl font-black tracking-tight text-white font-headline leading-tight">
-                    {props.selectedItem.title}
-                  </h3>
-                  {props.selectedItem.subtitle ? (
-                    <p className="mt-0.5 text-xs text-slate-300">{props.selectedItem.subtitle}</p>
-                  ) : null}
                 </div>
               </div>
 
               {/* Body */}
-              <div className="space-y-4 p-5">
-                <p className="text-sm leading-relaxed text-slate-300">
+              <div className="space-y-5 p-5 md:p-6">
+                <p className="text-base leading-relaxed text-slate-200">
                   {props.spotlightLoading ? "Loading metadata..." : spotlightOverview}
                 </p>
 
@@ -2298,6 +2735,474 @@ function LogsPanel(props: {
   );
 }
 
+type ArrInstanceDraft = {
+  id: string;
+  label: string;
+  arr_type: "radarr" | "sonarr";
+  instance_key: string;
+  url: string;
+  api_key: string;
+  is_4k: boolean;
+};
+
+function normalizeInstanceKey(input: string) {
+  return String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "");
+}
+
+function inferDefaultKey(label: string, arrType: "radarr" | "sonarr") {
+  const slug = normalizeInstanceKey(label);
+  return `${arrType}_${slug || "instance"}`;
+}
+
+function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] {
+  const raw = String(values.ARR_INSTANCES_JSON || "").trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const items = parsed
+          .filter((item) => item && typeof item === "object")
+          .map((item, index) => {
+            const obj = item as Record<string, unknown>;
+            const arrType = String(obj.arr_type || obj.type || "").toLowerCase() === "sonarr" ? "sonarr" : "radarr";
+            const label = String(obj.label || obj.instance_key || obj.key || obj.name || `${arrType} ${index + 1}`);
+            return {
+              id: `json-${index}-${Math.random().toString(36).slice(2, 8)}`,
+              label,
+              arr_type: arrType,
+              instance_key: normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType))),
+              url: String(obj.url || ""),
+              api_key: String(obj.api_key || obj.apikey || ""),
+              is_4k: Boolean(obj.is_4k),
+            } satisfies ArrInstanceDraft;
+          });
+        if (items.length) return items;
+      }
+    } catch {
+      // Fall through to legacy pairs.
+    }
+  }
+
+  const legacy: ArrInstanceDraft[] = [];
+  const radarrUrl = String(values.RADARR_URL || "").trim();
+  const radarrKey = String(values.RADARR_API_KEY || "").trim();
+  const radarr4kUrl = String(values.RADARR_4K_URL || "").trim();
+  const radarr4kKey = String(values.RADARR_4K_API_KEY || "").trim();
+  const sonarrUrl = String(values.SONARR_URL || "").trim();
+  const sonarrKey = String(values.SONARR_API_KEY || "").trim();
+  const sonarr4kUrl = String(values.SONARR_4K_URL || "").trim();
+  const sonarr4kKey = String(values.SONARR_4K_API_KEY || "").trim();
+
+  if (radarrUrl || radarrKey) {
+    legacy.push({
+      id: "legacy-radarr-std",
+      label: "Radarr Standard",
+      arr_type: "radarr",
+      instance_key: normalizeInstanceKey(String(values.RADARR_STD_INSTANCE_KEY || "radarr_std")),
+      url: radarrUrl,
+      api_key: radarrKey,
+      is_4k: false,
+    });
+  }
+  if (radarr4kUrl || radarr4kKey) {
+    legacy.push({
+      id: "legacy-radarr-4k",
+      label: "Radarr 4K",
+      arr_type: "radarr",
+      instance_key: normalizeInstanceKey(String(values.RADARR_4K_INSTANCE_KEY || "radarr_4k")),
+      url: radarr4kUrl,
+      api_key: radarr4kKey,
+      is_4k: true,
+    });
+  }
+  if (sonarrUrl || sonarrKey) {
+    legacy.push({
+      id: "legacy-sonarr-std",
+      label: "Sonarr Standard",
+      arr_type: "sonarr",
+      instance_key: normalizeInstanceKey(String(values.SONARR_STD_INSTANCE_KEY || "sonarr_std")),
+      url: sonarrUrl,
+      api_key: sonarrKey,
+      is_4k: false,
+    });
+  }
+  if (sonarr4kUrl || sonarr4kKey) {
+    legacy.push({
+      id: "legacy-sonarr-4k",
+      label: "Sonarr 4K",
+      arr_type: "sonarr",
+      instance_key: normalizeInstanceKey(String(values.SONARR_4K_INSTANCE_KEY || "sonarr_4k")),
+      url: sonarr4kUrl,
+      api_key: sonarr4kKey,
+      is_4k: true,
+    });
+  }
+  return legacy;
+}
+
+function serializeArrInstances(instances: ArrInstanceDraft[]) {
+  const clean = instances
+    .map((row) => {
+      const label = String(row.label || "").trim();
+      const inferredKey = normalizeInstanceKey(inferDefaultKey(label, row.arr_type));
+      const inferredIs4k = /(^|\s)4k(\s|$)/i.test(label);
+      return {
+        arr_type: row.arr_type,
+        instance_key: inferredKey,
+        label,
+        url: String(row.url || "").trim(),
+        api_key: String(row.api_key || "").trim(),
+        is_4k: Boolean(row.is_4k || inferredIs4k),
+      };
+    })
+    .filter((row) => row.instance_key && row.url && row.api_key);
+  return JSON.stringify(clean);
+}
+
+function ArrInstancesEditor(props: {
+  values: FieldValueMap;
+  onValueChange: (key: string, value: unknown) => void;
+  accent: BrandAccent;
+}) {
+  const [instances, setInstances] = useState<ArrInstanceDraft[]>(() => parseArrInstancesFromValues(props.values));
+  const [testState, setTestState] = useState<Record<string, { ok: boolean; message: string }>>({});
+
+  useEffect(() => {
+    setInstances(parseArrInstancesFromValues(props.values));
+  }, [props.values.ARR_INSTANCES_JSON, props.values.RADARR_URL, props.values.RADARR_4K_URL, props.values.SONARR_URL, props.values.SONARR_4K_URL]);
+
+  function update(next: ArrInstanceDraft[]) {
+    setInstances(next);
+    props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(next));
+  }
+
+  function addInstance(arrType: "radarr" | "sonarr") {
+    const label = arrType === "radarr" ? "Radarr Instance" : "Sonarr Instance";
+    update([
+      ...instances,
+      {
+        id: `new-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        label,
+        arr_type: arrType,
+        instance_key: inferDefaultKey(label, arrType),
+        url: "",
+        api_key: "",
+        is_4k: false,
+      },
+    ]);
+  }
+
+  async function runTest(item: ArrInstanceDraft) {
+    setTestState((prev) => ({ ...prev, [item.id]: { ok: true, message: "Testing..." } }));
+    const result = await testIntegrationConnection({
+      service: item.arr_type,
+      url: String(item.url || ""),
+      credential: String(item.api_key || ""),
+    });
+    setTestState((prev) => ({ ...prev, [item.id]: result }));
+  }
+
+  const byType = {
+    radarr: instances.filter((item) => item.arr_type === "radarr"),
+    sonarr: instances.filter((item) => item.arr_type === "sonarr"),
+  };
+
+  function card(item: ArrInstanceDraft) {
+    const status = testState[item.id];
+    return (
+      <div key={item.id} className="rounded-xl border border-[#424753]/40 bg-[#0f1419] overflow-hidden">
+        <div className="p-4 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex-1">
+              <input
+                className="bg-transparent text-sm font-semibold text-white font-headline outline-none w-full"
+                value={item.label}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  update(instances.map((row) => (row.id === item.id ? { ...row, label: value } : row)));
+                }}
+                placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
+              />
+              <div className="text-[11px] text-slate-400 mt-1">{item.arr_type.toUpperCase()}</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {/* url and api key fields */}
+          </div>
+          <input
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
+            value={item.url}
+            onChange={(e) => update(instances.map((row) => (row.id === item.id ? { ...row, url: e.target.value } : row)))}
+            placeholder="http://arr-host:port/api/v3"
+          />
+          <input
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
+            value={item.api_key}
+            onChange={(e) => update(instances.map((row) => (row.id === item.id ? { ...row, api_key: e.target.value } : row)))}
+            placeholder="API key"
+            type="password"
+          />
+          <div className="text-[11px] text-slate-400">Instance key (derived): <span className="text-slate-200">{normalizeInstanceKey(inferDefaultKey(String(item.label || ""), item.arr_type))}</span></div>
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => runTest(item)}
+              className="px-3 py-1.5 rounded-md text-xs bg-[#252e3a] border border-[#424753]/40 text-slate-300"
+            >
+              Test
+            </button>
+            <button
+              type="button"
+              onClick={() => update(instances.filter((row) => row.id !== item.id))}
+              className="px-3 py-1.5 rounded-md text-xs bg-red-900/25 border border-red-500/30 text-red-300"
+            >
+              Delete
+            </button>
+          </div>
+          {status ? (
+            <div className={`text-xs ${status.ok ? "text-green-400" : "text-red-400"}`}>{status.message}</div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      {(["radarr", "sonarr"] as const).map((arrType) => (
+        <div key={arrType}>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-white font-headline">{arrType === "radarr" ? "Radarr Settings" : "Sonarr Settings"}</h3>
+            <button
+              type="button"
+              onClick={() => addInstance(arrType)}
+              className="px-3 py-1.5 rounded-lg text-xs border border-dashed text-slate-300"
+              style={{ borderColor: alphaColor(props.accent.hex, 0.6), backgroundColor: alphaColor(props.accent.hex, 0.12) }}
+            >
+              + Add {arrType === "radarr" ? "Radarr" : "Sonarr"} Server
+            </button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {byType[arrType].map((item) => card(item))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LibraryPathsForm(props: {
+  fields: SettingsField[];
+  values: FieldValueMap;
+  brand: Brand;
+  themeMode: ThemeMode;
+  accent: BrandAccent;
+  layout: "settings" | "wizard";
+  onValueChange: (key: string, value: unknown) => void;
+  runTest?: (field: SettingsField) => void;
+  testResults?: Record<string, { ok: boolean; message: string }>;
+}) {
+  const { root, profiles, overrides, rest } = useMemo(() => partitionLibraryPathFields(props.fields), [props.fields]);
+  const [overridesOpen, setOverridesOpen] = useState(() => {
+    if (props.layout === "wizard") return false;
+    return overrides.some((f) => String(props.values[f.key] ?? "").trim() !== "");
+  });
+  const focus = getBrandFocusClass(props.brand, props.themeMode);
+
+  function renderBool(field: SettingsField, compact?: boolean) {
+    const v = Boolean(props.values[field.key]);
+    return (
+      <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
+        <div
+          className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${v ? "" : "bg-[#252e3a]"}`}
+          style={v ? { backgroundColor: props.accent.hex } : undefined}
+          onClick={() => props.onValueChange(field.key, !v)}
+        >
+          <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${v ? "translate-x-5" : "translate-x-0"}`} />
+        </div>
+        <span className={compact ? "text-xs text-slate-400" : "text-sm text-slate-300"}>{v ? "Enabled" : "Disabled"}</span>
+      </label>
+    );
+  }
+
+  function renderTextInput(field: SettingsField, opts?: { compact?: boolean; muted?: boolean }) {
+    const border = opts?.muted ? "border-[#424753]/25" : "border-[#424753]/40";
+    const ph = field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`;
+    return (
+      <input
+        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-xs py-1.5" : ""}`}
+        type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+        value={String(props.values[field.key] ?? "")}
+        placeholder={ph}
+        onChange={(e) => props.onValueChange(field.key, e.target.value)}
+      />
+    );
+  }
+
+  function renderSettingsRestField(field: SettingsField) {
+    const value = props.values[field.key];
+    const test = props.testResults?.[field.key];
+    const testTarget = URL_TEST_TARGET[field.key];
+    return (
+      <div key={field.key} className="px-6 py-5">
+        <div className="flex items-start gap-3 mb-2">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-white font-headline">{field.label}</span>
+              {field.required && (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(props.accent.hex, 0.3), color: props.accent.text }}>Required</span>
+              )}
+              {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
+              {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
+            </div>
+            {field.description && <p className="text-xs text-slate-500 mt-1">{field.description}</p>}
+          </div>
+        </div>
+        {field.type === "bool" ? (
+          renderBool(field)
+        ) : field.type === "choice" && field.options?.length ? (
+          <select
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+            value={String(value ?? field.options[0]?.value ?? "")}
+            onChange={(e) => props.onValueChange(field.key, e.target.value)}
+          >
+            {field.options.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        ) : (
+          <div className="flex gap-2">
+            <input
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+              type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              value={String(value ?? "")}
+              placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
+              onChange={(e) => props.onValueChange(field.key, e.target.value)}
+            />
+            {testTarget && props.runTest && (
+              <button type="button" onClick={() => props.runTest!(field)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
+                Test
+              </button>
+            )}
+          </div>
+        )}
+        {test && (
+          <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+            {test.message}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const rootBlock = root ? (
+    <div
+      className="rounded-xl border px-4 py-4"
+      style={{
+        borderColor: alphaColor(props.accent.hex, 0.4),
+        backgroundColor: alphaColor(props.accent.hex, 0.07),
+      }}
+    >
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <span className="text-sm font-semibold text-white font-headline">{root.label}</span>
+        <span className="px-2 py-0.5 rounded text-[9px] font-bold font-headline uppercase tracking-wide bg-emerald-500/15 text-emerald-300/95 border border-emerald-500/25">
+          Suggested setup
+        </span>
+      </div>
+      <p className="text-xs text-slate-400 mb-3 leading-relaxed">
+        One base path; Placeholdarr creates selected profile folders (Standard, 4K, Anime) from this root.
+      </p>
+      {root.description && <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">{root.description}</p>}
+      {root.type === "bool" ? renderBool(root) : renderTextInput(root)}
+    </div>
+  ) : null;
+
+  const profileBlock = profiles.length ? (
+    <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419]/55 px-4 py-4">
+      <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {profiles.map((field) => (
+          <div key={field.key} className="rounded-lg border border-[#424753]/35 bg-[#0b111b] px-3 py-2">
+            <div className="text-xs text-slate-300 font-medium mb-2">{field.label}</div>
+            {renderBool(field, true)}
+            {field.description ? <p className="text-[11px] text-slate-600 mt-2">{field.description}</p> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  ) : null;
+
+  const overridesBlock = overrides.length ? (
+    <div className={props.layout === "settings" ? "rounded-lg border border-[#424753]/30 bg-[#0f1419]/50 px-4 py-3" : "rounded-lg border border-[#424753]/30 bg-[#0f1419]/50 px-3 py-3"}>
+      <button
+        type="button"
+        onClick={() => setOverridesOpen((o) => !o)}
+        className="flex w-full items-start justify-between gap-3 text-left rounded-md outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#171c22] focus-visible:ring-emerald-500/40"
+      >
+        <div className="min-w-0">
+          <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-0.5">Optional overrides</div>
+          <div className="text-sm font-medium text-slate-400 font-headline">Custom folder per library</div>
+          <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+            Use when a library path is not under Library Root (or you use no root and set each path manually).
+          </p>
+        </div>
+        <span
+          className="material-symbols-outlined shrink-0 text-slate-500 transition-transform duration-200"
+          style={{ fontSize: 22, transform: overridesOpen ? "rotate(180deg)" : undefined }}
+        >
+          expand_more
+        </span>
+      </button>
+      {overridesOpen && (
+        <div className="mt-4 ml-1 space-y-4 pl-4 border-l-2 border-[#424753]/60">
+          {overrides.map((field) => (
+            <div key={field.key}>
+              <label className="block text-xs font-medium text-slate-400 font-headline mb-1">{field.label}</label>
+              {field.description && <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">{field.description}</p>}
+              {field.type === "bool" ? renderBool(field, true) : renderTextInput(field, { compact: true, muted: true })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  if (props.layout === "wizard") {
+    return (
+      <div className="space-y-5">
+        {rootBlock}
+        {profileBlock}
+        {overridesBlock}
+        {rest.map((field) => (
+          <div key={field.key}>
+            <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
+            {field.description && <p className="text-xs text-slate-500 mb-2">{field.description}</p>}
+            {field.type === "bool" ? renderBool(field) : renderTextInput(field)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {root ? (
+        <div className="px-6 py-5">{rootBlock}</div>
+      ) : null}
+      {profiles.length ? <div className="px-6 py-5">{profileBlock}</div> : null}
+      {overrides.length ? <div className="px-6 py-5">{overridesBlock}</div> : null}
+      {rest.map((field) => renderSettingsRestField(field))}
+    </>
+  );
+}
+
 function SettingsPanel(props: {
   payload: SettingsPayload | null;
   activeSection: string;
@@ -2330,8 +3235,8 @@ function SettingsPanel(props: {
   const SECTION_ICONS: Record<string, string> = {
     "Integrations": "hub",
     "Paths":        "folder",
+    "Library sync": "sync",
     "Calendar":     "calendar_month",
-    "Automation":   "auto_awesome",
     "Playback":     "play_circle",
     "Advanced":     "tune",
   };
@@ -2346,6 +3251,73 @@ function SettingsPanel(props: {
       credentialKey: target.credentialKey,
     });
     setTestResults((prev) => ({ ...prev, [field.key]: result }));
+  }
+
+  function renderStandardField(field: SettingsField) {
+    const value = props.values[field.key];
+    const test = testResults[field.key];
+    const testTarget = URL_TEST_TARGET[field.key];
+
+    return (
+      <div key={field.key} className="px-6 py-5">
+        <div className="flex items-start gap-3 mb-2">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-white font-headline">{field.label}</span>
+              {field.required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.3), color: accent.text }}>Required</span>}
+              {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
+              {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
+            </div>
+            {field.description && <p className="text-xs text-slate-500 mt-1">{field.description}</p>}
+          </div>
+        </div>
+
+        {field.type === "bool" ? (
+          <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
+            <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
+              style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
+              onClick={() => props.onValueChange(field.key, !Boolean(value))}>
+              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
+            </div>
+            <span className="text-sm text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+          </label>
+        ) : field.type === "choice" && field.options?.length ? (
+          <select
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+            value={String(value ?? field.options[0]?.value ?? "")}
+            onChange={(e) => props.onValueChange(field.key, e.target.value)}
+          >
+            {field.options.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        ) : (
+          <div className="flex gap-2">
+            <input
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+              type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              value={String(value ?? "")}
+              placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
+              onChange={e => props.onValueChange(field.key, e.target.value)}
+            />
+            {testTarget && (
+              <button type="button" onClick={() => runTest(field)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
+                Test
+              </button>
+            )}
+          </div>
+        )}
+
+        {test && (
+          <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+            {test.message}
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -2402,62 +3374,34 @@ function SettingsPanel(props: {
               <h2 className="text-base font-bold text-white font-headline">{active.name}</h2>
             </div>
             <div className="divide-y divide-[#424753]/20">
-              {active.fields.map(field => {
-                const value = props.values[field.key];
-                const test = testResults[field.key];
-                const testTarget = URL_TEST_TARGET[field.key];
-
-                return (
-                  <div key={field.key} className="px-6 py-5">
-                    <div className="flex items-start gap-3 mb-2">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-white font-headline">{field.label}</span>
-                          {field.required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.3), color: accent.text }}>Required</span>}
-                          {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
-                          {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
-                        </div>
-                        {field.description && <p className="text-xs text-slate-500 mt-1">{field.description}</p>}
-                      </div>
+              {active.name === "Paths" ? (
+                <LibraryPathsForm
+                  fields={active.fields}
+                  values={props.values}
+                  brand={props.brand}
+                  themeMode={props.themeMode}
+                  accent={accent}
+                  layout="settings"
+                  onValueChange={props.onValueChange}
+                  runTest={runTest}
+                  testResults={testResults}
+                />
+              ) : active.name === "Integrations" ? (
+                <>
+                  {active.fields
+                    .filter((field) => !(field.key.startsWith("RADARR") || field.key.startsWith("SONARR") || field.key === "ARR_INSTANCES_JSON"))
+                    .map((field) => renderStandardField(field))}
+                  <div className="px-6 py-5">
+                    <div className="mb-3">
+                      <h3 className="text-base font-bold text-white font-headline">ARR Instances</h3>
+                      <p className="text-xs text-slate-500 mt-1">Add one or more Radarr/Sonarr instances with labels. These entries power webhook labels and instance-aware routing.</p>
                     </div>
-
-                    {field.type === "bool" ? (
-                      <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-                        <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
-                          style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-                          onClick={() => props.onValueChange(field.key, !Boolean(value))}>
-                          <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
-                        </div>
-                        <span className="text-sm text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
-                      </label>
-                    ) : (
-                      <div className="flex gap-2">
-                        <input
-                          className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                          type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-                          value={String(value ?? "")}
-                          placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-                          onChange={e => props.onValueChange(field.key, e.target.value)}
-                        />
-                        {testTarget && (
-                          <button type="button" onClick={() => runTest(field)}
-                            className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
-                            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
-                            Test
-                          </button>
-                        )}
-                      </div>
-                    )}
-
-                    {test && (
-                      <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
-                        {test.message}
-                      </div>
-                    )}
+                    <ArrInstancesEditor values={props.values} onValueChange={props.onValueChange} accent={accent} />
                   </div>
-                );
-              })}
+                </>
+              ) : (
+                active.fields.map((field) => renderStandardField(field))
+              )}
             </div>
           </div>
         </div>
@@ -2477,12 +3421,90 @@ function OnboardingWizard(props: {
   onNext: () => void;
   onChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
+  onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
+  onPartialSave?: (result: any, partialValues: Record<string, unknown>) => Promise<void> | void;
 }) {
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const step = WIZARD_STEPS[props.stepIndex];
   const guidance = WIZARD_STEP_GUIDANCE[step.key];
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const pathsReviewAck = Boolean(props.values.WIZARD_PATHS_REVIEW_ACK);
+  const canProceed = step.key !== "paths_review" || pathsReviewAck;
   const keys = fieldsForWizardStep(step.key, props.payload.sections);
   const fields = props.payload.sections.flatMap((section) => section.fields).filter((f) => keys.includes(f.key));
+  const [stepSaving, setStepSaving] = useState(false);
+  const [stepError, setStepError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTestResults({});
+  }, [props.stepIndex]);
+
+  async function runTest(field: SettingsField) {
+    const target = URL_TEST_TARGET[field.key];
+    if (!target) return;
+    setTestResults((prev) => ({ ...prev, [field.key]: { ok: true, message: "Testing..." } }));
+    const result = await props.onTestConnection({
+      service: target.service,
+      urlKey: field.key,
+      credentialKey: target.credentialKey,
+    });
+    setTestResults((prev) => ({ ...prev, [field.key]: result }));
+  }
+
+  function wizardFieldRow(field: SettingsField) {
+    const test = testResults[field.key];
+    const testTarget = URL_TEST_TARGET[field.key];
+    const focus = getBrandFocusClass(props.brand, props.themeMode);
+    return (
+      <div key={field.key}>
+        <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
+        {field.description && <p className="text-xs text-slate-500 mb-2">{field.description}</p>}
+        {field.type === "bool" ? (
+          <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
+            <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"}`}
+              style={Boolean(props.values[field.key]) ? { backgroundColor: accent.hex } : undefined}
+              onClick={() => props.onChange(field.key, !Boolean(props.values[field.key]))}>
+              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values[field.key]) ? "translate-x-5" : "translate-x-0"}`} />
+            </div>
+            <span className="text-sm text-slate-300">{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
+          </label>
+        ) : field.type === "choice" && field.options?.length ? (
+          <select
+            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+            value={String(props.values[field.key] ?? field.options[0]?.value ?? "")}
+            onChange={(e) => props.onChange(field.key, e.target.value)}
+          >
+            {field.options.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        ) : (
+          <div className="flex gap-2">
+            <input
+              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+              type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              value={String(props.values[field.key] ?? "")}
+              placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
+              onChange={(e) => props.onChange(field.key, e.target.value)}
+            />
+            {testTarget && (
+              <button type="button" onClick={() => runTest(field)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap shrink-0">
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
+                Test
+              </button>
+            )}
+          </div>
+        )}
+        {test && (
+          <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
+            <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+            <span>{test.message}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 bg-[#0f1419]/80 backdrop-blur-sm flex items-center justify-center p-6">
@@ -2524,35 +3546,67 @@ function OnboardingWizard(props: {
             <div className="text-[11px] font-headline uppercase tracking-widest" style={{ color: accent.icon }}>{guidance.title}</div>
             <p className="mt-1 text-xs text-slate-400">{guidance.detail}</p>
           </div>
-          {!fields.length ? (
-            <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
-          ) : (
-            <div className="space-y-5">
-              {fields.map(field => (
-                <div key={field.key}>
-                  <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
-                  {field.description && <p className="text-xs text-slate-500 mb-2">{field.description}</p>}
-                  {field.type === "bool" ? (
-                    <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-                      <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"}`}
-                        style={Boolean(props.values[field.key]) ? { backgroundColor: accent.hex } : undefined}
-                        onClick={() => props.onChange(field.key, !Boolean(props.values[field.key]))}>
-                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values[field.key]) ? "translate-x-5" : "translate-x-0"}`} />
-                      </div>
-                      <span className="text-sm text-slate-300">{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
-                    </label>
-                  ) : (
-                    <input
-                      className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                      type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-                      value={String(props.values[field.key] ?? "")}
-                      placeholder={`Enter ${field.label.toLowerCase()}...`}
-                      onChange={e => props.onChange(field.key, e.target.value)}
-                    />
-                  )}
+          {step.key === "paths" ? (
+            <LibraryPathsForm
+              fields={fields}
+              values={props.values}
+              brand={props.brand}
+              themeMode={props.themeMode}
+              accent={accent}
+              layout="wizard"
+              onValueChange={props.onChange}
+            />
+          ) : step.key === "paths_review" ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
+                <h3 className="text-sm font-semibold text-white font-headline">Create libraries now in your media server</h3>
+                <p className="mt-1 text-xs text-slate-400">Use the generated root folders to create your movie and TV libraries in Plex, Jellyfin, or Emby before proceeding to service credentials.</p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 font-headline">Movie Root</div>
+                  <div className="mt-1 text-sm text-slate-200 break-all">{String(props.values.MOVIE_LIBRARY_FOLDER || "Not set")}</div>
                 </div>
-              ))}
+                <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 font-headline">TV Root</div>
+                  <div className="mt-1 text-sm text-slate-200 break-all">{String(props.values.TV_LIBRARY_FOLDER || "Not set")}</div>
+                </div>
+              </div>
+              <label className="flex items-start gap-3 rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={pathsReviewAck}
+                  onChange={(e) => props.onChange("WIZARD_PATHS_REVIEW_ACK", e.target.checked)}
+                />
+                <span className="text-sm text-slate-300">I created or verified media libraries using these root paths and I am ready to continue.</span>
+              </label>
             </div>
+          ) : step.key === "arr" ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
+                <h3 className="text-sm font-semibold text-white font-headline">Add ARR instances</h3>
+                <p className="mt-1 text-xs text-slate-400">Create one or more Radarr and Sonarr instances. Labels should match your webhook naming for reliable routing.</p>
+              </div>
+              <ArrInstancesEditor values={props.values} onValueChange={props.onChange} accent={accent} />
+            </div>
+          ) : !fields.length ? (
+            <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
+          ) : step.key === "behavior" ? (
+            <div className="space-y-6">
+              {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
+                const secFields = fields.filter((f) => f.section === sectionName);
+                if (!secFields.length) return null;
+                return (
+                  <div key={sectionName}>
+                    <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">{sectionName}</h3>
+                    <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-5">{fields.map((field) => wizardFieldRow(field))}</div>
           )}
         </div>
 
@@ -2566,10 +3620,48 @@ function OnboardingWizard(props: {
           <div className="flex items-center gap-3">
             {props.hasUnsavedChanges && <span className="text-xs text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
             {props.stepIndex < WIZARD_STEPS.length - 1 ? (
-              <button type="button" onClick={props.onNext}
-                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-xs font-headline uppercase tracking-wider transition-colors"
-                style={{ backgroundColor: accent.hex }}>
-                Continue Setup
+              <button
+                type="button"
+                disabled={!canProceed || stepSaving}
+                onClick={async () => {
+                  setStepError(null);
+                  if (step.key === "paths_review") {
+                    if (!pathsReviewAck) return setStepError("Please confirm you created libraries before continuing.");
+                    props.onNext();
+                    return;
+                  }
+
+                  const stepKeys = keys || [];
+                  if (!stepKeys.length) {
+                    props.onNext();
+                    return;
+                  }
+
+                  // Build partial payload for this step and save it
+                  const partial: Record<string, unknown> = {};
+                  for (const k of stepKeys) partial[k] = props.values[k];
+                  try {
+                    setStepSaving(true);
+                    const result = await saveSettings(partial, true);
+                    if (!result.ok) {
+                      const first = Object.entries(result.errors || {})[0];
+                      setStepError(first ? `${first[0]}: ${first[1]}` : "Unable to save step settings");
+                      setStepSaving(false);
+                      return;
+                    }
+                    // Inform parent to merge baseline and refresh payload
+                    await props.onPartialSave?.(result, partial);
+                    setStepSaving(false);
+                    props.onNext();
+                  } catch (err) {
+                    setStepSaving(false);
+                    setStepError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-xs font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ backgroundColor: accent.hex }}
+              >
+                {stepSaving ? "Saving..." : "Continue Setup"}
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_forward</span>
               </button>
             ) : (
@@ -2581,6 +3673,9 @@ function OnboardingWizard(props: {
             )}
           </div>
         </div>
+        {stepError ? (
+          <div className="px-8 pb-4 text-sm text-red-400">{stepError}</div>
+        ) : null}
       </div>
     </div>
   );
@@ -2713,15 +3808,16 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
 
   const integrations = new Set(map.Integrations || []);
   const paths = map.Paths || [];
+  const librarySync = map["Library sync"] || [];
   const calendar = map.Calendar || [];
-  const automation = map.Automation || [];
   const playback = map.Playback || [];
   const advanced = map.Advanced || [];
 
   if (stepKey === "paths") return [...paths];
-  if (stepKey === "arr") return [...integrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR"));
+  if (stepKey === "paths_review") return [];
+  if (stepKey === "arr") return [...integrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON");
   if (stepKey === "media") {
     return [...integrations].filter((k) => k.startsWith("PLEX") || k.startsWith("JELLYFIN") || k.startsWith("EMBY") || k === "ENABLE_PLEX" || k === "ENABLE_JELLYFIN" || k === "ENABLE_EMBY");
   }
-  return [...calendar, ...automation, ...playback, ...advanced];
+  return [...librarySync, ...calendar, ...playback, ...advanced];
 }

@@ -8,6 +8,7 @@ import type {
   IntegrationTestResponse,
   LibraryResponse,
   LogsResponse,
+  PlaceholderActivityRow,
   SaveSettingsResponse,
   SettingsPayload,
   SettingsStatus,
@@ -20,6 +21,10 @@ export function getStats(): Promise<StatsResponse> {
 
 export function getActivity(limit = 100): Promise<ActivityRow[]> {
   return fetchJson<ActivityRow[]>(`/api/activity?limit=${limit}`);
+}
+
+export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivityRow[]> {
+  return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
 }
 
 export function getLibrary(limit = 400): Promise<LibraryResponse> {
@@ -54,11 +59,11 @@ export function getSettingsStatus(): Promise<SettingsStatus> {
   return fetchJson<SettingsStatus>("/api/settings/status");
 }
 
-export async function saveSettings(values: Record<string, unknown>): Promise<SaveSettingsResponse> {
+export async function saveSettings(values: Record<string, unknown>, partial = false): Promise<SaveSettingsResponse> {
   const response = await fetch("/api/settings/save", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ values }),
+    body: JSON.stringify({ values, partial }),
   });
   return (await response.json()) as SaveSettingsResponse;
 }

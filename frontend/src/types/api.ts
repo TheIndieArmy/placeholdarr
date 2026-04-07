@@ -30,9 +30,23 @@ export interface ActivityRow {
   source?: string | null;
   event_type?: string | null;
   job_type?: string | null;
+  display_name?: string | null;
   status?: string | null;
   error?: string | null;
   details?: string | null;
+  time?: string | null;
+}
+
+export interface PlaceholderActivityRow {
+  id: number;
+  type: "placeholder";
+  action: "Created" | "Deleted";
+  item_type: "movie" | "episode";
+  item_title: string;
+  series_title?: string | null;
+  path: string;
+  reason: string;
+  status: string;
   time?: string | null;
 }
 
@@ -258,18 +272,24 @@ export interface CalendarErrorResponse {
   message: string;
 }
 
+export interface SettingsFieldOption {
+  value: string;
+  label: string;
+}
+
 export interface SettingsField {
   key: string;
   section: string;
   label: string;
   description: string;
-  type: "bool" | "int" | "url" | "path" | "string";
+  type: "bool" | "int" | "url" | "path" | "string" | "choice";
   required: boolean;
   secret: boolean;
   restart_required: boolean;
   value: unknown;
   saved_value?: unknown;
   has_saved_value?: boolean;
+  options?: SettingsFieldOption[];
 }
 
 export interface SettingsSection {

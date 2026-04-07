@@ -155,6 +155,9 @@ Optional settings:
 - `TV_PLAY_MODE`: Download scope (`episode`, `season`, or `series`)
 - 4K support settings (if needed)
 - `RADARR_STD_INSTANCE_KEY`, `RADARR_4K_INSTANCE_KEY`, `SONARR_STD_INSTANCE_KEY`, `SONARR_4K_INSTANCE_KEY`: Optional webhook/sync instance key overrides (defaults: `radarr_std`, `radarr_4k`, `sonarr_std`, `sonarr_4k`)
+- `ARR_INSTANCES_JSON`: Optional advanced JSON array for many named ARR instances (overrides fixed std/4K URL/API-key pairs when set)
+  - Example:
+    - `[ {"arr_type":"radarr","instance_key":"radarr_main","label":"Main Radarr","url":"http://radarr:7878/api/v3","api_key":"...","is_4k":false}, {"arr_type":"sonarr","instance_key":"sonarr_anime","label":"Anime Sonarr","url":"http://sonarr-anime:8989/api/v3","api_key":"...","is_4k":false} ]`
 - `TAUTULLI_INSTANCE_KEY`, `JELLYFIN_INSTANCE_KEY`, `EMBY_INSTANCE_KEY`: Optional playback webhook source key overrides (defaults: `tautulli`, `jellyfin`, `emby`)
 - **Playback event handler settings** (requires a Tautulli/Jellyfin/Emby webhook; disabled by default):
   - `ENABLE_PLAYBACK_EVENT_HANDLERS`: Activate playback-driven ARR searches (`true`/`false`, default `false`)
@@ -178,7 +181,6 @@ Optional settings:
     - `< 0` (for example `-1`): infinite lookahead.
   - `CALENDAR_SYNC_INTERVAL_HOURS`: Independent calendar/date-refresh scheduler cadence in hours (`0` disables independent calendar scheduler)
     - This scheduler runs lightweight date refresh + determination/materialization/calendar/status reconcile without a full ARR sync.
-  - `ENABLE_COMING_SOON_PLACEHOLDERS`: Enable or disable "Coming Soon" placeholders (`true`/`false`)
   - `PREFERRED_MOVIE_DATE_TYPE`: Which movie release date to use (`inCinemas`, `digitalRelease`, `physicalRelease`)
     - This is the selected movie date type for status text and lookahead decisions.
     - Strict behavior: Placeholdarr does not fallback to another release type when this date is missing.
@@ -199,6 +201,7 @@ Calendar freshness notes:
 - `DUMMY_FILE_PATH`: Path to your standard dummy video file (used for available/requestable placeholders).
 - `COMING_SOON_DUMMY_FILE_PATH`: (Optional) Path to a special dummy video file used for "Coming Soon" placeholders (future releases).  
   If not set, the standard dummy file will be used for all placeholders.
+- In onboarding, blank dummy paths are pre-filled from `APPDATA_PATH` defaults (`${APPDATA_PATH}/dummy.mp4` and `${APPDATA_PATH}/coming_soon_dummy.mp4`).
 - Placeholdarr now writes a `.nfo` sidecar beside each placeholder by default to support faster Jellyfin/Plex metadata refresh workflows.
 
 ---

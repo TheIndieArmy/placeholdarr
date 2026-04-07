@@ -290,7 +290,7 @@ def run_determination_pass() -> dict:
     }
 
     try:
-        placeholders_enabled = bool(getattr(settings, 'ENABLE_COMING_SOON_PLACEHOLDERS', True))
+        placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
         lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
         now_date = datetime.now(timezone.utc).date()
 
@@ -406,7 +406,7 @@ def run_determination_for_entities_in_session(
         'needs_placeholder': 0,
     }
 
-    placeholders_enabled = bool(getattr(settings, 'ENABLE_COMING_SOON_PLACEHOLDERS', True))
+    placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
     now_date = datetime.now(timezone.utc).date()
 

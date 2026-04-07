@@ -7,7 +7,11 @@ import time
 from core.config import settings
 from services.media_servers.refresh import refresh_all_sections
 from core.logger import logger
-from services.placeholders import ensure_placeholder_file, episode_placeholder_path
+from services.placeholders import (
+    ensure_placeholder_file,
+    episode_placeholder_path,
+    resolve_calendar_variant_dummy_path,
+)
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.source_of_truth.determiner import DETERMINATION_EXISTS, DETERMINATION_NEEDS
@@ -182,11 +186,8 @@ def _is_coming_soon_status(status: str | None) -> bool:
 
 
 def _dummy_file_path_for_variant(variant: str) -> str | None:
-    coming_soon_dummy = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
-    if variant == "coming_soon" and coming_soon_dummy:
-        return coming_soon_dummy
-    request_dummy = str(getattr(settings, "DUMMY_FILE_PATH", "") or "").strip()
-    return request_dummy or None
+    path = resolve_calendar_variant_dummy_path(variant)
+    return path or None
 
 
 def _resolve_variant_for_path(session, path: str) -> str:

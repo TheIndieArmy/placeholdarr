@@ -7,7 +7,7 @@ from typing import Any
 
 from core.config import settings
 from core.logger import logger
-from services.placeholders import ensure_placeholder_file
+from services.placeholders import ensure_placeholder_file, resolve_calendar_variant_dummy_path
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
@@ -221,22 +221,20 @@ def _normalize_reason(value: str | None) -> str:
 def _calendar_variant_settings_fingerprint() -> str:
     """Hash settings that influence placeholder variant selection/replacement."""
     parts = [
-        str(bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True))),
+        str(bool(settings.coming_soon_placeholders_enabled)),
         str(int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)),
         str(bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))),
         str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas"),
         str(getattr(settings, "DUMMY_FILE_PATH", "") or ""),
         str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or ""),
+        str(getattr(settings, "CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon") or "coming_soon"),
     ]
     payload = "|".join(parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _variant_dummy_path(variant: str) -> str:
-    coming_soon_dummy = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
-    if variant == "coming_soon" and coming_soon_dummy:
-        return coming_soon_dummy
-    return str(getattr(settings, "DUMMY_FILE_PATH", "") or "")
+    return resolve_calendar_variant_dummy_path(variant)
 
 
 def _switch_placeholder_dummy_variant(
@@ -305,7 +303,7 @@ def run_calendar_phase() -> dict[str, Any]:
         return stats
 
     lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-    placeholders_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_PLACEHOLDERS", True))
+    placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
     now_date = datetime.now(timezone.utc).date()
     settings_fingerprint = _calendar_variant_settings_fingerprint()
