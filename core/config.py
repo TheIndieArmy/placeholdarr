@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     LOG_DIR: str = os.getenv("LOG_DIR", "").split('#')[0].strip()
     LOG_FILE: str = os.getenv("LOG_FILE", "").split('#')[0].strip()
     LOG_MAX_RUN_FILES: int = int(os.getenv("LOG_MAX_RUN_FILES", "10").split('#')[0].strip())
-    WORKER_COUNT: int = os.getenv("WORKER_COUNT", 4)
+    WORKER_COUNT: int = 4
     SCHEDULED_TIME_FAILED: Optional[str] = None  # Add this line to avoid AttributeError
 
     # Plex
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     RADARR_4K_INSTANCE_KEY: str = os.getenv("RADARR_4K_INSTANCE_KEY", "radarr_4k").split('#')[0].strip().lower()
     SONARR_STD_INSTANCE_KEY: str = os.getenv("SONARR_STD_INSTANCE_KEY", "sonarr_std").split('#')[0].strip().lower()
     SONARR_4K_INSTANCE_KEY: str = os.getenv("SONARR_4K_INSTANCE_KEY", "sonarr_4k").split('#')[0].strip().lower()
-    ARR_INSTANCES_JSON: str = os.getenv("ARR_INSTANCES_JSON", "").split('#')[0].strip()
+    ARR_INSTANCES_JSON: str = ""
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
     EMBY_INSTANCE_KEY: str = os.getenv("EMBY_INSTANCE_KEY", "emby").split('#')[0].strip().lower()
@@ -98,38 +98,38 @@ class Settings(BaseSettings):
     # - full: always run full ARR startup sync
     # - lite: run ARR history delta catch-up only
     # - off: skip ARR startup sync
-    STARTUP_SYNC_MODE: Literal["auto", "full", "lite", "off"] = os.getenv("STARTUP_SYNC_MODE", "auto").split('#')[0].strip().lower()
+    STARTUP_SYNC_MODE: Literal["auto", "full", "lite", "off"] = "auto"
     # ARR startup check mode:
     # - off: skip ARR preflight checks
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
-    STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = os.getenv("STARTUP_ARR_CHECK_MODE", "live").split('#')[0].strip().lower()
-    FULL_SYNC_INTERVAL_HOURS: int = int(os.getenv("FULL_SYNC_INTERVAL_HOURS", "0").split('#')[0].strip())
+    STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = "live"
+    FULL_SYNC_INTERVAL_HOURS: int = 0
 
     # Library Paths
-    LIBRARY_ROOT: str = os.getenv("LIBRARY_ROOT", "").split('#')[0].strip()
-    ENABLE_STANDARD_PROFILE: bool = os.getenv("ENABLE_STANDARD_PROFILE", "true").split('#')[0].strip().lower() == "true"
-    ENABLE_4K_PROFILE: bool = os.getenv("ENABLE_4K_PROFILE", "true").split('#')[0].strip().lower() == "true"
-    ENABLE_ANIME_PROFILE: bool = os.getenv("ENABLE_ANIME_PROFILE", "false").split('#')[0].strip().lower() == "true"
-    MOVIE_LIBRARY_FOLDER: str = os.getenv("MOVIE_LIBRARY_FOLDER", "").split('#')[0].strip()
-    TV_LIBRARY_FOLDER: str = os.getenv("TV_LIBRARY_FOLDER", "").split('#')[0].strip()
-    MOVIE_LIBRARY_4K_FOLDER: str = os.getenv("MOVIE_LIBRARY_4K_FOLDER", "").split('#')[0].strip()
-    TV_LIBRARY_4K_FOLDER: str = os.getenv("TV_LIBRARY_4K_FOLDER", "").split('#')[0].strip()
-    ANIME_LIBRARY_FOLDER: str = os.getenv("ANIME_LIBRARY_FOLDER", "").split('#')[0].strip()
+    LIBRARY_ROOT: str = ""
+    ENABLE_STANDARD_PROFILE: bool = True
+    ENABLE_4K_PROFILE: bool = True
+    ENABLE_ANIME_PROFILE: bool = False
+    MOVIE_LIBRARY_FOLDER: str = ""
+    TV_LIBRARY_FOLDER: str = ""
+    MOVIE_LIBRARY_4K_FOLDER: str = ""
+    TV_LIBRARY_4K_FOLDER: str = ""
+    ANIME_LIBRARY_FOLDER: str = ""
 
     # Application
-    PLAYBACK_COOLDOWN: int = int(os.environ.get("PLAYBACK_COOLDOWN", "30").split('#')[0].strip())
-    MAX_MONITOR_TIME: int = int(os.getenv("MAX_MONITOR_TIME", "60").split('#')[0].strip())
-    CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "10").split('#')[0].strip())
-    AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10").split('#')[0].strip())
+    PLAYBACK_COOLDOWN: int = 30
+    MAX_MONITOR_TIME: int = 60
+    CHECK_INTERVAL: int = 10
+    AVAILABLE_CLEANUP_DELAY: int = 10
 
     # Dummy file management
     DUMMY_FILE_PATH: str = ""
     COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
-    PLACEHOLDER_CREATE_NFO: bool = os.getenv("PLACEHOLDER_CREATE_NFO", "true").split('#')[0].strip().lower() == "true"
-    PLACEHOLDER_STATUS_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
-    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both", "off"] = os.getenv("PLACEHOLDER_STATUS_PROJECTION_MODE", "summary").split('#')[0].strip().lower()
+    PLACEHOLDER_CREATE_NFO: bool = True
+    PLACEHOLDER_STATUS_UPDATES: str = "ALL"
+    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both", "off"] = "summary"
     PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
     FORCE_PRIME_ON_STARTUP: bool = os.getenv("FORCE_PRIME_ON_STARTUP", "false").split('#')[0].strip().lower() == "true"
@@ -139,14 +139,12 @@ class Settings(BaseSettings):
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
-    EPISODES_LOOKAHEAD: int = int(os.getenv("EPISODES_LOOKAHEAD", "5").split('#')[0].strip())
-    PLAYBACK_SEARCH_PREFERENCE: Literal["standard", "4k", "both"] = os.getenv("PLAYBACK_SEARCH_PREFERENCE", "both").split('#')[0].strip().lower()
-    TV_PLAYBACK_INSTANCE_MODE: Literal["match", "preference", "both"] = os.getenv("TV_PLAYBACK_INSTANCE_MODE", "match").split('#')[0].strip().lower()
-    ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = os.getenv("ENABLE_PLAYBACK_FALLBACK_SEARCH", "true").split('#')[0].strip().lower() == "true"
-    PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = int(os.getenv("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", "30").split('#')[0].strip())
-    # Backward-compat alias for legacy modules still reading TITLE_UPDATES.
-    TITLE_UPDATES: str = os.getenv("PLACEHOLDER_STATUS_UPDATES", os.getenv("TITLE_UPDATES", "ALL")).split('#')[0].strip().upper()
-    AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10"))
+    EPISODES_LOOKAHEAD: int = 5
+    PLAYBACK_SEARCH_PREFERENCE: Literal["standard", "4k", "both"] = "both"
+    TV_PLAYBACK_INSTANCE_MODE: Literal["match", "preference", "both"] = "match"
+    ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
+    PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
+    AVAILABLE_CLEANUP_DELAY: int = 10
 
     # Migration settings
     MIGRATION: bool = False
@@ -157,18 +155,18 @@ class Settings(BaseSettings):
     #   - 0 (zero): disabled/off for future placeholder lookahead; future placeholders are reconciled out
     #   - -1 (negative): infinite lookahead; future items can remain Coming Soon
     # Default: 30 days
-    CALENDAR_LOOKAHEAD_DAYS: int = int(os.getenv("CALENDAR_LOOKAHEAD_DAYS", "30").split('#')[0].strip())
+    CALENDAR_LOOKAHEAD_DAYS: int = 30
     # Calendar scheduler cadence (independent from full sync).
     # <= 0 disables independent calendar scheduler.
-    CALENDAR_SYNC_INTERVAL_HOURS: int = int(os.getenv("CALENDAR_SYNC_INTERVAL_HOURS", "12").split('#')[0].strip())
-    PREFERRED_MOVIE_DATE_TYPE: str = os.getenv("PREFERRED_MOVIE_DATE_TYPE", "inCinemas").split('#')[0].strip()
-    ENABLE_COMING_SOON_COUNTDOWN: bool = os.getenv("ENABLE_COMING_SOON_COUNTDOWN", "true").split('#')[0].strip().lower() == "true"
-    CALENDAR_PLACEHOLDER_MODE: str = os.getenv("CALENDAR_PLACEHOLDER_MODE", "episode").split('#')[0].strip().lower()
+    CALENDAR_SYNC_INTERVAL_HOURS: int = 12
+    PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
+    ENABLE_COMING_SOON_COUNTDOWN: bool = True
+    CALENDAR_PLACEHOLDER_MODE: str = "episode"
     # For calendar "coming soon" placeholders: use primary dummy only, or prefer coming-soon dummy when configured.
-    CALENDAR_LOOKAHEAD_DUMMY_MODE: str = os.getenv("CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon").split('#')[0].strip().lower()
+    CALENDAR_LOOKAHEAD_DUMMY_MODE: str = "coming_soon"
 
     # Include specials (season 0) when creating episode subflows
-    INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").split('#')[0].strip().lower() == "true"
+    INCLUDE_SPECIALS: bool = False
 
     # Postgres
     DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()
@@ -179,16 +177,16 @@ class Settings(BaseSettings):
 
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
-    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "false").split('#')[0].strip().lower() == "true"
-    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "false").split('#')[0].strip().lower() == "true"
-    ENABLE_EMBY: bool = os.getenv("ENABLE_EMBY", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_PLEX: bool = False
+    ENABLE_JELLYFIN: bool = False
+    ENABLE_EMBY: bool = False
 
     # Job queue / batching
     BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
     JOB_DEBOUNCE_SECONDS: int = int(os.getenv("JOB_DEBOUNCE_SECONDS", "3"))
     ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
     ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
-    ENABLE_PLAYBACK_EVENT_HANDLERS: bool = os.getenv("ENABLE_PLAYBACK_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_PLAYBACK_EVENT_HANDLERS: bool = True
     ENABLE_QUEUE_MONITOR: bool = os.getenv("ENABLE_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"
     QUEUE_MONITOR_RETRY_GRACE_SECONDS: int = int(os.getenv("QUEUE_MONITOR_RETRY_GRACE_SECONDS", "300").split('#')[0].strip())
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"

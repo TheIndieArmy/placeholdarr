@@ -385,6 +385,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "STARTUP_ARR_CHECK_MODE",
+            {
+                "section": "Library sync",
+                "label": "Startup ARR check mode",
+                "description": "Controls ARR preflight checks during startup: off skips checks, config validates configured values, live performs live API reachability/auth checks.",
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "off", "label": "Off — skip ARR preflight checks"},
+                    {"value": "config", "label": "Config — validate configured URL/API-key pairs"},
+                    {"value": "live", "label": "Live — call ARR APIs to verify reachability/auth"},
+                ],
+            },
+        ),
+        (
             "FULL_SYNC_INTERVAL_HOURS",
             {
                 "section": "Library sync",
@@ -501,6 +516,169 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "int",
                 "min": 0,
                 "restart_required": False,
+            },
+        ),
+        (
+            "TV_PLAY_MODE",
+            {
+                "section": "Playback",
+                "label": "TV playback search granularity",
+                "description": "Choose how TV playback searches are targeted: current episode, current season, or whole series.",
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "episode", "label": "Episode"},
+                    {"value": "season", "label": "Season"},
+                    {"value": "series", "label": "Series"},
+                ],
+            },
+        ),
+        (
+            "MAX_MONITOR_TIME",
+            {
+                "section": "Playback",
+                "label": "Max monitor time (seconds)",
+                "description": "Maximum time a playback-triggered monitoring window remains active before cleanup.",
+                "type": "int",
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "AVAILABLE_CLEANUP_DELAY",
+            {
+                "section": "Playback",
+                "label": "Available cleanup delay (seconds)",
+                "description": "Delay before cleanup actions after content becomes available.",
+                "type": "int",
+                "min": 0,
+                "restart_required": False,
+            },
+        ),
+        (
+            "ENABLE_PLAYBACK_EVENT_HANDLERS",
+            {
+                "section": "Playback",
+                "label": "Enable playback event handlers",
+                "description": "Enable playback-triggered ARR search and monitoring handlers.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLAYBACK_SEARCH_PREFERENCE",
+            {
+                "section": "Playback",
+                "label": "Playback search preference",
+                "description": "Preferred quality target when playback events trigger searches.",
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "standard", "label": "Standard"},
+                    {"value": "4k", "label": "4K"},
+                    {"value": "both", "label": "Both"},
+                ],
+            },
+        ),
+        (
+            "TV_PLAYBACK_INSTANCE_MODE",
+            {
+                "section": "Playback",
+                "label": "TV playback instance mode",
+                "description": "How playback searches choose Sonarr instances: match, preference, or both.",
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "match", "label": "Match"},
+                    {"value": "preference", "label": "Preference"},
+                    {"value": "both", "label": "Both"},
+                ],
+            },
+        ),
+        (
+            "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+            {
+                "section": "Playback",
+                "label": "Enable playback fallback search",
+                "description": "Enable fallback search logic when initial playback-triggered requests do not resolve quickly.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
+            {
+                "section": "Playback",
+                "label": "Playback fallback timeout (minutes)",
+                "description": "How long to wait before triggering playback fallback search behavior.",
+                "type": "int",
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_STRATEGY",
+            {
+                "section": "Advanced",
+                "label": "Placeholder file strategy",
+                "description": "Use hardlink or copy when creating placeholder media files.",
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "hardlink", "label": "Hardlink"},
+                    {"value": "copy", "label": "Copy"},
+                ],
+            },
+        ),
+        (
+            "PLACEHOLDER_CREATE_NFO",
+            {
+                "section": "Advanced",
+                "label": "Create placeholder NFO files",
+                "description": "Create companion NFO files for placeholders when supported by the media stack.",
+                "type": "bool",
+                "restart_required": True,
+            },
+        ),
+        (
+            "PLACEHOLDER_STATUS_UPDATES",
+            {
+                "section": "Advanced",
+                "label": "Placeholder status updates",
+                "description": "Controls how aggressively placeholder statuses are projected (OFF, REQUEST, or ALL).",
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "OFF", "label": "Off"},
+                    {"value": "REQUEST", "label": "Request only"},
+                    {"value": "ALL", "label": "All"},
+                ],
+            },
+        ),
+        (
+            "PLACEHOLDER_STATUS_PROJECTION_MODE",
+            {
+                "section": "Advanced",
+                "label": "Placeholder status projection mode",
+                "description": "Choose whether status appears in summary text, title text, both, or is disabled.",
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "summary", "label": "Summary"},
+                    {"value": "title", "label": "Title"},
+                    {"value": "both", "label": "Both"},
+                    {"value": "off", "label": "Off"},
+                ],
+            },
+        ),
+        (
+            "INCLUDE_SPECIALS",
+            {
+                "section": "Advanced",
+                "label": "Include specials (season 0)",
+                "description": "Include specials when creating and reconciling episode placeholder flows.",
+                "type": "bool",
+                "restart_required": True,
             },
         ),
         (
