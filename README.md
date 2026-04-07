@@ -61,22 +61,19 @@ Perfect for:
 
 ## Key Features
 
-- **Jellyfin Support:**  
-  Placeholdarr now works with Jellyfin as well as Plex. All placeholder, status, and automation features are available for both servers.
+- **Jellyfin/Emby Support:**  
+  Placeholdarr now works with Jellyfin/Emby as well as Plex. All placeholder, status, and automation features are available for both servers.
 - **Automatic Placeholder Creation:**  
-  Creates dummy video files for missing movies and TV episodes, so users can see and request unavailable content in Plex or Jellyfin.
+  Creates dummy video files for missing movies and TV episodes, so users can see and request unavailable content in Plex, Jellyfin, or Emby.
 - **Calendar-Based Status Sync:**  
   Periodically syncs with Sonarr/Radarr calendars to create placeholders and update statuses for upcoming content (e.g., "Coming Soon", "Request").
-- **Batch Processing:**  
-  Efficiently batches placeholder creation and library refreshes to avoid missed updates and improve performance.
 - **Status in Summary/Description:**  
   Statuses (e.g., "Coming Soon", "Request", "Searching...") are now prepended to the summary/description field for both movies and TV episodes, ensuring visibility in all Plex and Jellyfin clients (including mobile).
 - **Queue Monitoring:**  
   Tracks download/search progress and updates status in Plex or Jellyfin as content moves through the queue.
 - **Highly Configurable:**  
-  Supports lookahead windows, "Coming Soon" toggles, preferred movie date types, and more via `.env` settings.
-- **Robust Logging:**  
-  Emoji-enhanced logs for easy filtering and debugging.
+  Supports lookahead windows, "Coming Soon" toggles, preferred movie date types, and more.
+
 
 ---
 
