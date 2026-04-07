@@ -71,10 +71,10 @@ class Settings(BaseSettings):
     JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
 
     # Services
-    RADARR_URL: str
-    RADARR_API_KEY: str
-    SONARR_URL: str
-    SONARR_API_KEY: str
+    RADARR_URL: str = ""
+    RADARR_API_KEY: str = ""
+    SONARR_URL: str = ""
+    SONARR_API_KEY: str = ""
 
     # 4K Services (optional)
     RADARR_4K_URL: str = ""
@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     AVAILABLE_CLEANUP_DELAY: int = int(os.getenv("AVAILABLE_CLEANUP_DELAY", "10").split('#')[0].strip())
 
     # Dummy file management
-    DUMMY_FILE_PATH: str
+    DUMMY_FILE_PATH: str = ""
     COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
     PLACEHOLDER_CREATE_NFO: bool = os.getenv("PLACEHOLDER_CREATE_NFO", "true").split('#')[0].strip().lower() == "true"
@@ -164,16 +164,16 @@ class Settings(BaseSettings):
     INCLUDE_SPECIALS: bool = os.getenv("INCLUDE_SPECIALS", "false").split('#')[0].strip().lower() == "true"
 
     # Postgres
-    DB_HOST: str
-    DB_PORT: int
-    DB_USER: str
-    DB_PASS: str
-    DB_NAME: str
+    DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()
+    DB_PORT: int = int(os.getenv("DB_PORT", "5432").split('#')[0].strip())
+    DB_USER: str = os.getenv("DB_USER", "").split('#')[0].strip()
+    DB_PASS: str = os.getenv("DB_PASS", "").split('#')[0].strip()
+    DB_NAME: str = os.getenv("DB_NAME", "").split('#')[0].strip()
 
     PLACEHOLDARR_HOST: str = os.getenv("PLACEHOLDARR_HOST", "0.0.0.0")
 
-    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "true").split('#')[0].strip().lower() == "true"
-    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "true").split('#')[0].strip().lower() == "true"
+    ENABLE_PLEX: bool = os.getenv("ENABLE_PLEX", "false").split('#')[0].strip().lower() == "true"
+    ENABLE_JELLYFIN: bool = os.getenv("ENABLE_JELLYFIN", "false").split('#')[0].strip().lower() == "true"
     ENABLE_EMBY: bool = os.getenv("ENABLE_EMBY", "false").split('#')[0].strip().lower() == "true"
 
     # Job queue / batching
@@ -211,7 +211,7 @@ class Settings(BaseSettings):
     @validator('DUMMY_FILE_PATH')
     def validate_dummy_file_path(cls, v):
         if not v:
-            raise ValueError("DUMMY_FILE_PATH is required")
+            return v
         path = Path(v)
         if not path.exists():
             raise ValueError(f"Path does not exist: {v}")
@@ -252,13 +252,11 @@ class Settings(BaseSettings):
         jellyfin_configured = all(jellyfin_keys)
         emby_configured = all(emby_keys)
         if enable_plex and not plex_configured:
-            raise ValueError("ENABLE_PLEX is true but PLEX_URL or PLEX_TOKEN is missing.")
+            values['ENABLE_PLEX'] = False
         if enable_jellyfin and not jellyfin_configured:
-            raise ValueError("ENABLE_JELLYFIN is true but JELLYFIN_URL or JELLYFIN_TOKEN is missing.")
+            values['ENABLE_JELLYFIN'] = False
         if enable_emby and not emby_configured:
-            raise ValueError("ENABLE_EMBY is true but EMBY_URL or EMBY_TOKEN is missing.")
-        if not (enable_plex or enable_jellyfin or enable_emby):
-            raise ValueError("At least one of ENABLE_PLEX, ENABLE_JELLYFIN, or ENABLE_EMBY must be true.")
+            values['ENABLE_EMBY'] = False
         return values
 
     @root_validator(skip_on_failure=True)
@@ -285,9 +283,11 @@ class Settings(BaseSettings):
                 tv_4k_folder = os.path.join(library_root, 'tv-4k')
 
         if not movie_folder or not tv_folder:
-            raise ValueError(
-                'Set MOVIE_LIBRARY_FOLDER/TV_LIBRARY_FOLDER directly or set LIBRARY_ROOT so folders can be derived.'
-            )
+            values['MOVIE_LIBRARY_FOLDER'] = movie_folder
+            values['TV_LIBRARY_FOLDER'] = tv_folder
+            values['MOVIE_LIBRARY_4K_FOLDER'] = movie_4k_folder
+            values['TV_LIBRARY_4K_FOLDER'] = tv_4k_folder
+            return values
 
         dir_mode = _parse_octal_mode(values.get('PLACEHOLDER_DIR_MODE', '777'), 0o777)
         folder_values = {

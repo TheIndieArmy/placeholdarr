@@ -20,6 +20,17 @@ import asyncio
 import threading
 from sqlalchemy.sql import text
 
+
+def _onboarding_is_complete() -> bool:
+    try:
+        from services.app_config import get_onboarding_status
+
+        status = get_onboarding_status()
+        return bool(status.get('setup_complete'))
+    except Exception as e:
+        logger.warning(f"Failed to read onboarding status; defaulting to startup allowed: {e}", extra={'emoji_type': 'warning'})
+        return True
+
 # Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -101,6 +112,16 @@ async def lifespan(app: FastAPI):
                 )
         except Exception as e:
             logger.warning(f"Failed to apply persisted app settings: {e}", extra={'emoji_type': 'warning'})
+
+        onboarding_complete = _onboarding_is_complete()
+        if not onboarding_complete:
+            startup_sync_complete.set()
+            logger.info(
+                'Onboarding incomplete; startup sync, schedulers, workers, and queue monitoring are deferred until setup is completed and the app is restarted.',
+                extra={'emoji_type': 'info'},
+            )
+            yield
+            return
 
         # Log a DB summary after initialization so operators can see starting counts
         try:

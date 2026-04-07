@@ -22,7 +22,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Enable Plex",
-                "description": "Enable Plex integration and playback/import handlers against Plex media libraries.",
+                "description": "Enable Plex integration for metadata updates and playback/import workflows. If disabled, Plex URL/token/section IDs can stay blank.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -32,7 +32,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Plex URL",
-                "description": "Base Plex URL, for example: http://plex.local:32400",
+                "description": "Base Plex URL, for example http://plex.local:32400. Needed only when Plex is enabled.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -43,7 +43,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Plex Token",
-                "description": "Plex authentication token used for API requests.",
+                "description": "Plex authentication token used for API requests. Required only when Plex is enabled.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -55,7 +55,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Enable Jellyfin",
-                "description": "Enable Jellyfin integration for playback and metadata refresh actions.",
+                "description": "Enable Jellyfin integration for metadata refresh and playback-driven actions. If disabled, Jellyfin fields can stay blank.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -65,7 +65,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Jellyfin URL",
-                "description": "Base Jellyfin URL, for example: http://jellyfin.local:8096",
+                "description": "Base Jellyfin URL, for example http://jellyfin.local:8096. Needed only when Jellyfin is enabled.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -76,7 +76,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Jellyfin Token",
-                "description": "Jellyfin API token used for authenticated requests.",
+                "description": "Jellyfin API token used for authenticated requests. Required only when Jellyfin is enabled.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -88,7 +88,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Enable Emby",
-                "description": "Enable Emby integration for playback and metadata refresh actions.",
+                "description": "Enable Emby integration for metadata refresh and playback-driven actions. If disabled, Emby fields can stay blank.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -98,7 +98,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Emby URL",
-                "description": "Base Emby URL, for example: http://emby.local:8096",
+                "description": "Base Emby URL, for example http://emby.local:8096. Needed only when Emby is enabled.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -109,7 +109,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Emby Token",
-                "description": "Emby API token used for authenticated requests.",
+                "description": "Emby API token used for authenticated requests. Required only when Emby is enabled.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -121,7 +121,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Radarr URL",
-                "description": "Base Radarr URL, for example: http://radarr.local:7878",
+                "description": "Standard Radarr base URL, for example http://radarr.local:7878/api/v3 or http://radarr.local:7878 (both accepted). Leave blank if Radarr is not used.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -132,7 +132,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Radarr API Key",
-                "description": "API key used to authenticate Radarr requests.",
+                "description": "API key used to authenticate standard Radarr requests. Required when Radarr URL is configured.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -144,7 +144,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Radarr 4K URL",
-                "description": "Optional second Radarr instance URL for 4K media.",
+                "description": "Optional second Radarr instance URL for 4K media workflows. Leave blank to disable 4K Radarr support.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -155,7 +155,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Radarr 4K API Key",
-                "description": "API key for the optional 4K Radarr instance.",
+                "description": "API key for the optional 4K Radarr instance. Required only when Radarr 4K URL is configured.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -167,7 +167,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Sonarr URL",
-                "description": "Base Sonarr URL, for example: http://sonarr.local:8989",
+                "description": "Standard Sonarr base URL, for example http://sonarr.local:8989/api/v3 or http://sonarr.local:8989 (both accepted). Leave blank if Sonarr is not used.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -178,7 +178,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Sonarr API Key",
-                "description": "API key used to authenticate Sonarr requests.",
+                "description": "API key used to authenticate standard Sonarr requests. Required when Sonarr URL is configured.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -190,7 +190,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Sonarr 4K URL",
-                "description": "Optional second Sonarr instance URL for 4K media.",
+                "description": "Optional second Sonarr instance URL for 4K media workflows. Leave blank to disable 4K Sonarr support.",
                 "type": "url",
                 "required": False,
                 "restart_required": False,
@@ -201,7 +201,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Integrations",
                 "label": "Sonarr 4K API Key",
-                "description": "API key for the optional 4K Sonarr instance.",
+                "description": "API key for the optional 4K Sonarr instance. Required only when Sonarr 4K URL is configured.",
                 "type": "string",
                 "required": False,
                 "secret": True,
@@ -213,7 +213,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Library Root",
-                "description": "Optional root used as the base for derived movie and TV folders.",
+                "description": "Optional shared base path for derived folders: movies, tv, movies-4k, and tv-4k. Use this for simple setups; explicit folder fields below can override any derived path.",
                 "type": "path",
                 "required": False,
                 "restart_required": False,
@@ -224,7 +224,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Movie Library Folder",
-                "description": "Folder path where movie placeholders and library files are managed.",
+                "description": "Optional explicit movies folder for placeholders. If blank and Library Root is set, Placeholdarr derives this automatically.",
                 "type": "path",
                 "required": False,
                 "restart_required": False,
@@ -235,7 +235,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "TV Library Folder",
-                "description": "Folder path where episode placeholders and library files are managed.",
+                "description": "Optional explicit TV folder for placeholders. If blank and Library Root is set, Placeholdarr derives this automatically.",
                 "type": "path",
                 "required": False,
                 "restart_required": False,
@@ -246,7 +246,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Movie Library 4K Folder",
-                "description": "Optional dedicated folder path for 4K movie placeholders.",
+                "description": "Optional explicit 4K movies folder. If blank and Library Root is set, Placeholdarr derives a movies-4k path.",
                 "type": "path",
                 "required": False,
                 "restart_required": False,
@@ -257,7 +257,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "TV Library 4K Folder",
-                "description": "Optional dedicated folder path for 4K episode placeholders.",
+                "description": "Optional explicit 4K TV folder. If blank and Library Root is set, Placeholdarr derives a tv-4k path.",
                 "type": "path",
                 "required": False,
                 "restart_required": False,
@@ -268,7 +268,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Dummy File Path",
-                "description": "Path to the base dummy file used for placeholder materialization.",
+                "description": "Path to the primary dummy media file used when creating placeholders. Recommended for full placeholder functionality.",
                 "type": "path",
                 "required": False,
                 "restart_required": True,
@@ -279,7 +279,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Coming Soon Dummy File Path",
-                "description": "Optional path to a special dummy file for upcoming content placeholders.",
+                "description": "Optional alternate dummy file used only for Coming Soon placeholders. If blank, the standard Dummy File Path is used.",
                 "type": "path",
                 "required": False,
                 "restart_required": True,
@@ -290,7 +290,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Calendar",
                 "label": "Enable Coming Soon Placeholders",
-                "description": "Allow future placeholders inside the configured lookahead window.",
+                "description": "Enable future placeholders for items inside the calendar lookahead window. Disable to suppress Coming Soon placeholder creation.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -300,7 +300,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Calendar",
                 "label": "Calendar Lookahead Days",
-                "description": "How far ahead future content is considered placeholder-eligible.",
+                "description": "Future horizon for placeholder eligibility: >0 uses that many days, 0 disables future lookahead, -1 enables infinite lookahead.",
                 "type": "int",
                 "min": -1,
                 "restart_required": False,
@@ -311,7 +311,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Calendar",
                 "label": "Calendar Sync Interval Hours",
-                "description": "Scheduler cadence for calendar sync operations.",
+                "description": "Independent calendar/date-refresh scheduler cadence in hours. Set to 0 to disable this scheduler.",
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
@@ -322,7 +322,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Calendar",
                 "label": "Enable Coming Soon Countdown",
-                "description": "Enable countdown metadata for coming-soon placeholder surfaces.",
+                "description": "Show countdown wording in Coming Soon status metadata (for example, \"in 12 days\").",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -332,7 +332,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Automation",
                 "label": "Enable Import Event Handlers",
-                "description": "Process import webhooks and react automatically.",
+                "description": "Process import webhooks (ARR/media server) and automatically reconcile placeholders when real files arrive.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -342,7 +342,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Automation",
                 "label": "Enable Delete Event Handlers",
-                "description": "Process delete webhooks and recreate placeholders when needed.",
+                "description": "Process delete webhooks and recreate placeholders when media files are removed.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -352,7 +352,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Automation",
                 "label": "Enable Playback Event Handlers",
-                "description": "Trigger playback-driven search and placeholder logic.",
+                "description": "Enable playback-triggered ARR searches from webhook events (Tautulli/Jellyfin/Emby).",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -362,7 +362,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Automation",
                 "label": "Enable Playback Fallback Search",
-                "description": "If enabled, schedule a delayed fallback-instance search when the preferred instance did not import.",
+                "description": "When playback handlers are enabled, schedule delayed fallback searches if the preferred instance still has not imported the title.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -372,7 +372,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Automation",
                 "label": "Enable Queue Monitor",
-                "description": "Continuously poll ARR queues after playback-triggered searches and update placeholder statuses.",
+                "description": "Continuously poll ARR queues after playback searches and update placeholder status as jobs progress.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -382,7 +382,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Automation",
                 "label": "Queue Retry Grace Seconds",
-                "description": "How long to wait after an item leaves queue before marking it as an error.",
+                "description": "Grace period after a queue item disappears before classifying it as failed/missing, to avoid transient false negatives.",
                 "type": "int",
                 "min": 30,
                 "restart_required": False,
@@ -393,7 +393,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Playback",
                 "label": "Playback Cooldown Seconds",
-                "description": "Minimum time between repeat playback actions for the same title.",
+                "description": "Deduplication window for repeated playback events on the same title. Set 0 to disable cooldown.",
                 "type": "int",
                 "min": 0,
                 "restart_required": False,
@@ -404,7 +404,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Advanced",
                 "label": "Queue Check Interval Seconds",
-                "description": "Background polling cadence for queue monitoring.",
+                "description": "Background queue polling cadence in seconds. Lower values react faster but increase API traffic.",
                 "type": "int",
                 "min": 1,
                 "restart_required": True,
@@ -415,7 +415,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Advanced",
                 "label": "Worker Threads",
-                "description": "Number of worker threads to launch at startup.",
+                "description": "Number of worker threads launched at startup for asynchronous jobs. Increase cautiously based on host resources.",
                 "type": "int",
                 "min": 1,
                 "restart_required": True,
@@ -426,7 +426,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Advanced",
                 "label": "Full Sync Interval Hours",
-                "description": "How often full sync is scheduled; set to 0 to disable periodic full sync.",
+                "description": "Recurring full-sync cadence in hours. Set 0 to disable recurring full sync jobs.",
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
@@ -645,6 +645,28 @@ def save_settings(values: dict[str, Any], session=None) -> dict[str, Any]:
             "ok": True,
             "saved_keys": saved_keys,
             "restart_required_keys": restart_required_keys,
+            "status": get_onboarding_status(session=session),
+        }
+    except Exception as exc:
+        session.rollback()
+        return {"ok": False, "errors": {"__all__": str(exc)}}
+    finally:
+        if owns_session:
+            session.close()
+
+
+def reset_onboarding(session=None) -> dict[str, Any]:
+    """Clear persisted onboarding/settings state so setup can run fresh."""
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        target_keys = set(SETTINGS_SCHEMA.keys())
+        target_keys.add(SETUP_COMPLETED_KEY)
+        deleted = session.query(AppConfig).filter(AppConfig.key.in_(tuple(target_keys))).delete(synchronize_session=False)
+        session.commit()
+        return {
+            "ok": True,
+            "deleted_keys": int(deleted or 0),
             "status": get_onboarding_status(session=session),
         }
     except Exception as exc:

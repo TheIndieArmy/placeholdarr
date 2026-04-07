@@ -8,11 +8,11 @@ import unicodedata
 from datetime import date, datetime, timezone, timedelta
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import and_, case, func, or_, text
 
 from core.config import settings
-from services.app_config import get_onboarding_status, get_settings_payload, save_settings
+from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
 from services.postgres.models import (
@@ -171,37 +171,76 @@ def _iso(value) -> str | None:
 # HTML page
 # ---------------------------------------------------------------------------
 
+def _dashboard_dist_index_path() -> str:
+    return os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "index.html")
+
+
+def _dashboard_not_built_response() -> PlainTextResponse:
+    return PlainTextResponse(
+        "dashboard-next is not built yet. Run: cd frontend && npm install && npm run build",
+        status_code=503,
+    )
+
+
+def _serve_dashboard_index() -> FileResponse | PlainTextResponse:
+    index_path = _dashboard_dist_index_path()
+    if not os.path.isfile(index_path):
+        return _dashboard_not_built_response()
+    return FileResponse(index_path, media_type="text/html")
+
+
 @router.get("/", response_class=HTMLResponse)
 async def dashboard_page():
-    html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
-    with open(html_path, "r") as f:
-        return HTMLResponse(content=f.read())
+    """Serve the React + TypeScript dashboard at the app root."""
+    return _serve_dashboard_index()
+
+
+@router.get("/activity", response_class=HTMLResponse)
+async def dashboard_activity_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/library", response_class=HTMLResponse)
+async def dashboard_library_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/library/{path:path}", response_class=HTMLResponse)
+async def dashboard_library_path_page(path: str):
+    return _serve_dashboard_index()
+
+
+@router.get("/calendar", response_class=HTMLResponse)
+async def dashboard_calendar_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/errors", response_class=HTMLResponse)
+async def dashboard_errors_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/logs", response_class=HTMLResponse)
+async def dashboard_logs_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/settings", response_class=HTMLResponse)
+async def dashboard_settings_page():
+    return _serve_dashboard_index()
 
 
 @router.get("/dashboard-next", response_class=HTMLResponse)
 async def dashboard_next_page():
-    """Serve the React + TypeScript dashboard canary app."""
-    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-    index_path = os.path.join(dist_dir, "index.html")
-    if not os.path.isfile(index_path):
-        return PlainTextResponse(
-            "dashboard-next is not built yet. Run: cd frontend && npm install && npm run build",
-            status_code=503,
-        )
-    return FileResponse(index_path, media_type="text/html")
+    """Back-compat route that now points to root dashboard."""
+    return RedirectResponse(url="/", status_code=307)
 
 
 @router.get("/dashboard-next/{path:path}", response_class=HTMLResponse)
 async def dashboard_next_path(path: str):
-    """Serve React app index for deep links under /dashboard-next."""
-    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-    index_path = os.path.join(dist_dir, "index.html")
-    if not os.path.isfile(index_path):
-        return PlainTextResponse(
-            "dashboard-next is not built yet. Run: cd frontend && npm install && npm run build",
-            status_code=503,
-        )
-    return FileResponse(index_path, media_type="text/html")
+    """Back-compat deep-link route redirecting to root-based SPA paths."""
+    target = f"/{path.lstrip('/')}" if path else "/"
+    return RedirectResponse(url=target, status_code=307)
 
 
 @router.get("/assets/{asset_path:path}")
@@ -975,6 +1014,13 @@ async def settings_save(request: Request):
         return JSONResponse(content={"ok": False, "errors": {"values": "expected an object"}}, status_code=400)
 
     result = save_settings(values)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@router.post("/api/settings/reset")
+async def settings_reset():
+    result = reset_onboarding()
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

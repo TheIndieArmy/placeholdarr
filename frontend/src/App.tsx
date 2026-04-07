@@ -37,6 +37,29 @@ const WIZARD_STEPS = [
   { key: "behavior", name: "Behavior" },
 ] as const;
 
+const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title: string; detail: string }> = {
+  paths: {
+    title: "Paths are flexible",
+    detail:
+      "Library Root is optional. If set, Placeholdarr can derive movies/tv (and 4K) folders from it. Movie/TV folder fields are optional overrides when you want paths different from the derived defaults.",
+  },
+  arr: {
+    title: "ARR connections",
+    detail:
+      "Configure whichever ARR instances you use. Standard Radarr/Sonarr are typical; 4K instances are optional. Leave any unused instance blank.",
+  },
+  media: {
+    title: "Media server targets",
+    detail:
+      "Enable at least one media server you actually run. You can use Plex, Jellyfin, Emby, or a combination. Disabled services can stay blank.",
+  },
+  behavior: {
+    title: "Automation and scheduling",
+    detail:
+      "These controls tune lookahead, webhook handling, playback behavior, queue checks, and sync cadence. Defaults are safe, and you can fine-tune after first save.",
+  },
+};
+
 const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
   PLEX_URL: { service: "plex", credentialKey: "PLEX_TOKEN" },
   JELLYFIN_URL: { service: "jellyfin", credentialKey: "JELLYFIN_TOKEN" },
@@ -310,6 +333,7 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const currentTab = getTabFromPath(location.pathname);
+  const defaultLandingPath = setupStatus?.setup_complete === false ? "/settings" : "/activity";
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandMeta = BRAND_META[brand];
   const hasUnsavedChanges = useMemo(() => !deepEqualValues(fieldValues, baselineValues), [fieldValues, baselineValues]);
@@ -534,6 +558,13 @@ export function App() {
     if (!onboardingVisible) return;
     setOnboardingStepIndex((i) => Math.min(i, WIZARD_STEPS.length - 1));
   }, [onboardingVisible]);
+
+  useEffect(() => {
+    if (setupStatus?.setup_complete !== false) return;
+    if (location.pathname === "/" || location.pathname.startsWith("/activity")) {
+      navigate("/settings", { replace: true });
+    }
+  }, [location.pathname, navigate, setupStatus]);
 
   const filteredLibrary = useMemo(() => {
     return library.filter((item) => {
@@ -1015,7 +1046,7 @@ export function App() {
         ) : null}
 
         <Routes>
-          <Route path="/" element={<Navigate to="/activity" replace />} />
+          <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
           <Route path="*" element={null} />
         </Routes>
       </div>
@@ -1053,7 +1084,7 @@ export function App() {
                   <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
               </select>
-              <div className="meta-pill">Canary route: /dashboard-next</div>
+              <div className="meta-pill">Dashboard route: /</div>
             </div>
       </header>
 
@@ -1114,7 +1145,7 @@ export function App() {
       ) : null}
 
       <Routes>
-        <Route path="/" element={<Navigate to="/activity" replace />} />
+        <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
         <Route path="*" element={null} />
       </Routes>
 
@@ -2448,6 +2479,7 @@ function OnboardingWizard(props: {
   onSave: () => Promise<void>;
 }) {
   const step = WIZARD_STEPS[props.stepIndex];
+  const guidance = WIZARD_STEP_GUIDANCE[step.key];
   const accent = getBrandAccent(props.brand, props.themeMode);
   const keys = fieldsForWizardStep(step.key, props.payload.sections);
   const fields = props.payload.sections.flatMap((section) => section.fields).filter((f) => keys.includes(f.key));
@@ -2488,6 +2520,10 @@ function OnboardingWizard(props: {
 
         {/* Fields */}
         <div className="px-8 py-6 overflow-y-auto max-h-[50vh]">
+          <div className="mb-5 rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
+            <div className="text-[11px] font-headline uppercase tracking-widest" style={{ color: accent.icon }}>{guidance.title}</div>
+            <p className="mt-1 text-xs text-slate-400">{guidance.detail}</p>
+          </div>
           {!fields.length ? (
             <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
           ) : (

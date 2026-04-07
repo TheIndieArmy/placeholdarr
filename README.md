@@ -125,12 +125,20 @@ Placeholdarr does not need to know your *arr root folders—just set the library
 
 ### Environment Variables
 
-Required settings in `.env`:
-- `PLEX_URL`, `PLEX_TOKEN`: Your Plex server details
-- `RADARR_URL`, `RADARR_API_KEY`: Radarr connection details
-- `SONARR_URL`, `SONARR_API_KEY`: Sonarr connection details
-- `MOVIE_LIBRARY_FOLDER`, `TV_LIBRARY_FOLDER`: Folders where placeholders (and optionally real files) will be created and scanned by Plex/Jellyfin
-- `DUMMY_FILE_PATH`: Path to your dummy.mp4 file
+Onboarding-managed defaults:
+- Placeholdarr now starts with integration/path settings optional so first-run onboarding can be completed in the UI.
+- You can still pre-seed values in `.env`, but most operators should leave onboarding-managed settings commented and configure them in the dashboard.
+
+Recommended minimum settings to run placeholders end-to-end:
+- At least one media server enabled (`PLEX_*`, `JELLYFIN_*`, or `EMBY_*`)
+- At least one ARR pair (`RADARR_*` and/or `SONARR_*`) depending on your media goals
+- Placeholder output path strategy (`LIBRARY_ROOT` and/or explicit movie/tv folders)
+- `DUMMY_FILE_PATH` for standard placeholder media
+
+Path behavior summary:
+- `LIBRARY_ROOT` is optional and can be used as a shared base.
+- `MOVIE_LIBRARY_FOLDER` and `TV_LIBRARY_FOLDER` are optional explicit overrides.
+- 4K folder fields are optional and only needed when you want separate 4K placeholder locations.
 
 Optional settings:
 - `APPDATA_PATH`: In-container app data root used for defaults such as logs (default `/config`)
@@ -204,7 +212,7 @@ Calendar freshness notes:
   Leave `JELLYFIN_URL` and `JELLYFIN_TOKEN` blank in your `.env` file.
 
 **Note:**  
-You must have at least one of Plex or Jellyfin configured. Placeholdarr will automatically detect which server(s) to use based on which variables are set.
+For a useful production setup, configure at least one media server integration (Plex, Jellyfin, or Emby). Placeholdarr auto-detects enabled servers from configured values.
 
 ---
 
