@@ -16,7 +16,15 @@ class MovieRepository:
     def add(self, **kwargs) -> Movie:
         if 'instance_key' not in kwargs:
             is_4k = bool(kwargs.get('is_4k', False))
-            kwargs['instance_key'] = settings.RADARR_4K_INSTANCE_KEY if is_4k else settings.RADARR_STD_INSTANCE_KEY
+            # Derive from configured instances; fall back to hardcoded for backward compat
+            default_key = None
+            for item in (getattr(settings, 'configured_arr_instances', []) or []):
+                if str(item.get('arr_type', '')).lower() == 'radarr' and bool(item.get('is_4k', False)) == is_4k:
+                    default_key = str(item.get('instance_key', '')).lower()
+                    break
+            if not default_key:
+                default_key = 'radarr_4k' if is_4k else 'radarr_std'
+            kwargs['instance_key'] = default_key
         movie = Movie(**kwargs)
         self.session.add(movie)
         self.session.commit()

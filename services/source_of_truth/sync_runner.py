@@ -223,9 +223,17 @@ def _tv_library_root(is_4k: bool) -> str:
 
 
 def _default_instance_key(content_type: str, is_4k: bool) -> str:
-    if content_type == 'movie':
-        return settings.RADARR_4K_INSTANCE_KEY if is_4k else settings.RADARR_STD_INSTANCE_KEY
-    return settings.SONARR_4K_INSTANCE_KEY if is_4k else settings.SONARR_STD_INSTANCE_KEY
+    """Get default/first instance key for given content type and 4k flag from configured instances."""
+    arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
+    # Try to find matching 4k flag first
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        if str(item.get('arr_type', '')).lower() == arr_type and bool(item.get('is_4k', False)) == is_4k:
+            return str(item.get('instance_key', '')).lower()
+    # Fall back to first instance of type
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        if str(item.get('arr_type', '')).lower() == arr_type:
+            return str(item.get('instance_key', '')).lower()
+    raise ValueError(f"No {arr_type} instances configured for default key generation")
 
 
 def _movie_folder_name(title: str, year: int, tmdbid: int) -> str:
@@ -483,21 +491,18 @@ def _upsert_episode(session, fields: Dict):
 
 
 def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool) -> Iterable[Tuple[str, str, str, bool, str]]:
-    if 'movie' in types:
-        if is_4k:
-            if settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY:
-                yield ('movie', settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY, True, settings.RADARR_4K_INSTANCE_KEY)
-        else:
-            if settings.RADARR_URL and settings.RADARR_API_KEY:
-                yield ('movie', settings.RADARR_URL, settings.RADARR_API_KEY, False, settings.RADARR_STD_INSTANCE_KEY)
-
-    if 'series' in types:
-        if is_4k:
-            if settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY:
-                yield ('series', settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY, True, settings.SONARR_4K_INSTANCE_KEY)
-        else:
-            if settings.SONARR_URL and settings.SONARR_API_KEY:
-                yield ('series', settings.SONARR_URL, settings.SONARR_API_KEY, False, settings.SONARR_STD_INSTANCE_KEY)
+    """Yield (arr_type, url, api_key, is_4k, instance_key) tuples for configured ARR instances."""
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        arr_type = str(item.get('arr_type', '')).lower()
+        if arr_type not in types:
+            continue
+        if bool(item.get('is_4k', False)) != is_4k:
+            continue
+        url = str(item.get('url', '')).strip()
+        api_key = str(item.get('api_key', '')).strip()
+        instance_key = str(item.get('instance_key', '')).strip().lower()
+        if url and api_key and instance_key:
+            yield (arr_type, url, api_key, is_4k, instance_key)
 
 
 def run_full_sync(

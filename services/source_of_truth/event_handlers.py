@@ -49,12 +49,20 @@ def _infer_is_4k_from_instance(instance: str | None) -> bool:
 
 
 def _resolve_instance_key(content_type: str, instance: str | None, is_4k: bool) -> str:
+    """Resolve instance key from explicit param or derive from configured ARR instances."""
     normalized = str(instance or '').strip().lower()
     if normalized:
         return normalized
-    if content_type == 'movie':
-        return settings.RADARR_4K_INSTANCE_KEY if is_4k else settings.RADARR_STD_INSTANCE_KEY
-    return settings.SONARR_4K_INSTANCE_KEY if is_4k else settings.SONARR_STD_INSTANCE_KEY
+    # Fall back to finding first matching instance by type and 4k flag
+    arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        if str(item.get('arr_type', '')).lower() == arr_type and bool(item.get('is_4k', False)) == is_4k:
+            return str(item.get('instance_key', '')).lower()
+    # Final fallback: return first instance of the type, regardless of 4k flag
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        if str(item.get('arr_type', '')).lower() == arr_type:
+            return str(item.get('instance_key', '')).lower()
+    raise ValueError(f"No {arr_type} instances configured")
 
 
 def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:

@@ -90,7 +90,15 @@ class SeriesRepository:
 
         if 'instance_key' not in mapped:
             is_4k = bool(mapped.get('is_4k', False))
-            mapped['instance_key'] = settings.SONARR_4K_INSTANCE_KEY if is_4k else settings.SONARR_STD_INSTANCE_KEY
+            # Derive from configured instances; fall back to hardcoded for backward compat
+            default_key = None
+            for item in (getattr(settings, 'configured_arr_instances', []) or []):
+                if str(item.get('arr_type', '')).lower() == 'sonarr' and bool(item.get('is_4k', False)) == is_4k:
+                    default_key = str(item.get('instance_key', '')).lower()
+                    break
+            if not default_key:
+                default_key = 'sonarr_4k' if is_4k else 'sonarr_std'
+            mapped['instance_key'] = default_key
 
         series = Series(**mapped)
         self.session.add(series)

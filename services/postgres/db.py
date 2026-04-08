@@ -238,6 +238,24 @@ def _migrate_instance_key_constraints(engine):
     Safe to call repeatedly — all operations are idempotent.
     """
     from sqlalchemy import text
+    
+    # Derive default instance keys from configured instances or use hardcoded defaults for backward compat
+    def get_default_radarr_key(is_4k: bool) -> str:
+        for item in (getattr(settings, 'configured_arr_instances', []) or []):
+            if str(item.get('arr_type', '')).lower() == 'radarr' and bool(item.get('is_4k', False)) == is_4k:
+                return str(item.get('instance_key', '')).lower()
+        return 'radarr_4k' if is_4k else 'radarr_std'
+    
+    def get_default_sonarr_key(is_4k: bool) -> str:
+        for item in (getattr(settings, 'configured_arr_instances', []) or []):
+            if str(item.get('arr_type', '')).lower() == 'sonarr' and bool(item.get('is_4k', False)) == is_4k:
+                return str(item.get('instance_key', '')).lower()
+        return 'sonarr_4k' if is_4k else 'sonarr_std'
+    
+    radarr_std_key = get_default_radarr_key(False)
+    radarr_4k_key = get_default_radarr_key(True)
+    sonarr_std_key = get_default_sonarr_key(False)
+    sonarr_4k_key = get_default_sonarr_key(True)
     from core.config import settings
 
     steps = [
@@ -247,8 +265,8 @@ def _migrate_instance_key_constraints(engine):
             "Backfill movie.instance_key from is_4k",
             f"""
             UPDATE movie
-               SET instance_key = CASE WHEN is_4k THEN '{settings.RADARR_4K_INSTANCE_KEY}'
-                                        ELSE '{settings.RADARR_STD_INSTANCE_KEY}'
+               SET instance_key = CASE WHEN is_4k THEN '{radarr_4k_key}'
+                                        ELSE '{radarr_std_key}'
                                    END
              WHERE instance_key IS NULL OR instance_key = ''
             """,
@@ -258,8 +276,8 @@ def _migrate_instance_key_constraints(engine):
             "Backfill series.instance_key from is_4k",
             f"""
             UPDATE series
-               SET instance_key = CASE WHEN is_4k THEN '{settings.SONARR_4K_INSTANCE_KEY}'
-                                        ELSE '{settings.SONARR_STD_INSTANCE_KEY}'
+               SET instance_key = CASE WHEN is_4k THEN '{sonarr_4k_key}'
+                                        ELSE '{sonarr_std_key}'
                                    END
              WHERE instance_key IS NULL OR instance_key = ''
             """,

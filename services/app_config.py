@@ -581,17 +581,57 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "MOVIE_INSTANCE_RANKING",
+            {
+                "section": "Playback",
+                "label": "Movie instance ranking",
+                "description": "Internal JSON ranking used by the UI to order Radarr playback routing.",
+                "type": "string",
+                "restart_required": False,
+            },
+        ),
+        (
+            "MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES",
+            {
+                "section": "Playback",
+                "label": "Movie playback: search all instances",
+                "description": "If enabled, movie playback searches all eligible Radarr instances and ignores rank order. Only instances where the item already exists in ARR context are searched; Placeholdarr does not add missing items to ARR.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "TV_INSTANCE_RANKING",
+            {
+                "section": "Playback",
+                "label": "TV instance ranking",
+                "description": "Internal JSON ranking used by the UI to order Sonarr playback routing.",
+                "type": "string",
+                "restart_required": False,
+            },
+        ),
+        (
+            "TV_PLAYBACK_SEARCH_ALL_INSTANCES",
+            {
+                "section": "Playback",
+                "label": "TV playback: search all instances",
+                "description": "If enabled, TV playback searches all eligible Sonarr instances and ignores rank order. Only instances where the series already exists in ARR context are searched; Placeholdarr does not add missing items to ARR.",
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
             "TV_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "Playback",
                 "label": "TV playback instance mode",
-                "description": "How playback searches choose Sonarr instances: match, preference, or both.",
+                "description": "Applies to real-file TV playback events. Match uses the Sonarr instance tied to the playing file, Preference uses your ranking order, Both tries match first then ranking fallback.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
-                    {"value": "match", "label": "Match"},
-                    {"value": "preference", "label": "Preference"},
-                    {"value": "both", "label": "Both"},
+                    {"value": "match", "label": "Match file instance only"},
+                    {"value": "preference", "label": "Use ranking order only"},
+                    {"value": "both", "label": "Match first, then ranking fallback"},
                 ],
             },
         ),
@@ -600,7 +640,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Playback",
                 "label": "Enable playback fallback search",
-                "description": "Enable fallback search logic when initial playback-triggered requests do not resolve quickly.",
+                "description": "Enable fallback search logic when initial playback-triggered requests do not resolve. This is most useful when Search All is disabled and a primary/ranked path is being tried first.",
                 "type": "bool",
                 "restart_required": False,
             },

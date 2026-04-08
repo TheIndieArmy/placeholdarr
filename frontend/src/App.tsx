@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { ARR_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getActivity,
   getCalendar,
@@ -37,6 +38,7 @@ const WIZARD_STEPS = [
   { key: "paths_review", name: "Confirm Paths" },
   { key: "media", name: "Media Servers" },
   { key: "arr", name: "ARR Services" },
+  { key: "webhooks", name: "Webhook Setup" },
   { key: "behavior", name: "Behavior" },
 ] as const;
 
@@ -53,6 +55,14 @@ const PATH_PER_LIBRARY_OVERRIDE_KEYS = [
   "TV_LIBRARY_4K_FOLDER",
   "ANIME_LIBRARY_FOLDER",
 ] as const;
+
+const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([
+  "MOVIE_INSTANCE_RANKING",
+  "TV_INSTANCE_RANKING",
+  "MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES",
+  "TV_PLAYBACK_SEARCH_ALL_INSTANCES",
+  "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+]);
 
 function partitionLibraryPathFields(fields: SettingsField[]) {
   const profileSet = new Set<string>(PATH_PROFILE_KEYS as unknown as string[]);
@@ -85,6 +95,11 @@ const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title
     title: "ARR connections",
     detail:
       "Add one or more Radarr/Sonarr instances, give each a label, and test connectivity. This replaces fixed standard/4K-only setup.",
+  },
+  webhooks: {
+    title: "Connect webhooks",
+    detail:
+      "Placeholdarr routes webhooks using the instance query parameter. ARR instance keys are generated from your server names. Copy the URLs below into each service exactly as shown.",
   },
   behavior: {
     title: "Sync, calendar, and playback",
@@ -2863,6 +2878,138 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
   return JSON.stringify(clean);
 }
 
+function parseRankingKeys(value: unknown): string[] {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeRankingOrder(instances: ArrInstanceDraft[], rawValue: unknown): ArrInstanceDraft[] {
+  const byKey = new Map<string, ArrInstanceDraft>();
+  instances.forEach((instance) => {
+    if (instance.instance_key) {
+      byKey.set(instance.instance_key, instance);
+    }
+  });
+
+  const ordered: ArrInstanceDraft[] = [];
+  const seen = new Set<string>();
+  parseRankingKeys(rawValue).forEach((key) => {
+    const match = byKey.get(key);
+    if (match && !seen.has(match.instance_key)) {
+      seen.add(match.instance_key);
+      ordered.push(match);
+    }
+  });
+
+  instances.forEach((instance) => {
+    if (!seen.has(instance.instance_key)) {
+      seen.add(instance.instance_key);
+      ordered.push(instance);
+    }
+  });
+
+  return ordered;
+}
+
+function InstanceRankingEditor(props: {
+  instances: ArrInstanceDraft[];
+  rankingValue: unknown;
+  onRankingChange: (nextValue: string) => void;
+}) {
+  const ordered = useMemo(
+    () => normalizeRankingOrder(props.instances, props.rankingValue),
+    [props.instances, props.rankingValue],
+  );
+  const [draggingKey, setDraggingKey] = useState<string | null>(null);
+
+  function commit(next: ArrInstanceDraft[]) {
+    const keys = next
+      .map((instance) => instance.instance_key)
+      .filter(Boolean);
+    props.onRankingChange(JSON.stringify(keys));
+  }
+
+  function move(index: number, delta: number) {
+    const target = index + delta;
+    if (target < 0 || target >= ordered.length) return;
+    const next = [...ordered];
+    const [item] = next.splice(index, 1);
+    next.splice(target, 0, item);
+    commit(next);
+  }
+
+  function handleDrop(targetIndex: number) {
+    if (!draggingKey) return;
+    const sourceIndex = ordered.findIndex((instance) => instance.instance_key === draggingKey);
+    if (sourceIndex < 0 || sourceIndex === targetIndex) {
+      setDraggingKey(null);
+      return;
+    }
+    const next = [...ordered];
+    const [item] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, item);
+    commit(next);
+    setDraggingKey(null);
+  }
+
+  if (!ordered.length) {
+    return (
+      <p className="text-xs text-slate-500 italic mt-2">No matching ARR instances configured yet. Add instances in Integrations to enable ranking.</p>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5 mt-2">
+      <p className="text-[11px] text-slate-500">Drag to reorder. Top instance is searched first.</p>
+      {ordered.map((instance, index) => (
+        <div
+          key={instance.id}
+          draggable
+          onDragStart={() => setDraggingKey(instance.instance_key)}
+          onDragOver={(event) => { event.preventDefault(); }}
+          onDrop={() => handleDrop(index)}
+          onDragEnd={() => setDraggingKey(null)}
+          className={`flex items-center gap-2 px-3 py-2 bg-[#0a0d11] rounded border transition-colors cursor-grab active:cursor-grabbing ${draggingKey === instance.instance_key ? "border-emerald-500/60" : "border-[#424753]/40"}`}
+        >
+          <span className="text-[10px] font-headline uppercase tracking-wider text-slate-500 w-5 text-center">{index + 1}</span>
+          <span className="material-symbols-outlined shrink-0 text-slate-500" style={{ fontSize: 16 }}>drag_indicator</span>
+          <span className="text-xs text-slate-300 flex-1 min-w-0 truncate">{instance.label}</span>
+          {instance.is_4k && <span className="text-[9px] px-1.5 py-0.5 bg-[#424753]/60 text-slate-400 rounded">4K</span>}
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => move(index, -1)}
+              disabled={index === 0}
+              className="px-1.5 py-1 rounded border border-[#424753]/40 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed"
+              aria-label={`Move ${instance.label} up`}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>keyboard_arrow_up</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => move(index, 1)}
+              disabled={index === ordered.length - 1}
+              className="px-1.5 py-1 rounded border border-[#424753]/40 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed"
+              aria-label={`Move ${instance.label} down`}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>keyboard_arrow_down</span>
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ArrInstancesEditor(props: {
   values: FieldValueMap;
   onValueChange: (key: string, value: unknown) => void;
@@ -3254,6 +3401,7 @@ function SettingsPanel(props: {
   }
 
   function renderStandardField(field: SettingsField) {
+    if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
     const value = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
@@ -3398,6 +3546,154 @@ function SettingsPanel(props: {
                     </div>
                     <ArrInstancesEditor values={props.values} onValueChange={props.onValueChange} accent={accent} />
                   </div>
+                  {/* Playback routing summary */}
+                  {(() => {
+                    const movieSearchAll = Boolean(props.values.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES);
+                    const tvSearchAll = Boolean(props.values.TV_PLAYBACK_SEARCH_ALL_INSTANCES);
+                    const fallbackEnabled = Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH);
+                    const movieLabel = movieSearchAll ? "Search All" : "Ranked";
+                    const tvLabel = tvSearchAll ? "Search All" : "Ranked";
+                    return (
+                      <div className="px-6 pb-5">
+                        <div className="rounded-lg border border-[#424753]/20 bg-[#0a0d11] px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+                          <div className="flex items-center gap-3 flex-wrap text-xs text-slate-400">
+                            <span className="font-headline uppercase tracking-wider text-[10px] text-slate-500">Playback routing</span>
+                            <span className="px-2 py-0.5 rounded bg-[#252e3a] text-slate-300">Movies: {movieLabel}</span>
+                            <span className="px-2 py-0.5 rounded bg-[#252e3a] text-slate-300">TV: {tvLabel}</span>
+                            {fallbackEnabled && !movieSearchAll && !tvSearchAll && (
+                              <span className="px-2 py-0.5 rounded bg-[#252e3a] text-slate-300">Fallback: on</span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            className="text-[11px] font-headline uppercase tracking-wider text-slate-400 hover:text-white transition-colors shrink-0"
+                            onClick={() => props.onSectionChange("Playback")}
+                          >
+                            Adjust in Playback →
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </>
+              ) : active.name === "Playback" ? (
+                <>
+                  {(() => {
+                    const tvModeField = active.fields.find((field) => field.key === "TV_PLAYBACK_INSTANCE_MODE");
+                    const fallbackTimeoutField = active.fields.find((field) => field.key === "PLAYBACK_FALLBACK_TIMEOUT_MINUTES");
+                    const remainingFields = active.fields.filter(
+                      (field) =>
+                        !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                        field.key !== "TV_PLAYBACK_INSTANCE_MODE" &&
+                        field.key !== "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
+                    );
+                    const allInstances = parseArrInstancesFromValues(props.values);
+                    const radarrInstances = allInstances.filter((i) => i.arr_type === "radarr");
+                    const sonarrInstances = allInstances.filter((i) => i.arr_type === "sonarr");
+                    const movieSearchAll = Boolean(props.values.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES);
+                    const tvSearchAll = Boolean(props.values.TV_PLAYBACK_SEARCH_ALL_INSTANCES);
+                    const anyRanked = !movieSearchAll || !tvSearchAll;
+
+                    return (
+                      <>
+                        {remainingFields.map((field) => renderStandardField(field))}
+                        <div className="px-6 py-5 space-y-4">
+
+                          {/* Card A: Search Scope */}
+                          <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                            <div>
+                              <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Search Scope</h3>
+                              <p className="text-xs text-slate-400">Choose how Placeholdarr searches when a playback event fires. Searches only run on instances where that item already exists in ARR — Placeholdarr never adds missing entries to ARR on your behalf.</p>
+                            </div>
+
+                            {/* Movies */}
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-xs font-semibold text-slate-300">Movies</div>
+                                  <div className="text-xs text-slate-500">Fan out to all Radarr instances, or search in ranked order</div>
+                                </div>
+                                <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+                                  <div
+                                    className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${movieSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
+                                    onClick={() => props.onValueChange("MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES", !movieSearchAll)}
+                                  >
+                                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${movieSearchAll ? "translate-x-4" : "translate-x-0"}`} />
+                                  </div>
+                                  <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
+                                </label>
+                              </div>
+                              {!movieSearchAll && (
+                                <InstanceRankingEditor
+                                  instances={radarrInstances}
+                                  rankingValue={props.values.MOVIE_INSTANCE_RANKING}
+                                  onRankingChange={(next) => props.onValueChange("MOVIE_INSTANCE_RANKING", next)}
+                                />
+                              )}
+                            </div>
+
+                            <div className="border-t border-[#424753]/30" />
+
+                            {/* TV Shows */}
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-xs font-semibold text-slate-300">TV Shows</div>
+                                  <div className="text-xs text-slate-500">Fan out to all Sonarr instances, or search in ranked order</div>
+                                </div>
+                                <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+                                  <div
+                                    className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${tvSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
+                                    onClick={() => props.onValueChange("TV_PLAYBACK_SEARCH_ALL_INSTANCES", !tvSearchAll)}
+                                  >
+                                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${tvSearchAll ? "translate-x-4" : "translate-x-0"}`} />
+                                  </div>
+                                  <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
+                                </label>
+                              </div>
+                              {!tvSearchAll && (
+                                <InstanceRankingEditor
+                                  instances={sonarrInstances}
+                                  rankingValue={props.values.TV_INSTANCE_RANKING}
+                                  onRankingChange={(next) => props.onValueChange("TV_INSTANCE_RANKING", next)}
+                                />
+                              )}
+                            </div>
+
+                            {/* Fallback timeout — only shown when at least one media type uses ranked mode */}
+                            {anyRanked && fallbackTimeoutField ? (
+                              <>
+                                <div className="border-t border-[#424753]/30" />
+                                <div className="flex items-center justify-between gap-4">
+                                  <div>
+                                    <div className="text-xs font-semibold text-slate-300">Fallback timeout</div>
+                                    <div className="text-xs text-slate-500">Minutes to wait before retrying on the next ranked instance</div>
+                                  </div>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={String(props.values[fallbackTimeoutField.key] ?? "")}
+                                    onChange={(e) => props.onValueChange(fallbackTimeoutField.key, e.target.value === "" ? "" : Number(e.target.value))}
+                                    className="w-20 shrink-0 bg-[#0a0d11] border border-[#424753]/40 rounded px-2 py-1.5 text-xs text-white text-right focus:outline-none focus:border-slate-400"
+                                  />
+                                </div>
+                              </>
+                            ) : null}
+                          </div>
+
+                          {/* Card B: TV Real-File Routing Mode */}
+                          {tvModeField ? (
+                            <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4">
+                              <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">TV Real-File Routing Mode</h3>
+                              <p className="text-xs text-slate-400 mb-3">Applies to real-file TV playback events only. Choose whether to match the Sonarr instance that owns the file, follow your ranking order, or try file-match first then fall through to ranking.</p>
+                              {renderStandardField(tvModeField)}
+                            </div>
+                          ) : null}
+
+                        </div>
+                      </>
+                    );
+                  })()}
                 </>
               ) : (
                 active.fields.map((field) => renderStandardField(field))
@@ -3429,7 +3725,8 @@ function OnboardingWizard(props: {
   const guidance = WIZARD_STEP_GUIDANCE[step.key];
   const accent = getBrandAccent(props.brand, props.themeMode);
   const pathsReviewAck = Boolean(props.values.WIZARD_PATHS_REVIEW_ACK);
-  const canProceed = step.key !== "paths_review" || pathsReviewAck;
+  const hasArrInstances = parseArrInstancesFromValues(props.values).length > 0;
+  const canProceed = (step.key !== "paths_review" || pathsReviewAck) && (step.key !== "webhooks" || hasArrInstances);
   const keys = fieldsForWizardStep(step.key, props.payload.sections);
   const fields = props.payload.sections.flatMap((section) => section.fields).filter((f) => keys.includes(f.key));
   const [stepSaving, setStepSaving] = useState(false);
@@ -3452,6 +3749,7 @@ function OnboardingWizard(props: {
   }
 
   function wizardFieldRow(field: SettingsField) {
+    if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const focus = getBrandFocusClass(props.brand, props.themeMode);
@@ -3590,17 +3888,307 @@ function OnboardingWizard(props: {
               </div>
               <ArrInstancesEditor values={props.values} onValueChange={props.onChange} accent={accent} />
             </div>
-          ) : !fields.length ? (
+          ) : step.key === "webhooks" ? (() => {
+            const instances = parseArrInstancesFromValues(props.values);
+            const webhookBaseUrl = window.location.origin;
+            const hasArrInstances = instances.length > 0;
+
+            return (
+              <div className="space-y-6">
+                {!hasArrInstances && (
+                  <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
+                    <div className="flex items-start gap-2">
+                      <span className="material-symbols-outlined shrink-0 text-yellow-500" style={{ fontSize: 18 }}>warning</span>
+                      <div>
+                        <h3 className="text-sm font-semibold text-yellow-200">No ARR instances configured</h3>
+                        <p className="mt-1 text-xs text-yellow-300/80">Please go back to the previous step and configure at least one Radarr or Sonarr instance to enable webhook setup.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {hasArrInstances && (
+                  <>
+                    {/* ARR Webhooks */}
+                    <div>
+                      <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Radarr &amp; Sonarr Webhooks</h3>
+                      <div className="space-y-3">
+                        {instances.map((instance) => {
+                          const webhookUrl = `${webhookBaseUrl}/webhook?instance=${encodeURIComponent(instance.instance_key)}`;
+                          return (
+                            <div key={instance.id} className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1">
+                                  <div className="text-xs font-semibold text-slate-300">
+                                    {instance.arr_type === "radarr" ? "Radarr" : "Sonarr"} 
+                                    {instance.label && ` - ${instance.label}`}
+                                    {instance.is_4k && " (4K)"}
+                                  </div>
+                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{webhookUrl}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(webhookUrl);
+                                    alert("Webhook URL copied to clipboard!");
+                                  }}
+                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Trigger Setup Instructions */}
+                    <div>
+                      <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Setup Triggers in Each Service</h3>
+                      <div className="space-y-4">
+                        {instances.some((i) => i.arr_type === "radarr") && (() => {
+                          const radarrService = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === "radarr");
+                          return radarrService ? (
+                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="font-semibold text-sm text-white mb-2 flex items-center gap-2">
+                                <span style={{ color: radarrService.color }}>●</span> {radarrService.name} Setup
+                              </div>
+                              <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
+                                <li>Go to Settings → Webhooks → Create New Webhook</li>
+                                <li>
+                                  Select these events:{" "}
+                                  {radarrService.triggers.map((t) => t.displayName).join(", ")}
+                                </li>
+                                <li>Paste webhook URL in the URL field</li>
+                                <li>Test and Save</li>
+                              </ol>
+                            </div>
+                          ) : null;
+                        })()}
+                        {instances.some((i) => i.arr_type === "sonarr") && (() => {
+                          const sonarrService = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === "sonarr");
+                          return sonarrService ? (
+                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="font-semibold text-sm text-white mb-2 flex items-center gap-2">
+                                <span style={{ color: sonarrService.color }}>●</span> {sonarrService.name} Setup
+                              </div>
+                              <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
+                                <li>Go to Settings → Webhooks → Create New Webhook</li>
+                                <li>
+                                  Select these events:{" "}
+                                  {sonarrService.triggers.map((t) => t.displayName).join(", ")}
+                                </li>
+                                <li>Paste webhook URL in the URL field</li>
+                                <li>Test and Save</li>
+                              </ol>
+                            </div>
+                          ) : null;
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* Playback Webhooks (if applicable) */}
+                    {(String(props.values.TAUTULLI_INSTANCE_KEY || "").trim() || String(props.values.JELLYFIN_INSTANCE_KEY || "").trim() || String(props.values.EMBY_INSTANCE_KEY || "").trim()) && (
+                      <div>
+                        <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Playback Source Webhooks (Optional)</h3>
+                        <div className="space-y-3">
+                          {String(props.values.TAUTULLI_INSTANCE_KEY || "").trim() && (
+                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1">
+                                  <div className="text-xs font-semibold text-slate-300">Tautulli</div>
+                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`);
+                                    alert("Tautulli webhook URL copied to clipboard!");
+                                  }}
+                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {String(props.values.JELLYFIN_INSTANCE_KEY || "").trim() && (
+                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1">
+                                  <div className="text-xs font-semibold text-slate-300">Jellyfin</div>
+                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`);
+                                    alert("Jellyfin webhook URL copied to clipboard!");
+                                  }}
+                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {String(props.values.EMBY_INSTANCE_KEY || "").trim() && (
+                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1">
+                                  <div className="text-xs font-semibold text-slate-300">Emby</div>
+                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`);
+                                    alert("Emby webhook URL copied to clipboard!");
+                                  }}
+                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })() : !fields.length ? (
             <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
                 const secFields = fields.filter((f) => f.section === sectionName);
-                if (!secFields.length) return null;
+                if (!secFields.length && sectionName !== "Playback") return null;
                 return (
                   <div key={sectionName}>
                     <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">{sectionName}</h3>
-                    <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
+                    {sectionName === "Playback" ? (
+                      <div className="space-y-4">
+                        {(() => {
+                          const tvModeField = secFields.find((field) => field.key === "TV_PLAYBACK_INSTANCE_MODE");
+                          const fallbackTimeoutField = secFields.find((field) => field.key === "PLAYBACK_FALLBACK_TIMEOUT_MINUTES");
+                          const remainingFields = secFields.filter(
+                            (field) =>
+                              !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                              field.key !== "TV_PLAYBACK_INSTANCE_MODE" &&
+                              field.key !== "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
+                          );
+                          const allInstances = parseArrInstancesFromValues(props.values);
+                          const radarrInstances = allInstances.filter((i) => i.arr_type === "radarr");
+                          const sonarrInstances = allInstances.filter((i) => i.arr_type === "sonarr");
+                          const movieSearchAll = Boolean(props.values.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES);
+                          const tvSearchAll = Boolean(props.values.TV_PLAYBACK_SEARCH_ALL_INSTANCES);
+                          const anyRanked = !movieSearchAll || !tvSearchAll;
+
+                          return (
+                            <>
+                              {remainingFields.map((field) => wizardFieldRow(field))}
+
+                              {/* Card A: Search Scope */}
+                              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                                <div>
+                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Search Scope</h3>
+                                  <p className="text-xs text-slate-400">Choose how Placeholdarr searches when a playback event fires. Searches only run on instances where that item already exists in ARR — Placeholdarr never adds missing entries to ARR on your behalf.</p>
+                                </div>
+
+                                {/* Movies */}
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-semibold text-slate-300">Movies</div>
+                                      <div className="text-xs text-slate-500">Fan out to all Radarr instances, or search in ranked order</div>
+                                    </div>
+                                    <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+                                      <div
+                                        className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${movieSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
+                                        onClick={() => props.onChange("MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES", !movieSearchAll)}
+                                      >
+                                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${movieSearchAll ? "translate-x-4" : "translate-x-0"}`} />
+                                      </div>
+                                      <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
+                                    </label>
+                                  </div>
+                                  {!movieSearchAll && (
+                                    <InstanceRankingEditor
+                                      instances={radarrInstances}
+                                      rankingValue={props.values.MOVIE_INSTANCE_RANKING}
+                                      onRankingChange={(next) => props.onChange("MOVIE_INSTANCE_RANKING", next)}
+                                    />
+                                  )}
+                                </div>
+
+                                <div className="border-t border-[#424753]/30" />
+
+                                {/* TV Shows */}
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-semibold text-slate-300">TV Shows</div>
+                                      <div className="text-xs text-slate-500">Fan out to all Sonarr instances, or search in ranked order</div>
+                                    </div>
+                                    <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+                                      <div
+                                        className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${tvSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
+                                        onClick={() => props.onChange("TV_PLAYBACK_SEARCH_ALL_INSTANCES", !tvSearchAll)}
+                                      >
+                                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${tvSearchAll ? "translate-x-4" : "translate-x-0"}`} />
+                                      </div>
+                                      <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
+                                    </label>
+                                  </div>
+                                  {!tvSearchAll && (
+                                    <InstanceRankingEditor
+                                      instances={sonarrInstances}
+                                      rankingValue={props.values.TV_INSTANCE_RANKING}
+                                      onRankingChange={(next) => props.onChange("TV_INSTANCE_RANKING", next)}
+                                    />
+                                  )}
+                                </div>
+
+                                {/* Fallback timeout — only shown when at least one media type uses ranked mode */}
+                                {anyRanked && fallbackTimeoutField ? (
+                                  <>
+                                    <div className="border-t border-[#424753]/30" />
+                                    <div className="flex items-center justify-between gap-4">
+                                      <div>
+                                        <div className="text-xs font-semibold text-slate-300">Fallback timeout</div>
+                                        <div className="text-xs text-slate-500">Minutes to wait before retrying on the next ranked instance</div>
+                                      </div>
+                                      <input
+                                        type="number"
+                                        min={1}
+                                        value={String(props.values[fallbackTimeoutField.key] ?? "")}
+                                        onChange={(e) => props.onChange(fallbackTimeoutField.key, e.target.value === "" ? "" : Number(e.target.value))}
+                                        className="w-20 shrink-0 bg-[#0a0d11] border border-[#424753]/40 rounded px-2 py-1.5 text-xs text-white text-right focus:outline-none focus:border-slate-400"
+                                      />
+                                    </div>
+                                  </>
+                                ) : null}
+                              </div>
+
+                              {/* Card B: TV Real-File Routing Mode */}
+                              {tvModeField ? (
+                                <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4">
+                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">TV Real-File Routing Mode</h3>
+                                  <p className="text-xs text-slate-400 mb-3">Applies to real-file TV playback events only. Choose whether to match the Sonarr instance that owns the file, follow your ranking order, or try file-match first then fall through to ranking.</p>
+                                  {wizardFieldRow(tvModeField)}
+                                </div>
+                              ) : null}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ) : (
+                      <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
+                    )}
                   </div>
                 );
               })}
@@ -3815,6 +4403,7 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
 
   if (stepKey === "paths") return [...paths];
   if (stepKey === "paths_review") return [];
+  if (stepKey === "webhooks") return [];
   if (stepKey === "arr") return [...integrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON");
   if (stepKey === "media") {
     return [...integrations].filter((k) => k.startsWith("PLEX") || k.startsWith("JELLYFIN") || k.startsWith("EMBY") || k === "ENABLE_PLEX" || k === "ENABLE_JELLYFIN" || k === "ENABLE_EMBY");

@@ -184,62 +184,72 @@ For a useful production setup, configure at least one media server integration (
 
 Placeholdarr receives all webhook traffic on `/webhook` and routes each request by the required `instance` query parameter.
 
-Use this URL format for every sender:
-- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<value>`
+**URL Format:**
+- `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<instance_key>`
 
-Allowed `instance` values are configurable via ENV instance-key settings.
+**Instance Keys:**
+- **ARR instances** (Radarr/Sonarr): Generated dynamically from your configured server names during onboarding. Each instance gets a unique key that's stable across restarts. Examples: `radarr_standard`, `radarr_4k`, `sonarr_anime`, etc.
+- **Playback sources** (fixed, ENV-backed): 
+  - `tautulli` - For Plex activity monitoring
+  - `jellyfin` - For Jellyfin playback tracking
+  - `emby` - For Emby playback tracking
 
-Default values:
-- `radarr_std` (`RADARR_STD_INSTANCE_KEY`)
-- `radarr_4k` (`RADARR_4K_INSTANCE_KEY`)
-- `sonarr_std` (`SONARR_STD_INSTANCE_KEY`)
-- `sonarr_4k` (`SONARR_4K_INSTANCE_KEY`)
-- `tautulli` (`TAUTULLI_INSTANCE_KEY`)
-- `jellyfin` (`JELLYFIN_INSTANCE_KEY`)
-- `emby` (`EMBY_INSTANCE_KEY`)
+**Important Notes:**
+- The instance key is **case-sensitive** and must match exactly what's shown during onboarding webhook setup
+- If you rename an ARR server label in the onboarding panel, webhooks need to be updated with the new instance key
+- Requests with invalid `instance` parameters are rejected with HTTP 400
+- Placeholdarr does NOT infer sender identity from webhook payload content
+- The `instance` parameter is the only required query parameter
 
-Current behavior:
-- Requests without a valid configured `instance` value are rejected with HTTP 400.
-- Placeholdarr does not infer sender identity from payload content.
-- The only deployment-specific parts are your server address and `PLACEHOLDARR_PORT`.
+**Webhook Instance Key Discovery:**
+During initial onboarding setup, the "Webhook Setup" step displays all active instance keys with pre-filled webhook URLs. Copy these URLs directly into your ARR service configurations.
 
 ---
 
 ### Radarr Webhook Setup
 
-- For more-tailored control of content, utilize tags to determine what titles get placeholders created for them.
+ARR webhooks monitor your Radarr and Sonarr instances for media changes. Each instance requires its own webhook configuration with the correct instance key.
 
-1. In Radarr, go to Settings → Connect → Add Connection (Plus Icon)
-2. Select "Webhook"
-3. Configure:
-   - Name: PlaceholdARR
-  - Standard Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<RADARR_STD_INSTANCE_KEY>`
-  - 4K Radarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<RADARR_4K_INSTANCE_KEY>`
-   - Method: POST
-   - Triggers (enable only):
-     - On Grab
-     - On File Import
-     - On Movie Added
-     - On Movie Delete
-     - On Movie File Delete
+**Setup Steps:**
+
+1. In Radarr, go to Settings → Connect → Add New Webhook
+2. For each Radarr instance you configured in Placeholdarr:
+   - Copy the webhook URL from Placeholdarr's Webhook Setup step (format: `http://your-server:PORT/webhook?instance=<your-instance-key>`)
+   - Name: `Placeholdarr` (or instance-specific name if multiple webhooks)
+   - URL: Paste the copied webhook URL
+   - Method: `POST`
+3. Enable **Required Events**:
+   - ✅ On Grab
+   - ✅ On Import
+   - ✅ On Rename
+4. Test and Save
+
+**Notes:**
+- Each ARR instance (standard, 4K, anime, etc.) needs its own webhook with the correct instance key
+- Tags in Radarr can control which content gets placeholders; untag movies to prevent placeholder creation
+- The instance parameter must match exactly what was configured during onboarding
 
 ---
 
 ### Sonarr Webhook Setup
 
-1. In Sonarr, go to Settings → Connect → Add Connection (Plus Icon)
-2. Select "Webhook"
-3. Configure:
-   - Name: PlaceholdARR
-  - Standard Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<SONARR_STD_INSTANCE_KEY>`
-  - 4K Sonarr URL: `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<SONARR_4K_INSTANCE_KEY>`
-   - Method: POST
-   - Triggers (enable only):
-     - On Grab
-     - On File Import
-     - On Series Add
-     - On Series Delete
-     - On Episode File Delete
+1. In Sonarr, go to Settings → Connect → Add New Webhook
+2. For each Sonarr instance you configured in Placeholdarr:
+   - Copy the webhook URL from Placeholdarr's Webhook Setup step
+   - Name: `Placeholdarr` (or instance-specific name if multiple webhooks)
+   - URL: Paste the copied webhook URL
+   - Method: `POST`
+3. Enable **Required Events**:
+   - ✅ On Grab
+   - ✅ On Import
+   - ✅ On Rename
+   - ✅ On Episode File Delete
+4. Test and Save
+
+**Notes:**
+- Each Sonarr instance (standard, 4K, anime, etc.) needs its own webhook with the correct instance key
+- Tags in Sonarr can control which series get placeholders
+- Episode file deletion triggers ensure placeholder recreation when files are removed
 
 ---
 
@@ -341,16 +351,24 @@ Placeholdarr's playback event handlers are opt-in and configured in the Settings
 | Setting | Default | Description |
 |---|---|---|
 | **Enable Playback Handlers** | Disabled | Activate playback-driven ARR searches |
-| **Playback Search Preference** | Both | Which ARR instance to search for movies (`Standard`, `4K`, or `Both`) |
-| **TV Playback Instance Mode** | Match | How to select Sonarr for TV: `Match` (path-based), `Preference` (follow above), or `Both` |
-| **Playback Fallback Timeout** | 30 min | Minutes before a delayed fallback search fires if the preferred instance hasn't imported; `0` disables |
-| **Playback Cooldown** | 30 sec | Seconds to suppress duplicate playback events for the same item; `0` disables |
+| **Movie Instance Ranking** | Auto | Ordered list of Radarr instances to try for movie playback (configured in onboarding) |
+| **TV Instance Ranking** | Auto | Ordered list of Sonarr instances to try for TV playback (configured in onboarding) |
+| **Playback Fallback Timeout** | 30 min | Minutes for fallback instance retry if primary fails; `0` disables |
+| **Playback Cooldown** | 30 sec | Seconds to suppress duplicate playback events; `0` disables |
 
-**How it works:**
-- **Placeholder played**: Placeholdarr immediately triggers an ARR search on the selected instance(s) based on your configured preferences.
-- **Real file played**: If the alternate instance (standard vs. 4K) doesn't yet have the file, an optional fallback search can be triggered after the cooldown.
-- **Fallback search**: If the preferred instance doesn't import within the configured timeout, Placeholdarr searches the alternate instance.
-- **Skipped titles**: Content marked as deleted or ignored in Placeholdarr is never searched.
+**How Instance Ranking Works:**
+
+Placeholdarr now routes playback searches using dynamic instance ranking instead of fixed standard/4K buckets. This treats all instances equally:
+
+- **Custom instances fully supported**: Configure anime, 3D, remux, or any custom instances - they're all first-class citizens in the ranking
+- **Primary instance**: First instance in your ranking is tried first when a placeholder is played
+- **Fallback chain**: If the primary instance fails (timeout, missing file, error), Placeholdarr steps through remaining ranked instances in order
+- **Ranking configuration**: Set during onboarding in the "Behavior" step "Playback" section, or adjust anytime in Settings
+- **Automatic fallback**: After configured timeout without file match, next ranked instance is tried automatically
+
+**Legacy Settings (Deprecated):**
+- `PLAYBACK_SEARCH_PREFERENCE` and `TV_PLAYBACK_INSTANCE_MODE` are retained for backward compatibility but ignored if instance rankings are configured
+- New instances created during onboarding automatically populate rankings based on your instance order
 
 ---
 
