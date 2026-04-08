@@ -361,7 +361,7 @@ if __name__ == '__main__':
 
     # Do not import media clients at startup; initialize them lazily in their modules when needed.
 
-    port = int(os.getenv('PLACEHOLDARR_PORT', 8001))
+    port = int(os.getenv('PLACEHOLDARR_PORT', 8000))
     host = getattr(settings, "host", "0.0.0.0")
 
     logger.info(f"Using host {host} and port {port}", extra={'emoji_type': 'info'})
