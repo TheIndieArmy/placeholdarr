@@ -38,7 +38,7 @@ tests/
 
 # Local deployment overrides (contain host-specific paths/secrets)
 docker-compose.override.yml
-
+docker-compose.dev.yml
 
 # Python
 __pycache__/
