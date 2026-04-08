@@ -1,9 +1,7 @@
 version: "3.8"
 services:
   placeholdarr:
-    build:
-      context: .
-      dockerfile: dockerfile
+    image: ghcr.io/theindiearmy/placeholdarr:main-db-latest
     container_name: placeholdarr
     env_file:
       - .env
@@ -33,7 +31,7 @@ services:
 
   placeholdarr_postgres:
     container_name: placeholdarr_postgres
-    image: postgres:15-alpine
+    image: docker.io/library/postgres:15-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: "placeholdarr"
