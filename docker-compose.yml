@@ -2,8 +2,6 @@ services:
   placeholdarr:
     image: ghcr.io/theindiearmy/placeholdarr:main-db-latest
     container_name: placeholdarr
-    env_file:
-      - .env
     environment:
       DB_HOST: placeholdarr_postgres
       DB_PORT: 5432

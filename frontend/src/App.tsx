@@ -363,7 +363,7 @@ export function App() {
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [logFile, setLogFile] = useState<string>("");
-  const [logLevel, setLogLevel] = useState<"all" | "warn" | "error">("all");
+  const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
   const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
@@ -2681,11 +2681,11 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
 function LogsPanel(props: {
   lines: string[];
   logFile: string;
-  logLevel: "all" | "warn" | "error";
+  logLevel: "all" | "debug" | "info" | "warn" | "error" | "critical";
   logFilter: string;
   brand: Brand;
   themeMode: ThemeMode;
-  onLevelChange: (value: "all" | "warn" | "error") => void;
+  onLevelChange: (value: "all" | "debug" | "info" | "warn" | "error" | "critical") => void;
   onFilterChange: (value: string) => void;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
@@ -2710,11 +2710,14 @@ function LogsPanel(props: {
             placeholder="Search log output..." />
         </div>
         <div className="relative">
-          <select value={props.logLevel} onChange={e => props.onLevelChange(e.target.value as "all" | "warn" | "error")}
+          <select value={props.logLevel} onChange={e => props.onLevelChange(e.target.value as "all" | "debug" | "info" | "warn" | "error" | "critical")}
             className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-sm text-slate-300 outline-none">
             <option value="all">All Levels</option>
-            <option value="warn">Warnings + Errors</option>
-            <option value="error">Errors Only</option>
+            <option value="debug">Debug + Above</option>
+            <option value="info">Info + Above</option>
+            <option value="warn">Warnings + Above</option>
+            <option value="error">Errors + Above</option>
+            <option value="critical">Critical Only</option>
           </select>
           <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>expand_more</span>
         </div>

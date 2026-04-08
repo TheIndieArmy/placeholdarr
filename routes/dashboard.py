@@ -1833,7 +1833,7 @@ async def logs(
     tail: int = Query(200, ge=1, le=2000),
     level: str = Query("all"),
 ):
-    """Tail the current log file. Optionally filter by level (all, warn, error)."""
+    """Tail the current log file. Optionally filter by level threshold (all/debug/info/warn/error/critical)."""
     from core.config import settings
 
     # Resolve log directory the same way logger.py does
@@ -1865,11 +1865,33 @@ async def logs(
 
     lines = all_lines[-tail:]
 
-    # Optional level filter
-    if level == "warn":
-        lines = [l for l in lines if "WARNING" in l or "ERROR" in l or "CRITICAL" in l]
-    elif level == "error":
-        lines = [l for l in lines if "ERROR" in l or "CRITICAL" in l]
+    # Optional level filter (threshold semantics)
+    normalized_level = str(level or "all").strip().lower()
+    thresholds = {
+        "debug": 10,
+        "info": 20,
+        "warn": 30,
+        "error": 40,
+        "critical": 50,
+    }
+
+    def _line_level_value(line: str):
+        upper = line.upper()
+        if "CRITICAL" in upper:
+            return 50
+        if "ERROR" in upper:
+            return 40
+        if "WARNING" in upper or " WARN " in upper:
+            return 30
+        if "INFO" in upper:
+            return 20
+        if "DEBUG" in upper:
+            return 10
+        return None
+
+    threshold = thresholds.get(normalized_level)
+    if threshold is not None:
+        lines = [l for l in lines if (_line_level_value(l) or -1) >= threshold]
 
     return {
         "lines": [l.rstrip("\n") for l in lines],

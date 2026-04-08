@@ -10,6 +10,18 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 - Placeholder for upcoming release notes.
 
+## [0.8.2] - 2026-04-08
+
+### Changed
+- Updated GHCR workflow to publish semver tags on git tag pushes (`*.*.*`) and continue publishing branch `-latest` tags.
+- Updated Docker compose defaults to make `.env` optional by removing the required `env_file` dependency.
+- Simplified `.env.example` to focused infrastructure/advanced overrides instead of onboarding-managed behavior settings.
+- Updated README configuration guidance to reflect optional `.env` usage and current override variables.
+- Expanded Logs UI filter levels from `all/warn/error` to `all/debug/info/warn/error/critical`.
+- Expanded `/api/logs` filtering to support threshold-based level filtering for `debug`, `info`, `warn`, `error`, and `critical`.
+
+## [0.8.1] - 2026-04-08
+
 ### Changed
 - Simplified Docker defaults to a `/config`-first model by removing redundant `APPDATA_PATH`/`LOG_DIR` environment entries from `docker-compose.yml`; `/config` remains the canonical in-container appdata path.
 - Updated `docker-compose.yml` volume guidance to map one host appdata root to `/config` and one placeholder/media root for onboarding path selection.

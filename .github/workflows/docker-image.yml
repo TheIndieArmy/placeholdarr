@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "**"
+    tags:
+      - "*.*.*"
 
 jobs:
   build-and-push:
@@ -23,15 +25,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract branch name
-        id: extract_branch
-        run: |
-          ref="${GITHUB_REF#refs/heads/}"
-          echo "branch_name=${ref//\//-}" >> $GITHUB_OUTPUT
-
       - name: Set lowercase repo name
         id: repo
         run: echo "repo=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+
+      - name: Compute Docker tags
+        id: tags
+        run: |
+          REPO="ghcr.io/${{ steps.repo.outputs.repo }}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tags=${REPO}:${{ github.ref_name }},${REPO}:latest" >> $GITHUB_OUTPUT
+          else
+            ref="${GITHUB_REF#refs/heads/}"
+            branch="${ref//\//-}"
+            echo "tags=${REPO}:${branch}-latest" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -43,5 +51,4 @@ jobs:
           file: ./dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ steps.repo.outputs.repo }}:${{ steps.extract_branch.outputs.branch_name }}-latest
+          tags: ${{ steps.tags.outputs.tags }}

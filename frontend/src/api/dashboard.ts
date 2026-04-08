@@ -47,7 +47,7 @@ export function getErrors(limit = 100): Promise<ErrorRow[]> {
   return fetchJson<ErrorRow[]>(`/api/errors?limit=${limit}`);
 }
 
-export function getLogs(level: "all" | "warn" | "error", tail = 500): Promise<LogsResponse> {
+export function getLogs(level: "all" | "debug" | "info" | "warn" | "error" | "critical", tail = 500): Promise<LogsResponse> {
   return fetchJson<LogsResponse>(`/api/logs?tail=${tail}&level=${level}`);
 }
 

@@ -129,7 +129,7 @@ Placeholdarr does not need to know your *arr root folders.Just configure the pla
 Placeholdarr starts with all general app settings (media server integrations, library paths, placeholder behavior) optional during first run. Complete the onboarding wizard in the UI to configure these. You can reconfigure them anytime in the Settings dashboard.
 
 **Infrastructure-Only Environment Variables:**
-The `.env` file is reserved for infrastructure/technical settings (database, server bind, logging). General app behavior is managed entirely through the dashboard.
+The `.env` file is optional for Docker users. When present, it is used for infrastructure/technical overrides (database, server bind, logging). General app behavior is managed entirely through the dashboard.
 
 **For first-run setup, you'll configure:**
 - At least one media server (Plex, Jellyfin, or Emby)
@@ -138,20 +138,14 @@ The `.env` file is reserved for infrastructure/technical settings (database, ser
 - Dummy video file paths (optional; defaults are provided)
 
 **Optional Environment Variables (Infrastructure/Technical):**
-- `APPDATA_PATH`: Advanced override for in-container app data root (default `/config`). Most Docker setups should leave this unset and map host appdata to `/config`.
-- `LOG_LEVEL`: Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
-- `LOG_DIR`: Advanced override for per-run log directory (default `/config/logs`)
-- `LOG_FILE`: Full path to log directory (overrides `LOG_DIR` when set)
-- `LOG_MAX_RUN_FILES`: Maximum number of per-run log files to keep (default `10`)
+- `PLACEHOLDARR_APPDATA`: Host appdata root used by compose volume mappings (default `./.appdata`).
 - `PLACEHOLDARR_HOST`: Server bind address (default `0.0.0.0`)
 - `PLACEHOLDARR_PORT`: Server port (default `8000`)
-- `RADARR_STD_INSTANCE_KEY`, `RADARR_4K_INSTANCE_KEY`, `SONARR_STD_INSTANCE_KEY`, `SONARR_4K_INSTANCE_KEY`: Optional webhook/sync instance key overrides (defaults: `radarr_std`, `radarr_4k`, `sonarr_std`, `sonarr_4k`)
+- `PLACEHOLDARR_LOG_LEVEL`: Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)
+- `FORCE_PRIME_ON_STARTUP`: Force a one-time prime pass on startup (`true`/`false`, default `false`)
+- `PLACEHOLDARR_SKIP_WEBHOOK_CHECK`: Skip webhook checks and force calendar startup (`true`/`false`, default `false`)
 - `TAUTULLI_INSTANCE_KEY`, `JELLYFIN_INSTANCE_KEY`, `EMBY_INSTANCE_KEY`: Optional playback webhook source key overrides (defaults: `tautulli`, `jellyfin`, `emby`)
-- `ARR_INSTANCES_JSON`: Advanced JSON array for many named *arr instances (overrides fixed std/4K pairs when set)
-  - Example: `[ {"arr_type":"radarr","instance_key":"radarr_main","label":"Main Radarr","url":"http://radarr:7878/api/v3","api_key":"...","is_4k":false}, {"arr_type":"sonarr","instance_key":"sonarr_anime","label":"Anime Sonarr","url":"http://sonarr-anime:8989/api/v3","api_key":"...","is_4k":false} ]`
-- `PLACEHOLDER_FILE_MODE`: Octal file mode applied to placeholder files (default `666`)
-- `PLACEHOLDER_DIR_MODE`: Octal directory mode applied to placeholder folders (default `777`)
-- `FORCE_PRIME_ON_STARTUP`: Force a full content sync on app startup (`true`/`false`, default `false`)
+- `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`: Optional external Postgres overrides. For bundled compose Postgres, the included compose defaults are used.
 
 **Dashboard-Managed Settings (Onboarding):**
 All other behavior settings (placeholder strategy, status updates, TV play mode, calendar lookahead, playback handlers, etc.) are managed via the Settings dashboard. See the sections below for details on what each setting does.
