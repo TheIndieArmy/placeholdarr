@@ -104,7 +104,7 @@ const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title
   behavior: {
     title: "Sync, calendar, and playback",
     detail:
-      "Tune how often ARR data and the calendar refresh, which dummy file Coming Soon items use, lookahead horizons, and playback search behavior. Safe defaults work for most setups.",
+      "Tune refresh cadence, lookahead windows, and playback behavior. Keep dummy files under /config and choose which dummy path Coming Soon placeholders use.",
   },
 };
 
@@ -3264,7 +3264,7 @@ function LibraryPathsForm(props: {
         </span>
       </div>
       <p className="text-xs text-slate-400 mb-3 leading-relaxed">
-        One base path; Placeholdarr creates selected profile folders (Standard, 4K, Anime) from this root.
+        One mounted base path; Placeholdarr creates selected profile folders (Standard, 4K, Anime) from this root.
       </p>
       {root.description && <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">{root.description}</p>}
       {root.type === "bool" ? renderBool(root) : renderTextInput(root)}

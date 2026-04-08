@@ -137,10 +137,10 @@ The `.env` file is reserved for infrastructure/technical settings (database, ser
 - Placeholder output paths (library folders)
 - Dummy video file paths (optional; defaults are provided)
 
-**Optional Environment Variables (Infrastructure/Technical):
-- `APPDATA_PATH`: In-container app data root used for logging and state (default `/config`)
+**Optional Environment Variables (Infrastructure/Technical):**
+- `APPDATA_PATH`: Advanced override for in-container app data root (default `/config`). Most Docker setups should leave this unset and map host appdata to `/config`.
 - `LOG_LEVEL`: Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
-- `LOG_DIR`: Directory for per-run log files (default `${APPDATA_PATH}/logs`)
+- `LOG_DIR`: Advanced override for per-run log directory (default `/config/logs`)
 - `LOG_FILE`: Full path to log directory (overrides `LOG_DIR` when set)
 - `LOG_MAX_RUN_FILES`: Maximum number of per-run log files to keep (default `10`)
 - `PLACEHOLDARR_HOST`: Server bind address (default `0.0.0.0`)
@@ -161,8 +161,8 @@ All other behavior settings (placeholder strategy, status updates, TV play mode,
 ### Placeholder Video Files
 
 During onboarding, you'll configure dummy video file paths:
-- **Standard Dummy File**: Used for available/requestable placeholders (default: `${APPDATA_PATH}/dummy.mp4`)
-- **Coming Soon Dummy File**: (Optional) Used for "Coming Soon" placeholders for future releases. If empty, the standard dummy file is used for all placeholders (default: `${APPDATA_PATH}/coming_soon_dummy.mp4`)
+- **Standard Dummy File**: Used for available/requestable placeholders (default: `/config/dummy.mp4`)
+- **Coming Soon Dummy File**: (Optional) Used for "Coming Soon" placeholders for future releases. If empty, the standard dummy file is used for all placeholders (default: `/config/coming_soon_dummy.mp4`)
 
 You can change these paths anytime in Settings. Placeholdarr also creates `.nfo` sidecars beside each placeholder by default to support faster metadata refresh in media players.
 
@@ -375,21 +375,17 @@ Placeholdarr now routes playback searches using dynamic instance ranking instead
 ## Docker Usage Notes
 
 **Dummy Video Files:**
-When running Placeholdarr in Docker, you need to provide dummy video files for placeholders. You can:
+When running Placeholdarr in Docker, place dummy video files inside your host appdata folder that is mapped to `/config`.
 
-1. **Use the sample file from the repository:**
-   - Download `dummy.mp4` and `coming_soon_dummy.mp4` from the Placeholdarr GitHub repository and save it to your host (e.g., `/mnt/appdata/dummy.mp4`).
+1. **Use the sample files from the repository:**
+   - Download `dummy.mp4` and `coming_soon_dummy.mp4` from the Placeholdarr GitHub repository.
+   - Save them in your mapped appdata folder (for example `${PLACEHOLDARR_APPDATA}/dummy.mp4` and `${PLACEHOLDARR_APPDATA}/coming_soon_dummy.mp4`).
 
 2. **Or create your own:**
    - Any small/valid video file works as a placeholder (e.g., a 100 KB video clip).
 
-3. **Mount into Docker:**
-   - In your `docker-compose.yml`, add a mount for your dummy files:
-     ```yaml
-     volumes:
-       - /mnt/appdata/dummy.mp4:/config/dummy.mp4
-       - /mnt/appdata/coming_soon_dummy.mp4:/config/coming_soon_dummy.mp4  # optional
-     ```
+3. **No extra file mounts needed:**
+   - If your appdata volume is already mapped to `/config`, Placeholdarr can use `/config/dummy.mp4` and `/config/coming_soon_dummy.mp4` directly.
 
 4. **Configure in Onboarding:**
    - During first-run onboarding or in Settings, set the **Standard Dummy File** path to `/config/dummy.mp4`

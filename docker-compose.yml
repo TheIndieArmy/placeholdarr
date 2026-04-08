@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   placeholdarr:
     image: ghcr.io/theindiearmy/placeholdarr:main-db-latest
@@ -6,25 +5,16 @@ services:
     env_file:
       - .env
     environment:
-      APPDATA_PATH: /config
-      LOG_DIR: /config/logs
       DB_HOST: placeholdarr_postgres
       DB_PORT: 5432
       DB_USER: placeholdarr
       DB_PASS: placeholdarr
       DB_NAME: placeholdarr
     volumes:
-      # Placeholdarr app state + logs + Postgres data root
+      # Map host appdata to /config inside the container (default app state + logs path).
       - ${PLACEHOLDARR_APPDATA:-./.appdata}:/config
-      # Update these paths to match your actual placeholder library locations
-      - /path/to/your/movie-library:/movies
-      - /path/to/your/tv-library:/tv
-      # Uncomment the following lines if using 4K placeholder libraries:
-      # - /path/to/your/movie-library-4k:/movies-4k  # MOVIE_LIBRARY_4K_FOLDER
-      # - /path/to/your/tv-library-4k:/tv-4k        # TV_LIBRARY_4K_FOLDER
-      # Optional dummy files (match DUMMY_FILE_PATH / COMING_SOON_DUMMY_FILE_PATH)
-      - ./dummy.mp4:/data/dummy.mp4
-      - ./coming_soon_dummy.mp4:/data/coming_soon_dummy.mp4
+      # Placeholder/media root mapping used by onboarding/settings path fields.
+      - /path/to/your/data/placeholdarr:/placeholdarr
     ports:
       - "8000:8000"
     restart: unless-stopped
