@@ -67,6 +67,84 @@ def _resolve_dummy_path(kind: str = "primary") -> str:
     return configured
 
 
+def ensure_runtime_dummy_files() -> dict[str, Any]:
+    """Ensure default dummy media files exist in /config early at runtime.
+
+    This is best-effort and intended to run during app startup so first-run
+    onboarding has known-good dummy files available before any placeholder work.
+    """
+    created: list[str] = []
+    existing: list[str] = []
+    missing_sources: list[str] = []
+    errors: list[str] = []
+
+    service_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(service_dir, ".."))
+
+    specs = [
+        {
+            "dest": "/config/dummy.mp4",
+            "sources": [
+                "/app/dummy.mp4",
+                os.path.join(repo_root, "dummy.mp4"),
+            ],
+        },
+        {
+            "dest": "/config/coming_soon_dummy.mp4",
+            "sources": [
+                "/app/coming_soon_dummy.mp4",
+                os.path.join(repo_root, "coming_soon_dummy.mp4"),
+                "/app/dummy.mp4",
+                os.path.join(repo_root, "dummy.mp4"),
+            ],
+        },
+    ]
+
+    config_dir = "/config"
+    try:
+        os.makedirs(config_dir, exist_ok=True)
+        _ensure_open_permissions(config_dir, is_dir=True)
+    except Exception as exc:
+        errors.append(f"failed to prepare /config: {exc}")
+        return {
+            "created": created,
+            "existing": existing,
+            "missing_sources": missing_sources,
+            "errors": errors,
+        }
+
+    for spec in specs:
+        dest = spec["dest"]
+        source = next((candidate for candidate in spec["sources"] if candidate and os.path.isfile(candidate)), "")
+
+        try:
+            if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+                _ensure_open_permissions(dest)
+                existing.append(dest)
+                continue
+        except Exception:
+            # Continue and try to restore the file from source.
+            pass
+
+        if not source:
+            missing_sources.append(dest)
+            continue
+
+        try:
+            shutil.copy2(source, dest)
+            _ensure_open_permissions(dest)
+            created.append(dest)
+        except Exception as exc:
+            errors.append(f"failed to write {dest} from {source}: {exc}")
+
+    return {
+        "created": created,
+        "existing": existing,
+        "missing_sources": missing_sources,
+        "errors": errors,
+    }
+
+
 def _ensure_open_permissions(path: str, *, is_dir: bool = False) -> None:
     mode = _PLACEHOLDER_DIR_MODE if is_dir else _PLACEHOLDER_FILE_MODE
     try:

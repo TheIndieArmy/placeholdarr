@@ -94,6 +94,33 @@ async def lifespan(app: FastAPI):
     load_env_and_migrate()
     logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
 
+    # Ensure default dummy media files are present before onboarding/settings use.
+    try:
+        from services.placeholders import ensure_runtime_dummy_files
+
+        dummy_result = ensure_runtime_dummy_files()
+        created = dummy_result.get('created') or []
+        missing_sources = dummy_result.get('missing_sources') or []
+        errors = dummy_result.get('errors') or []
+
+        if created:
+            logger.info(
+                f"Ensured startup dummy media files: {created}",
+                extra={'emoji_type': 'dummy'},
+            )
+        if missing_sources:
+            logger.warning(
+                f"Dummy media sources unavailable for: {missing_sources}",
+                extra={'emoji_type': 'warning'},
+            )
+        if errors:
+            logger.warning(
+                f"Dummy media startup ensure completed with warnings: {errors}",
+                extra={'emoji_type': 'warning'},
+            )
+    except Exception as e:
+        logger.warning(f"Failed to ensure startup dummy media files: {e}", extra={'emoji_type': 'warning'})
+
     # DB Initialization
     if check_db():
         logger.info("Database is reachable, initializing...", extra={'emoji_type': 'info'})

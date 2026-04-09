@@ -914,7 +914,7 @@ export function App() {
           onSave={async () => {
             setSettingsFeedback("Saving...");
             setSettingsFeedbackKind("");
-            const result = await saveSettings(fieldValues);
+            const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
             if (!result.ok) {
               const first = Object.entries(result.errors || {})[0];
               setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
@@ -1186,7 +1186,7 @@ export function App() {
             onSave={async () => {
               setSettingsFeedback("Saving...");
               setSettingsFeedbackKind("");
-              const result = await saveSettings(fieldValues);
+              const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
               if (!result.ok) {
                 const first = Object.entries(result.errors || {})[0];
                 setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
@@ -1290,7 +1290,7 @@ export function App() {
           onSave={async () => {
             setSettingsFeedback("Saving...");
             setSettingsFeedbackKind("");
-            const result = await saveSettings(fieldValues);
+            const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
             if (!result.ok) {
               const first = Object.entries(result.errors || {})[0];
               setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
@@ -2894,6 +2894,50 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
   return JSON.stringify(clean);
 }
 
+const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
+const PLAYBACK_MODE_VALUES = new Set(["match", "primary", "secondary", "both"]);
+
+function buildPersistableSettingsValues(values: FieldValueMap, payload: SettingsPayload | null) {
+  const allowedKeys = new Set<string>(
+    payload ? payload.sections.flatMap((section) => section.fields.map((field) => field.key)) : Object.keys(values),
+  );
+  const cleaned: FieldValueMap = {};
+
+  Object.entries(values).forEach(([key, value]) => {
+    if (allowedKeys.has(key) && !key.startsWith("WIZARD_")) {
+      cleaned[key] = value;
+    }
+  });
+
+  const instances = parseArrInstancesFromValues(cleaned);
+  const hasRadarrSecondary = instances.filter((item) => item.arr_type === "radarr").length > 1;
+  const hasSonarrSecondary = instances.filter((item) => item.arr_type === "sonarr").length > 1;
+
+  const moviePlaceholderMode = String(cleaned.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary").trim().toLowerCase();
+  const tvPlaceholderMode = String(cleaned.TV_PLACEHOLDER_SEARCH_MODE ?? "primary").trim().toLowerCase();
+  const moviePlaybackMode = String(cleaned.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match").trim().toLowerCase();
+  const tvPlaybackMode = String(cleaned.TV_PLAYBACK_INSTANCE_MODE ?? "match").trim().toLowerCase();
+
+  cleaned.MOVIE_PLACEHOLDER_SEARCH_MODE = hasRadarrSecondary
+    ? (PLACEHOLDER_MODE_VALUES.has(moviePlaceholderMode) ? moviePlaceholderMode : "primary")
+    : "primary";
+  cleaned.TV_PLACEHOLDER_SEARCH_MODE = hasSonarrSecondary
+    ? (PLACEHOLDER_MODE_VALUES.has(tvPlaceholderMode) ? tvPlaceholderMode : "primary")
+    : "primary";
+  cleaned.MOVIE_PLAYBACK_INSTANCE_MODE = hasRadarrSecondary
+    ? (PLAYBACK_MODE_VALUES.has(moviePlaybackMode) ? moviePlaybackMode : "match")
+    : "match";
+  cleaned.TV_PLAYBACK_INSTANCE_MODE = hasSonarrSecondary
+    ? (PLAYBACK_MODE_VALUES.has(tvPlaybackMode) ? tvPlaybackMode : "match")
+    : "match";
+
+  if (!hasRadarrSecondary && !hasSonarrSecondary) {
+    cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = false;
+  }
+
+  return cleaned;
+}
+
 function ArrInstancesEditor(props: {
   values: FieldValueMap;
   onValueChange: (key: string, value: unknown) => void;
@@ -4348,6 +4392,42 @@ function OnboardingWizard(props: {
             const instances = arrInstances;
             const webhookBaseUrl = window.location.origin;
             const hasArrInstances = instances.length > 0;
+            const tautulliPayloadTemplate = `{
+    "event": "playback.start",
+    "media": {
+        "type": "{media_type}",
+        "title": "{title}",
+        "show_name": "{show_name}",
+        "episode_name": "{episode_name}",
+        "season_num": "{season_num}",
+        "episode_num": "{episode_num}",
+        "year": "{year}",
+        "ids": {
+            "plex": "{rating_key}",
+            "tmdb": "{themoviedb_id}",
+            "tvdb": "{thetvdb_id}",
+            "imdb": "{imdb_id}"
+        },
+        "file_info": {
+            "path": "{file}"
+        }
+    }
+}`;
+            const jellyfinPayloadTemplate = `{
+  "event": "playback.start",
+  "ItemId": "{{ItemId}}",
+  "UserId": "{{UserId}}",
+  "Name": "{{Name}}",
+  "ItemType": "{{ItemType}}",
+  "SeriesName": "{{SeriesName}}",
+  "SeasonNumber": "{{SeasonNumber}}",
+  "EpisodeNumber": "{{EpisodeNumber}}",
+  "Provider_tmdb": "{{Provider_tmdb}}",
+  "Provider_tvdb": "{{Provider_tvdb}}",
+  "Provider_imdb": "{{Provider_imdb}}",
+  "Year": "{{Year}}",
+  "NotificationType": "{{NotificationType}}"
+}`;
 
             return (
               <div className="space-y-6">
@@ -4423,6 +4503,18 @@ function OnboardingWizard(props: {
                                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
                                 </button>
                               </div>
+                              <ol className="mt-3 text-[11px] text-slate-400 list-decimal list-inside space-y-1.5">
+                                <li>Open Tautulli and go to Settings → Notification Agents.</li>
+                                <li>Create a new Webhook notification agent.</li>
+                                <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+                                <li>Paste the payload template below and save.</li>
+                              </ol>
+                              <div className="mt-3">
+                                <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON Payload Template</div>
+                                <pre className="mt-1.5 overflow-x-auto rounded bg-[#0a0d11] border border-[#424753]/40 p-3 text-[11px] leading-relaxed text-slate-300 font-mono">
+                                  <code>{tautulliPayloadTemplate}</code>
+                                </pre>
+                              </div>
                             </div>
                           )}
                           {Boolean(props.values.ENABLE_JELLYFIN) && (
@@ -4430,6 +4522,7 @@ function OnboardingWizard(props: {
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1">
                                   <div className="text-xs font-semibold text-slate-300">Jellyfin</div>
+                                  <div className="mt-1 text-[11px] text-slate-500">Use the Webhook plugin with a custom JSON payload template.</div>
                                   <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}</div>
                                 </div>
                                 <button
@@ -4443,6 +4536,18 @@ function OnboardingWizard(props: {
                                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
                                 </button>
                               </div>
+                              <ol className="mt-3 text-[11px] text-slate-400 list-decimal list-inside space-y-1.5">
+                                <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
+                                <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
+                                <li>Set Events to include Playback Start and Content Type to application/json.</li>
+                                <li>Paste the payload template below, then save the webhook.</li>
+                              </ol>
+                              <div className="mt-3">
+                                <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON Payload Template</div>
+                                <pre className="mt-1.5 overflow-x-auto rounded bg-[#0a0d11] border border-[#424753]/40 p-3 text-[11px] leading-relaxed text-slate-300 font-mono">
+                                  <code>{jellyfinPayloadTemplate}</code>
+                                </pre>
+                              </div>
                             </div>
                           )}
                           {Boolean(props.values.ENABLE_EMBY) && (
@@ -4450,6 +4555,7 @@ function OnboardingWizard(props: {
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1">
                                   <div className="text-xs font-semibold text-slate-300">Emby</div>
+                                  <div className="mt-1 text-[11px] text-slate-500">Set a playback-start webhook so Placeholdarr receives media start events.</div>
                                   <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}</div>
                                 </div>
                                 <button
@@ -4463,6 +4569,12 @@ function OnboardingWizard(props: {
                                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
                                 </button>
                               </div>
+                              <ol className="mt-3 text-[11px] text-slate-400 list-decimal list-inside space-y-1.5">
+                                <li>In Emby, go to Settings → Notifications.</li>
+                                <li>Add or edit a webhook notification and set the URL above.</li>
+                                <li>Enable the playback-start event you want Placeholdarr to process.</li>
+                                <li>Save the webhook.</li>
+                              </ol>
                             </div>
                           )}
                         </div>
