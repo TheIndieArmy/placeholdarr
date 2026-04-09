@@ -23,6 +23,11 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy application code
 COPY . .
 
+# Ship default dummy media in /config so onboarding can stay zero-touch.
+RUN mkdir -p /config \
+    && cp /app/dummy.mp4 /config/dummy.mp4 \
+    && cp /app/coming_soon_dummy.mp4 /config/coming_soon_dummy.mp4
+
 # Copy built frontend assets from the Node stage into the runtime image
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 

@@ -59,11 +59,15 @@ export function getSettingsStatus(): Promise<SettingsStatus> {
   return fetchJson<SettingsStatus>("/api/settings/status");
 }
 
-export async function saveSettings(values: Record<string, unknown>, partial = false): Promise<SaveSettingsResponse> {
+export async function saveSettings(
+  values: Record<string, unknown>,
+  partial = false,
+  context?: { source?: string; stepKey?: string; stepName?: string },
+): Promise<SaveSettingsResponse> {
   const response = await fetch("/api/settings/save", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ values, partial }),
+    body: JSON.stringify({ values, partial, context }),
   });
   return (await response.json()) as SaveSettingsResponse;
 }

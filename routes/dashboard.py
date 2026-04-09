@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from sqlalchemy import and_, case, func, or_, text
 
 from core.config import settings
+from core.logger import logger
 from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
@@ -1791,10 +1792,15 @@ async def settings_save(request: Request):
     payload = await request.json()
     values = payload.get("values") if isinstance(payload, dict) else None
     partial = bool(payload.get("partial", False)) if isinstance(payload, dict) else False
+    context = payload.get("context") if isinstance(payload, dict) else None
     if not isinstance(values, dict):
         return JSONResponse(content={"ok": False, "errors": {"values": "expected an object"}}, status_code=400)
 
-    result = save_settings(values, partial=partial)
+    logger.debug(
+        f"Settings save request received: partial={partial} context={context or {}} keys={sorted(values.keys())}",
+        extra={"emoji_type": "processing"},
+    )
+    result = save_settings(values, partial=partial, context=context if isinstance(context, dict) else None)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

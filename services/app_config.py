@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from collections import OrderedDict
 from datetime import datetime, timezone
+import os
+from pathlib import Path
 import re
 from urllib.parse import urlparse
 from typing import Any
@@ -10,6 +12,7 @@ from typing import Any
 from sqlalchemy import func
 
 from core.config import settings
+from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import AppConfig
 
@@ -250,110 +253,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Library Root",
-                "description": "Optional shared base path where Placeholdarr writes placeholder folders. Derived folders include movies, tv, movies-4k, and tv-4k.",
+                "description": "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root.",
                 "type": "path",
                 "required": False,
                 "restart_required": False,
-            },
-        ),
-        (
-            "LIBRARY_ORGANIZATION_MODE",
-            {
-                "section": "Paths",
-                "label": "Library organization",
-                "description": "Single library keeps placeholder and real folders together. Separate libraries are recommended when 4K placeholders are enabled for clearer routing and browsing.",
-                "type": "choice",
-                "restart_required": False,
-                "options": [
-                    {"value": "single", "label": "Single library"},
-                    {"value": "separate", "label": "Separate libraries (recommended for 4K)"},
-                ],
-            },
-        ),
-        (
-            "ENABLE_STANDARD_PROFILE",
-            {
-                "section": "Paths",
-                "label": "Standard placeholders",
-                "description": "Standard placeholders are always enabled.",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "ENABLE_4K_PROFILE",
-            {
-                "section": "Paths",
-                "label": "Enable 4K placeholders",
-                "description": "When enabled, Placeholdarr creates separate 4K placeholders for 4K ARR instances. For best results, use separate media-server libraries for standard and 4K placeholders.",
-                "type": "bool",
-                "restart_required": False,
-            },
-        ),
-        (
-            "MOVIE_LIBRARY_FOLDER",
-            {
-                "section": "Paths",
-                "label": "Movie Library Folder",
-                "description": "Optional explicit movies folder for placeholders. If blank and Library Root is set, Placeholdarr derives this automatically.",
-                "type": "path",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "TV_LIBRARY_FOLDER",
-            {
-                "section": "Paths",
-                "label": "TV Library Folder",
-                "description": "Optional explicit TV folder for placeholders. If blank and Library Root is set, Placeholdarr derives this automatically.",
-                "type": "path",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "MOVIE_LIBRARY_4K_FOLDER",
-            {
-                "section": "Paths",
-                "label": "Movie Library 4K Folder",
-                "description": "Optional explicit 4K movies folder. If blank and Library Root is set, Placeholdarr derives a movies-4k path.",
-                "type": "path",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "TV_LIBRARY_4K_FOLDER",
-            {
-                "section": "Paths",
-                "label": "TV Library 4K Folder",
-                "description": "Optional explicit 4K TV folder. If blank and Library Root is set, Placeholdarr derives a tv-4k path.",
-                "type": "path",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "DUMMY_FILE_PATH",
-            {
-                "section": "Paths",
-                "label": "Dummy File Path",
-                "description": "Path to the primary dummy media file used when creating placeholders. Defaults to APPDATA_PATH/dummy.mp4 in onboarding.",
-                "type": "path",
-                "required": False,
-                "restart_required": True,
-            },
-        ),
-        (
-            "COMING_SOON_DUMMY_FILE_PATH",
-            {
-                "section": "Paths",
-                "label": "Coming Soon Dummy File Path",
-                "description": "Optional alternate dummy file used only for Coming Soon placeholders. Defaults to APPDATA_PATH/coming_soon_dummy.mp4 in onboarding.",
-                "type": "path",
-                "required": False,
-                "restart_required": True,
             },
         ),
         (
@@ -375,21 +278,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     {"value": "full", "label": "Full — always full ARR sync on every startup"},
                     {"value": "lite", "label": "Lite — history/delta catch-up only"},
                     {"value": "off", "label": "Off — skip ARR startup sync"},
-                ],
-            },
-        ),
-        (
-            "STARTUP_ARR_CHECK_MODE",
-            {
-                "section": "Library sync",
-                "label": "Startup ARR check mode",
-                "description": "Controls ARR preflight checks during startup: off skips checks, config validates configured values, live performs live API reachability/auth checks.",
-                "type": "choice",
-                "restart_required": True,
-                "options": [
-                    {"value": "off", "label": "Off — skip ARR preflight checks"},
-                    {"value": "config", "label": "Config — validate configured URL/API-key pairs"},
-                    {"value": "live", "label": "Live — call ARR APIs to verify reachability/auth"},
                 ],
             },
         ),
@@ -803,6 +691,59 @@ def _set_runtime_value(key: str, value: Any) -> None:
         pass
 
 
+def _apply_runtime_library_defaults() -> None:
+    """Derive internal runtime folders from LIBRARY_ROOT in simplified mode."""
+    root = str(getattr(settings, "LIBRARY_ROOT", "") or "").strip()
+    if not root:
+        return
+    movie = os.path.join(root, "movies")
+    tv = os.path.join(root, "tv")
+    _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie)
+    _set_runtime_value("TV_LIBRARY_FOLDER", tv)
+    # Keep 4K folders aligned to simplified layout so legacy call sites keep working.
+    _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie)
+    _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv)
+    _set_runtime_value("ENABLE_STANDARD_PROFILE", True)
+    _set_runtime_value("ENABLE_4K_PROFILE", False)
+
+
+def _parse_octal_mode(raw: Any, default: int = 0o777) -> int:
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    try:
+        return int(text, 8)
+    except Exception:
+        return default
+
+
+def _ensure_library_root_folders(root: str, dir_mode: int) -> list[str]:
+    root_value = str(root or "").strip()
+    if not root_value:
+        return []
+
+    created: list[str] = []
+    root_path = Path(root_value)
+    if not root_path.exists():
+        root_path.mkdir(parents=True, exist_ok=True)
+        created.append(str(root_path))
+    try:
+        os.chmod(root_path, dir_mode)
+    except Exception:
+        pass
+
+    for folder_name in ("movies", "tv"):
+        target = root_path / folder_name
+        if not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
+            created.append(str(target))
+        try:
+            os.chmod(target, dir_mode)
+        except Exception:
+            pass
+    return created
+
+
 def apply_persisted_settings(session=None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
@@ -814,6 +755,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
                 continue
             _set_runtime_value(row.key, row.value)
             applied.append(row.key)
+        _apply_runtime_library_defaults()
         return {"applied": applied, "count": len(applied)}
     finally:
         if owns_session:
@@ -848,15 +790,8 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped.setdefault(meta["section"], [])
             row = _get_row(session, key)
             effective_value = getattr(settings, key, row.value if row else None)
-            if key == "ENABLE_STANDARD_PROFILE":
-                effective_value = True
             if _is_blank(effective_value):
-                appdata = str(getattr(settings, "APPDATA_PATH", "/config") or "/config").strip() or "/config"
-                appdata = appdata.rstrip("/")
-                if key == "DUMMY_FILE_PATH":
-                    effective_value = f"{appdata}/dummy.mp4"
-                elif key == "COMING_SOON_DUMMY_FILE_PATH":
-                    effective_value = f"{appdata}/coming_soon_dummy.mp4"
+                pass
             entry: dict[str, Any] = {
                 "key": key,
                 "section": meta["section"],
@@ -882,11 +817,13 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             session.close()
 
 
-def save_settings(values: dict[str, Any], session=None, partial: bool = False) -> dict[str, Any]:
+def save_settings(values: dict[str, Any], session=None, partial: bool = False, context: dict[str, Any] | None = None) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     errors: dict[str, str] = {}
     validated: dict[str, Any] = {}
+    created_paths: list[str] = []
+    derived_library_paths: list[str] = []
     try:
         for key, raw_value in values.items():
             if key not in SETTINGS_SCHEMA:
@@ -910,8 +847,21 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False) -
             except Exception as exc:
                 errors[key] = str(exc)
 
-        # Standard placeholders are always enabled in the simplified path model.
-        validated["ENABLE_STANDARD_PROFILE"] = True
+        # Simplified path model: derive runtime folders from LIBRARY_ROOT.
+        if "LIBRARY_ROOT" in validated:
+            root = str(validated.get("LIBRARY_ROOT") or "").strip()
+            if root:
+                dir_mode = _parse_octal_mode(validated.get("PLACEHOLDER_DIR_MODE", getattr(settings, "PLACEHOLDER_DIR_MODE", "777")), 0o777)
+                movie_path = os.path.join(root, "movies")
+                tv_path = os.path.join(root, "tv")
+                created_paths = _ensure_library_root_folders(root, dir_mode)
+                derived_library_paths = [movie_path, tv_path]
+                _set_runtime_value("MOVIE_LIBRARY_FOLDER", movie_path)
+                _set_runtime_value("TV_LIBRARY_FOLDER", tv_path)
+                _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie_path)
+                _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv_path)
+                _set_runtime_value("ENABLE_STANDARD_PROFILE", True)
+                _set_runtime_value("ENABLE_4K_PROFILE", False)
 
         enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
         if enable_plex:
@@ -982,6 +932,10 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False) -
         # Rankings are derived from configured ARR instances instead.
 
         if errors:
+            logger.warning(
+                f"Settings save rejected: partial={partial} context={context or {}} errors={errors}",
+                extra={"emoji_type": "warning"},
+            )
             return {"ok": False, "errors": errors}
 
         restart_required_keys: list[str] = []
@@ -1027,6 +981,15 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False) -
                 session.add(setup_row)
 
         session.commit()
+        logger.info(
+            "Settings saved"
+            f" partial={partial}"
+            f" context={context or {}}"
+            f" saved_keys={saved_keys}"
+            f" derived_library_paths={derived_library_paths}"
+            f" created_paths={created_paths}",
+            extra={"emoji_type": "update" if partial else "success"},
+        )
         return {
             "ok": True,
             "saved_keys": saved_keys,

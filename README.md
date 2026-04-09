@@ -215,8 +215,10 @@ ARR webhooks monitor your Radarr and Sonarr instances for media changes. Each in
    - Method: `POST`
 3. Enable **Required Events**:
    - ✅ On Grab
-   - ✅ On Import
-   - ✅ On Rename
+   - ✅ On File Import
+   - ✅ On Movie Add
+   - ✅ On Movie Delete
+   - ✅ On Movie File Delete
 4. Test and Save
 
 **Notes:**
@@ -236,8 +238,9 @@ ARR webhooks monitor your Radarr and Sonarr instances for media changes. Each in
    - Method: `POST`
 3. Enable **Required Events**:
    - ✅ On Grab
-   - ✅ On Import
-   - ✅ On Rename
+   - ✅ On File Import
+   - ✅ On Series Add
+   - ✅ On Series Delete
    - ✅ On Episode File Delete
 4. Test and Save
 

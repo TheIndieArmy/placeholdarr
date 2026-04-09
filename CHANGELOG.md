@@ -10,6 +10,27 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 - Placeholder for upcoming release notes.
 
+## [0.8.4] - 2026-04-09
+
+### Changed
+- Simplified onboarding paths to a single `LIBRARY_ROOT` flow with derived `movies` and `tv` folders instead of separate placeholder path/profile branches.
+- Reworked onboarding progression so `Save & Continue` stays blocked until each key step has meaningful configured input, including confirmed media-server and ARR connection tests where applicable.
+- Updated ARR setup to support optional primary Radarr/Sonarr usage, with secondary instance toggles unlocking only after a successful primary connection test.
+- Refined ARR playback/placeholder routing controls so fallback messaging, timeout visibility, and disabled states better reflect real routing behavior.
+- Moved Plex library creation guidance out of the onboarding flow and into the Plex library ID fields where it is actually needed.
+- Updated ARR webhook guidance in UI and docs to use per-instance setup instructions and current required Radarr/Sonarr webhook event names.
+
+### Added
+- Added runtime creation of derived `movies` and `tv` folders when `LIBRARY_ROOT` is saved, including open-permission handling based on configured directory mode.
+- Added default dummy media provisioning to `/config` in the container image, with placeholder dummy-path resolution falling back through `/config` and in-image defaults.
+- Added contextual logging for settings saves and onboarding partial-save requests to improve onboarding diagnostics.
+
+### Fixed
+- Fixed webhook setup rendering so all enabled ARR instances, including primary instances, appear in setup instructions instead of only secondary entries.
+- Fixed ARR primary instance labeling so the UI consistently uses `Primary` instead of mixing `Primary` and `Standard`.
+- Fixed fallback controls to disable automatically when they are not applicable, when fallback is turned off, or when all unlocked search behaviors already target both instances.
+- Fixed onboarding/settings guidance mismatches around ARR webhook triggers, fallback behavior, and Plex library ID setup.
+
 ## [0.8.3] - 2026-04-09
 
 ### Changed

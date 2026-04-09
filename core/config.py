@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     PLEX_TOKEN: Optional[str] = None
     PLEX_MOVIE_SECTION_ID: Optional[int] = None
     PLEX_TV_SECTION_ID: Optional[int] = None
+    PLEX_MOVIE_4K_SECTION_ID: Optional[int] = None
+    PLEX_TV_4K_SECTION_ID: Optional[int] = None
     
     # Jellyfin
     JELLYFIN_URL: Optional[str] = None
@@ -273,41 +275,25 @@ class Settings(BaseSettings):
     @root_validator(skip_on_failure=True)
     def configure_library_paths(cls, values):
         library_root = str(values.get('LIBRARY_ROOT') or '').strip()
-        use_standard = bool(values.get('ENABLE_STANDARD_PROFILE', True))
-        use_4k = bool(values.get('ENABLE_4K_PROFILE', True))
-        use_anime = bool(values.get('ENABLE_ANIME_PROFILE', False))
-
+        # Simplified path model:
+        # - one base library root
+        # - internal folders derive to `<root>/movies` and `<root>/tv`
         movie_folder = str(values.get('MOVIE_LIBRARY_FOLDER') or '').strip()
         tv_folder = str(values.get('TV_LIBRARY_FOLDER') or '').strip()
-        movie_4k_folder = str(values.get('MOVIE_LIBRARY_4K_FOLDER') or '').strip()
-        tv_4k_folder = str(values.get('TV_LIBRARY_4K_FOLDER') or '').strip()
-        anime_folder = str(values.get('ANIME_LIBRARY_FOLDER') or '').strip()
-
         if library_root:
-            if use_standard and not movie_folder:
+            if not movie_folder:
                 movie_folder = os.path.join(library_root, 'movies')
-            if use_standard and not tv_folder:
+            if not tv_folder:
                 tv_folder = os.path.join(library_root, 'tv')
 
-        # 4K defaults to the main library root. Users can override either path explicitly.
-        has_4k_service = bool(values.get('RADARR_4K_URL') or values.get('SONARR_4K_URL'))
-        if use_4k and has_4k_service and library_root:
-            if not movie_4k_folder:
-                movie_4k_folder = os.path.join(library_root, 'movies-4k')
-            if not tv_4k_folder:
-                tv_4k_folder = os.path.join(library_root, 'tv-4k')
-
-        if use_anime and library_root and not anime_folder:
-            anime_folder = os.path.join(library_root, 'anime')
-
-        if not use_standard:
-            movie_folder = ''
-            tv_folder = ''
-        if not use_4k:
-            movie_4k_folder = ''
-            tv_4k_folder = ''
-        if not use_anime:
-            anime_folder = ''
+        # Keep legacy 4K/anime attributes aligned for compatibility, but do not
+        # create separate path branches in the simplified model.
+        movie_4k_folder = movie_folder
+        tv_4k_folder = tv_folder
+        anime_folder = ''
+        values['ENABLE_STANDARD_PROFILE'] = True
+        values['ENABLE_4K_PROFILE'] = False
+        values['ENABLE_ANIME_PROFILE'] = False
 
         dir_mode = _parse_octal_mode(values.get('PLACEHOLDER_DIR_MODE', '777'), 0o777)
         folder_values = {

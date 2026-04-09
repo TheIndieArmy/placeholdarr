@@ -35,7 +35,6 @@ const SETTINGS_SECTION_ORDER = ["Media Integrations", "ARR Integrations", "Paths
 const BEHAVIOR_WIZARD_SECTIONS = ["ARR Integrations", "Library sync", "Calendar", "Playback", "Advanced"] as const;
 const WIZARD_STEPS = [
   { key: "paths", name: "Paths" },
-  { key: "paths_review", name: "Confirm Paths" },
   { key: "media", name: "Media Servers" },
   { key: "arr", name: "ARR Services" },
   { key: "webhooks", name: "Webhook Setup" },
@@ -43,16 +42,8 @@ const WIZARD_STEPS = [
 ] as const;
 
 const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
-const PATH_PROFILE_KEYS = [
-  "ENABLE_STANDARD_PROFILE",
-  "ENABLE_4K_PROFILE",
-] as const;
-const PATH_PER_LIBRARY_OVERRIDE_KEYS = [
-  "MOVIE_LIBRARY_FOLDER",
-  "TV_LIBRARY_FOLDER",
-  "MOVIE_LIBRARY_4K_FOLDER",
-  "TV_LIBRARY_4K_FOLDER",
-] as const;
+const PATH_PROFILE_KEYS = [] as const;
+const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 
 const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
 
@@ -100,12 +91,7 @@ const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title
   paths: {
     title: "Start with Library Root",
     detail:
-      "Placeholdarr always creates Standard placeholders. Enable 4K placeholders only if you run separate 4K ARR instances. If you enable 4K, separate media-server libraries are recommended.",
-  },
-  paths_review: {
-    title: "Create libraries before continuing",
-    detail:
-      "Use the derived/override paths below to create libraries in Plex/Jellyfin/Emby. After that, continue to Media Services and ARR setup.",
+      "Set one base path. Placeholdarr will create and use `movies` and `tv` folders under that path for placeholders.",
   },
   media: {
     title: "Media server targets",
@@ -120,7 +106,7 @@ const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title
   webhooks: {
     title: "Connect webhooks",
     detail:
-      "Placeholdarr routes webhooks using the instance query parameter. ARR instance keys are generated from your server names. Copy the URLs below into each service exactly as shown.",
+      "Use the exact webhook URLs below for each ARR/media service. Instance keys are derived from your current labels.",
   },
   behavior: {
     title: "Sync, calendar, and playback",
@@ -1189,7 +1175,6 @@ export function App() {
             hasUnsavedChanges={hasUnsavedChanges}
             brand={brand}
             themeMode={themeMode}
-            onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
             onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
             onPartialSave={handlePartialSave}
             onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
@@ -1294,7 +1279,6 @@ export function App() {
           hasUnsavedChanges={hasUnsavedChanges}
           brand={brand}
           themeMode={themeMode}
-          onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
           onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
             onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
             onPartialSave={handlePartialSave}
@@ -2796,7 +2780,13 @@ function normalizeInstanceKey(input: string) {
 
 function inferDefaultKey(label: string, arrType: "radarr" | "sonarr") {
   const slug = normalizeInstanceKey(label);
-  return `${arrType}_${slug || "instance"}`;
+  return slug || `${arrType}_instance`;
+}
+
+function getPlexLibraryIdNote(fieldKey: string) {
+  if (fieldKey === "PLEX_MOVIE_SECTION_ID") return "Use the Plex library ID for the placeholder movie library that points at your derived `movies` path.";
+  if (fieldKey === "PLEX_TV_SECTION_ID") return "Use the Plex library ID for the placeholder TV library that points at your derived `tv` path.";
+  return null;
 }
 
 function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] {
@@ -2841,7 +2831,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
   if (radarrUrl || radarrKey) {
     legacy.push({
       id: "legacy-radarr-std",
-      label: "Radarr Standard",
+      label: "Radarr Primary",
       arr_type: "radarr",
       instance_key: normalizeInstanceKey(String(values.RADARR_STD_INSTANCE_KEY || "radarr_std")),
       url: radarrUrl,
@@ -2863,7 +2853,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
   if (sonarrUrl || sonarrKey) {
     legacy.push({
       id: "legacy-sonarr-std",
-      label: "Sonarr Standard",
+      label: "Sonarr Primary",
       arr_type: "sonarr",
       instance_key: normalizeInstanceKey(String(values.SONARR_STD_INSTANCE_KEY || "sonarr_std")),
       url: sonarrUrl,
@@ -2908,14 +2898,30 @@ function ArrInstancesEditor(props: {
   values: FieldValueMap;
   onValueChange: (key: string, value: unknown) => void;
   accent: BrandAccent;
+  onPrimaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
+  onSecondaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
 }) {
   const [instances, setInstances] = useState<ArrInstanceDraft[]>(() => parseArrInstancesFromValues(props.values));
   const [testState, setTestState] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [primaryCache, setPrimaryCache] = useState<{ radarr: ArrInstanceDraft | null; sonarr: ArrInstanceDraft | null }>(() => {
+    const parsed = parseArrInstancesFromValues(props.values);
+    return {
+      radarr: parsed.filter((item) => item.arr_type === "radarr")[0] || null,
+      sonarr: parsed.filter((item) => item.arr_type === "sonarr")[0] || null,
+    };
+  });
   const [secondaryCache, setSecondaryCache] = useState<{ radarr: ArrInstanceDraft | null; sonarr: ArrInstanceDraft | null }>(() => {
     const parsed = parseArrInstancesFromValues(props.values);
     return {
       radarr: parsed.filter((item) => item.arr_type === "radarr")[1] || null,
       sonarr: parsed.filter((item) => item.arr_type === "sonarr")[1] || null,
+    };
+  });
+  const [primaryEnabled, setPrimaryEnabled] = useState<{ radarr: boolean; sonarr: boolean }>(() => {
+    const parsed = parseArrInstancesFromValues(props.values);
+    return {
+      radarr: parsed.filter((item) => item.arr_type === "radarr").length > 0,
+      sonarr: parsed.filter((item) => item.arr_type === "sonarr").length > 0,
     };
   });
   const [secondaryEnabled, setSecondaryEnabled] = useState<{ radarr: boolean; sonarr: boolean }>(() => {
@@ -2925,6 +2931,15 @@ function ArrInstancesEditor(props: {
       sonarr: parsed.filter((item) => item.arr_type === "sonarr").length > 1,
     };
   });
+  const [primaryConnectionOk, setPrimaryConnectionOk] = useState<{ radarr: boolean; sonarr: boolean }>({
+    radarr: false,
+    sonarr: false,
+  });
+
+  useEffect(() => {
+    props.onValueChange("WIZARD_RADARR_SECONDARY_ENABLED", secondaryEnabled.radarr);
+    props.onValueChange("WIZARD_SONARR_SECONDARY_ENABLED", secondaryEnabled.sonarr);
+  }, [props, secondaryEnabled]);
 
 
   function update(next: ArrInstanceDraft[]) {
@@ -2962,15 +2977,45 @@ function ArrInstancesEditor(props: {
     }
     const target = typeRows[slotIndex] || defaultSlot(arrType, slotIndex);
     typeRows[slotIndex] = { ...target, ...patch };
+    if (slotIndex === 0 && (Object.prototype.hasOwnProperty.call(patch, "url") || Object.prototype.hasOwnProperty.call(patch, "api_key"))) {
+      setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
+      props.onPrimaryTestStatusChange?.(arrType, false);
+      props.onSecondaryTestStatusChange?.(arrType, false);
+    }
+    if (slotIndex === 1 && (Object.prototype.hasOwnProperty.call(patch, "url") || Object.prototype.hasOwnProperty.call(patch, "api_key"))) {
+      props.onSecondaryTestStatusChange?.(arrType, false);
+    }
     update([...otherRows, ...typeRows]);
   }
 
+  function setPrimary(arrType: "radarr" | "sonarr", enabled: boolean) {
+    const typeRows = getTypeRows(arrType);
+    const otherRows = instances.filter((item) => item.arr_type !== arrType);
+    if (!enabled) {
+      setPrimaryCache((prev) => ({ ...prev, [arrType]: typeRows[0] || prev[arrType] }));
+      setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
+      setPrimaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
+      props.onPrimaryTestStatusChange?.(arrType, false);
+      props.onSecondaryTestStatusChange?.(arrType, false);
+      update(otherRows);
+      return;
+    }
+
+    const primary = typeRows[0] ?? primaryCache[arrType] ?? defaultSlot(arrType, 0);
+    setPrimaryEnabled((prev) => ({ ...prev, [arrType]: true }));
+    update([...otherRows, { ...primary }]);
+  }
+
   function setSecondary(arrType: "radarr" | "sonarr", enabled: boolean) {
+    if (enabled && (!primaryEnabled[arrType] || !primaryConnectionOk[arrType])) return;
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     if (!enabled) {
       setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
       setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      props.onSecondaryTestStatusChange?.(arrType, false);
       update([...otherRows, ...typeRows.slice(0, 1)]);
       return;
     }
@@ -2981,7 +3026,7 @@ function ArrInstancesEditor(props: {
     update([...otherRows, primary, { ...secondary }]);
   }
 
-  async function runTest(item: ArrInstanceDraft) {
+  async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: 0 | 1) {
     setTestState((prev) => ({ ...prev, [item.id]: { ok: true, message: "Testing..." } }));
     const result = await testIntegrationConnection({
       service: item.arr_type,
@@ -2989,6 +3034,14 @@ function ArrInstancesEditor(props: {
       credential: String(item.api_key || ""),
     });
     setTestState((prev) => ({ ...prev, [item.id]: result }));
+    if (slotIndex === 0 && primaryEnabled[arrType]) {
+      setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: Boolean(result.ok) }));
+      props.onPrimaryTestStatusChange?.(arrType, Boolean(result.ok));
+      if (!result.ok) props.onSecondaryTestStatusChange?.(arrType, false);
+    }
+    if (slotIndex === 1 && secondaryEnabled[arrType]) {
+      props.onSecondaryTestStatusChange?.(arrType, Boolean(result.ok));
+    }
   }
 
   const byType = {
@@ -3005,10 +3058,18 @@ function ArrInstancesEditor(props: {
     arrType: "radarr" | "sonarr",
     slotIndex: 0 | 1,
     required: boolean,
-    opts?: { showSecondaryToggle?: boolean; secondaryEnabled?: boolean },
+    opts?: {
+      showToggle?: boolean;
+      enabled?: boolean;
+      onToggle?: (enabled: boolean) => void;
+      toggleDisabled?: boolean;
+      toggleHint?: string;
+      statusHint?: string;
+    },
   ) {
     const status = testState[item.id];
-    const isDisabled = Boolean(opts?.showSecondaryToggle) && !Boolean(opts?.secondaryEnabled);
+    const isEnabled = opts?.enabled ?? true;
+    const isDisabled = !isEnabled;
     return (
       <div key={item.id} className={`rounded-xl border border-[#424753]/40 bg-[#0f1419] overflow-hidden ${isDisabled ? "opacity-60" : ""}`}>
         <div className="p-4 space-y-3">
@@ -3025,27 +3086,32 @@ function ArrInstancesEditor(props: {
                 disabled={isDisabled}
               />
               <div className="text-[11px] text-slate-400 mt-1">
-                {item.arr_type.toUpperCase()} {required ? "• Required" : "• Optional"}
+                {item.arr_type.toUpperCase()} {required ? "• Primary" : "• Secondary"}
               </div>
+              {opts?.statusHint ? <div className="text-[11px] text-slate-500 mt-1">{opts.statusHint}</div> : null}
             </div>
-            {opts?.showSecondaryToggle ? (
-              <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+            {opts?.showToggle ? (
+              <label className={`flex items-center gap-2 select-none shrink-0 ${opts.toggleDisabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
                 <span className="text-[11px] text-slate-300">Enabled</span>
                 <div
-                  className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${opts.secondaryEnabled ? "" : "bg-[#252e3a]"}`}
-                  style={opts.secondaryEnabled ? { backgroundColor: props.accent.hex } : undefined}
-                  onClick={() => setSecondary(arrType, !opts.secondaryEnabled)}
+                  className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${isEnabled ? "" : "bg-[#252e3a]"}`}
+                  style={isEnabled ? { backgroundColor: props.accent.hex } : undefined}
+                  onClick={() => {
+                    if (opts.toggleDisabled) return;
+                    opts.onToggle?.(!isEnabled);
+                  }}
                 >
-                  <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${opts.secondaryEnabled ? "translate-x-4" : "translate-x-0"}`} />
+                  <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${isEnabled ? "translate-x-4" : "translate-x-0"}`} />
                 </div>
               </label>
             ) : null}
           </div>
+          {opts?.toggleHint && opts.toggleDisabled ? <div className="text-[11px] text-slate-500">{opts.toggleHint}</div> : null}
           <input
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
             value={item.url}
             onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
-            placeholder="http://arr-host:port/api/v3"
+            placeholder="http://arr-host:port"
             disabled={isDisabled}
           />
           <input
@@ -3060,7 +3126,7 @@ function ArrInstancesEditor(props: {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => runTest(item)}
+              onClick={() => runTest(item, arrType, slotIndex)}
               className="px-3 py-1.5 rounded-md text-xs bg-[#252e3a] border border-[#424753]/40 text-slate-300"
               disabled={isDisabled}
             >
@@ -3084,10 +3150,22 @@ function ArrInstancesEditor(props: {
 
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {card(slotFor(arrType, 0), arrType, 0, true)}
+            {card(slotFor(arrType, 0), arrType, 0, true, {
+              showToggle: true,
+              enabled: primaryEnabled[arrType],
+              onToggle: (enabled) => setPrimary(arrType, enabled),
+              statusHint: primaryConnectionOk[arrType]
+                ? "Connection test confirmed."
+                : "Run a successful primary connection test to unlock the secondary instance toggle.",
+            })}
             {card(slotFor(arrType, 1), arrType, 1, false, {
-              showSecondaryToggle: true,
-              secondaryEnabled: secondaryEnabled[arrType],
+              showToggle: true,
+              enabled: secondaryEnabled[arrType],
+              onToggle: (enabled) => setSecondary(arrType, enabled),
+              toggleDisabled: !primaryEnabled[arrType] || !primaryConnectionOk[arrType],
+              toggleHint: !primaryEnabled[arrType]
+                ? "Enable and configure the primary instance first."
+                : (!primaryConnectionOk[arrType] ? "Run a successful primary connection test first." : undefined),
             })}
           </div>
 
@@ -3145,6 +3223,21 @@ function LibraryPathsForm(props: {
     );
   }
 
+  function renderChoice(field: SettingsField, opts?: { compact?: boolean; muted?: boolean }) {
+    const border = opts?.muted ? "border-[#424753]/25" : "border-[#424753]/40";
+    return (
+      <select
+        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus} ${opts?.compact ? "text-xs py-1.5" : ""}`}
+        value={String(props.values[field.key] ?? field.options?.[0]?.value ?? "")}
+        onChange={(e) => props.onValueChange(field.key, e.target.value)}
+      >
+        {(field.options || []).map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
+        ))}
+      </select>
+    );
+  }
+
   function renderSettingsRestField(field: SettingsField) {
     const value = props.values[field.key];
     const test = props.testResults?.[field.key];
@@ -3162,6 +3255,7 @@ function LibraryPathsForm(props: {
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
             {field.description && <p className="text-xs text-slate-500 mt-1">{field.description}</p>}
+            {getPlexLibraryIdNote(field.key) ? <p className="text-xs text-slate-500 mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
           </div>
         </div>
         {field.type === "bool" ? (
@@ -3219,8 +3313,8 @@ function LibraryPathsForm(props: {
         </span>
       </div>
       <p className="text-xs text-slate-400 mb-3 leading-relaxed">
-        Placeholdarr creates placeholder file folders under this root. Standard placeholders are always created.
-        If 4K placeholders are enabled, separate 4K placeholder folders are also created.
+        Placeholdarr creates placeholder folders under this root using a simple structure:
+        <span className="block mt-1">`movies` and `tv`</span>
       </p>
       {root.description && <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">{root.description}</p>}
       {root.type === "bool" ? renderBool(root) : renderTextInput(root)}
@@ -3271,7 +3365,7 @@ function LibraryPathsForm(props: {
             <div key={field.key}>
               <label className="block text-xs font-medium text-slate-400 font-headline mb-1">{field.label}</label>
               {field.description && <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">{field.description}</p>}
-              {field.type === "bool" ? renderBool(field, true) : renderTextInput(field, { compact: true, muted: true })}
+              {field.type === "bool" ? renderBool(field, true) : field.type === "choice" ? renderChoice(field, { compact: true, muted: true }) : renderTextInput(field, { compact: true, muted: true })}
             </div>
           ))}
         </div>
@@ -3289,7 +3383,7 @@ function LibraryPathsForm(props: {
           <div key={field.key}>
             <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
             {field.description && <p className="text-xs text-slate-500 mb-2">{field.description}</p>}
-            {field.type === "bool" ? renderBool(field) : renderTextInput(field)}
+            {field.type === "bool" ? renderBool(field) : field.type === "choice" ? renderChoice(field) : renderTextInput(field)}
           </div>
         ))}
       </div>
@@ -3323,6 +3417,7 @@ function SettingsPanel(props: {
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   if (!props.payload) return (
@@ -3336,6 +3431,25 @@ function SettingsPanel(props: {
 
   const sectionNames = SETTINGS_SECTION_ORDER.filter((name) => props.payload!.sections.some((s) => s.name === name));
   const active = props.payload.sections.find((s) => s.name === props.activeSection) || props.payload.sections[0];
+  const arrInstances = parseArrInstancesFromValues(props.values);
+  const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
+  const hasSonarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
+  const canUseRadarrSecondaryBehavior = hasRadarrSecondaryConfigured && arrSecondaryTestStatus.radarr;
+  const canUseSonarrSecondaryBehavior = hasSonarrSecondaryConfigured && arrSecondaryTestStatus.sonarr;
+  const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
+  const unlockedSettingsSearchBehavior = [
+    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
+    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
+    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : null,
+    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : null,
+  ].filter((value): value is string => Boolean(value));
+  const fallbackUnnecessaryBecauseAllBoth = unlockedSettingsSearchBehavior.length > 0 && unlockedSettingsSearchBehavior.every((value) => value === "both");
+
+  useEffect(() => {
+    if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
+      props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
+    }
+  }, [fallbackUnnecessaryBecauseAllBoth, props, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH]);
 
   const SECTION_ICONS: Record<string, string> = {
     "Media Integrations": "hub",
@@ -3358,6 +3472,8 @@ function SettingsPanel(props: {
     });
     setTestResults((prev) => ({ ...prev, [field.key]: result }));
   }
+
+  const failedConnectionTests = Object.entries(testResults).filter(([, result]) => result && !result.ok);
 
   function renderStandardField(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
@@ -3480,6 +3596,12 @@ function SettingsPanel(props: {
             <div className="px-6 py-4 border-b border-[#424753]/30">
               <h2 className="text-base font-bold text-white font-headline">{active.name}</h2>
             </div>
+            {failedConnectionTests.length ? (
+              <div className="mx-6 mt-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
+                <div className="text-[11px] font-headline uppercase tracking-widest text-red-300">Connection Warning</div>
+                <p className="mt-1 text-xs text-red-200/90">One or more configured services could not be reached. Review the failed test results below and correct the URL or API key.</p>
+              </div>
+            ) : null}
             <div className="divide-y divide-[#424753]/20">
               {active.name === "Paths" ? (
                 <LibraryPathsForm
@@ -3512,7 +3634,14 @@ function SettingsPanel(props: {
                       <h3 className="text-base font-bold text-white font-headline">ARR Instances</h3>
                       <p className="text-xs text-slate-500 mt-1">Configure up to 2 Radarr and 2 Sonarr instances. These entries power webhook labels and instance-aware routing.</p>
                     </div>
-                    <ArrInstancesEditor values={props.values} onValueChange={props.onValueChange} accent={accent} />
+                    <ArrInstancesEditor
+                      values={props.values}
+                      onValueChange={props.onValueChange}
+                      accent={accent}
+                      onSecondaryTestStatusChange={(arrType, ok) => {
+                        setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
+                      }}
+                    />
                   </div>
 
                   {/* Placeholder search mode dropdowns */}
@@ -3526,32 +3655,50 @@ function SettingsPanel(props: {
                         <div>
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                            value={String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")}
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
                             onChange={(e) => props.onValueChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                            disabled={!canUseRadarrSecondaryBehavior}
                           >
-                            <option value="primary">Primary instance only</option>
-                            <option value="secondary">Secondary instance only</option>
-                            <option value="both">Both instances</option>
+                            {canUseRadarrSecondaryBehavior ? (
+                              <>
+                                <option value="primary">Primary instance</option>
+                                <option value="secondary">Secondary instance</option>
+                                <option value="both">Both instances</option>
+                              </>
+                            ) : (
+                              <option value="na">Not applicable, no second instance set up.</option>
+                            )}
                           </select>
                           <p className="text-[11px] text-slate-500 mt-1.5">
-                            {({ primary: "Searches only your primary (standard) Radarr instance.", secondary: "Searches only your secondary (4K) Radarr instance.", both: "Searches both Radarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Radarr instances."}
+                            {canUseRadarrSecondaryBehavior
+                              ? (({ primary: "Searches your primary (standard) Radarr instance.", secondary: "Searches your secondary (4K) Radarr instance.", both: "Searches both Radarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Radarr instances.")
+                              : "Not applicable, no second instance set up."}
                           </p>
                         </div>
                         <div className="border-t border-[#424753]/20" />
                         <div>
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                            value={String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")}
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
                             onChange={(e) => props.onValueChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                            disabled={!canUseSonarrSecondaryBehavior}
                           >
-                            <option value="primary">Primary instance only</option>
-                            <option value="secondary">Secondary instance only</option>
-                            <option value="both">Both instances</option>
+                            {canUseSonarrSecondaryBehavior ? (
+                              <>
+                                <option value="primary">Primary instance</option>
+                                <option value="secondary">Secondary instance</option>
+                                <option value="both">Both instances</option>
+                              </>
+                            ) : (
+                              <option value="na">Not applicable, no second instance set up.</option>
+                            )}
                           </select>
                           <p className="text-[11px] text-slate-500 mt-1.5">
-                            {({ primary: "Searches only your primary (standard) Sonarr instance.", secondary: "Searches only your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Sonarr instances."}
+                            {canUseSonarrSecondaryBehavior
+                              ? (({ primary: "Searches your primary (standard) Sonarr instance.", secondary: "Searches your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Sonarr instances.")
+                              : "Not applicable, no second instance set up."}
                           </p>
                         </div>
                       </div>
@@ -3565,62 +3712,115 @@ function SettingsPanel(props: {
                         <div>
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                            value={String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")}
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                             onChange={(e) => props.onValueChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                            disabled={!canUseRadarrSecondaryBehavior}
                           >
-                            <option value="match">Match by library path</option>
-                            <option value="primary">Primary instance only</option>
-                            <option value="secondary">Secondary instance only</option>
-                            <option value="both">Both instances</option>
+                            {canUseRadarrSecondaryBehavior ? (
+                              <>
+                                <option value="match">Match by library path</option>
+                                <option value="primary">Primary instance</option>
+                                <option value="secondary">Secondary instance</option>
+                                <option value="both">Both instances</option>
+                              </>
+                            ) : (
+                              <option value="na">Not applicable, no second instance set up.</option>
+                            )}
                           </select>
                           <p className="text-[11px] text-slate-500 mt-1.5">
-                            {({ match: "Uses the movie file path to determine which Radarr instance should be searched.", primary: "Always searches only your primary (standard) Radarr instance.", secondary: "Always searches only your secondary (4K) Radarr instance.", both: "Searches both Radarr instances." } as Record<string, string>)[String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the movie file path to determine which Radarr instance should be searched."}
+                            {canUseRadarrSecondaryBehavior
+                              ? (({ match: "Uses the movie file path to determine which Radarr instance should be searched.", primary: "Always searches your primary (standard) Radarr instance.", secondary: "Always searches your secondary (4K) Radarr instance.", both: "Searches both Radarr instances." } as Record<string, string>)[String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the movie file path to determine which Radarr instance should be searched.")
+                              : "Not applicable, no second instance set up."}
                           </p>
                         </div>
                         <div className="border-t border-[#424753]/20" />
                         <div>
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                            value={String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")}
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                             onChange={(e) => props.onValueChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                            disabled={!canUseSonarrSecondaryBehavior}
                           >
-                            <option value="match">Match by library path</option>
-                            <option value="primary">Primary instance only</option>
-                            <option value="secondary">Secondary instance only</option>
-                            <option value="both">Both instances</option>
+                            {canUseSonarrSecondaryBehavior ? (
+                              <>
+                                <option value="match">Match by library path</option>
+                                <option value="primary">Primary instance</option>
+                                <option value="secondary">Secondary instance</option>
+                                <option value="both">Both instances</option>
+                              </>
+                            ) : (
+                              <option value="na">Not applicable, no second instance set up.</option>
+                            )}
                           </select>
                           <p className="text-[11px] text-slate-500 mt-1.5">
-                            {({ match: "Uses the TV file path to determine which Sonarr instance should be searched.", primary: "Always searches only your primary (standard) Sonarr instance.", secondary: "Always searches only your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances." } as Record<string, string>)[String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the TV file path to determine which Sonarr instance should be searched."}
+                            {canUseSonarrSecondaryBehavior
+                              ? (({ match: "Uses the TV file path to determine which Sonarr instance should be searched.", primary: "Always searches your primary (standard) Sonarr instance.", secondary: "Always searches your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances." } as Record<string, string>)[String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the TV file path to determine which Sonarr instance should be searched.")
+                              : "Not applicable, no second instance set up."}
                           </p>
                         </div>
                         <div className="border-t border-[#424753]/20" />
                         <div className="flex items-center justify-between gap-3">
                           <div>
                             <div className="text-xs font-semibold text-slate-300">Fallback search</div>
-                            <div className="text-xs text-slate-500">If the content is not present in the selected ARR instance, fallback is immediate, including missing rows and rows marked deleted. This delayed retry is only for searches that were attempted first but did not resolve, such as no releases found or failed downloads.</div>
+                            <div className="text-xs text-slate-500">
+                              {fallbackUnnecessaryBecauseAllBoth
+                                ? "Fallback is not needed because every unlocked search behavior already searches both instances."
+                                : canUseAnySecondaryBehavior
+                                ? "If the selected ARR instance has the item but the search does not resolve, Placeholdarr waits the timeout and then searches the other enabled instance. If the item is not in ARR at all (missing/deleted rows), fallback is immediate."
+                                : "Not applicable, no second instance set up."}
+                            </div>
                           </div>
                           <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
                             <div
-                              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]"}`}
-                              style={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
-                              onClick={() => props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
+                              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
+                              style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
+                              onClick={() => canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
                             >
-                              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
+                              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
                             </div>
-                            <span className="text-sm text-slate-300">{Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled"}</span>
+                            <span className="text-sm text-slate-300">
+                              {fallbackUnnecessaryBecauseAllBoth
+                                ? "Not needed"
+                                : canUseAnySecondaryBehavior
+                                ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled")
+                                : "Not applicable, no second instance set up."}
+                            </span>
                           </label>
                         </div>
                         <div>
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                          <input
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                            type="number"
-                            min={1}
-                            value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "")}
-                            onChange={(e) => props.onValueChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
-                          />
+                          {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
+                            <input
+                              className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                              type="number"
+                              min={1}
+                              value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "")}
+                              onChange={(e) => props.onValueChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
+                            />
+                          ) : fallbackUnnecessaryBecauseAllBoth ? (
+                            <input
+                              className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                              type="text"
+                              value="Not needed because all unlocked behaviors already search both instances."
+                              disabled
+                            />
+                          ) : canUseAnySecondaryBehavior ? (
+                            <input
+                              className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                              type="text"
+                              value="Enable fallback search to set timeout."
+                              disabled
+                            />
+                          ) : (
+                            <input
+                              className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                              type="text"
+                              value="Not applicable, no second instance set up."
+                              disabled
+                            />
+                          )}
                         </div>
                       </div>
                     </div>
@@ -3646,7 +3846,6 @@ function OnboardingWizard(props: {
   hasUnsavedChanges: boolean;
   brand: Brand;
   themeMode: ThemeMode;
-  onBack: () => void;
   onNext: () => void;
   onChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
@@ -3654,16 +3853,53 @@ function OnboardingWizard(props: {
   onPartialSave?: (result: any, partialValues: Record<string, unknown>) => Promise<void> | void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [arrPrimaryTestStatus, setArrPrimaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
+  const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const step = WIZARD_STEPS[props.stepIndex];
   const guidance = WIZARD_STEP_GUIDANCE[step.key];
   const accent = getBrandAccent(props.brand, props.themeMode);
-  const pathsReviewAck = Boolean(props.values.WIZARD_PATHS_REVIEW_ACK);
-  const hasArrInstances = parseArrInstancesFromValues(props.values).length > 0;
-  const canProceed = (step.key !== "paths_review" || pathsReviewAck) && (step.key !== "webhooks" || hasArrInstances);
+  const arrInstances = parseArrInstancesFromValues(props.values);
+  const hasArrInstances = arrInstances.length > 0;
+  const hasRadarrSecondary = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
+  const hasSonarrSecondary = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
+  const uiHasRadarrSecondary = hasRadarrSecondary || Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED);
+  const uiHasSonarrSecondary = hasSonarrSecondary || Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED);
+  const canUseRadarrSecondaryBehavior = uiHasRadarrSecondary && arrSecondaryTestStatus.radarr;
+  const canUseSonarrSecondaryBehavior = uiHasSonarrSecondary && arrSecondaryTestStatus.sonarr;
+  const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
+  const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
+  const enabledMediaServices = [
+    { enabled: Boolean(props.values.ENABLE_PLEX), urlKey: "PLEX_URL" },
+    { enabled: Boolean(props.values.ENABLE_JELLYFIN), urlKey: "JELLYFIN_URL" },
+    { enabled: Boolean(props.values.ENABLE_EMBY), urlKey: "EMBY_URL" },
+  ];
+  const hasConfirmedMediaConnection = enabledMediaServices.some((item) => item.enabled && Boolean(testResults[item.urlKey]?.ok));
+  const hasConfirmedArrConnection = arrPrimaryTestStatus.radarr || arrPrimaryTestStatus.sonarr;
   const keys = fieldsForWizardStep(step.key, props.payload.sections);
   const fields = props.payload.sections.flatMap((section) => section.fields).filter((f) => keys.includes(f.key));
   const [stepSaving, setStepSaving] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
+
+  const hasUnlockedSearchBehavior = [
+    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
+    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
+    canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : null,
+    canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : null,
+  ].filter((value): value is string => Boolean(value));
+  const fallbackUnnecessaryBecauseAllBoth = hasUnlockedSearchBehavior.length > 0 && hasUnlockedSearchBehavior.every((value) => value === "both");
+  const canProceed = (() => {
+    if (step.key === "paths") return hasLibraryRoot;
+    if (step.key === "media") return hasConfirmedMediaConnection;
+    if (step.key === "arr") return hasConfirmedArrConnection;
+    if (step.key === "webhooks") return hasArrInstances;
+    return true;
+  })();
+
+  useEffect(() => {
+    if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
+      props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
+    }
+  }, [fallbackUnnecessaryBecauseAllBoth, props, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH]);
 
   useEffect(() => {
     setTestResults({});
@@ -3679,6 +3915,32 @@ function OnboardingWizard(props: {
       credentialKey: target.credentialKey,
     });
     setTestResults((prev) => ({ ...prev, [field.key]: result }));
+  }
+
+  function buildStepPartialValues(stepKeys: string[]) {
+    const partial: Record<string, unknown> = {};
+    for (const key of stepKeys) partial[key] = props.values[key];
+
+    if (step.key === "arr") {
+      partial.MOVIE_PLACEHOLDER_SEARCH_MODE = canUseRadarrSecondaryBehavior
+        ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary")
+        : "primary";
+      partial.TV_PLACEHOLDER_SEARCH_MODE = canUseSonarrSecondaryBehavior
+        ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary")
+        : "primary";
+      partial.MOVIE_PLAYBACK_INSTANCE_MODE = canUseRadarrSecondaryBehavior
+        ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")
+        : "match";
+      partial.TV_PLAYBACK_INSTANCE_MODE = canUseSonarrSecondaryBehavior
+        ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")
+        : "match";
+      partial.ENABLE_PLAYBACK_FALLBACK_SEARCH = canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth
+        ? Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)
+        : false;
+      partial.PLAYBACK_FALLBACK_TIMEOUT_MINUTES = String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "").trim() || 30;
+    }
+
+    return partial;
   }
 
   function wizardFieldRow(field: SettingsField) {
@@ -3737,6 +3999,8 @@ function OnboardingWizard(props: {
     );
   }
 
+  const failedConnectionTests = Object.entries(testResults).filter(([, result]) => result && !result.ok);
+
   return (
     <div className="fixed inset-0 z-50 bg-[#0f1419]/80 backdrop-blur-sm flex items-center justify-center p-6">
       <div className="w-full max-w-2xl bg-[#171c22] border border-[#424753]/40 rounded-2xl shadow-2xl overflow-hidden">
@@ -3773,10 +4037,18 @@ function OnboardingWizard(props: {
 
         {/* Fields */}
         <div className="px-8 py-6 overflow-y-auto max-h-[50vh]">
-          <div className="mb-5 rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
-            <div className="text-[11px] font-headline uppercase tracking-widest" style={{ color: accent.icon }}>{guidance.title}</div>
-            <p className="mt-1 text-xs text-slate-400">{guidance.detail}</p>
-          </div>
+          {step.key !== "media" && step.key !== "webhooks" ? (
+            <div className="mb-5 rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
+              <div className="text-[11px] font-headline uppercase tracking-widest" style={{ color: accent.icon }}>{guidance.title}</div>
+              <p className="mt-1 text-xs text-slate-400">{guidance.detail}</p>
+            </div>
+          ) : null}
+          {failedConnectionTests.length ? (
+            <div className="mb-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
+              <div className="text-[11px] font-headline uppercase tracking-widest text-red-300">Connection Warning</div>
+              <p className="mt-1 text-xs text-red-200/90">One or more configured services could not be reached. Review the failed test results in this step and correct the URL or API key.</p>
+            </div>
+          ) : null}
           {step.key === "paths" ? (
             <LibraryPathsForm
               fields={fields}
@@ -3787,42 +4059,293 @@ function OnboardingWizard(props: {
               layout="wizard"
               onValueChange={props.onChange}
             />
-          ) : step.key === "paths_review" ? (
+          ) : step.key === "media" ? (() => {
+            const focus = getBrandFocusClass(props.brand, props.themeMode);
+            const mediaCards = [
+              {
+                id: "plex",
+                title: "Plex",
+                enabledKey: "ENABLE_PLEX",
+                note: "Tautulli is required for Plex playback webhooks and playback-aware routing.",
+                keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
+              },
+              {
+                id: "jellyfin",
+                title: "Jellyfin",
+                enabledKey: "ENABLE_JELLYFIN",
+                note: "Optional playback webhook support can be configured in the Webhook step.",
+                keys: ["JELLYFIN_URL", "JELLYFIN_TOKEN", "JELLYFIN_INSTANCE_KEY"],
+              },
+              {
+                id: "emby",
+                title: "Emby",
+                enabledKey: "ENABLE_EMBY",
+                note: "Optional playback webhook support can be configured in the Webhook step.",
+                keys: ["EMBY_URL", "EMBY_TOKEN", "EMBY_INSTANCE_KEY"],
+              },
+            ] as const;
+            const fieldByKey = new Map(fields.map((f) => [f.key, f]));
+
+            return (
+              <div className="space-y-4">
+                {mediaCards.map((card) => {
+                  const enabled = Boolean(props.values[card.enabledKey]);
+                  const availableFields = card.keys
+                    .map((key) => fieldByKey.get(key))
+                    .filter(Boolean) as SettingsField[];
+
+                  return (
+                    <div key={card.id} className={`rounded-xl border border-[#424753]/40 bg-[#0f1419] p-4 transition-opacity ${enabled ? "" : "opacity-55"}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-semibold text-white font-headline">{card.title}</h3>
+                          <p className="mt-1 text-xs text-slate-400">{card.note}</p>
+                        </div>
+                        <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
+                          <div
+                            className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${enabled ? "" : "bg-[#252e3a]"}`}
+                            style={enabled ? { backgroundColor: accent.hex } : undefined}
+                            onClick={() => props.onChange(card.enabledKey, !enabled)}
+                          >
+                            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-5" : "translate-x-0"}`} />
+                          </div>
+                          <span className="text-sm text-slate-300">{enabled ? "Enabled" : "Disabled"}</span>
+                        </label>
+                      </div>
+                      <div className="mt-4 space-y-3">
+                        {availableFields.map((field) => {
+                          if (field.key === card.enabledKey) return null;
+                          if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
+                          const value = props.values[field.key];
+                          const test = testResults[field.key];
+                          const testTarget = URL_TEST_TARGET[field.key];
+                          return (
+                            <div key={field.key}>
+                              <label className="block text-xs font-semibold text-slate-300 mb-1">{field.label}</label>
+                              {getPlexLibraryIdNote(field.key) ? <p className="text-[11px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
+                              {field.type === "bool" ? (
+                                <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
+                                  <div
+                                    className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
+                                    style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
+                                    onClick={() => enabled && props.onChange(field.key, !Boolean(value))}
+                                  >
+                                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
+                                  </div>
+                                  <span className="text-xs text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+                                </label>
+                              ) : (
+                                <div className="flex gap-2">
+                                  <input
+                                    className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+                                    type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+                                    value={String(value ?? "")}
+                                    placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
+                                    onChange={(e) => props.onChange(field.key, e.target.value)}
+                                    disabled={!enabled}
+                                  />
+                                  {testTarget ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => runTest(field)}
+                                      disabled={!enabled}
+                                      className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
+                                      Test
+                                    </button>
+                                  ) : null}
+                                </div>
+                              )}
+                              {test ? (
+                                <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
+                                  <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+                                  <span>{test.message}</span>
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })() : step.key === "arr" ? (
             <div className="space-y-4">
-              <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
-                <h3 className="text-sm font-semibold text-white font-headline">Create libraries now in your media server</h3>
-                <p className="mt-1 text-xs text-slate-400">Use the generated root folders to create your movie and TV libraries in Plex, Jellyfin, or Emby before proceeding to service credentials.</p>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3">
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500 font-headline">Movie Root</div>
-                  <div className="mt-1 text-sm text-slate-200 break-all">{String(props.values.MOVIE_LIBRARY_FOLDER || "Not set")}</div>
+              <ArrInstancesEditor
+                values={props.values}
+                onValueChange={props.onChange}
+                accent={accent}
+                onPrimaryTestStatusChange={(arrType, ok) => {
+                  setArrPrimaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
+                }}
+                onSecondaryTestStatusChange={(arrType, ok) => {
+                  setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
+                }}
+              />
+              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                <div>
+                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
+                  <p className="text-xs text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
                 </div>
-                <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3">
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500 font-headline">TV Root</div>
-                  <div className="mt-1 text-sm text-slate-200 break-all">{String(props.values.TV_LIBRARY_FOLDER || "Not set")}</div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                    <select
+                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
+                      onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                      disabled={!canUseRadarrSecondaryBehavior}
+                    >
+                      {canUseRadarrSecondaryBehavior ? (
+                        <>
+                          <option value="primary">Primary instance</option>
+                          <option value="secondary">Secondary instance</option>
+                          <option value="both">Both instances</option>
+                        </>
+                      ) : (
+                        <option value="na">Not applicable, no second instance set up.</option>
+                      )}
+                    </select>
+                  </div>
+                  <div className="border-t border-[#424753]/20" />
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                    <select
+                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
+                      onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                      disabled={!canUseSonarrSecondaryBehavior}
+                    >
+                      {canUseSonarrSecondaryBehavior ? (
+                        <>
+                          <option value="primary">Primary instance</option>
+                          <option value="secondary">Secondary instance</option>
+                          <option value="both">Both instances</option>
+                        </>
+                      ) : (
+                        <option value="na">Not applicable, no second instance set up.</option>
+                      )}
+                    </select>
+                  </div>
                 </div>
               </div>
-              <label className="flex items-start gap-3 rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={pathsReviewAck}
-                  onChange={(e) => props.onChange("WIZARD_PATHS_REVIEW_ACK", e.target.checked)}
-                />
-                <span className="text-sm text-slate-300">I created or verified media libraries using these root paths and I am ready to continue.</span>
-              </label>
-            </div>
-          ) : step.key === "arr" ? (
-            <div className="space-y-4">
-              <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
-                <h3 className="text-sm font-semibold text-white font-headline">Add ARR instances</h3>
-                <p className="mt-1 text-xs text-slate-400">Create up to 2 Radarr and 2 Sonarr instances. Labels should match your webhook naming for reliable routing.</p>
+              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                <div>
+                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
+                  <p className="text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                    <select
+                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
+                      onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                      disabled={!canUseRadarrSecondaryBehavior}
+                    >
+                      {canUseRadarrSecondaryBehavior ? (
+                        <>
+                          <option value="match">Match by library path</option>
+                          <option value="primary">Primary instance</option>
+                          <option value="secondary">Secondary instance</option>
+                          <option value="both">Both instances</option>
+                        </>
+                      ) : (
+                        <option value="na">Not applicable, no second instance set up.</option>
+                      )}
+                    </select>
+                  </div>
+                  <div className="border-t border-[#424753]/20" />
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                    <select
+                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
+                      onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                      disabled={!canUseSonarrSecondaryBehavior}
+                    >
+                      {canUseSonarrSecondaryBehavior ? (
+                        <>
+                          <option value="match">Match by library path</option>
+                          <option value="primary">Primary instance</option>
+                          <option value="secondary">Secondary instance</option>
+                          <option value="both">Both instances</option>
+                        </>
+                      ) : (
+                        <option value="na">Not applicable, no second instance set up.</option>
+                      )}
+                    </select>
+                  </div>
+                  <div className="border-t border-[#424753]/20" />
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-slate-300">Fallback search</div>
+                      <div className="text-xs text-slate-500">
+                        {fallbackUnnecessaryBecauseAllBoth
+                          ? "Fallback is not needed because every unlocked search behavior already searches both instances."
+                          : canUseAnySecondaryBehavior
+                          ? "If the selected ARR instance has the item but the search does not resolve, Placeholdarr waits the timeout and then searches the other enabled instance. If the item is not in ARR at all (missing/deleted rows), fallback is immediate."
+                          : "Not applicable, no second instance set up."}
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
+                      <div
+                        className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
+                        style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
+                        onClick={() => canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
+                      >
+                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
+                      </div>
+                      <span className="text-sm text-slate-300">
+                        {fallbackUnnecessaryBecauseAllBoth
+                          ? "Not needed"
+                          : canUseAnySecondaryBehavior
+                          ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled")
+                          : "Not applicable, no second instance set up."}
+                      </span>
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                    {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
+                      <input
+                        className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                        type="number"
+                        min={1}
+                        value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? 30)}
+                        onChange={(e) => props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
+                      />
+                    ) : fallbackUnnecessaryBecauseAllBoth ? (
+                      <input
+                        className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                        type="text"
+                        value="Not needed because all unlocked behaviors already search both instances."
+                        disabled
+                      />
+                    ) : canUseAnySecondaryBehavior ? (
+                      <input
+                        className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                        type="text"
+                        value="Enable fallback search to set timeout."
+                        disabled
+                      />
+                    ) : (
+                      <input
+                        className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                        type="text"
+                        value="Not applicable, no second instance set up."
+                        disabled
+                      />
+                    )}
+                  </div>
+                </div>
               </div>
-              <ArrInstancesEditor values={props.values} onValueChange={props.onChange} accent={accent} />
             </div>
           ) : step.key === "webhooks" ? (() => {
-            const instances = parseArrInstancesFromValues(props.values);
+            const instances = arrInstances;
             const webhookBaseUrl = window.location.origin;
             const hasArrInstances = instances.length > 0;
 
@@ -3834,7 +4357,7 @@ function OnboardingWizard(props: {
                       <span className="material-symbols-outlined shrink-0 text-yellow-500" style={{ fontSize: 18 }}>warning</span>
                       <div>
                         <h3 className="text-sm font-semibold text-yellow-200">No ARR instances configured</h3>
-                        <p className="mt-1 text-xs text-yellow-300/80">Please go back to the previous step and configure at least one Radarr or Sonarr instance to enable webhook setup.</p>
+                        <p className="mt-1 text-xs text-yellow-300/80">Configure at least one Radarr or Sonarr instance in ARR Services, then continue to enable webhook setup.</p>
                       </div>
                     </div>
                   </div>
@@ -3842,33 +4365,33 @@ function OnboardingWizard(props: {
 
                 {hasArrInstances && (
                   <>
-                    {/* ARR Webhooks */}
+                    {/* Trigger Setup Instructions */}
                     <div>
-                      <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Radarr &amp; Sonarr Webhooks</h3>
-                      <div className="space-y-3">
+                      <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Setup Steps for Each Service</h3>
+                      <div className="space-y-4">
                         {instances.map((instance) => {
-                          const webhookUrl = `${webhookBaseUrl}/webhook?instance=${encodeURIComponent(instance.instance_key)}`;
+                          const service = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === instance.arr_type);
+                          if (!service) return null;
+                          const liveInstanceKey = normalizeInstanceKey(inferDefaultKey(String(instance.label || ""), instance.arr_type));
+                          const webhookUrl = `${webhookBaseUrl}/webhook?instance=${encodeURIComponent(liveInstanceKey)}`;
                           return (
-                            <div key={instance.id} className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1">
-                                  <div className="text-xs font-semibold text-slate-300">
-                                    {instance.arr_type === "radarr" ? "Radarr" : "Sonarr"} 
-                                    {instance.label && ` - ${instance.label}`}
-                                    {instance.is_4k && " (4K)"}
+                            <div key={`steps-${instance.id}`} className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
+                              <div className="font-semibold text-sm text-white mb-2 flex items-center gap-2">
+                                <span style={{ color: service.color }}>●</span>
+                                {service.name} {instance.label ? `- ${instance.label}` : ""}
+                              </div>
+                              <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
+                                <li>Go to Settings → Webhooks → Create New Webhook</li>
+                                <li>Set URL to <span className="font-mono text-slate-300">{webhookUrl}</span></li>
+                                <li>Select required events:</li>
+                              </ol>
+                              <div className="mt-2 ml-4 space-y-1">
+                                {service.triggers.filter((t) => t.required).map((trigger) => (
+                                  <div key={`${instance.id}-${trigger.event}`} className="flex items-center gap-2 text-xs text-slate-300">
+                                    <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check_box_outline_blank</span>
+                                    <span>{trigger.displayName}</span>
                                   </div>
-                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{webhookUrl}</div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(webhookUrl);
-                                    alert("Webhook URL copied to clipboard!");
-                                  }}
-                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
-                                >
-                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
-                                </button>
+                                ))}
                               </div>
                             </div>
                           );
@@ -3876,61 +4399,17 @@ function OnboardingWizard(props: {
                       </div>
                     </div>
 
-                    {/* Trigger Setup Instructions */}
-                    <div>
-                      <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Setup Triggers in Each Service</h3>
-                      <div className="space-y-4">
-                        {instances.some((i) => i.arr_type === "radarr") && (() => {
-                          const radarrService = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === "radarr");
-                          return radarrService ? (
-                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="font-semibold text-sm text-white mb-2 flex items-center gap-2">
-                                <span style={{ color: radarrService.color }}>●</span> {radarrService.name} Setup
-                              </div>
-                              <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
-                                <li>Go to Settings → Webhooks → Create New Webhook</li>
-                                <li>
-                                  Select these events:{" "}
-                                  {radarrService.triggers.map((t) => t.displayName).join(", ")}
-                                </li>
-                                <li>Paste webhook URL in the URL field</li>
-                                <li>Test and Save</li>
-                              </ol>
-                            </div>
-                          ) : null;
-                        })()}
-                        {instances.some((i) => i.arr_type === "sonarr") && (() => {
-                          const sonarrService = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === "sonarr");
-                          return sonarrService ? (
-                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="font-semibold text-sm text-white mb-2 flex items-center gap-2">
-                                <span style={{ color: sonarrService.color }}>●</span> {sonarrService.name} Setup
-                              </div>
-                              <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
-                                <li>Go to Settings → Webhooks → Create New Webhook</li>
-                                <li>
-                                  Select these events:{" "}
-                                  {sonarrService.triggers.map((t) => t.displayName).join(", ")}
-                                </li>
-                                <li>Paste webhook URL in the URL field</li>
-                                <li>Test and Save</li>
-                              </ol>
-                            </div>
-                          ) : null;
-                        })()}
-                      </div>
-                    </div>
-
                     {/* Playback Webhooks (if applicable) */}
-                    {(String(props.values.TAUTULLI_INSTANCE_KEY || "").trim() || String(props.values.JELLYFIN_INSTANCE_KEY || "").trim() || String(props.values.EMBY_INSTANCE_KEY || "").trim()) && (
+                    {(Boolean(props.values.ENABLE_PLEX) || Boolean(props.values.ENABLE_JELLYFIN) || Boolean(props.values.ENABLE_EMBY)) && (
                       <div>
-                        <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Playback Source Webhooks (Optional)</h3>
+                        <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Playback Source Webhooks</h3>
                         <div className="space-y-3">
-                          {String(props.values.TAUTULLI_INSTANCE_KEY || "").trim() && (
+                          {Boolean(props.values.ENABLE_PLEX) && (
                             <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1">
                                   <div className="text-xs font-semibold text-slate-300">Tautulli</div>
+                                  <div className="mt-1 text-[11px] text-slate-500">Required for Plex playback signals</div>
                                   <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}</div>
                                 </div>
                                 <button
@@ -3946,7 +4425,7 @@ function OnboardingWizard(props: {
                               </div>
                             </div>
                           )}
-                          {String(props.values.JELLYFIN_INSTANCE_KEY || "").trim() && (
+                          {Boolean(props.values.ENABLE_JELLYFIN) && (
                             <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1">
@@ -3966,7 +4445,7 @@ function OnboardingWizard(props: {
                               </div>
                             </div>
                           )}
-                          {String(props.values.EMBY_INSTANCE_KEY || "").trim() && (
+                          {Boolean(props.values.ENABLE_EMBY) && (
                             <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1">
@@ -3999,120 +4478,11 @@ function OnboardingWizard(props: {
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
                 const secFields = fields.filter((f) => f.section === sectionName);
-                if (!secFields.length && sectionName !== "ARR Integrations") return null;
+                if (!secFields.length) return null;
                 return (
                   <div key={sectionName}>
                     <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">{sectionName}</h3>
-                    {sectionName === "ARR Integrations" ? (
-                      <div className="space-y-4">
-                        {(() => {
-                          const remainingFields = secFields.filter((field) => !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) && !ARR_CONFIGURATION_KEYS.has(field.key) && !ARR_BEHAVIOR_KEYS.has(field.key));
-                          const focus = getBrandFocusClass(props.brand, props.themeMode);
-                          return (
-                            <>
-                              {remainingFields.map((field) => wizardFieldRow(field))}
-                              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                                <div>
-                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                                  <p className="text-xs text-slate-400">When a placeholder plays, choose which ARR instance to search for the real file.</p>
-                                </div>
-                                <div className="space-y-4">
-                                  <div>
-                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                                    <select
-                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
-                                      value={String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")}
-                                      onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                                    >
-                                      <option value="primary">Primary instance only</option>
-                                      <option value="secondary">Secondary instance only</option>
-                                      <option value="both">Both instances</option>
-                                    </select>
-                                  </div>
-                                  <div className="border-t border-[#424753]/20" />
-                                  <div>
-                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                                    <select
-                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
-                                      value={String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")}
-                                      onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
-                                    >
-                                      <option value="primary">Primary instance only</option>
-                                      <option value="secondary">Secondary instance only</option>
-                                      <option value="both">Both instances</option>
-                                    </select>
-                                  </div>
-                                </div>
-                              </div>
-                              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                                <div>
-                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                                  <p className="text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes the ARR search.</p>
-                                </div>
-                                <div className="space-y-4">
-                                  <div>
-                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
-                                    <select
-                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
-                                      value={String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")}
-                                      onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                                    >
-                                      <option value="match">Match by library path</option>
-                                      <option value="primary">Primary instance only</option>
-                                      <option value="secondary">Secondary instance only</option>
-                                      <option value="both">Both instances</option>
-                                    </select>
-                                  </div>
-                                  <div className="border-t border-[#424753]/20" />
-                                  <div>
-                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
-                                    <select
-                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
-                                      value={String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")}
-                                      onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
-                                    >
-                                      <option value="match">Match by library path</option>
-                                      <option value="primary">Primary instance only</option>
-                                      <option value="secondary">Secondary instance only</option>
-                                      <option value="both">Both instances</option>
-                                    </select>
-                                  </div>
-                                  <div className="border-t border-[#424753]/20" />
-                                  <div className="flex items-center justify-between gap-3">
-                                    <div>
-                                      <div className="text-xs font-semibold text-slate-300">Fallback search</div>
-                                      <div className="text-xs text-slate-500">If the content is not present in the selected ARR instance, fallback is immediate, including missing rows and rows marked deleted. This delayed retry is only for searches that were attempted first but did not resolve.</div>
-                                    </div>
-                                    <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
-                                      <div
-                                        className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]"}`}
-                                        style={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
-                                        onClick={() => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
-                                      >
-                                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
-                                      </div>
-                                      <span className="text-sm text-slate-300">{Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled"}</span>
-                                    </label>
-                                  </div>
-                                  <div>
-                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                                    <input
-                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
-                                      type="number"
-                                      min={1}
-                                      value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "")}
-                                      onChange={(e) => props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
-                                    />
-                                  </div>
-                                </div>
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-                    ) : (
-                      <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
-                    )}
+                    <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
                   </div>
                 );
               })}
@@ -4123,12 +4493,7 @@ function OnboardingWizard(props: {
         </div>
 
         {/* Actions */}
-        <div className="px-8 py-5 border-t border-[#424753]/30 flex items-center justify-between">
-          <button type="button" onClick={props.onBack} disabled={props.stepIndex === 0}
-            className="flex items-center gap-2 px-4 py-2 bg-[#252e3a] border border-[#424753]/40 text-slate-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg text-xs font-headline uppercase tracking-wider transition-colors">
-            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_back</span>
-            Previous Step
-          </button>
+        <div className="px-8 py-5 border-t border-[#424753]/30 flex items-center justify-end">
           <div className="flex items-center gap-3">
             {props.hasUnsavedChanges && <span className="text-xs text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
             {props.stepIndex < WIZARD_STEPS.length - 1 ? (
@@ -4137,11 +4502,6 @@ function OnboardingWizard(props: {
                 disabled={!canProceed || stepSaving}
                 onClick={async () => {
                   setStepError(null);
-                  if (step.key === "paths_review") {
-                    if (!pathsReviewAck) return setStepError("Please confirm you created libraries before continuing.");
-                    props.onNext();
-                    return;
-                  }
 
                   const stepKeys = keys || [];
                   if (!stepKeys.length) {
@@ -4150,11 +4510,14 @@ function OnboardingWizard(props: {
                   }
 
                   // Build partial payload for this step and save it
-                  const partial: Record<string, unknown> = {};
-                  for (const k of stepKeys) partial[k] = props.values[k];
+                  const partial = buildStepPartialValues(stepKeys);
                   try {
                     setStepSaving(true);
-                    const result = await saveSettings(partial, true);
+                    const result = await saveSettings(partial, true, {
+                      source: "onboarding",
+                      stepKey: step.key,
+                      stepName: step.name,
+                    });
                     if (!result.ok) {
                       const first = Object.entries(result.errors || {})[0];
                       setStepError(first ? `${first[0]}: ${first[1]}` : "Unable to save step settings");
@@ -4172,8 +4535,8 @@ function OnboardingWizard(props: {
                 }}
                 className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-xs font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ backgroundColor: accent.hex }}
-              >
-                {stepSaving ? "Saving..." : "Continue Setup"}
+                >
+                {stepSaving ? "Saving..." : "Save & Continue"}
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_forward</span>
               </button>
             ) : (
@@ -4339,11 +4702,15 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const playbackNonArrSearch = playback.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
   if (stepKey === "paths") return [...paths];
-  if (stepKey === "paths_review") return [];
   if (stepKey === "webhooks") return [];
-  if (stepKey === "arr") return [...arrIntegrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON");
+  if (stepKey === "arr") {
+    return [
+      ...[...arrIntegrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON"),
+      ...arrBehavior,
+    ];
+  }
   if (stepKey === "media") {
     return [...mediaIntegrations];
   }
-  return [...arrBehavior, ...librarySync, ...calendar, ...playbackNonArrSearch, ...advanced];
+  return [...librarySync, ...calendar, ...playbackNonArrSearch, ...advanced];
 }

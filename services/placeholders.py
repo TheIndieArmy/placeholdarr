@@ -31,6 +31,42 @@ _PLACEHOLDER_FILE_MODE = _parse_mode(getattr(settings, "PLACEHOLDER_FILE_MODE", 
 _PLACEHOLDER_DIR_MODE = _parse_mode(getattr(settings, "PLACEHOLDER_DIR_MODE", "777"), 0o777)
 
 
+def _resolve_dummy_path(kind: str = "primary") -> str:
+    """Resolve dummy media source path with runtime fallbacks.
+
+    Preference order:
+    1) Explicit configured setting if valid
+    2) Docker `/config` defaults
+    3) In-image `/app` defaults
+    """
+    configured = ""
+    if kind == "coming_soon":
+        configured = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
+    else:
+        configured = str(getattr(settings, "DUMMY_FILE_PATH", "") or "").strip()
+
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    if kind == "coming_soon":
+        candidates.extend([
+            "/config/coming_soon_dummy.mp4",
+            "/app/coming_soon_dummy.mp4",
+            "/config/dummy.mp4",
+            "/app/dummy.mp4",
+        ])
+    else:
+        candidates.extend([
+            "/config/dummy.mp4",
+            "/app/dummy.mp4",
+        ])
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return configured
+
+
 def _ensure_open_permissions(path: str, *, is_dir: bool = False) -> None:
     mode = _PLACEHOLDER_DIR_MODE if is_dir else _PLACEHOLDER_FILE_MODE
     try:
@@ -97,8 +133,8 @@ def resolve_calendar_variant_dummy_path(variant: str) -> str:
     ``coming_soon`` status can use either the primary dummy or the optional
     coming-soon dummy, depending on ``CALENDAR_LOOKAHEAD_DUMMY_MODE``.
     """
-    primary = str(getattr(settings, "DUMMY_FILE_PATH", "") or "").strip()
-    alt = str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or "").strip()
+    primary = _resolve_dummy_path("primary")
+    alt = _resolve_dummy_path("coming_soon")
     mode = str(getattr(settings, "CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon") or "coming_soon").strip().lower()
     if variant != "coming_soon":
         return primary
@@ -171,7 +207,7 @@ def ensure_placeholder_file(
     Returns:
         True when a file was created/replaced, False when no write was needed.
     """
-    dummy_path = dummy_file_path or getattr(settings, "DUMMY_FILE_PATH", None)
+    dummy_path = dummy_file_path or _resolve_dummy_path("primary")
     if not dummy_path or not os.path.isfile(dummy_path):
         raise RuntimeError(f"DUMMY_FILE_PATH missing or invalid: {dummy_path}")
 
