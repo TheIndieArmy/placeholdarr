@@ -19,7 +19,7 @@ services:
 
   placeholdarr_postgres:
     container_name: placeholdarr_postgres
-    image: docker.io/library/postgres:15-alpine
+    image: docker.io/library/postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_USER: "placeholdarr"

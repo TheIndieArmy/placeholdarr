@@ -63,7 +63,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
         },
       ],
       notes: [
-        "Standard webhook setup applies to all Radarr instances (standard, 4K, anime, etc.)",
+        "Placeholdarr currently supports up to 2 Radarr instances per deployment",
         "Each instance must have its own webhook with the correct instance parameter",
         "The instance parameter is auto-generated from your Radarr server name",
       ],
@@ -102,7 +102,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
         },
       ],
       notes: [
-        "Standard webhook setup applies to all Sonarr instances (standard, 4K, anime, etc.)",
+        "Placeholdarr currently supports up to 2 Sonarr instances per deployment",
         "Each instance must have its own webhook with the correct instance parameter",
         "The instance parameter is auto-generated from your Sonarr server name",
       ],

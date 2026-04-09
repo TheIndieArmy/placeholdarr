@@ -10,6 +10,27 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 - Placeholder for upcoming release notes.
 
+## [0.8.3] - 2026-04-09
+
+### Changed
+- Split settings into `Media Integrations` and `ARR Integrations` for clearer setup flow and onboarding parity.
+- Reworked ARR instance management to a slot-based model (primary/secondary) with explicit limits of up to 2 Radarr and 2 Sonarr instances per deployment.
+- Replaced playback ranking/search-all controls with explicit dropdown routing modes for placeholder playback and real-file playback.
+- Updated fallback behavior messaging and handling so missing/deleted preferred-instance rows fall back immediately, while delayed fallback remains timeout-based after attempted searches.
+- Enforced standard placeholder profile as always enabled in the simplified path model.
+- Updated frontend toolchain to Vite 6 and `@vitejs/plugin-react` 5.
+- Updated default Postgres image in compose from `postgres:15-alpine` to `postgres:18`.
+
+### Removed
+- Removed legacy playback/ranking configuration fields (`MOVIE_INSTANCE_RANKING`, `TV_INSTANCE_RANKING`, `MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES`, `TV_PLAYBACK_SEARCH_ALL_INSTANCES`, `PLAYBACK_SEARCH_PREFERENCE`) from settings flows and backend parsing.
+- Removed the user-facing `Enable playback event handlers` setting; playback event handling is now treated as core always-on behavior.
+- Removed legacy anime profile/path fields from the simplified paths experience.
+
+### Fixed
+- Fixed ARR instance editor input remount/focus loss by using deterministic row IDs.
+- Fixed secondary ARR slot behavior to prevent incorrect value promotion into primary slots.
+- Prevented stale/legacy internal playback keys from leaking into settings wizard and ARR sections.
+
 ## [0.8.2] - 2026-04-08
 
 ### Changed

@@ -29,13 +29,38 @@ def _instance_label(is_4k: bool) -> str:
 
 
 def _search_preference() -> str:
-    value = str(getattr(settings, 'PLAYBACK_SEARCH_PREFERENCE', 'both') or 'both').strip().lower()
-    return value if value in {'standard', '4k', 'both'} else 'both'
+    # Legacy `PLAYBACK_SEARCH_PREFERENCE` removed. Use TV playback instance mode
+    # to determine preference when matching/missing in TV real-file routing.
+    mode = str(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
+    if mode == 'primary':
+        return 'standard'
+    if mode == 'secondary':
+        return '4k'
+    return 'both'
 
 
 def _tv_instance_mode() -> str:
     value = str(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    return value if value in {'match', 'preference', 'both'} else 'match'
+    return value if value in {'match', 'primary', 'secondary', 'both'} else 'match'
+
+
+
+def _movie_instance_mode() -> str:
+    value = str(getattr(settings, 'MOVIE_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
+    return value if value in {'match', 'primary', 'secondary', 'both'} else 'match'
+
+
+def _placeholder_search_pref(media_type: str) -> str:
+    """Map MOVIE/TV_PLACEHOLDER_SEARCH_MODE (primary/secondary/both) to instance labels (standard/4k/both)."""
+    if media_type == 'movie':
+        value = str(getattr(settings, 'MOVIE_PLACEHOLDER_SEARCH_MODE', 'both') or 'both').strip().lower()
+    else:
+        value = str(getattr(settings, 'TV_PLACEHOLDER_SEARCH_MODE', 'both') or 'both').strip().lower()
+    if value == 'primary':
+        return 'standard'
+    if value == 'secondary':
+        return '4k'
+    return 'both'
 
 
 def _fallback_timeout_minutes() -> int:
@@ -603,6 +628,60 @@ def _select_tv_real_rows(rows_by_instance: dict[str, Any], file_path: str | None
         selection['root_match'] = matched_instance
         return selection
 
+    if mode == 'primary':
+        matched_instance = _match_tv_instance_from_path(file_path)
+        qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
+        row = rows_by_instance.get('standard')
+        fallback = rows_by_instance.get('4k')
+        if row is not None:
+            return {
+                'rows': [row],
+                'chosen_instances': ['standard'],
+                'qualifying_instances': qualifying_instances,
+                'preferred_instance': 'standard',
+                'fallback_instance': '4k' if fallback is not None else None,
+                'selection_reason': 'tv_mode_primary',
+                'immediate_fallback': False,
+                'root_match': matched_instance,
+            }
+        return {
+            'rows': [],
+            'chosen_instances': [],
+            'qualifying_instances': qualifying_instances,
+            'preferred_instance': 'standard',
+            'fallback_instance': None,
+            'selection_reason': 'tv_mode_primary_no_row',
+            'immediate_fallback': False,
+            'root_match': matched_instance,
+        }
+
+    if mode == 'secondary':
+        matched_instance = _match_tv_instance_from_path(file_path)
+        qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
+        row = rows_by_instance.get('4k')
+        fallback = rows_by_instance.get('standard')
+        if row is not None:
+            return {
+                'rows': [row],
+                'chosen_instances': ['4k'],
+                'qualifying_instances': qualifying_instances,
+                'preferred_instance': '4k',
+                'fallback_instance': 'standard' if fallback is not None else None,
+                'selection_reason': 'tv_mode_secondary',
+                'immediate_fallback': False,
+                'root_match': matched_instance,
+            }
+        return {
+            'rows': [],
+            'chosen_instances': [],
+            'qualifying_instances': qualifying_instances,
+            'preferred_instance': '4k',
+            'fallback_instance': None,
+            'selection_reason': 'tv_mode_secondary_no_row',
+            'immediate_fallback': False,
+            'root_match': matched_instance,
+        }
+
     selection = _select_rows_by_preference(rows_by_instance, _search_preference())
     selection['selection_reason'] = 'tv_preference_mode'
     selection['root_match'] = _match_tv_instance_from_path(file_path)
@@ -964,7 +1043,7 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
     if playback_kind != 'placeholder':
         return {'ok': False, 'reason': 'unresolved_movie_playback_kind'}
 
-    selection = _select_rows_by_preference(active_rows, _search_preference())
+    selection = _select_rows_by_preference(active_rows, _placeholder_search_pref('movie'))
     selected_rows = selection.get('rows') or []
     if not selected_rows:
         return {
@@ -1018,7 +1097,7 @@ def _process_episode_playback(session, payload: dict[str, Any], context: dict[st
     playback_kind = str(context.get('playback_kind') or 'unknown')
 
     if playback_kind == 'placeholder':
-        selection = _select_rows_by_preference(active_rows, _search_preference())
+        selection = _select_rows_by_preference(active_rows, _placeholder_search_pref('tv'))
     elif playback_kind == 'real':
         selection = _select_tv_real_rows(active_rows, context.get('file_path'))
     else:
@@ -1150,9 +1229,6 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
 
 
 def process_playback_start_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
-    if not bool(getattr(settings, 'ENABLE_PLAYBACK_EVENT_HANDLERS', False)):
-        return {'ok': True, 'skipped': 'playback_handlers_disabled'}
-
     session = get_session()
     try:
         context = _resolve_playback_context(session, payload)

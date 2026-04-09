@@ -31,8 +31,8 @@ import type {
 } from "./types/api";
 
 const REFRESH_MS = 5000;
-const SETTINGS_SECTION_ORDER = ["Integrations", "Paths", "Library sync", "Calendar", "Playback", "Advanced"];
-const BEHAVIOR_WIZARD_SECTIONS = ["Library sync", "Calendar", "Playback", "Advanced"] as const;
+const SETTINGS_SECTION_ORDER = ["Media Integrations", "ARR Integrations", "Paths", "Library sync", "Calendar", "Playback", "Advanced"];
+const BEHAVIOR_WIZARD_SECTIONS = ["ARR Integrations", "Library sync", "Calendar", "Playback", "Advanced"] as const;
 const WIZARD_STEPS = [
   { key: "paths", name: "Paths" },
   { key: "paths_review", name: "Confirm Paths" },
@@ -46,22 +46,43 @@ const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
 const PATH_PROFILE_KEYS = [
   "ENABLE_STANDARD_PROFILE",
   "ENABLE_4K_PROFILE",
-  "ENABLE_ANIME_PROFILE",
 ] as const;
 const PATH_PER_LIBRARY_OVERRIDE_KEYS = [
   "MOVIE_LIBRARY_FOLDER",
   "TV_LIBRARY_FOLDER",
   "MOVIE_LIBRARY_4K_FOLDER",
   "TV_LIBRARY_4K_FOLDER",
-  "ANIME_LIBRARY_FOLDER",
 ] as const;
 
-const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([
-  "MOVIE_INSTANCE_RANKING",
-  "TV_INSTANCE_RANKING",
-  "MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES",
-  "TV_PLAYBACK_SEARCH_ALL_INSTANCES",
+const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
+
+const ARR_CONFIGURATION_KEYS = new Set<string>([
+  "RADARR_URL",
+  "RADARR_API_KEY",
+  "RADARR_4K_URL",
+  "RADARR_4K_API_KEY",
+  "SONARR_URL",
+  "SONARR_API_KEY",
+  "SONARR_4K_URL",
+  "SONARR_4K_API_KEY",
+  "ARR_INSTANCES_JSON",
+]);
+
+const ARR_SEARCH_PLAYBACK_KEYS = new Set<string>([
+  "MOVIE_PLACEHOLDER_SEARCH_MODE",
+  "TV_PLACEHOLDER_SEARCH_MODE",
+]);
+
+const ARR_REAL_FILE_PLAYBACK_KEYS = new Set<string>([
+  "MOVIE_PLAYBACK_INSTANCE_MODE",
+  "TV_PLAYBACK_INSTANCE_MODE",
   "ENABLE_PLAYBACK_FALLBACK_SEARCH",
+  "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
+]);
+
+const ARR_BEHAVIOR_KEYS = new Set<string>([
+  ...ARR_SEARCH_PLAYBACK_KEYS,
+  ...ARR_REAL_FILE_PLAYBACK_KEYS,
 ]);
 
 function partitionLibraryPathFields(fields: SettingsField[]) {
@@ -79,7 +100,7 @@ const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title
   paths: {
     title: "Start with Library Root",
     detail:
-      "Choose which path profiles you want (Standard, 4K, Anime), then set Library Root. Placeholdarr derives only the selected profile folders from that root.",
+      "Placeholdarr always creates Standard placeholders. Enable 4K placeholders only if you run separate 4K ARR instances. If you enable 4K, separate media-server libraries are recommended.",
   },
   paths_review: {
     title: "Create libraries before continuing",
@@ -94,7 +115,7 @@ const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title
   arr: {
     title: "ARR connections",
     detail:
-      "Add one or more Radarr/Sonarr instances, give each a label, and test connectivity. This replaces fixed standard/4K-only setup.",
+      "Add up to 2 Radarr and 2 Sonarr instances, give each a label, and test connectivity.",
   },
   webhooks: {
     title: "Connect webhooks",
@@ -385,7 +406,7 @@ export function App() {
   const [titleSearchIndex, setTitleSearchIndex] = useState(0);
 
   const [settingsPayload, setSettingsPayload] = useState<SettingsPayload | null>(null);
-  const [activeSettingsSection, setActiveSettingsSection] = useState("Integrations");
+  const [activeSettingsSection, setActiveSettingsSection] = useState("Media Integrations");
   const [fieldValues, setFieldValues] = useState<FieldValueMap>({});
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
   const [settingsFeedback, setSettingsFeedback] = useState("");
@@ -2763,6 +2784,8 @@ type ArrInstanceDraft = {
   is_4k: boolean;
 };
 
+const ARR_INSTANCE_LIMIT_PER_TYPE = 2;
+
 function normalizeInstanceKey(input: string) {
   return String(input || "")
     .trim()
@@ -2789,7 +2812,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
             const arrType = String(obj.arr_type || obj.type || "").toLowerCase() === "sonarr" ? "sonarr" : "radarr";
             const label = String(obj.label || obj.instance_key || obj.key || obj.name || `${arrType} ${index + 1}`);
             return {
-              id: `json-${index}-${Math.random().toString(36).slice(2, 8)}`,
+              id: `json-${arrType}-${index}`,
               label,
               arr_type: arrType,
               instance_key: normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType))),
@@ -2881,138 +2904,6 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
   return JSON.stringify(clean);
 }
 
-function parseRankingKeys(value: unknown): string[] {
-  const raw = String(value || "").trim();
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((item) => String(item || "").trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function normalizeRankingOrder(instances: ArrInstanceDraft[], rawValue: unknown): ArrInstanceDraft[] {
-  const byKey = new Map<string, ArrInstanceDraft>();
-  instances.forEach((instance) => {
-    if (instance.instance_key) {
-      byKey.set(instance.instance_key, instance);
-    }
-  });
-
-  const ordered: ArrInstanceDraft[] = [];
-  const seen = new Set<string>();
-  parseRankingKeys(rawValue).forEach((key) => {
-    const match = byKey.get(key);
-    if (match && !seen.has(match.instance_key)) {
-      seen.add(match.instance_key);
-      ordered.push(match);
-    }
-  });
-
-  instances.forEach((instance) => {
-    if (!seen.has(instance.instance_key)) {
-      seen.add(instance.instance_key);
-      ordered.push(instance);
-    }
-  });
-
-  return ordered;
-}
-
-function InstanceRankingEditor(props: {
-  instances: ArrInstanceDraft[];
-  rankingValue: unknown;
-  onRankingChange: (nextValue: string) => void;
-}) {
-  const ordered = useMemo(
-    () => normalizeRankingOrder(props.instances, props.rankingValue),
-    [props.instances, props.rankingValue],
-  );
-  const [draggingKey, setDraggingKey] = useState<string | null>(null);
-
-  function commit(next: ArrInstanceDraft[]) {
-    const keys = next
-      .map((instance) => instance.instance_key)
-      .filter(Boolean);
-    props.onRankingChange(JSON.stringify(keys));
-  }
-
-  function move(index: number, delta: number) {
-    const target = index + delta;
-    if (target < 0 || target >= ordered.length) return;
-    const next = [...ordered];
-    const [item] = next.splice(index, 1);
-    next.splice(target, 0, item);
-    commit(next);
-  }
-
-  function handleDrop(targetIndex: number) {
-    if (!draggingKey) return;
-    const sourceIndex = ordered.findIndex((instance) => instance.instance_key === draggingKey);
-    if (sourceIndex < 0 || sourceIndex === targetIndex) {
-      setDraggingKey(null);
-      return;
-    }
-    const next = [...ordered];
-    const [item] = next.splice(sourceIndex, 1);
-    next.splice(targetIndex, 0, item);
-    commit(next);
-    setDraggingKey(null);
-  }
-
-  if (!ordered.length) {
-    return (
-      <p className="text-xs text-slate-500 italic mt-2">No matching ARR instances configured yet. Add instances in Integrations to enable ranking.</p>
-    );
-  }
-
-  return (
-    <div className="space-y-1.5 mt-2">
-      <p className="text-[11px] text-slate-500">Drag to reorder. Top instance is searched first.</p>
-      {ordered.map((instance, index) => (
-        <div
-          key={instance.id}
-          draggable
-          onDragStart={() => setDraggingKey(instance.instance_key)}
-          onDragOver={(event) => { event.preventDefault(); }}
-          onDrop={() => handleDrop(index)}
-          onDragEnd={() => setDraggingKey(null)}
-          className={`flex items-center gap-2 px-3 py-2 bg-[#0a0d11] rounded border transition-colors cursor-grab active:cursor-grabbing ${draggingKey === instance.instance_key ? "border-emerald-500/60" : "border-[#424753]/40"}`}
-        >
-          <span className="text-[10px] font-headline uppercase tracking-wider text-slate-500 w-5 text-center">{index + 1}</span>
-          <span className="material-symbols-outlined shrink-0 text-slate-500" style={{ fontSize: 16 }}>drag_indicator</span>
-          <span className="text-xs text-slate-300 flex-1 min-w-0 truncate">{instance.label}</span>
-          {instance.is_4k && <span className="text-[9px] px-1.5 py-0.5 bg-[#424753]/60 text-slate-400 rounded">4K</span>}
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              type="button"
-              onClick={() => move(index, -1)}
-              disabled={index === 0}
-              className="px-1.5 py-1 rounded border border-[#424753]/40 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed"
-              aria-label={`Move ${instance.label} up`}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>keyboard_arrow_up</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => move(index, 1)}
-              disabled={index === ordered.length - 1}
-              className="px-1.5 py-1 rounded border border-[#424753]/40 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed"
-              aria-label={`Move ${instance.label} down`}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>keyboard_arrow_down</span>
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function ArrInstancesEditor(props: {
   values: FieldValueMap;
   onValueChange: (key: string, value: unknown) => void;
@@ -3020,30 +2911,74 @@ function ArrInstancesEditor(props: {
 }) {
   const [instances, setInstances] = useState<ArrInstanceDraft[]>(() => parseArrInstancesFromValues(props.values));
   const [testState, setTestState] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [secondaryCache, setSecondaryCache] = useState<{ radarr: ArrInstanceDraft | null; sonarr: ArrInstanceDraft | null }>(() => {
+    const parsed = parseArrInstancesFromValues(props.values);
+    return {
+      radarr: parsed.filter((item) => item.arr_type === "radarr")[1] || null,
+      sonarr: parsed.filter((item) => item.arr_type === "sonarr")[1] || null,
+    };
+  });
+  const [secondaryEnabled, setSecondaryEnabled] = useState<{ radarr: boolean; sonarr: boolean }>(() => {
+    const parsed = parseArrInstancesFromValues(props.values);
+    return {
+      radarr: parsed.filter((item) => item.arr_type === "radarr").length > 1,
+      sonarr: parsed.filter((item) => item.arr_type === "sonarr").length > 1,
+    };
+  });
 
-  useEffect(() => {
-    setInstances(parseArrInstancesFromValues(props.values));
-  }, [props.values.ARR_INSTANCES_JSON, props.values.RADARR_URL, props.values.RADARR_4K_URL, props.values.SONARR_URL, props.values.SONARR_4K_URL]);
 
   function update(next: ArrInstanceDraft[]) {
-    setInstances(next);
-    props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(next));
+    const radarr = next.filter((item) => item.arr_type === "radarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
+    const sonarr = next.filter((item) => item.arr_type === "sonarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
+    const trimmed = [...radarr, ...sonarr];
+    setInstances(trimmed);
+    props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(trimmed));
   }
 
-  function addInstance(arrType: "radarr" | "sonarr") {
-    const label = arrType === "radarr" ? "Radarr Instance" : "Sonarr Instance";
-    update([
-      ...instances,
-      {
-        id: `new-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        label,
-        arr_type: arrType,
-        instance_key: inferDefaultKey(label, arrType),
-        url: "",
-        api_key: "",
-        is_4k: false,
-      },
-    ]);
+  function defaultSlot(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
+    const label = arrType === "radarr"
+      ? (slotIndex === 0 ? "Radarr Primary" : "Radarr Secondary")
+      : (slotIndex === 0 ? "Sonarr Primary" : "Sonarr Secondary");
+    return {
+      id: `slot-${arrType}-${slotIndex}`,
+      label,
+      arr_type: arrType,
+      instance_key: inferDefaultKey(label, arrType),
+      url: "",
+      api_key: "",
+      is_4k: slotIndex === 1,
+    };
+  }
+
+  function getTypeRows(arrType: "radarr" | "sonarr"): ArrInstanceDraft[] {
+    return instances.filter((item) => item.arr_type === arrType).slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
+  }
+
+  function upsertSlot(arrType: "radarr" | "sonarr", slotIndex: 0 | 1, patch: Partial<ArrInstanceDraft>) {
+    const typeRows = getTypeRows(arrType);
+    const otherRows = instances.filter((item) => item.arr_type !== arrType);
+    while (typeRows.length <= slotIndex) {
+      typeRows.push(defaultSlot(arrType, typeRows.length === 0 ? 0 : 1));
+    }
+    const target = typeRows[slotIndex] || defaultSlot(arrType, slotIndex);
+    typeRows[slotIndex] = { ...target, ...patch };
+    update([...otherRows, ...typeRows]);
+  }
+
+  function setSecondary(arrType: "radarr" | "sonarr", enabled: boolean) {
+    const typeRows = getTypeRows(arrType);
+    const otherRows = instances.filter((item) => item.arr_type !== arrType);
+    if (!enabled) {
+      setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      update([...otherRows, ...typeRows.slice(0, 1)]);
+      return;
+    }
+    // Ensure primary exists before adding secondary
+    const primary = typeRows[0] ?? defaultSlot(arrType, 0);
+    const secondary = typeRows[1] ?? secondaryCache[arrType] ?? defaultSlot(arrType, 1);
+    setSecondaryEnabled((prev) => ({ ...prev, [arrType]: true }));
+    update([...otherRows, primary, { ...secondary }]);
   }
 
   async function runTest(item: ArrInstanceDraft) {
@@ -3057,14 +2992,25 @@ function ArrInstancesEditor(props: {
   }
 
   const byType = {
-    radarr: instances.filter((item) => item.arr_type === "radarr"),
-    sonarr: instances.filter((item) => item.arr_type === "sonarr"),
+    radarr: getTypeRows("radarr"),
+    sonarr: getTypeRows("sonarr"),
   };
 
-  function card(item: ArrInstanceDraft) {
+  function slotFor(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
+    return byType[arrType][slotIndex] || defaultSlot(arrType, slotIndex);
+  }
+
+  function card(
+    item: ArrInstanceDraft,
+    arrType: "radarr" | "sonarr",
+    slotIndex: 0 | 1,
+    required: boolean,
+    opts?: { showSecondaryToggle?: boolean; secondaryEnabled?: boolean },
+  ) {
     const status = testState[item.id];
+    const isDisabled = Boolean(opts?.showSecondaryToggle) && !Boolean(opts?.secondaryEnabled);
     return (
-      <div key={item.id} className="rounded-xl border border-[#424753]/40 bg-[#0f1419] overflow-hidden">
+      <div key={item.id} className={`rounded-xl border border-[#424753]/40 bg-[#0f1419] overflow-hidden ${isDisabled ? "opacity-60" : ""}`}>
         <div className="p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex-1">
@@ -3073,44 +3019,52 @@ function ArrInstancesEditor(props: {
                 value={item.label}
                 onChange={(e) => {
                   const value = e.target.value;
-                  update(instances.map((row) => (row.id === item.id ? { ...row, label: value } : row)));
+                  upsertSlot(arrType, slotIndex, { label: value });
                 }}
                 placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
+                disabled={isDisabled}
               />
-              <div className="text-[11px] text-slate-400 mt-1">{item.arr_type.toUpperCase()}</div>
+              <div className="text-[11px] text-slate-400 mt-1">
+                {item.arr_type.toUpperCase()} {required ? "• Required" : "• Optional"}
+              </div>
             </div>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {/* url and api key fields */}
+            {opts?.showSecondaryToggle ? (
+              <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+                <span className="text-[11px] text-slate-300">Enabled</span>
+                <div
+                  className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${opts.secondaryEnabled ? "" : "bg-[#252e3a]"}`}
+                  style={opts.secondaryEnabled ? { backgroundColor: props.accent.hex } : undefined}
+                  onClick={() => setSecondary(arrType, !opts.secondaryEnabled)}
+                >
+                  <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${opts.secondaryEnabled ? "translate-x-4" : "translate-x-0"}`} />
+                </div>
+              </label>
+            ) : null}
           </div>
           <input
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
             value={item.url}
-            onChange={(e) => update(instances.map((row) => (row.id === item.id ? { ...row, url: e.target.value } : row)))}
+            onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
             placeholder="http://arr-host:port/api/v3"
+            disabled={isDisabled}
           />
           <input
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
             value={item.api_key}
-            onChange={(e) => update(instances.map((row) => (row.id === item.id ? { ...row, api_key: e.target.value } : row)))}
+            onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
             placeholder="API key"
             type="password"
+            disabled={isDisabled}
           />
           <div className="text-[11px] text-slate-400">Instance key (derived): <span className="text-slate-200">{normalizeInstanceKey(inferDefaultKey(String(item.label || ""), item.arr_type))}</span></div>
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => runTest(item)}
               className="px-3 py-1.5 rounded-md text-xs bg-[#252e3a] border border-[#424753]/40 text-slate-300"
+              disabled={isDisabled}
             >
               Test
-            </button>
-            <button
-              type="button"
-              onClick={() => update(instances.filter((row) => row.id !== item.id))}
-              className="px-3 py-1.5 rounded-md text-xs bg-red-900/25 border border-red-500/30 text-red-300"
-            >
-              Delete
             </button>
           </div>
           {status ? (
@@ -3127,18 +3081,16 @@ function ArrInstancesEditor(props: {
         <div key={arrType}>
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-semibold text-white font-headline">{arrType === "radarr" ? "Radarr Settings" : "Sonarr Settings"}</h3>
-            <button
-              type="button"
-              onClick={() => addInstance(arrType)}
-              className="px-3 py-1.5 rounded-lg text-xs border border-dashed text-slate-300"
-              style={{ borderColor: alphaColor(props.accent.hex, 0.6), backgroundColor: alphaColor(props.accent.hex, 0.12) }}
-            >
-              + Add {arrType === "radarr" ? "Radarr" : "Sonarr"} Server
-            </button>
+
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {byType[arrType].map((item) => card(item))}
+            {card(slotFor(arrType, 0), arrType, 0, true)}
+            {card(slotFor(arrType, 1), arrType, 1, false, {
+              showSecondaryToggle: true,
+              secondaryEnabled: secondaryEnabled[arrType],
+            })}
           </div>
+
         </div>
       ))}
     </div>
@@ -3267,7 +3219,8 @@ function LibraryPathsForm(props: {
         </span>
       </div>
       <p className="text-xs text-slate-400 mb-3 leading-relaxed">
-        One mounted base path; Placeholdarr creates selected profile folders (Standard, 4K, Anime) from this root.
+        Placeholdarr creates placeholder file folders under this root. Standard placeholders are always created.
+        If 4K placeholders are enabled, separate 4K placeholder folders are also created.
       </p>
       {root.description && <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">{root.description}</p>}
       {root.type === "bool" ? renderBool(root) : renderTextInput(root)}
@@ -3277,11 +3230,13 @@ function LibraryPathsForm(props: {
   const profileBlock = profiles.length ? (
     <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419]/55 px-4 py-4">
       <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {profiles.map((field) => (
           <div key={field.key} className="rounded-lg border border-[#424753]/35 bg-[#0b111b] px-3 py-2">
             <div className="text-xs text-slate-300 font-medium mb-2">{field.label}</div>
-            {renderBool(field, true)}
+            {field.key === "ENABLE_STANDARD_PROFILE" ? (
+              <span className="text-xs text-emerald-300">Always enabled</span>
+            ) : renderBool(field, true)}
             {field.description ? <p className="text-[11px] text-slate-600 mt-2">{field.description}</p> : null}
           </div>
         ))}
@@ -3383,7 +3338,8 @@ function SettingsPanel(props: {
   const active = props.payload.sections.find((s) => s.name === props.activeSection) || props.payload.sections[0];
 
   const SECTION_ICONS: Record<string, string> = {
-    "Integrations": "hub",
+    "Media Integrations": "hub",
+    "ARR Integrations": "dns",
     "Paths":        "folder",
     "Library sync": "sync",
     "Calendar":     "calendar_month",
@@ -3537,167 +3493,141 @@ function SettingsPanel(props: {
                   runTest={runTest}
                   testResults={testResults}
                 />
-              ) : active.name === "Integrations" ? (
+              ) : active.name === "Media Integrations" ? (
+                <>
+                  {active.fields.map((field) => renderStandardField(field))}
+                </>
+              ) : active.name === "ARR Integrations" ? (
                 <>
                   {active.fields
-                    .filter((field) => !(field.key.startsWith("RADARR") || field.key.startsWith("SONARR") || field.key === "ARR_INSTANCES_JSON"))
+                    .filter(
+                      (field) =>
+                        !ARR_CONFIGURATION_KEYS.has(field.key) &&
+                        !ARR_BEHAVIOR_KEYS.has(field.key) &&
+                        !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key),
+                    )
                     .map((field) => renderStandardField(field))}
                   <div className="px-6 py-5">
                     <div className="mb-3">
                       <h3 className="text-base font-bold text-white font-headline">ARR Instances</h3>
-                      <p className="text-xs text-slate-500 mt-1">Add one or more Radarr/Sonarr instances with labels. These entries power webhook labels and instance-aware routing.</p>
+                      <p className="text-xs text-slate-500 mt-1">Configure up to 2 Radarr and 2 Sonarr instances. These entries power webhook labels and instance-aware routing.</p>
                     </div>
                     <ArrInstancesEditor values={props.values} onValueChange={props.onValueChange} accent={accent} />
                   </div>
-                  {/* Playback routing summary */}
-                  {(() => {
-                    const movieSearchAll = Boolean(props.values.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES);
-                    const tvSearchAll = Boolean(props.values.TV_PLAYBACK_SEARCH_ALL_INSTANCES);
-                    const fallbackEnabled = Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH);
-                    const movieLabel = movieSearchAll ? "Search All" : "Ranked";
-                    const tvLabel = tvSearchAll ? "Search All" : "Ranked";
-                    return (
-                      <div className="px-6 pb-5">
-                        <div className="rounded-lg border border-[#424753]/20 bg-[#0a0d11] px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
-                          <div className="flex items-center gap-3 flex-wrap text-xs text-slate-400">
-                            <span className="font-headline uppercase tracking-wider text-[10px] text-slate-500">Playback routing</span>
-                            <span className="px-2 py-0.5 rounded bg-[#252e3a] text-slate-300">Movies: {movieLabel}</span>
-                            <span className="px-2 py-0.5 rounded bg-[#252e3a] text-slate-300">TV: {tvLabel}</span>
-                            {fallbackEnabled && !movieSearchAll && !tvSearchAll && (
-                              <span className="px-2 py-0.5 rounded bg-[#252e3a] text-slate-300">Fallback: on</span>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            className="text-[11px] font-headline uppercase tracking-wider text-slate-400 hover:text-white transition-colors shrink-0"
-                            onClick={() => props.onSectionChange("Playback")}
+
+                  {/* Placeholder search mode dropdowns */}
+                  <div className="px-6 pb-5">
+                    <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                      <div>
+                        <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
+                        <p className="text-xs text-slate-400">When a placeholder plays, Placeholdarr triggers a search in the corresponding ARR app. Choose which instance to search.</p>
+                      </div>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                          <select
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                            value={String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")}
+                            onChange={(e) => props.onValueChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                           >
-                            Adjust in Playback →
-                          </button>
+                            <option value="primary">Primary instance only</option>
+                            <option value="secondary">Secondary instance only</option>
+                            <option value="both">Both instances</option>
+                          </select>
+                          <p className="text-[11px] text-slate-500 mt-1.5">
+                            {({ primary: "Searches only your primary (standard) Radarr instance.", secondary: "Searches only your secondary (4K) Radarr instance.", both: "Searches both Radarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Radarr instances."}
+                          </p>
+                        </div>
+                        <div className="border-t border-[#424753]/20" />
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                          <select
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                            value={String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")}
+                            onChange={(e) => props.onValueChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                          >
+                            <option value="primary">Primary instance only</option>
+                            <option value="secondary">Secondary instance only</option>
+                            <option value="both">Both instances</option>
+                          </select>
+                          <p className="text-[11px] text-slate-500 mt-1.5">
+                            {({ primary: "Searches only your primary (standard) Sonarr instance.", secondary: "Searches only your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Sonarr instances."}
+                          </p>
                         </div>
                       </div>
-                    );
-                  })()}
+                    </div>
+                    <div className="mt-3 rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                      <div>
+                        <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
+                        <p className="text-xs text-slate-400">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
+                      </div>
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                          <select
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                            value={String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")}
+                            onChange={(e) => props.onValueChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                          >
+                            <option value="match">Match by library path</option>
+                            <option value="primary">Primary instance only</option>
+                            <option value="secondary">Secondary instance only</option>
+                            <option value="both">Both instances</option>
+                          </select>
+                          <p className="text-[11px] text-slate-500 mt-1.5">
+                            {({ match: "Uses the movie file path to determine which Radarr instance should be searched.", primary: "Always searches only your primary (standard) Radarr instance.", secondary: "Always searches only your secondary (4K) Radarr instance.", both: "Searches both Radarr instances." } as Record<string, string>)[String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the movie file path to determine which Radarr instance should be searched."}
+                          </p>
+                        </div>
+                        <div className="border-t border-[#424753]/20" />
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                          <select
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                            value={String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")}
+                            onChange={(e) => props.onValueChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                          >
+                            <option value="match">Match by library path</option>
+                            <option value="primary">Primary instance only</option>
+                            <option value="secondary">Secondary instance only</option>
+                            <option value="both">Both instances</option>
+                          </select>
+                          <p className="text-[11px] text-slate-500 mt-1.5">
+                            {({ match: "Uses the TV file path to determine which Sonarr instance should be searched.", primary: "Always searches only your primary (standard) Sonarr instance.", secondary: "Always searches only your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances." } as Record<string, string>)[String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the TV file path to determine which Sonarr instance should be searched."}
+                          </p>
+                        </div>
+                        <div className="border-t border-[#424753]/20" />
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-300">Fallback search</div>
+                            <div className="text-xs text-slate-500">If the content is not present in the selected ARR instance, fallback is immediate, including missing rows and rows marked deleted. This delayed retry is only for searches that were attempted first but did not resolve, such as no releases found or failed downloads.</div>
+                          </div>
+                          <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
+                            <div
+                              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]"}`}
+                              style={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
+                              onClick={() => props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
+                            >
+                              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
+                            </div>
+                            <span className="text-sm text-slate-300">{Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled"}</span>
+                          </label>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                          <input
+                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                            type="number"
+                            min={1}
+                            value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "")}
+                            onChange={(e) => props.onValueChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </>
               ) : active.name === "Playback" ? (
-                <>
-                  {(() => {
-                    const tvModeField = active.fields.find((field) => field.key === "TV_PLAYBACK_INSTANCE_MODE");
-                    const fallbackTimeoutField = active.fields.find((field) => field.key === "PLAYBACK_FALLBACK_TIMEOUT_MINUTES");
-                    const remainingFields = active.fields.filter(
-                      (field) =>
-                        !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
-                        field.key !== "TV_PLAYBACK_INSTANCE_MODE" &&
-                        field.key !== "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
-                    );
-                    const allInstances = parseArrInstancesFromValues(props.values);
-                    const radarrInstances = allInstances.filter((i) => i.arr_type === "radarr");
-                    const sonarrInstances = allInstances.filter((i) => i.arr_type === "sonarr");
-                    const movieSearchAll = Boolean(props.values.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES);
-                    const tvSearchAll = Boolean(props.values.TV_PLAYBACK_SEARCH_ALL_INSTANCES);
-                    const anyRanked = !movieSearchAll || !tvSearchAll;
-
-                    return (
-                      <>
-                        {remainingFields.map((field) => renderStandardField(field))}
-                        <div className="px-6 py-5 space-y-4">
-
-                          {/* Card A: Search Scope */}
-                          <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                            <div>
-                              <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Search Scope</h3>
-                              <p className="text-xs text-slate-400">Choose how Placeholdarr searches when a playback event fires. Searches only run on instances where that item already exists in ARR — Placeholdarr never adds missing entries to ARR on your behalf.</p>
-                            </div>
-
-                            {/* Movies */}
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between gap-3">
-                                <div>
-                                  <div className="text-xs font-semibold text-slate-300">Movies</div>
-                                  <div className="text-xs text-slate-500">Fan out to all Radarr instances, or search in ranked order</div>
-                                </div>
-                                <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
-                                  <div
-                                    className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${movieSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
-                                    onClick={() => props.onValueChange("MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES", !movieSearchAll)}
-                                  >
-                                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${movieSearchAll ? "translate-x-4" : "translate-x-0"}`} />
-                                  </div>
-                                  <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
-                                </label>
-                              </div>
-                              {!movieSearchAll && (
-                                <InstanceRankingEditor
-                                  instances={radarrInstances}
-                                  rankingValue={props.values.MOVIE_INSTANCE_RANKING}
-                                  onRankingChange={(next) => props.onValueChange("MOVIE_INSTANCE_RANKING", next)}
-                                />
-                              )}
-                            </div>
-
-                            <div className="border-t border-[#424753]/30" />
-
-                            {/* TV Shows */}
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between gap-3">
-                                <div>
-                                  <div className="text-xs font-semibold text-slate-300">TV Shows</div>
-                                  <div className="text-xs text-slate-500">Fan out to all Sonarr instances, or search in ranked order</div>
-                                </div>
-                                <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
-                                  <div
-                                    className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${tvSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
-                                    onClick={() => props.onValueChange("TV_PLAYBACK_SEARCH_ALL_INSTANCES", !tvSearchAll)}
-                                  >
-                                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${tvSearchAll ? "translate-x-4" : "translate-x-0"}`} />
-                                  </div>
-                                  <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
-                                </label>
-                              </div>
-                              {!tvSearchAll && (
-                                <InstanceRankingEditor
-                                  instances={sonarrInstances}
-                                  rankingValue={props.values.TV_INSTANCE_RANKING}
-                                  onRankingChange={(next) => props.onValueChange("TV_INSTANCE_RANKING", next)}
-                                />
-                              )}
-                            </div>
-
-                            {/* Fallback timeout — only shown when at least one media type uses ranked mode */}
-                            {anyRanked && fallbackTimeoutField ? (
-                              <>
-                                <div className="border-t border-[#424753]/30" />
-                                <div className="flex items-center justify-between gap-4">
-                                  <div>
-                                    <div className="text-xs font-semibold text-slate-300">Fallback timeout</div>
-                                    <div className="text-xs text-slate-500">Minutes to wait before retrying on the next ranked instance</div>
-                                  </div>
-                                  <input
-                                    type="number"
-                                    min={1}
-                                    value={String(props.values[fallbackTimeoutField.key] ?? "")}
-                                    onChange={(e) => props.onValueChange(fallbackTimeoutField.key, e.target.value === "" ? "" : Number(e.target.value))}
-                                    className="w-20 shrink-0 bg-[#0a0d11] border border-[#424753]/40 rounded px-2 py-1.5 text-xs text-white text-right focus:outline-none focus:border-slate-400"
-                                  />
-                                </div>
-                              </>
-                            ) : null}
-                          </div>
-
-                          {/* Card B: TV Real-File Routing Mode */}
-                          {tvModeField ? (
-                            <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4">
-                              <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">TV Real-File Routing Mode</h3>
-                              <p className="text-xs text-slate-400 mb-3">Applies to real-file TV playback events only. Choose whether to match the Sonarr instance that owns the file, follow your ranking order, or try file-match first then fall through to ranking.</p>
-                              {renderStandardField(tvModeField)}
-                            </div>
-                          ) : null}
-
-                        </div>
-                      </>
-                    );
-                  })()}
-                </>
+                <>{active.fields.map((field) => renderStandardField(field))}</>
               ) : (
                 active.fields.map((field) => renderStandardField(field))
               )}
@@ -3887,7 +3817,7 @@ function OnboardingWizard(props: {
             <div className="space-y-4">
               <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
                 <h3 className="text-sm font-semibold text-white font-headline">Add ARR instances</h3>
-                <p className="mt-1 text-xs text-slate-400">Create one or more Radarr and Sonarr instances. Labels should match your webhook naming for reliable routing.</p>
+                <p className="mt-1 text-xs text-slate-400">Create up to 2 Radarr and 2 Sonarr instances. Labels should match your webhook naming for reliable routing.</p>
               </div>
               <ArrInstancesEditor values={props.values} onValueChange={props.onChange} accent={accent} />
             </div>
@@ -4069,122 +3999,113 @@ function OnboardingWizard(props: {
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
                 const secFields = fields.filter((f) => f.section === sectionName);
-                if (!secFields.length && sectionName !== "Playback") return null;
+                if (!secFields.length && sectionName !== "ARR Integrations") return null;
                 return (
                   <div key={sectionName}>
                     <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">{sectionName}</h3>
-                    {sectionName === "Playback" ? (
+                    {sectionName === "ARR Integrations" ? (
                       <div className="space-y-4">
                         {(() => {
-                          const tvModeField = secFields.find((field) => field.key === "TV_PLAYBACK_INSTANCE_MODE");
-                          const fallbackTimeoutField = secFields.find((field) => field.key === "PLAYBACK_FALLBACK_TIMEOUT_MINUTES");
-                          const remainingFields = secFields.filter(
-                            (field) =>
-                              !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
-                              field.key !== "TV_PLAYBACK_INSTANCE_MODE" &&
-                              field.key !== "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
-                          );
-                          const allInstances = parseArrInstancesFromValues(props.values);
-                          const radarrInstances = allInstances.filter((i) => i.arr_type === "radarr");
-                          const sonarrInstances = allInstances.filter((i) => i.arr_type === "sonarr");
-                          const movieSearchAll = Boolean(props.values.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES);
-                          const tvSearchAll = Boolean(props.values.TV_PLAYBACK_SEARCH_ALL_INSTANCES);
-                          const anyRanked = !movieSearchAll || !tvSearchAll;
-
+                          const remainingFields = secFields.filter((field) => !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) && !ARR_CONFIGURATION_KEYS.has(field.key) && !ARR_BEHAVIOR_KEYS.has(field.key));
+                          const focus = getBrandFocusClass(props.brand, props.themeMode);
                           return (
                             <>
                               {remainingFields.map((field) => wizardFieldRow(field))}
-
-                              {/* Card A: Search Scope */}
                               <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
                                 <div>
-                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Search Scope</h3>
-                                  <p className="text-xs text-slate-400">Choose how Placeholdarr searches when a playback event fires. Searches only run on instances where that item already exists in ARR — Placeholdarr never adds missing entries to ARR on your behalf.</p>
+                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
+                                  <p className="text-xs text-slate-400">When a placeholder plays, choose which ARR instance to search for the real file.</p>
                                 </div>
-
-                                {/* Movies */}
-                                <div className="space-y-2">
-                                  <div className="flex items-center justify-between gap-3">
-                                    <div>
-                                      <div className="text-xs font-semibold text-slate-300">Movies</div>
-                                      <div className="text-xs text-slate-500">Fan out to all Radarr instances, or search in ranked order</div>
-                                    </div>
-                                    <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
-                                      <div
-                                        className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${movieSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
-                                        onClick={() => props.onChange("MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES", !movieSearchAll)}
-                                      >
-                                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${movieSearchAll ? "translate-x-4" : "translate-x-0"}`} />
-                                      </div>
-                                      <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
-                                    </label>
+                                <div className="space-y-4">
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                                    <select
+                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+                                      value={String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")}
+                                      onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                                    >
+                                      <option value="primary">Primary instance only</option>
+                                      <option value="secondary">Secondary instance only</option>
+                                      <option value="both">Both instances</option>
+                                    </select>
                                   </div>
-                                  {!movieSearchAll && (
-                                    <InstanceRankingEditor
-                                      instances={radarrInstances}
-                                      rankingValue={props.values.MOVIE_INSTANCE_RANKING}
-                                      onRankingChange={(next) => props.onChange("MOVIE_INSTANCE_RANKING", next)}
-                                    />
-                                  )}
-                                </div>
-
-                                <div className="border-t border-[#424753]/30" />
-
-                                {/* TV Shows */}
-                                <div className="space-y-2">
-                                  <div className="flex items-center justify-between gap-3">
-                                    <div>
-                                      <div className="text-xs font-semibold text-slate-300">TV Shows</div>
-                                      <div className="text-xs text-slate-500">Fan out to all Sonarr instances, or search in ranked order</div>
-                                    </div>
-                                    <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
-                                      <div
-                                        className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${tvSearchAll ? "bg-emerald-500" : "bg-[#252e3a]"}`}
-                                        onClick={() => props.onChange("TV_PLAYBACK_SEARCH_ALL_INSTANCES", !tvSearchAll)}
-                                      >
-                                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${tvSearchAll ? "translate-x-4" : "translate-x-0"}`} />
-                                      </div>
-                                      <span className="text-[11px] uppercase tracking-wider font-headline text-slate-300">Search All</span>
-                                    </label>
+                                  <div className="border-t border-[#424753]/20" />
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                                    <select
+                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+                                      value={String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")}
+                                      onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
+                                    >
+                                      <option value="primary">Primary instance only</option>
+                                      <option value="secondary">Secondary instance only</option>
+                                      <option value="both">Both instances</option>
+                                    </select>
                                   </div>
-                                  {!tvSearchAll && (
-                                    <InstanceRankingEditor
-                                      instances={sonarrInstances}
-                                      rankingValue={props.values.TV_INSTANCE_RANKING}
-                                      onRankingChange={(next) => props.onChange("TV_INSTANCE_RANKING", next)}
-                                    />
-                                  )}
                                 </div>
-
-                                {/* Fallback timeout — only shown when at least one media type uses ranked mode */}
-                                {anyRanked && fallbackTimeoutField ? (
-                                  <>
-                                    <div className="border-t border-[#424753]/30" />
-                                    <div className="flex items-center justify-between gap-4">
-                                      <div>
-                                        <div className="text-xs font-semibold text-slate-300">Fallback timeout</div>
-                                        <div className="text-xs text-slate-500">Minutes to wait before retrying on the next ranked instance</div>
-                                      </div>
-                                      <input
-                                        type="number"
-                                        min={1}
-                                        value={String(props.values[fallbackTimeoutField.key] ?? "")}
-                                        onChange={(e) => props.onChange(fallbackTimeoutField.key, e.target.value === "" ? "" : Number(e.target.value))}
-                                        className="w-20 shrink-0 bg-[#0a0d11] border border-[#424753]/40 rounded px-2 py-1.5 text-xs text-white text-right focus:outline-none focus:border-slate-400"
-                                      />
-                                    </div>
-                                  </>
-                                ) : null}
                               </div>
-
-                              {/* Card B: TV Real-File Routing Mode */}
-                              {tvModeField ? (
-                                <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4">
-                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">TV Real-File Routing Mode</h3>
-                                  <p className="text-xs text-slate-400 mb-3">Applies to real-file TV playback events only. Choose whether to match the Sonarr instance that owns the file, follow your ranking order, or try file-match first then fall through to ranking.</p>
-                                  {wizardFieldRow(tvModeField)}
+                              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                                <div>
+                                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
+                                  <p className="text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes the ARR search.</p>
                                 </div>
-                              ) : null}
+                                <div className="space-y-4">
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                                    <select
+                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+                                      value={String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")}
+                                      onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                                    >
+                                      <option value="match">Match by library path</option>
+                                      <option value="primary">Primary instance only</option>
+                                      <option value="secondary">Secondary instance only</option>
+                                      <option value="both">Both instances</option>
+                                    </select>
+                                  </div>
+                                  <div className="border-t border-[#424753]/20" />
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                                    <select
+                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+                                      value={String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")}
+                                      onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
+                                    >
+                                      <option value="match">Match by library path</option>
+                                      <option value="primary">Primary instance only</option>
+                                      <option value="secondary">Secondary instance only</option>
+                                      <option value="both">Both instances</option>
+                                    </select>
+                                  </div>
+                                  <div className="border-t border-[#424753]/20" />
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                      <div className="text-xs font-semibold text-slate-300">Fallback search</div>
+                                      <div className="text-xs text-slate-500">If the content is not present in the selected ARR instance, fallback is immediate, including missing rows and rows marked deleted. This delayed retry is only for searches that were attempted first but did not resolve.</div>
+                                    </div>
+                                    <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
+                                      <div
+                                        className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]"}`}
+                                        style={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
+                                        onClick={() => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
+                                      >
+                                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
+                                      </div>
+                                      <span className="text-sm text-slate-300">{Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "Enabled" : "Disabled"}</span>
+                                    </label>
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                                    <input
+                                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+                                      type="number"
+                                      min={1}
+                                      value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "")}
+                                      onChange={(e) => props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
                             </>
                           );
                         })()}
@@ -4398,18 +4319,31 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   });
 
   const integrations = new Set(map.Integrations || []);
+  const mediaIntegrations = new Set([...(map["Media Integrations"] || []), ...[...integrations].filter((k) => k.startsWith("PLEX") || k.startsWith("JELLYFIN") || k.startsWith("EMBY") || k === "ENABLE_PLEX" || k === "ENABLE_JELLYFIN" || k === "ENABLE_EMBY")]);
+  const arrIntegrations = new Set([
+    ...(map["ARR Integrations"] || []),
+    ...[...integrations].filter(
+      (k) =>
+        (k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON") &&
+        !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(k),
+    ),
+  ]);
   const paths = map.Paths || [];
   const librarySync = map["Library sync"] || [];
   const calendar = map.Calendar || [];
   const playback = map.Playback || [];
   const advanced = map.Advanced || [];
+  const arrBehaviorFromArrIntegrations = [...arrIntegrations].filter((k) => ARR_BEHAVIOR_KEYS.has(k));
+  const arrBehaviorFromPlayback = playback.filter((k) => ARR_BEHAVIOR_KEYS.has(k));
+  const arrBehavior = arrBehaviorFromArrIntegrations.length ? arrBehaviorFromArrIntegrations : arrBehaviorFromPlayback;
+  const playbackNonArrSearch = playback.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
   if (stepKey === "paths") return [...paths];
   if (stepKey === "paths_review") return [];
   if (stepKey === "webhooks") return [];
-  if (stepKey === "arr") return [...integrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON");
+  if (stepKey === "arr") return [...arrIntegrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON");
   if (stepKey === "media") {
-    return [...integrations].filter((k) => k.startsWith("PLEX") || k.startsWith("JELLYFIN") || k.startsWith("EMBY") || k === "ENABLE_PLEX" || k === "ENABLE_JELLYFIN" || k === "ENABLE_EMBY");
+    return [...mediaIntegrations];
   }
-  return [...librarySync, ...calendar, ...playback, ...advanced];
+  return [...arrBehavior, ...librarySync, ...calendar, ...playbackNonArrSearch, ...advanced];
 }

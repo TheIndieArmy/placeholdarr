@@ -99,12 +99,13 @@ This keeps logs, runtime state, and database storage under one Appdata root whil
 
 ### Library Folder Strategies
 
-Placeholdarr supports creating placeholders in dedicated folders or profiles. You'll configure these during onboarding or in the Settings dashboard.
+Placeholdarr creates placeholder file folders in paths you configure during onboarding or in the Settings dashboard.
 
 During onboarding, you can define:
-- **Standard Library** (movies/TV placeholder folders)
-- **4K Library** (optional, for 4K-specific placeholders)
-- **Anime Library** (optional, for anime profiles)
+- **Standard placeholders** (always enabled for movies/TV)
+- **4K placeholders** (optional; enabled only if you use 4K ARR instances)
+
+When 4K placeholders are enabled, Placeholdarr writes separate 4K placeholder folders. For best results, use separate media-server libraries for standard and 4K placeholders.
 
 Once configured, you have two library setup options in your media server:
 
@@ -182,7 +183,7 @@ Placeholdarr receives all webhook traffic on `/webhook` and routes each request 
 - `http://your-server:PLACEHOLDARR_PORT/webhook?instance=<instance_key>`
 
 **Instance Keys:**
-- **ARR instances** (Radarr/Sonarr): Generated dynamically from your configured server names during onboarding. Each instance gets a unique key that's stable across restarts. Examples: `radarr_standard`, `radarr_4k`, `sonarr_anime`, etc.
+- **ARR instances** (Radarr/Sonarr): Generated dynamically from your configured server names during onboarding. Each instance gets a unique key that's stable across restarts. By default, Placeholdarr supports up to 2 Radarr and 2 Sonarr instances per deployment. Examples: `radarr_standard`, `radarr_4k`, `sonarr_standard`, `sonarr_4k`.
 - **Playback sources** (fixed, ENV-backed): 
   - `tautulli` - For Plex activity monitoring
   - `jellyfin` - For Jellyfin playback tracking
@@ -219,7 +220,7 @@ ARR webhooks monitor your Radarr and Sonarr instances for media changes. Each in
 4. Test and Save
 
 **Notes:**
-- Each ARR instance (standard, 4K, anime, etc.) needs its own webhook with the correct instance key
+- Each configured Radarr instance needs its own webhook with the correct instance key
 - Tags in Radarr can control which content gets placeholders; untag movies to prevent placeholder creation
 - The instance parameter must match exactly what was configured during onboarding
 
@@ -241,7 +242,7 @@ ARR webhooks monitor your Radarr and Sonarr instances for media changes. Each in
 4. Test and Save
 
 **Notes:**
-- Each Sonarr instance (standard, 4K, anime, etc.) needs its own webhook with the correct instance key
+- Each configured Sonarr instance needs its own webhook with the correct instance key
 - Tags in Sonarr can control which series get placeholders
 - Episode file deletion triggers ensure placeholder recreation when files are removed
 
@@ -345,8 +346,6 @@ Placeholdarr's playback event handlers are opt-in and configured in the Settings
 | Setting | Default | Description |
 |---|---|---|
 | **Enable Playback Handlers** | Disabled | Activate playback-driven ARR searches |
-| **Movie Instance Ranking** | Auto | Ordered list of Radarr instances to try for movie playback (configured in onboarding) |
-| **TV Instance Ranking** | Auto | Ordered list of Sonarr instances to try for TV playback (configured in onboarding) |
 | **Playback Fallback Timeout** | 30 min | Minutes for fallback instance retry if primary fails; `0` disables |
 | **Playback Cooldown** | 30 sec | Seconds to suppress duplicate playback events; `0` disables |
 
@@ -354,15 +353,13 @@ Placeholdarr's playback event handlers are opt-in and configured in the Settings
 
 Placeholdarr now routes playback searches using dynamic instance ranking instead of fixed standard/4K buckets. This treats all instances equally:
 
-- **Custom instances fully supported**: Configure anime, 3D, remux, or any custom instances - they're all first-class citizens in the ranking
+- **Flexible instance naming**: Use labels that match your environment while staying within the current 2-per-type product limit
 - **Primary instance**: First instance in your ranking is tried first when a placeholder is played
 - **Fallback chain**: If the primary instance fails (timeout, missing file, error), Placeholdarr steps through remaining ranked instances in order
 - **Ranking configuration**: Set during onboarding in the "Behavior" step "Playback" section, or adjust anytime in Settings
 - **Automatic fallback**: After configured timeout without file match, next ranked instance is tried automatically
 
-**Legacy Settings (Deprecated):**
-- `PLAYBACK_SEARCH_PREFERENCE` and `TV_PLAYBACK_INSTANCE_MODE` are retained for backward compatibility but ignored if instance rankings are configured
-- New instances created during onboarding automatically populate rankings based on your instance order
+**Note:** Instance routing and playback behavior are now configured via the Settings dashboard using the ARR Integrations and Playback sections. Legacy JSON ranking fields have been removed.
 
 ---
 

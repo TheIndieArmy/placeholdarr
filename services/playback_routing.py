@@ -13,9 +13,7 @@ def get_candidate_instances_for_movie() -> list[str]:
     ranking = settings.movie_instance_ranking
     if not ranking:
         return []
-    if settings.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES:
-        return ranking
-    return ranking[:1]
+    return ranking
 
 
 def get_candidate_instances_for_tv() -> list[str]:
@@ -23,9 +21,7 @@ def get_candidate_instances_for_tv() -> list[str]:
     ranking = settings.tv_instance_ranking
     if not ranking:
         return []
-    if settings.TV_PLAYBACK_SEARCH_ALL_INSTANCES:
-        return ranking
-    return ranking[:1]
+    return ranking
 
 
 def resolve_playback_instance_for_movie(
@@ -95,10 +91,8 @@ def get_fallback_instances_for_movie(primary_instance: Optional[str] = None) -> 
         List of instance keys in fallback order
     """
     ranking = settings.movie_instance_ranking
-    if settings.MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES:
-        if primary_instance:
-            return [k for k in ranking if k != primary_instance]
-        return ranking
+    if not ranking:
+        return []
     if primary_instance:
         return [k for k in ranking if k != primary_instance]
     return ranking[1:] if len(ranking) > 1 else []
@@ -115,10 +109,8 @@ def get_fallback_instances_for_tv(primary_instance: Optional[str] = None) -> lis
         List of instance keys in fallback order
     """
     ranking = settings.tv_instance_ranking
-    if settings.TV_PLAYBACK_SEARCH_ALL_INSTANCES:
-        if primary_instance:
-            return [k for k in ranking if k != primary_instance]
-        return ranking
+    if not ranking:
+        return []
     if primary_instance:
         return [k for k in ranking if k != primary_instance]
     return ranking[1:] if len(ranking) > 1 else []

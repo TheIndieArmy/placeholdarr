@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     # ARR instance configuration: now fully dynamic from user-configured ARR server names in onboarding.
     # (Removed static RADARR_STD_INSTANCE_KEY, RADARR_4K_INSTANCE_KEY, SONARR_STD_INSTANCE_KEY, SONARR_4K_INSTANCE_KEY)
     ARR_INSTANCES_JSON: str = ""
+    ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "2").split('#')[0].strip())
     # Playback webhook source instance keys (retain defaults for backward compat)
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
@@ -106,6 +107,7 @@ class Settings(BaseSettings):
 
     # Library Paths
     LIBRARY_ROOT: str = ""
+    LIBRARY_ORGANIZATION_MODE: Literal["single", "separate"] = "separate"
     ENABLE_STANDARD_PROFILE: bool = True
     ENABLE_4K_PROFILE: bool = True
     ENABLE_ANIME_PROFILE: bool = False
@@ -139,17 +141,7 @@ class Settings(BaseSettings):
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
     EPISODES_LOOKAHEAD: int = 5
     
-    # Legacy playback preference settings (deprecated: use app_config MOVIE_INSTANCE_RANKING and TV_INSTANCE_RANKING instead)
-    # These are kept for backward compatibility but will be ignored if new ranking settings are populated
-    PLAYBACK_SEARCH_PREFERENCE: Literal["standard", "4k", "both"] = "both"
-    TV_PLAYBACK_INSTANCE_MODE: Literal["match", "preference", "both"] = "match"
-    
-    # New: Dynamic instance ranking for playback routing (JSON arrays of instance keys)
-    # These are normally persisted in app_config but kept here for environment override capability
-    MOVIE_INSTANCE_RANKING: str = ""  # Format: JSON array like ["radarr_std", "radarr_4k"]
-    TV_INSTANCE_RANKING: str = ""     # Format: JSON array like ["sonarr_std", "sonarr_anime"]
-    MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES: bool = os.getenv("MOVIE_PLAYBACK_SEARCH_ALL_INSTANCES", "false").split('#')[0].strip().lower() == "true"
-    TV_PLAYBACK_SEARCH_ALL_INSTANCES: bool = os.getenv("TV_PLAYBACK_SEARCH_ALL_INSTANCES", "false").split('#')[0].strip().lower() == "true"
+    # Playback-related settings
     
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
@@ -520,35 +512,19 @@ class Settings(BaseSettings):
 
     @property
     def movie_instance_ranking(self) -> list[str]:
-        """Get ranked movie instance keys (from app_config or fallback to configured instances)."""
-        # Would normally derive from app_config database; keeping simple for now
-        # Returns list of instance keys in order of preference for movie playback
-        if self.MOVIE_INSTANCE_RANKING:
-            try:
-                import json
-                ranking = json.loads(self.MOVIE_INSTANCE_RANKING)
-                if isinstance(ranking, list):
-                    return [str(k).lower() for k in ranking]
-            except (json.JSONDecodeError, ValueError):
-                pass
-        # Fallback: return all configured Radarr instances
-        return [str(item.get('instance_key', '')).lower() for item in self.configured_arr_instances if str(item.get('arr_type', '')).lower() == 'radarr']
+        """Get movie instance keys derived from configured ARR instances.
+
+        This no longer reads legacy MOVIE_INSTANCE_RANKING environment values.
+        """
+        return [str(item.get("instance_key", "")).lower() for item in self.configured_arr_instances if str(item.get("arr_type", "")).lower() == "radarr"]
 
     @property
     def tv_instance_ranking(self) -> list[str]:
-        """Get ranked TV instance keys (from app_config or fallback to configured instances)."""
-        # Would normally derive from app_config database; keeping simple for now
-        # Returns list of instance keys in order of preference for TV playback
-        if self.TV_INSTANCE_RANKING:
-            try:
-                import json
-                ranking = json.loads(self.TV_INSTANCE_RANKING)
-                if isinstance(ranking, list):
-                    return [str(k).lower() for k in ranking]
-            except (json.JSONDecodeError, ValueError):
-                pass
-        # Fallback: return all configured Sonarr instances
-        return [str(item.get('instance_key', '')).lower() for item in self.configured_arr_instances if str(item.get('arr_type', '')).lower() == 'sonarr']
+        """Get TV instance keys derived from configured ARR instances.
+
+        This no longer reads legacy TV_INSTANCE_RANKING environment values.
+        """
+        return [str(item.get("instance_key", "")).lower() for item in self.configured_arr_instances if str(item.get("arr_type", "")).lower() == "sonarr"]
 
     class Config:
         env_file = str(dotenv_path)
