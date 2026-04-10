@@ -8,7 +8,21 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ## [Unreleased]
 
 ### Added
-- Placeholder for upcoming release notes.
+- Added `OBSERVATION_MIN_CHUNKS_PER_PASS` to guarantee observation passes perform real placeholder checks before the pass time cap can stop them.
+- Added Sonarr full-sync progress logging so long series/episode imports report ongoing progress during episode expansion.
+- Added Postgres health checks and app startup dependency ordering in Compose to reduce first-boot race conditions.
+
+### Changed
+- Restored Plex to global path and section refresh fanout so placeholder creation and primer refreshes notify Plex again.
+- Updated primer flow to run create -> refresh -> observe -> status projection for the exact placeholders it seeds, preventing Plex ingest ambiguity before hardlink materialization.
+- Clarified materialization logging and documentation around the single-pass refresh/observe strategy used for large first-run syncs.
+- Updated Postgres storage mount path in Compose to use the Postgres 18 data layout.
+
+### Fixed
+- Fixed concurrent NFO sidecar writes by switching atomic text writes to unique temp files, eliminating `tvshow.nfo.tmp` races across parallel jobs.
+- Fixed database readiness handling by retrying initial connections and creating the target database once Postgres becomes reachable.
+- Fixed observation passes that could consume their budget on snapshot setup and perform zero chunk checks.
+- Ignored local `.appdata` runtime state in Git.
 
 ## [0.8.5] - 2026-04-09
 

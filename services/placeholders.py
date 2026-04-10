@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import filecmp
+import tempfile
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -365,11 +366,23 @@ def _atomic_write_text(path: str, content: str) -> bool:
                 _ensure_open_permissions(path)
                 return False
 
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    _ensure_open_permissions(tmp_path)
-    os.replace(tmp_path, path)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=parent,
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        _ensure_open_permissions(tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
     _ensure_open_permissions(path)
     return True
 

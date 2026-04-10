@@ -6,6 +6,7 @@ Original file line number	Diff line number	Diff line change
 .venv
 env/
 venv/
+.appdata
 
 
 # Secrets and private keys

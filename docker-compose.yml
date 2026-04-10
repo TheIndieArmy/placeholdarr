@@ -2,6 +2,9 @@ services:
   placeholdarr:
     image: ghcr.io/theindiearmy/placeholdarr:main-db-latest
     container_name: placeholdarr
+    depends_on:
+      placeholdarr_postgres:
+        condition: service_healthy
     environment:
       DB_HOST: placeholdarr_postgres
       DB_PORT: 5432
@@ -21,9 +24,15 @@ services:
     container_name: placeholdarr_postgres
     image: docker.io/library/postgres:18
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U placeholdarr -d placeholdarr"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     environment:
       POSTGRES_USER: "placeholdarr"
       POSTGRES_PASSWORD: "placeholdarr"
       POSTGRES_DB: "placeholdarr"
     volumes:
-      - ${PLACEHOLDARR_APPDATA:-./.appdata}/postgres:/var/lib/postgresql/data
+      - ${PLACEHOLDARR_APPDATA:-./.appdata}/postgres:/var/lib/postgresql

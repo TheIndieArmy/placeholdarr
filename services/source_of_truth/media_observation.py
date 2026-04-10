@@ -1073,6 +1073,14 @@ def _observation_max_pass_seconds() -> float:
 		return 45.0
 
 
+def _observation_min_chunks_per_pass() -> int:
+	"""Guarantee each pass performs some real checks before capping by time."""
+	try:
+		return max(1, int(getattr(settings, 'OBSERVATION_MIN_CHUNKS_PER_PASS', 1) or 1))
+	except Exception:
+		return 1
+
+
 def _timing_ms(started: float) -> int:
 	return int(round((time.monotonic() - started) * 1000.0))
 
@@ -1508,7 +1516,11 @@ def _run_observation_pass(
 	}
 
 	for chunk_start in range(0, len(placeholders), chunk_size):
-		if max_pass_seconds > 0 and (time.monotonic() - pass_started) >= max_pass_seconds:
+		if (
+			max_pass_seconds > 0
+			and (time.monotonic() - pass_started) >= max_pass_seconds
+			and pass_stats['chunks_processed'] >= _observation_min_chunks_per_pass()
+		):
 			still_unresolved.extend(placeholders[chunk_start:])
 			pass_stats['pass_capped'] = True
 			break

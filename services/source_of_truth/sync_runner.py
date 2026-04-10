@@ -591,8 +591,13 @@ def run_full_sync(
             if content_type == 'series':
                 series_items = fetch_sonarr_series(base_url, api_key)
                 seen_tvdbids = set()
+                total_series = len(series_items)
+                logger.info(
+                    f"Series fullsync: fetched {total_series} series from Sonarr ({sync_instance_key}), syncing episodes...",
+                    extra={'emoji_type': 'info'},
+                )
 
-                for series_entry in series_items:
+                for series_idx, series_entry in enumerate(series_items, start=1):
                     s_fields = _series_fields(series_entry, sync_is_4k, sync_instance_key)
                     s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
                     if not s_fields['tvdbid']:
@@ -605,6 +610,13 @@ def run_full_sync(
                         stats['series_created'] += 1
                     else:
                         stats['series_updated'] += 1
+
+                    if series_idx % 50 == 0 or series_idx == total_series:
+                        logger.info(
+                            f"Series fullsync progress: {series_idx}/{total_series} series processed "
+                            f"({stats['episodes_seen']} episodes so far)",
+                            extra={'emoji_type': 'info'},
+                        )
 
                     sonarr_series_id = series_entry.get('id')
                     episodes = fetch_sonarr_episodes(sonarr_series_id, base_url, api_key) if sonarr_series_id else []

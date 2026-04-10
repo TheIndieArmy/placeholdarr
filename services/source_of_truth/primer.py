@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
+
+from sqlalchemy import or_
 
 from core.config import settings
-from services.media_servers.refresh import refresh_all_sections
+from services.media_servers.refresh import refresh_all_paths
 from core.logger import logger
 from services.placeholders import (
     ensure_placeholder_file,
@@ -19,6 +20,8 @@ from services.source_of_truth.materializer import (
     apply_episode_materialization,
     apply_movie_materialization,
 )
+from services.source_of_truth.media_observation import observe_placeholders_with_polling
+from services.source_of_truth.status_reconciler import enqueue_status_projection
 
 
 def _configured_roots() -> list[str]:
@@ -319,7 +322,11 @@ def run_primer_phase() -> dict:
         "force_reprimed": 0,
         "refresh_requested": 0,
         "refresh_failed": 0,
-        "wait_seconds": 0,
+        "observed_plex": 0,
+        "observed_jellyfin": 0,
+        "observed_emby": 0,
+        "observe_failed": 0,
+        "status_projection_enqueued": 0,
     }
 
     # Hardlink mode needs primer protections by default. Non-hardlink mode only
@@ -373,6 +380,8 @@ def run_primer_phase() -> dict:
         session.close()
 
     changed_folders: set[str] = set()
+    touched_movie_ids: list[int] = []
+    touched_episode_ids: list[int] = []
     variant_session = get_session()
 
     try:
@@ -389,6 +398,7 @@ def run_primer_phase() -> dict:
                     extra={"emoji_type": "info"},
                 )
                 stats["materialized_movies"] += 1
+                touched_movie_ids.append(int(movie_id))
 
         for episode_id in episode_ids:
             result = apply_episode_materialization(episode_id)
@@ -403,6 +413,7 @@ def run_primer_phase() -> dict:
                     extra={"emoji_type": "info"},
                 )
                 stats["materialized_episodes"] += 1
+                touched_episode_ids.append(int(episode_id))
 
         # Force mode fallback: if nothing needed creation, rewrite a small sample of existing placeholders.
         if force_prime and stats["materialized_movies"] == 0 and stats["materialized_episodes"] == 0:
@@ -420,21 +431,60 @@ def run_primer_phase() -> dict:
         variant_session.close()
 
     if changed_folders:
-        refresh_stats = refresh_all_sections(
-            has_movies=stats["materialized_movies"] > 0,
-            has_episodes=stats["materialized_episodes"] > 0,
-        )
+        refresh_stats = refresh_all_paths(changed_folders)
         stats["refresh_requested"] = int(refresh_stats.get("refreshed", 0) or 0)
         stats["refresh_failed"] = int(refresh_stats.get("failed", 0) or 0)
 
-        wait_seconds = max(0, int(getattr(settings, "PRIMER_REFRESH_WAIT_SECONDS", 15) or 15))
-        stats["wait_seconds"] = wait_seconds
-        if wait_seconds:
-            logger.info(
-                f"Primer waiting {wait_seconds}s after Plex refresh before continuing",
-                extra={"emoji_type": "info"},
-            )
-            time.sleep(wait_seconds)
+        # Observe the specific placeholders we just primed so we confirm Plex has
+        # scanned and assigned rating keys to the independent-copy inodes BEFORE
+        # the full materialization pass creates its batch of hardlinks.  Without
+        # this gate, hardlinks (same inode as the dummy) and the primer files
+        # (unique inodes) arrive in Plex simultaneously and the per-inode
+        # deduplication logic can collapse entries incorrectly.
+        observe_session = get_session()
+        try:
+            filters = []
+            if touched_movie_ids:
+                filters.append(Placeholder.movie_id.in_(touched_movie_ids))
+            if touched_episode_ids:
+                filters.append(Placeholder.episode_id.in_(touched_episode_ids))
+
+            if filters:
+                primer_placeholders = (
+                    observe_session.query(Placeholder)
+                    .filter(Placeholder.has_placeholder == True)  # noqa: E712
+                    .filter(or_(*filters))
+                    .all()
+                )
+                if primer_placeholders:
+                    logger.info(
+                        f"Primer observing {len(primer_placeholders)} seeded placeholder(s) to confirm Plex ingest",
+                        extra={"emoji_type": "info"},
+                    )
+                    observe_stats = observe_placeholders_with_polling(
+                        observe_session,
+                        primer_placeholders,
+                        allow_title_fallback=False,
+                    )
+                    stats["observed_plex"] = observe_stats.get("observed_plex", 0)
+                    stats["observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
+                    stats["observed_emby"] = observe_stats.get("observed_emby", 0)
+                    stats["observe_failed"] = observe_stats.get("observe_failed", 0)
+
+                    # Enqueue status projection for any primer placeholders that
+                    # now have a Plex rating key so their titles get written.
+                    if getattr(settings, "ENABLE_PLEX", False):
+                        ready_for_projection = [
+                            int(row.id)
+                            for row in primer_placeholders
+                            if getattr(row, "has_placeholder", False)
+                            and getattr(row, "plex_placeholder_id", None)
+                        ]
+                        if ready_for_projection:
+                            enqueue_status_projection(ready_for_projection, session=observe_session)
+                            stats["status_projection_enqueued"] = len(ready_for_projection)
+        finally:
+            observe_session.close()
     else:
         stats["skipped"] = True
         stats["reason"] = "no_candidates"
@@ -443,7 +493,9 @@ def run_primer_phase() -> dict:
         (
             f"Primer phase complete: movies={stats['materialized_movies']} "
             f"episodes={stats['materialized_episodes']} force_reprimed={stats['force_reprimed']} "
-            f"refresh_requested={stats['refresh_requested']}"
+            f"refresh_requested={stats['refresh_requested']} "
+            f"observed_plex={stats['observed_plex']} observe_failed={stats['observe_failed']} "
+            f"status_projection_enqueued={stats['status_projection_enqueued']}"
         ),
         extra={"emoji_type": "success"},
     )

@@ -168,6 +168,7 @@ class Settings(BaseSettings):
     PLEX_METADATA_READY_CONFIRM_POLLS: int = int(os.getenv("PLEX_METADATA_READY_CONFIRM_POLLS", "2").split('#')[0].strip())
     OBSERVATION_PASS_CHUNK_SIZE: int = int(os.getenv("OBSERVATION_PASS_CHUNK_SIZE", "150").split('#')[0].strip())
     OBSERVATION_MAX_PASS_SECONDS: int = int(os.getenv("OBSERVATION_MAX_PASS_SECONDS", "45").split('#')[0].strip())
+    OBSERVATION_MIN_CHUNKS_PER_PASS: int = int(os.getenv("OBSERVATION_MIN_CHUNKS_PER_PASS", "1").split('#')[0].strip())
     ENABLE_STATUS_ORCHESTRATOR_CALENDAR: bool = os.getenv("ENABLE_STATUS_ORCHESTRATOR_CALENDAR", "true").split('#')[0].strip().lower() == "true"
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.

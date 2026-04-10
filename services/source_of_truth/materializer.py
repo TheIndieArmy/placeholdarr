@@ -680,7 +680,17 @@ def _run_materialization_for_ids(
 
 
 def run_materialization_pass() -> dict[str, Any]:
-    """Apply file/DB side effects for needs/obsolete determinations."""
+    """Apply file/DB side effects for needs/obsolete determinations.
+
+    Creates all placeholder files first, then sends a single grouped refresh to
+    each media server (one request per unique folder), then runs one observation
+    sweep.  Placeholders Plex didn't scan within the observation window are
+    deferred to the observation trail job queue picked up by background workers.
+
+    This single-pass approach is far faster than per-batch cycling for large
+    first-run syncs (tens of thousands of items) while still giving Plex a
+    path-scoped refresh signal for every new folder.
+    """
     session = get_session()
     try:
         movie_ids = [
@@ -695,6 +705,12 @@ def run_materialization_pass() -> dict[str, Any]:
             .filter(Episode.determination.in_([DETERMINATION_NEEDS, DETERMINATION_OBSOLETE]))
             .all()
         ]
+
+        total = len(movie_ids) + len(episode_ids)
+        logger.info(
+            f"Materialization pass: {len(movie_ids)} movies + {len(episode_ids)} episodes = {total} total",
+            extra={"emoji_type": "info"},
+        )
 
         stats = _run_materialization_for_ids(
             session,
