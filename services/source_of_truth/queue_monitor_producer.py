@@ -224,13 +224,11 @@ class QueueMonitorProducer:
             session.close()
 
     def _poll_radarr_queue(self, is_4k: bool) -> dict[str, dict[str, Any]]:
-        base_url = settings.RADARR_4K_URL if is_4k else settings.RADARR_URL
-        api_key = settings.RADARR_4K_API_KEY if is_4k else settings.RADARR_API_KEY
+        base_url, api_key = settings.resolve_arr_endpoint('radarr', is_4k=is_4k)
         return self._poll_queue_map(base_url, api_key, id_field="movieId")
 
     def _poll_sonarr_queue(self, is_4k: bool) -> dict[str, dict[str, Any]]:
-        base_url = settings.SONARR_4K_URL if is_4k else settings.SONARR_URL
-        api_key = settings.SONARR_4K_API_KEY if is_4k else settings.SONARR_API_KEY
+        base_url, api_key = settings.resolve_arr_endpoint('sonarr', is_4k=is_4k)
         return self._poll_queue_map(base_url, api_key, id_field="episodeId")
 
     def _poll_queue_map(self, base_url: str, api_key: str, *, id_field: str) -> dict[str, dict[str, Any]]:

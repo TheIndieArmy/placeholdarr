@@ -37,47 +37,72 @@ from services.source_of_truth.sync_runner import (
 )
 
 
+def _resolve_arr_context(content_type: str, instance: str | None = None) -> dict[str, Any]:
+    """Resolve ARR instance routing context for webhook event handlers.
+
+    Selection rules:
+    - explicit `instance` key wins when provided
+    - otherwise route to primary instance for the content type
+    """
+    arr_type = "radarr" if content_type == "movie" else "sonarr"
+    normalized_instance_key = str(instance or "").strip().lower()
+
+    if normalized_instance_key:
+        selected = settings.resolve_arr_instance(arr_type, instance_key=normalized_instance_key)
+        if not selected:
+            raise ValueError(f"unknown_arr_instance:{arr_type}:{normalized_instance_key}")
+    else:
+        selected = settings.resolve_arr_instance(arr_type, role="primary")
+        if not selected:
+            raise ValueError(f"missing_primary_arr_instance:{arr_type}")
+
+    base_url = str(selected.get("url") or "").strip()
+    api_key = str(selected.get("api_key") or "").strip()
+    if not base_url or not api_key:
+        raise ValueError(f"missing_arr_endpoint_credentials:{arr_type}")
+
+    role = str(selected.get("role") or "").strip().lower()
+    if role not in {"primary", "secondary", "additional"}:
+        role = "primary"
+    is_4k = role != "primary"
+
+    return {
+        "arr_type": arr_type,
+        "instance_key": str(selected.get("instance_key") or "").strip().lower(),
+        "instance_id": str(selected.get("instance_id") or "").strip().lower(),
+        "role": role,
+        "is_4k": is_4k,
+        "base_url": base_url,
+        "api_key": api_key,
+    }
+
+
 def _infer_is_4k_from_instance(instance: str | None) -> bool:
-    """Return True if instance identifier indicates 4K variant."""
-    if not instance:
-        return False
-    normalized = str(instance).strip().lower()
-    mapping = getattr(settings, 'instance_is_4k', {}) or {}
-    if normalized in mapping:
-        return bool(mapping[normalized])
-    return normalized.endswith('_4k') or normalized.endswith('4k')
+    """Compatibility helper while callers are migrated to role/instance-aware routing."""
+    content_type = "series" if str(instance or "").strip().lower().startswith("sonarr") else "movie"
+    try:
+        return bool(_resolve_arr_context(content_type, instance=instance).get("is_4k", False))
+    except Exception:
+        normalized = str(instance).strip().lower() if instance else ""
+        return normalized.endswith("_4k") or normalized.endswith("4k")
 
 
 def _resolve_instance_key(content_type: str, instance: str | None, is_4k: bool) -> str:
-    """Resolve instance key from explicit param or derive from configured ARR instances."""
-    normalized = str(instance or '').strip().lower()
-    if normalized:
-        return normalized
-    # Fall back to finding first matching instance by type and 4k flag
-    arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
-    for item in (getattr(settings, 'configured_arr_instances', []) or []):
-        if str(item.get('arr_type', '')).lower() == arr_type and bool(item.get('is_4k', False)) == is_4k:
-            return str(item.get('instance_key', '')).lower()
-    # Final fallback: return first instance of the type, regardless of 4k flag
-    for item in (getattr(settings, 'configured_arr_instances', []) or []):
-        if str(item.get('arr_type', '')).lower() == arr_type:
-            return str(item.get('instance_key', '')).lower()
-    raise ValueError(f"No {arr_type} instances configured")
+    """Compatibility helper while callers are migrated to role/instance-aware routing."""
+    ctx = _resolve_arr_context(content_type, instance=instance)
+    key = str(ctx.get("instance_key") or "").strip().lower()
+    if key:
+        return key
+    arr_type = "radarr" if content_type == "movie" else "sonarr"
+    fallback = settings.resolve_arr_instance(arr_type, role="secondary" if is_4k else "primary") or {}
+    return str(fallback.get("instance_key") or "").strip().lower()
 
 
 def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
-    if content_type == "movie":
-        if is_4k:
-            if settings.RADARR_4K_URL and settings.RADARR_4K_API_KEY:
-                return settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY
-            raise ValueError("unconfigured_4k_instance:movie")
-        return settings.RADARR_URL, settings.RADARR_API_KEY
-
-    if is_4k:
-        if settings.SONARR_4K_URL and settings.SONARR_4K_API_KEY:
-            return settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY
-        raise ValueError("unconfigured_4k_instance:series")
-    return settings.SONARR_URL, settings.SONARR_API_KEY
+    """Compatibility helper while callers are migrated to role/instance-aware routing."""
+    arr_type = "radarr" if content_type == "movie" else "sonarr"
+    role = "secondary" if is_4k else "primary"
+    return settings.resolve_arr_endpoint(arr_type, role=role)
 
 
 def _extract_series_id(payload: dict[str, Any]) -> int | None:
@@ -137,9 +162,10 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
     if not series_id:
         raise ValueError("seriesadd_missing_series_id")
 
-    inferred_is_4k = _infer_is_4k_from_instance(instance)
-    resolved_instance_key = _resolve_instance_key('series', instance, inferred_is_4k)
-    base_url, api_key = _resolve_endpoint("series", inferred_is_4k)
+    ctx = _resolve_arr_context("series", instance=instance)
+    inferred_is_4k = bool(ctx["is_4k"])
+    resolved_instance_key = str(ctx["instance_key"])
+    base_url, api_key = str(ctx["base_url"]), str(ctx["api_key"])
     if not base_url or not api_key:
         raise ValueError("seriesadd_missing_sonarr_config")
 
@@ -321,9 +347,10 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
     if not movie_id:
         raise ValueError("movieadd_missing_movie_id")
 
-    inferred_is_4k = _infer_is_4k_from_instance(instance)
-    resolved_instance_key = _resolve_instance_key('movie', instance, inferred_is_4k)
-    base_url, api_key = _resolve_endpoint("movie", inferred_is_4k)
+    ctx = _resolve_arr_context("movie", instance=instance)
+    inferred_is_4k = bool(ctx["is_4k"])
+    resolved_instance_key = str(ctx["instance_key"])
+    base_url, api_key = str(ctx["base_url"]), str(ctx["api_key"])
     if not base_url or not api_key:
         raise ValueError("movieadd_missing_radarr_config")
 

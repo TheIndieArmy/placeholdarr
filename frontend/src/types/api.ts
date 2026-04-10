@@ -74,6 +74,8 @@ export interface LibraryItem {
   backdrop_url?: string | null;
   is_4k: boolean;
   instance_key?: string | null;
+  instance_id?: string | null;
+  instance_label?: string | null;
   arr_link?: string | null;
   determination?: string | null;
   status?: string | null;
@@ -107,6 +109,8 @@ export interface MovieDetailResponse {
   collection?: Record<string, unknown> | null;
   is_4k: boolean;
   instance_key?: string | null;
+  instance_id?: string | null;
+  instance_label?: string | null;
   arr_link?: string | null;
   imdbid?: string | null;
   tmdbid?: number | null;
@@ -170,6 +174,8 @@ export interface SeriesDetailResponse {
   ratings?: Record<string, unknown> | null;
   is_4k: boolean;
   instance_key?: string | null;
+  instance_id?: string | null;
+  instance_label?: string | null;
   arr_link?: string | null;
   imdbid?: string | null;
   tvdbid?: number | null;

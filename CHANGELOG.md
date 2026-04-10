@@ -10,6 +10,25 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 - Placeholder for upcoming release notes.
 
+## [0.8.5] - 2026-04-09
+
+### Added
+- Default dummy media files provisioning at startup to ensure onboarding has files to work with.
+- Schema resilience checks via `_ensure_core_tables()` with Alembic fallback to prevent startup crashes from migration gaps.
+- Centralized, idempotent background service initialization (`start_runtime_background_services()`) for consistent worker/scheduler startup timing.
+- Webhook accept-but-ignore gate during onboarding to prevent job queue noise from pre-setup events; senders receive `{"status":"accepted","ignored":true,"reason":"onboarding_incomplete"}`.
+- New ARR instance helper functions (`_arr_instance_maps()`, `_arr_instance_meta()`) for cleaner instance metadata lookups in dashboard routes.
+
+### Changed
+- Post-onboarding settings completion now triggers worker/scheduler startup immediately (no app restart required).
+- Refactored `_arr_base_url()` to delegate instance resolution to `settings.resolve_arr_endpoint()` for centralized routing logic.
+- Startup gate (`startup_sync_complete`) is now guaranteed to be set during onboarding scenario (via post-onboarding sync) allowing workers to process queued jobs.
+- Updated onboarding status logging to report "onboarding-incomplete" by default on read failures (defensive behavior).
+
+### Fixed
+- Fixed worker and scheduler startup deferral bug: services were never started after onboarding completion without app restart.
+- Fixed queued->pending status migration to be fault-tolerant; if movie/series/episode tables unavailable, migration is skipped with warning instead of crashing.
+
 ## [0.8.4] - 2026-04-09
 
 ### Changed

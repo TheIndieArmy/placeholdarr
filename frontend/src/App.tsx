@@ -48,14 +48,6 @@ const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
-  "RADARR_URL",
-  "RADARR_API_KEY",
-  "RADARR_4K_URL",
-  "RADARR_4K_API_KEY",
-  "SONARR_URL",
-  "SONARR_API_KEY",
-  "SONARR_4K_URL",
-  "SONARR_4K_API_KEY",
   "ARR_INSTANCES_JSON",
 ]);
 
@@ -119,10 +111,6 @@ const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | 
   PLEX_URL: { service: "plex", credentialKey: "PLEX_TOKEN" },
   JELLYFIN_URL: { service: "jellyfin", credentialKey: "JELLYFIN_TOKEN" },
   EMBY_URL: { service: "emby", credentialKey: "EMBY_TOKEN" },
-  RADARR_URL: { service: "radarr", credentialKey: "RADARR_API_KEY" },
-  RADARR_4K_URL: { service: "radarr", credentialKey: "RADARR_4K_API_KEY" },
-  SONARR_URL: { service: "sonarr", credentialKey: "SONARR_API_KEY" },
-  SONARR_4K_URL: { service: "sonarr", credentialKey: "SONARR_4K_API_KEY" },
 };
 
 type LibraryFilter = "all" | "movie" | "series" | "placeholders" | "future" | "missing";
@@ -1654,7 +1642,7 @@ function LibraryPanel(props: {
 
   function statusBadge(item: LibraryItem) {
     if (item.has_missing) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white font-headline uppercase tracking-wider">Missing</span>;
-    if (item.is_4k) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white font-headline uppercase tracking-wider" style={{ backgroundColor: accent.hex }}>4K Ultra HD</span>;
+    if (item.instance_label) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white font-headline uppercase tracking-wider" style={{ backgroundColor: accent.hex }}>{item.instance_label}</span>;
     if (item.has_placeholder) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-700 text-white font-headline uppercase tracking-wider">Placeholder</span>;
     if (item.is_future) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-600 text-white font-headline uppercase tracking-wider">Future</span>;
     if (item.has_file) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-500 text-white font-headline uppercase tracking-wider">1080p</span>;
@@ -1927,7 +1915,7 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
             <div className="flex items-center gap-3 mt-4 flex-wrap">
               {p.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{p.year}</span>}
               <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text }}>Movie</span>
-              {p.is_4k && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>4K</span>}
+              {p.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{p.instance_label}</span>}
               {p.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
               {p.has_file
                 ? <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
@@ -1998,7 +1986,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
               {p.year && <span className="text-lg text-slate-200">{p.year}</span>}
               {p.network && <span className="text-lg text-slate-300">{p.network}</span>}
               <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
-              {p.is_4k && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>4K</span>}
+              {p.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{p.instance_label}</span>}
               {p.sonarr_monitored != null && (
                 <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${p.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
                   style={p.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
@@ -2760,11 +2748,14 @@ function LogsPanel(props: {
 
 type ArrInstanceDraft = {
   id: string;
+  instance_id: string;
   label: string;
   arr_type: "radarr" | "sonarr";
   instance_key: string;
   url: string;
   api_key: string;
+  role: "primary" | "secondary" | "additional";
+  priority: number;
   is_4k: boolean;
 };
 
@@ -2783,6 +2774,27 @@ function inferDefaultKey(label: string, arrType: "radarr" | "sonarr") {
   return slug || `${arrType}_instance`;
 }
 
+function makeInstanceId(arrType: "radarr" | "sonarr") {
+  const maybeCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (maybeCrypto?.randomUUID) {
+    return `${arrType}:${maybeCrypto.randomUUID().toLowerCase()}`;
+  }
+  const entropy = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `${arrType}:${entropy}`;
+}
+
+function normalizeInstanceRole(input: unknown, rank: number): "primary" | "secondary" | "additional" {
+  const role = String(input || "").trim().toLowerCase();
+  if (role === "primary" || role === "secondary" || role === "additional") return role;
+  if (rank <= 0) return "primary";
+  if (rank === 1) return "secondary";
+  return "additional";
+}
+
+function deriveIs4kFromRole(role: string) {
+  return role !== "primary";
+}
+
 function getPlexLibraryIdNote(fieldKey: string) {
   if (fieldKey === "PLEX_MOVIE_SECTION_ID") return "Use the Plex library ID for the placeholder movie library that points at your derived `movies` path.";
   if (fieldKey === "PLEX_TV_SECTION_ID") return "Use the Plex library ID for the placeholder TV library that points at your derived `tv` path.";
@@ -2795,99 +2807,61 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
+        const rankByType: Record<"radarr" | "sonarr", number> = { radarr: 0, sonarr: 0 };
         const items = parsed
           .filter((item) => item && typeof item === "object")
           .map((item, index) => {
             const obj = item as Record<string, unknown>;
             const arrType = String(obj.arr_type || obj.type || "").toLowerCase() === "sonarr" ? "sonarr" : "radarr";
             const label = String(obj.label || obj.instance_key || obj.key || obj.name || `${arrType} ${index + 1}`);
+            const rank = rankByType[arrType];
+            rankByType[arrType] = rank + 1;
+            const role = normalizeInstanceRole(obj.role, rank);
+            const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
+            const instanceId = String(obj.instance_id || obj.id || `${arrType}:${instanceKey}`).trim().toLowerCase();
             return {
-              id: `json-${arrType}-${index}`,
+              id: instanceId || `json-${arrType}-${index}`,
+              instance_id: instanceId || `json-${arrType}-${index}`,
               label,
               arr_type: arrType,
-              instance_key: normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType))),
+              instance_key: instanceKey,
               url: String(obj.url || ""),
               api_key: String(obj.api_key || obj.apikey || ""),
-              is_4k: Boolean(obj.is_4k),
+              role,
+              priority: Number.isFinite(Number(obj.priority)) ? Number(obj.priority) : rank,
+              is_4k: deriveIs4kFromRole(role),
             } satisfies ArrInstanceDraft;
           });
         if (items.length) return items;
       }
     } catch {
-      // Fall through to legacy pairs.
+      return [];
     }
   }
-
-  const legacy: ArrInstanceDraft[] = [];
-  const radarrUrl = String(values.RADARR_URL || "").trim();
-  const radarrKey = String(values.RADARR_API_KEY || "").trim();
-  const radarr4kUrl = String(values.RADARR_4K_URL || "").trim();
-  const radarr4kKey = String(values.RADARR_4K_API_KEY || "").trim();
-  const sonarrUrl = String(values.SONARR_URL || "").trim();
-  const sonarrKey = String(values.SONARR_API_KEY || "").trim();
-  const sonarr4kUrl = String(values.SONARR_4K_URL || "").trim();
-  const sonarr4kKey = String(values.SONARR_4K_API_KEY || "").trim();
-
-  if (radarrUrl || radarrKey) {
-    legacy.push({
-      id: "legacy-radarr-std",
-      label: "Radarr Primary",
-      arr_type: "radarr",
-      instance_key: normalizeInstanceKey(String(values.RADARR_STD_INSTANCE_KEY || "radarr_std")),
-      url: radarrUrl,
-      api_key: radarrKey,
-      is_4k: false,
-    });
-  }
-  if (radarr4kUrl || radarr4kKey) {
-    legacy.push({
-      id: "legacy-radarr-4k",
-      label: "Radarr 4K",
-      arr_type: "radarr",
-      instance_key: normalizeInstanceKey(String(values.RADARR_4K_INSTANCE_KEY || "radarr_4k")),
-      url: radarr4kUrl,
-      api_key: radarr4kKey,
-      is_4k: true,
-    });
-  }
-  if (sonarrUrl || sonarrKey) {
-    legacy.push({
-      id: "legacy-sonarr-std",
-      label: "Sonarr Primary",
-      arr_type: "sonarr",
-      instance_key: normalizeInstanceKey(String(values.SONARR_STD_INSTANCE_KEY || "sonarr_std")),
-      url: sonarrUrl,
-      api_key: sonarrKey,
-      is_4k: false,
-    });
-  }
-  if (sonarr4kUrl || sonarr4kKey) {
-    legacy.push({
-      id: "legacy-sonarr-4k",
-      label: "Sonarr 4K",
-      arr_type: "sonarr",
-      instance_key: normalizeInstanceKey(String(values.SONARR_4K_INSTANCE_KEY || "sonarr_4k")),
-      url: sonarr4kUrl,
-      api_key: sonarr4kKey,
-      is_4k: true,
-    });
-  }
-  return legacy;
+  return [];
 }
 
 function serializeArrInstances(instances: ArrInstanceDraft[]) {
+  const rankByType: Record<"radarr" | "sonarr", number> = { radarr: 0, sonarr: 0 };
   const clean = instances
     .map((row) => {
       const label = String(row.label || "").trim();
-      const inferredKey = normalizeInstanceKey(inferDefaultKey(label, row.arr_type));
-      const inferredIs4k = /(^|\s)4k(\s|$)/i.test(label);
+      const existingKey = normalizeInstanceKey(String(row.instance_key || ""));
+      const inferredKey = existingKey || normalizeInstanceKey(inferDefaultKey(label, row.arr_type));
+      const rank = rankByType[row.arr_type];
+      rankByType[row.arr_type] = rank + 1;
+      const role = normalizeInstanceRole(row.role, rank);
+      const instanceId = String(row.instance_id || makeInstanceId(row.arr_type)).trim().toLowerCase();
       return {
+        instance_id: instanceId,
         arr_type: row.arr_type,
         instance_key: inferredKey,
         label,
         url: String(row.url || "").trim(),
         api_key: String(row.api_key || "").trim(),
-        is_4k: Boolean(row.is_4k || inferredIs4k),
+        role,
+        priority: rank,
+        is_4k: deriveIs4kFromRole(role),
       };
     })
     .filter((row) => row.instance_key && row.url && row.api_key);
@@ -2998,14 +2972,19 @@ function ArrInstancesEditor(props: {
     const label = arrType === "radarr"
       ? (slotIndex === 0 ? "Radarr Primary" : "Radarr Secondary")
       : (slotIndex === 0 ? "Sonarr Primary" : "Sonarr Secondary");
+    const instanceKey = inferDefaultKey(label, arrType);
+    const role = slotIndex === 0 ? "primary" : "secondary";
     return {
       id: `slot-${arrType}-${slotIndex}`,
+      instance_id: makeInstanceId(arrType),
       label,
       arr_type: arrType,
-      instance_key: inferDefaultKey(label, arrType),
+      instance_key: instanceKey,
       url: "",
       api_key: "",
-      is_4k: slotIndex === 1,
+      role,
+      priority: slotIndex,
+      is_4k: deriveIs4kFromRole(role),
     };
   }
 
@@ -3166,7 +3145,7 @@ function ArrInstancesEditor(props: {
             type="password"
             disabled={isDisabled}
           />
-          <div className="text-[11px] text-slate-400">Instance key (derived): <span className="text-slate-200">{normalizeInstanceKey(inferDefaultKey(String(item.label || ""), item.arr_type))}</span></div>
+          <div className="text-[11px] text-slate-400">Instance key (webhook): <span className="text-slate-200">{normalizeInstanceKey(String(item.instance_key || ""))}</span></div>
           <div className="flex items-center gap-2">
             <button
               type="button"

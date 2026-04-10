@@ -236,6 +236,23 @@ def _default_instance_key(content_type: str, is_4k: bool) -> str:
     raise ValueError(f"No {arr_type} instances configured for default key generation")
 
 
+def _resolve_instance_identity(arr_type: str, instance_key: str | None, is_4k: bool) -> tuple[str, str]:
+    """Resolve canonical instance_id + webhook instance_key for persisted rows."""
+    normalized_type = str(arr_type or '').strip().lower()
+    normalized_key = str(instance_key or '').strip().lower()
+    item = None
+    if normalized_key:
+        item = settings.resolve_arr_instance(normalized_type, instance_key=normalized_key)
+    if not item:
+        item = settings.resolve_arr_instance(normalized_type, role='secondary' if bool(is_4k) else 'primary')
+    if not item:
+        fallback_key = normalized_key or _default_instance_key('movie' if normalized_type == 'radarr' else 'series', is_4k)
+        return f"{normalized_type}:{fallback_key}", fallback_key
+    resolved_key = str(item.get('instance_key') or normalized_key).strip().lower()
+    resolved_id = str(item.get('instance_id') or '').strip().lower() or f"{normalized_type}:{resolved_key}"
+    return resolved_id, resolved_key
+
+
 def _movie_folder_name(title: str, year: int, tmdbid: int) -> str:
     if year:
         return f"{_sanitize_name(title)} ({year}) {{tmdb-{tmdbid}}}"
@@ -292,13 +309,14 @@ def _movie_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     title = entry.get('title') or 'Unknown'
     year = _extract_year(entry.get('year') or entry.get('inCinemas') or entry.get('physicalRelease'), 0)
     tmdbid = int(entry.get('tmdbId') or entry.get('tmdb') or 0)
+    instance_id, resolved_instance_key = _resolve_instance_identity('radarr', instance_key, is_4k)
     placeholder_folder = _placeholder_movie_folder(entry, title=title, year=year, tmdbid=tmdbid, is_4k=is_4k)
     return {
         'title': title,
         'year': year,
         'tmdbid': tmdbid,
-        'instance_key': str(instance_key).strip().lower(),
-        'is_4k': is_4k,
+        'instance_id': instance_id,
+        'instance_key': resolved_instance_key,
         'radarrid': entry.get('id'),
         'placeholder_folder': placeholder_folder,
         'radarrpath': entry.get('path') or entry.get('rootFolderPath'),
@@ -338,13 +356,14 @@ def _series_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     title = entry.get('title') or 'Unknown'
     year = _extract_year(entry.get('year') or entry.get('firstAired'), 0)
     tvdbid = int(entry.get('tvdbId') or entry.get('tvdbid') or 0)
+    instance_id, resolved_instance_key = _resolve_instance_identity('sonarr', instance_key, is_4k)
     placeholder_folder = _placeholder_series_folder(entry, title=title, year=year, tvdbid=tvdbid, is_4k=is_4k)
     return {
         'title': title,
         'year': year,
         'tvdbid': tvdbid,
-        'instance_key': str(instance_key).strip().lower(),
-        'is_4k': is_4k,
+        'instance_id': instance_id,
+        'instance_key': resolved_instance_key,
         'sonarrid': entry.get('id'),
         'placeholder_folder': placeholder_folder,
         'sonarrpath': entry.get('path') or entry.get('rootFolderPath'),
@@ -408,7 +427,7 @@ def _episode_fields(series: Series, season: Season, entry: Dict, episode_file: D
 def _upsert_movie(session, fields: Dict):
     existing = (
         session.query(Movie)
-        .filter(and_(Movie.tmdbid == fields['tmdbid'], Movie.instance_key == fields['instance_key']))
+        .filter(and_(Movie.tmdbid == fields['tmdbid'], Movie.instance_id == fields['instance_id']))
         .first()
     )
     if existing:
@@ -423,7 +442,7 @@ def _upsert_movie(session, fields: Dict):
 def _upsert_series(session, fields: Dict):
     existing = (
         session.query(Series)
-        .filter(and_(Series.tvdbid == fields['tvdbid'], Series.instance_key == fields['instance_key']))
+        .filter(and_(Series.tvdbid == fields['tvdbid'], Series.instance_id == fields['instance_id']))
         .first()
     )
     if existing:
@@ -437,8 +456,9 @@ def _upsert_series(session, fields: Dict):
 
 
 def _upsert_season(session, series: Series, season_number: int):
+    series_role = str((settings.resolve_arr_instance('sonarr', instance_id=getattr(series, 'instance_id', None), instance_key=getattr(series, 'instance_key', None)) or {}).get('role') or 'primary').strip().lower()
     season_folder = os.path.join(
-        getattr(series, 'placeholder_folder', None) or _tv_library_root(bool(getattr(series, 'is_4k', False))),
+        getattr(series, 'placeholder_folder', None) or _tv_library_root(series_role != 'primary'),
         f"Season {season_number:02d}" if season_number > 0 else "Season 00",
     )
     season = (
@@ -490,19 +510,27 @@ def _upsert_episode(session, fields: Dict):
     return created, True
 
 
-def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool) -> Iterable[Tuple[str, str, str, bool, str]]:
-    """Yield (arr_type, url, api_key, is_4k, instance_key) tuples for configured ARR instances."""
+def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool, instance_key: str | None = None) -> Iterable[Tuple[str, str, str, bool, str]]:
+    """Yield (content_type, url, api_key, is_4k, instance_key) tuples for configured ARR instances."""
+    requested_key = str(instance_key or '').strip().lower()
+    normalized_types = {str(t or '').strip().lower() for t in (types or ())}
     for item in (getattr(settings, 'configured_arr_instances', []) or []):
         arr_type = str(item.get('arr_type', '')).lower()
-        if arr_type not in types:
+        content_type = 'movie' if arr_type == 'radarr' else 'series' if arr_type == 'sonarr' else ''
+        if not content_type:
             continue
-        if bool(item.get('is_4k', False)) != is_4k:
+        # Accept both legacy arr_type filters (radarr/sonarr) and content filters (movie/series).
+        if normalized_types and arr_type not in normalized_types and content_type not in normalized_types:
+            continue
+        if requested_key and str(item.get('instance_key', '')).strip().lower() != requested_key:
+            continue
+        if not requested_key and bool(item.get('is_4k', False)) != is_4k:
             continue
         url = str(item.get('url', '')).strip()
         api_key = str(item.get('api_key', '')).strip()
         instance_key = str(item.get('instance_key', '')).strip().lower()
         if url and api_key and instance_key:
-            yield (arr_type, url, api_key, is_4k, instance_key)
+            yield (content_type, url, api_key, is_4k, instance_key)
 
 
 def run_full_sync(
@@ -510,6 +538,7 @@ def run_full_sync(
     batch_size: int = 50,
     types: Tuple[str, ...] = ('movie', 'series'),
     is_4k: bool = False,
+    instance_key: str | None = None,
 ):
     """Source-of-truth full sync for ARR -> DB materialization."""
     _ = batch_size  # reserved for future chunking without changing public API
@@ -533,7 +562,7 @@ def run_full_sync(
 
     session = get_session()
     try:
-        for content_type, base_url, api_key, sync_is_4k, sync_instance_key in _iter_arr_endpoints(types, is_4k):
+        for content_type, base_url, api_key, sync_is_4k, sync_instance_key in _iter_arr_endpoints(types, is_4k, instance_key=instance_key):
             if content_type == 'movie':
                 movies = fetch_radarr_movies(base_url, api_key)
                 seen_tmdbids = set()
@@ -686,8 +715,8 @@ def sync_radarr_movies_by_ids(
     *,
     base_url: str,
     api_key: str,
-    is_4k: bool,
     instance_key: str | None = None,
+    is_4k: bool | None = None,
 ) -> dict:
     """Targeted movie sync for a specific Radarr instance and movie IDs."""
     ids = sorted({int(mid) for mid in (movie_ids or []) if mid})
@@ -701,7 +730,12 @@ def sync_radarr_movies_by_ids(
     if not ids:
         return stats
 
-    effective_instance_key = str(instance_key or _default_instance_key('movie', is_4k)).strip().lower()
+    if is_4k is None:
+        resolved = settings.resolve_arr_instance('radarr', instance_key=instance_key) or {}
+        inferred_secondary = str(resolved.get('role') or 'primary').strip().lower() != 'primary'
+    else:
+        inferred_secondary = bool(is_4k)
+    effective_instance_key = str(instance_key or _default_instance_key('movie', inferred_secondary)).strip().lower()
 
     session = get_session()
     try:
@@ -716,7 +750,7 @@ def sync_radarr_movies_by_ids(
                 stats['movies_marked_deleted'] += int(marked or 0)
                 continue
 
-            fields = _movie_fields(movie, is_4k, effective_instance_key)
+            fields = _movie_fields(movie, inferred_secondary, effective_instance_key)
             if not fields['tmdbid']:
                 continue
             stats['movies_seen'] += 1
@@ -740,8 +774,8 @@ def sync_sonarr_series_by_ids(
     *,
     base_url: str,
     api_key: str,
-    is_4k: bool,
     instance_key: str | None = None,
+    is_4k: bool | None = None,
 ) -> dict:
     """Targeted series+episode sync for a specific Sonarr instance and series IDs."""
     ids = sorted({int(sid) for sid in (series_ids or []) if sid})
@@ -759,7 +793,12 @@ def sync_sonarr_series_by_ids(
     if not ids:
         return stats
 
-    effective_instance_key = str(instance_key or _default_instance_key('series', is_4k)).strip().lower()
+    if is_4k is None:
+        resolved = settings.resolve_arr_instance('sonarr', instance_key=instance_key) or {}
+        inferred_secondary = str(resolved.get('role') or 'primary').strip().lower() != 'primary'
+    else:
+        inferred_secondary = bool(is_4k)
+    effective_instance_key = str(instance_key or _default_instance_key('series', inferred_secondary)).strip().lower()
 
     session = get_session()
     try:
@@ -775,7 +814,7 @@ def sync_sonarr_series_by_ids(
                 stats['series_marked_deleted'] += int(marked or 0)
                 continue
 
-            s_fields = _series_fields(series_entry, is_4k, effective_instance_key)
+            s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)
             if not s_fields['tvdbid']:
                 continue
 

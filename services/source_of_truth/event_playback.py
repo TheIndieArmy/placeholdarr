@@ -75,14 +75,8 @@ def _fallback_enabled() -> bool:
 
 
 def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
-    if content_type == 'movie':
-        if is_4k:
-            return settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY
-        return settings.RADARR_URL, settings.RADARR_API_KEY
-
-    if is_4k:
-        return settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY
-    return settings.SONARR_URL, settings.SONARR_API_KEY
+    arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
+    return settings.resolve_arr_endpoint(arr_type, is_4k=is_4k)
 
 
 def _normalize_path(value: str | None) -> str | None:

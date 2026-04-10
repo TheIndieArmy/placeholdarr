@@ -228,11 +228,23 @@ def sanitize_filename(value: str | None) -> str:
     return text or "unknown"
 
 
+def _arr_instance_role(content_type: str, item: Any) -> str:
+    arr_type = "radarr" if content_type == "movie" else "sonarr"
+    row = settings.resolve_arr_instance(
+        arr_type,
+        instance_id=str(getattr(item, "instance_id", "") or "").strip().lower() or None,
+        instance_key=str(getattr(item, "instance_key", "") or "").strip().lower() or None,
+    ) or {}
+    role = str(row.get("role") or "primary").strip().lower()
+    return role if role in {"primary", "secondary", "additional"} else "primary"
+
+
 def movie_placeholder_path(movie: Any) -> str:
     title = sanitize_filename(getattr(movie, "title", None))
     year = getattr(movie, "year", None)
 
-    root = settings.MOVIE_LIBRARY_4K_FOLDER if bool(getattr(movie, "is_4k", False)) else settings.MOVIE_LIBRARY_FOLDER
+    movie_role = _arr_instance_role("movie", movie)
+    root = settings.MOVIE_LIBRARY_4K_FOLDER if movie_role != "primary" else settings.MOVIE_LIBRARY_FOLDER
     tmdb_or_id = getattr(movie, "tmdbid", None) or getattr(movie, "id", None)
     default_folder = os.path.join(root, f"{title} ({year}) {{tmdb-{tmdb_or_id}}}" if year else f"{title} {{tmdb-{tmdb_or_id}}}")
     folder = getattr(movie, "placeholder_folder", None) or default_folder
@@ -247,7 +259,8 @@ def episode_placeholder_path(episode: Any, season: Any, series: Any) -> str:
     episode_title = sanitize_filename(getattr(episode, "title", None))
     year = getattr(series, "year", None)
 
-    root = settings.TV_LIBRARY_4K_FOLDER if bool(getattr(series, "is_4k", False)) else settings.TV_LIBRARY_FOLDER
+    series_role = _arr_instance_role("series", series)
+    root = settings.TV_LIBRARY_4K_FOLDER if series_role != "primary" else settings.TV_LIBRARY_FOLDER
     tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
     series_folder = f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
     season_folder = f"Season {int(getattr(season, 'season_number', 0)):02d}"
@@ -715,7 +728,8 @@ def ensure_series_nfo(series: Any, folder: str | None = None) -> bool:
         target_folder = getattr(series, "placeholder_folder", None)
     if not target_folder:
         # Fallback to a best-effort folder using configured TV root + sanitized title
-        root = settings.TV_LIBRARY_4K_FOLDER if bool(getattr(series, "is_4k", False)) else settings.TV_LIBRARY_FOLDER
+        series_role = _arr_instance_role("series", series)
+        root = settings.TV_LIBRARY_4K_FOLDER if series_role != "primary" else settings.TV_LIBRARY_FOLDER
         title = sanitize_filename(getattr(series, "title", None))
         year = getattr(series, "year", None)
         tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)

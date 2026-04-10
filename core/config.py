@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     LOG_FILE: str = os.getenv("LOG_FILE", "").split('#')[0].strip()
     LOG_MAX_RUN_FILES: int = int(os.getenv("LOG_MAX_RUN_FILES", "10").split('#')[0].strip())
     WORKER_COUNT: int = 4
-    SCHEDULED_TIME_FAILED: Optional[str] = None  # Add this line to avoid AttributeError
 
     # Plex
     PLEX_URL: Optional[str] = None
@@ -73,20 +72,7 @@ class Settings(BaseSettings):
     JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS: bool = os.getenv("JELLYFIN_FORCE_LIBRARY_REFRESH_ON_ITEM_MISS", "true").split('#')[0].strip().lower() == "true"
     JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS: float = float(os.getenv("JELLYFIN_TARGETED_REFRESH_WAIT_SECONDS", "5").split('#')[0].strip())
 
-    # Services
-    RADARR_URL: str = ""
-    RADARR_API_KEY: str = ""
-    SONARR_URL: str = ""
-    SONARR_API_KEY: str = ""
-
-    # 4K Services (optional)
-    RADARR_4K_URL: str = ""
-    RADARR_4K_API_KEY: str = ""
-    SONARR_4K_URL: str = ""
-    SONARR_4K_API_KEY: str = ""
-
-    # ARR instance configuration: now fully dynamic from user-configured ARR server names in onboarding.
-    # (Removed static RADARR_STD_INSTANCE_KEY, RADARR_4K_INSTANCE_KEY, SONARR_STD_INSTANCE_KEY, SONARR_4K_INSTANCE_KEY)
+    # ARR instance configuration: fully dynamic from user-configured ARR server names in onboarding.
     ARR_INSTANCES_JSON: str = ""
     ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "2").split('#')[0].strip())
     # Playback webhook source instance keys (retain defaults for backward compat)
@@ -109,21 +95,13 @@ class Settings(BaseSettings):
 
     # Library Paths
     LIBRARY_ROOT: str = ""
-    LIBRARY_ORGANIZATION_MODE: Literal["single", "separate"] = "separate"
-    ENABLE_STANDARD_PROFILE: bool = True
-    ENABLE_4K_PROFILE: bool = True
-    ENABLE_ANIME_PROFILE: bool = False
     MOVIE_LIBRARY_FOLDER: str = ""
     TV_LIBRARY_FOLDER: str = ""
     MOVIE_LIBRARY_4K_FOLDER: str = ""
     TV_LIBRARY_4K_FOLDER: str = ""
-    ANIME_LIBRARY_FOLDER: str = ""
 
     # Application
-    PLAYBACK_COOLDOWN: int = 30
-    MAX_MONITOR_TIME: int = 60
     CHECK_INTERVAL: int = 10
-    AVAILABLE_CLEANUP_DELAY: int = 10
 
     # Dummy file management
     DUMMY_FILE_PATH: str = ""
@@ -147,11 +125,7 @@ class Settings(BaseSettings):
     
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
-    AVAILABLE_CLEANUP_DELAY: int = 10
 
-    # Migration settings
-    MIGRATION: bool = False
-      
     # Calendar-based status update settings
     # CALENDAR_LOOKAHEAD_DAYS: how many days into the future to create/show "Coming Soon" placeholders
     #   - Positive integer (e.g., 30): strict horizon for selected release type; items beyond are REQUEST
@@ -164,7 +138,6 @@ class Settings(BaseSettings):
     CALENDAR_SYNC_INTERVAL_HOURS: int = 12
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True
-    CALENDAR_PLACEHOLDER_MODE: str = "episode"
     # For calendar "coming soon" placeholders: use primary dummy only, or prefer coming-soon dummy when configured.
     CALENDAR_LOOKAHEAD_DUMMY_MODE: str = "coming_soon"
 
@@ -185,11 +158,6 @@ class Settings(BaseSettings):
     ENABLE_EMBY: bool = False
 
     # Job queue / batching
-    BATCH_SERIES_SUBFLOWS: bool = os.getenv("BATCH_SERIES_SUBFLOWS", "true").strip().lower() == "true"
-    JOB_DEBOUNCE_SECONDS: int = int(os.getenv("JOB_DEBOUNCE_SECONDS", "3"))
-    ENABLE_IMPORT_EVENT_HANDLERS: bool = os.getenv("ENABLE_IMPORT_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
-    ENABLE_DELETE_EVENT_HANDLERS: bool = os.getenv("ENABLE_DELETE_EVENT_HANDLERS", "true").split('#')[0].strip().lower() == "true"
-    ENABLE_PLAYBACK_EVENT_HANDLERS: bool = True
     ENABLE_QUEUE_MONITOR: bool = os.getenv("ENABLE_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"
     QUEUE_MONITOR_RETRY_GRACE_SECONDS: int = int(os.getenv("QUEUE_MONITOR_RETRY_GRACE_SECONDS", "300").split('#')[0].strip())
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
@@ -245,7 +213,7 @@ class Settings(BaseSettings):
             raise ValueError(f"COMING_SOON_DUMMY_FILE_PATH must be a file: {v}")
         return str(path.absolute())
     
-    @validator('PLEX_URL', 'RADARR_URL', 'SONARR_URL', 'JELLYFIN_URL', 'EMBY_URL', pre=True)
+    @validator('PLEX_URL', 'JELLYFIN_URL', 'EMBY_URL', pre=True)
     def validate_url(cls, v):
         if v is None or v == "":
             return v  # Allow missing/blank for optional URLs
@@ -290,18 +258,12 @@ class Settings(BaseSettings):
         # create separate path branches in the simplified model.
         movie_4k_folder = movie_folder
         tv_4k_folder = tv_folder
-        anime_folder = ''
-        values['ENABLE_STANDARD_PROFILE'] = True
-        values['ENABLE_4K_PROFILE'] = False
-        values['ENABLE_ANIME_PROFILE'] = False
-
         dir_mode = _parse_octal_mode(values.get('PLACEHOLDER_DIR_MODE', '777'), 0o777)
         folder_values = {
             'MOVIE_LIBRARY_FOLDER': movie_folder,
             'TV_LIBRARY_FOLDER': tv_folder,
             'MOVIE_LIBRARY_4K_FOLDER': movie_4k_folder,
             'TV_LIBRARY_4K_FOLDER': tv_4k_folder,
-            'ANIME_LIBRARY_FOLDER': anime_folder,
         }
 
         for key, raw in folder_values.items():
@@ -342,7 +304,9 @@ class Settings(BaseSettings):
 
     @property
     def has_4k_support(self) -> bool:
-        return bool(self.RADARR_4K_URL and self.MOVIE_LIBRARY_4K_FOLDER) or bool(self.SONARR_4K_URL and self.TV_LIBRARY_4K_FOLDER)
+        has_4k_radarr = any(item.get('is_4k') and item.get('arr_type') == 'radarr' for item in self.configured_arr_instances)
+        has_4k_sonarr = any(item.get('is_4k') and item.get('arr_type') == 'sonarr' for item in self.configured_arr_instances)
+        return (has_4k_radarr and bool(self.MOVIE_LIBRARY_4K_FOLDER)) or (has_4k_sonarr and bool(self.TV_LIBRARY_4K_FOLDER))
 
     @property
     def plex_4k_movie_section_id(self) -> int:
@@ -385,14 +349,25 @@ class Settings(BaseSettings):
                         api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
                         if not instance_key or not url or not api_key:
                             continue
+                        instance_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
+                        if not instance_id:
+                            instance_id = f"{arr_type}:{instance_key}"
+                        role_raw = str(item.get("role") or "").strip().lower()
+                        role = role_raw if role_raw in {"primary", "secondary", "additional"} else ""
+                        try:
+                            priority = int(item.get("priority"))
+                        except Exception:
+                            priority = -1
                         parsed_instances.append(
                             {
+                                "instance_id": instance_id,
                                 "instance_key": instance_key,
                                 "arr_type": arr_type,
                                 "url": url,
                                 "api_key": api_key,
                                 "label": str(item.get("label") or instance_key).strip() or instance_key,
-                                "is_4k": bool(item.get("is_4k", False)),
+                                "role": role,
+                                "priority": priority,
                             }
                         )
             except Exception as exc:
@@ -400,62 +375,44 @@ class Settings(BaseSettings):
 
         if parsed_instances:
             deduped: list[dict[str, Any]] = []
-            seen: set[str] = set()
+            seen_ids: set[str] = set()
             for item in parsed_instances:
-                key = str(item.get("instance_key") or "").strip().lower()
-                if not key or key in seen:
+                instance_id = str(item.get("instance_id") or "").strip().lower()
+                if not instance_id or instance_id in seen_ids:
                     continue
                 deduped.append(item)
-                seen.add(key)
+                seen_ids.add(instance_id)
             if deduped:
-                return deduped
+                # Forward model:
+                # - instance_id: stable instance identity
+                # - role: primary/secondary/additional
+                # - priority: explicit per-type fallback order
+                # Compatibility output:
+                # - is_4k remains derived (primary=False, secondary/additional=True)
+                rank_by_type: dict[str, int] = {"radarr": 0, "sonarr": 0}
+                normalized: list[dict[str, Any]] = []
+                for item in deduped:
+                    arr_type = str(item.get("arr_type") or "").strip().lower()
+                    rank = int(rank_by_type.get(arr_type, 0))
+                    rank_by_type[arr_type] = rank + 1
+                    row = dict(item)
+                    role = str(row.get("role") or "").strip().lower()
+                    if role not in {"primary", "secondary", "additional"}:
+                        role = "primary" if rank == 0 else ("secondary" if rank == 1 else "additional")
+                    row["role"] = role
+                    if int(row.get("priority", -1)) < 0:
+                        row["priority"] = rank
+                    row["is_4k"] = role != "primary"
+                    normalized.append(row)
+                return sorted(
+                    normalized,
+                    key=lambda item: (
+                        str(item.get("arr_type") or "").strip().lower(),
+                        int(item.get("priority", 0)),
+                    ),
+                )
 
-        instances: list[dict[str, Any]] = []
-        if self.RADARR_URL and self.RADARR_API_KEY:
-            instances.append(
-                {
-                    "instance_key": "radarr_std",
-                    "arr_type": "radarr",
-                    "url": self.RADARR_URL,
-                    "api_key": self.RADARR_API_KEY,
-                    "label": "radarr_std",
-                    "is_4k": False,
-                }
-            )
-        if self.RADARR_4K_URL and self.RADARR_4K_API_KEY:
-            instances.append(
-                {
-                    "instance_key": "radarr_4k",
-                    "arr_type": "radarr",
-                    "url": self.RADARR_4K_URL,
-                    "api_key": self.RADARR_4K_API_KEY,
-                    "label": "radarr_4k",
-                    "is_4k": True,
-                }
-            )
-        if self.SONARR_URL and self.SONARR_API_KEY:
-            instances.append(
-                {
-                    "instance_key": "sonarr_std",
-                    "arr_type": "sonarr",
-                    "url": self.SONARR_URL,
-                    "api_key": self.SONARR_API_KEY,
-                    "label": "sonarr_std",
-                    "is_4k": False,
-                }
-            )
-        if self.SONARR_4K_URL and self.SONARR_4K_API_KEY:
-            instances.append(
-                {
-                    "instance_key": "sonarr_4k",
-                    "arr_type": "sonarr",
-                    "url": self.SONARR_4K_URL,
-                    "api_key": self.SONARR_4K_API_KEY,
-                    "label": "sonarr_4k",
-                    "is_4k": True,
-                }
-            )
-        return instances
+        return []
 
     @property
     def radarr_instance_keys(self) -> tuple[str, ...]:
@@ -497,6 +454,17 @@ class Settings(BaseSettings):
         return mapping
 
     @property
+    def instance_roles(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for item in self.configured_arr_instances:
+            key = str(item.get("instance_key") or "").strip().lower()
+            if not key:
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            mapping[key] = role if role in {"primary", "secondary", "additional"} else "primary"
+        return mapping
+
+    @property
     def movie_instance_ranking(self) -> list[str]:
         """Get movie instance keys derived from configured ARR instances.
 
@@ -511,6 +479,75 @@ class Settings(BaseSettings):
         This no longer reads legacy TV_INSTANCE_RANKING environment values.
         """
         return [str(item.get("instance_key", "")).lower() for item in self.configured_arr_instances if str(item.get("arr_type", "")).lower() == "sonarr"]
+
+    def arr_instances_for_type(self, arr_type: str) -> list[dict[str, Any]]:
+        normalized = str(arr_type or "").strip().lower()
+        if normalized not in {"radarr", "sonarr"}:
+            return []
+        return [
+            item
+            for item in self.configured_arr_instances
+            if str(item.get("arr_type", "")).strip().lower() == normalized
+        ]
+
+    def resolve_arr_instance(
+        self,
+        arr_type: str,
+        *,
+        instance_id: str | None = None,
+        instance_key: str | None = None,
+        role: str | None = None,
+        is_4k: bool | None = None,
+    ) -> dict[str, Any] | None:
+        instances = self.arr_instances_for_type(arr_type)
+        if not instances:
+            return None
+
+        if instance_id:
+            target_id = str(instance_id).strip().lower()
+            for item in instances:
+                if str(item.get("instance_id") or "").strip().lower() == target_id:
+                    return item
+
+        if instance_key:
+            target = str(instance_key).strip().lower()
+            for item in instances:
+                if str(item.get("instance_key") or "").strip().lower() == target:
+                    return item
+
+        if role:
+            target_role = str(role).strip().lower()
+            if target_role in {"primary", "secondary", "additional"}:
+                for item in instances:
+                    if str(item.get("role") or "").strip().lower() == target_role:
+                        return item
+
+        if is_4k is not None:
+            for item in instances:
+                if bool(item.get("is_4k", False)) == bool(is_4k):
+                    return item
+
+        return instances[0]
+
+    def resolve_arr_endpoint(
+        self,
+        arr_type: str,
+        *,
+        instance_id: str | None = None,
+        instance_key: str | None = None,
+        role: str | None = None,
+        is_4k: bool | None = None,
+    ) -> tuple[str, str]:
+        item = self.resolve_arr_instance(
+            arr_type,
+            instance_id=instance_id,
+            instance_key=instance_key,
+            role=role,
+            is_4k=is_4k,
+        )
+        if not item:
+            return "", ""
+        return str(item.get("url") or "").strip(), str(item.get("api_key") or "").strip()
 
     class Config:
         env_file = str(dotenv_path)

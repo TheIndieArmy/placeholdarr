@@ -72,6 +72,16 @@ def init_db(engine=None, convert_ts: bool | None = None):
     """
     engine = engine or get_engine()
 
+    # Recover from hard resets that drop the default schema.
+    # Without this, create_all/add-only migrations can no-op/fail and leave
+    # the app running against a database with no tables.
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql('CREATE SCHEMA IF NOT EXISTS public')
+            conn.commit()
+    except Exception as ex:
+        logger.warning(f"Could not ensure public schema exists: {ex}", extra={'emoji_type': 'warning'})
+
     logger.info(f"Connecting to database at: {engine.url}", extra={'emoji_type': 'info'})
 
     inspector = inspect(engine)
@@ -239,46 +249,33 @@ def _migrate_instance_key_constraints(engine):
     """
     from sqlalchemy import text
     
-    # Derive default instance keys from configured instances or use hardcoded defaults for backward compat
-    def get_default_radarr_key(is_4k: bool) -> str:
-        for item in (getattr(settings, 'configured_arr_instances', []) or []):
-            if str(item.get('arr_type', '')).lower() == 'radarr' and bool(item.get('is_4k', False)) == is_4k:
-                return str(item.get('instance_key', '')).lower()
-        return 'radarr_4k' if is_4k else 'radarr_std'
-    
-    def get_default_sonarr_key(is_4k: bool) -> str:
-        for item in (getattr(settings, 'configured_arr_instances', []) or []):
-            if str(item.get('arr_type', '')).lower() == 'sonarr' and bool(item.get('is_4k', False)) == is_4k:
-                return str(item.get('instance_key', '')).lower()
-        return 'sonarr_4k' if is_4k else 'sonarr_std'
-    
-    radarr_std_key = get_default_radarr_key(False)
-    radarr_4k_key = get_default_radarr_key(True)
-    sonarr_std_key = get_default_sonarr_key(False)
-    sonarr_4k_key = get_default_sonarr_key(True)
-    from core.config import settings
+    # Derive default instance keys from configured instances using role/priority.
+    def get_default_key(arr_type: str, role: str) -> str:
+        item = settings.resolve_arr_instance(arr_type, role=role) or settings.resolve_arr_instance(arr_type)
+        if item:
+            return str(item.get('instance_key', '')).strip().lower()
+        return f"{arr_type}_{role}"
+
+    radarr_primary_key = get_default_key('radarr', 'primary')
+    sonarr_primary_key = get_default_key('sonarr', 'primary')
 
     steps = [
         # (description, SQL)
-        # 1. Backfill instance_key from is_4k for movie rows where it is NULL
+        # 1. Backfill instance_key for movie rows where it is NULL
         (
-            "Backfill movie.instance_key from is_4k",
+            "Backfill movie.instance_key from defaults",
             f"""
             UPDATE movie
-               SET instance_key = CASE WHEN is_4k THEN '{radarr_4k_key}'
-                                        ELSE '{radarr_std_key}'
-                                   END
+               SET instance_key = '{radarr_primary_key}'
              WHERE instance_key IS NULL OR instance_key = ''
             """,
         ),
-        # 2. Backfill instance_key from is_4k for series rows where it is NULL
+        # 2. Backfill instance_key for series rows where it is NULL
         (
-            "Backfill series.instance_key from is_4k",
+            "Backfill series.instance_key from defaults",
             f"""
             UPDATE series
-               SET instance_key = CASE WHEN is_4k THEN '{sonarr_4k_key}'
-                                        ELSE '{sonarr_std_key}'
-                                   END
+               SET instance_key = '{sonarr_primary_key}'
              WHERE instance_key IS NULL OR instance_key = ''
             """,
         ),

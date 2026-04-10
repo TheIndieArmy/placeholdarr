@@ -97,14 +97,16 @@ def _run_all_syncs():
     """
     run_id = f'scheduled:all:{uuid4()}'
     try:
-        if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
-            run_full_sync(dry_run=False, batch_size=50, types=('movie',), is_4k=False)
-        if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
-            run_full_sync(dry_run=False, batch_size=50, types=('movie',), is_4k=True)
-        if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
-            run_full_sync(dry_run=False, batch_size=50, types=('series',), is_4k=False)
-        if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None):
-            run_full_sync(dry_run=False, batch_size=50, types=('series',), is_4k=True)
+        for instance in (getattr(settings, 'configured_arr_instances', []) or []):
+            arr_type = str(instance.get('arr_type') or '').strip().lower()
+            if arr_type not in {'radarr', 'sonarr'}:
+                continue
+            run_full_sync(
+                dry_run=False,
+                batch_size=50,
+                types=('movie',) if arr_type == 'radarr' else ('series',),
+                instance_key=str(instance.get('instance_key') or '').strip().lower() or None,
+            )
         _run_self_healing_pipeline(run_id)
     except Exception:
         logger.exception('Scheduled full-sync failed')

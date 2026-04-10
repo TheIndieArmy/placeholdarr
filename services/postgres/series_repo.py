@@ -59,10 +59,12 @@ class SeriesRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_by_tvdbid(self, tvdbid: int, is_4k: bool, instance_key: str | None = None) -> Series | None:
+    def get_by_tvdbid(self, tvdbid: int, instance_key: str | None = None, instance_id: str | None = None) -> Series | None:
+        if instance_id:
+            return self.session.query(Series).filter_by(tvdbid=tvdbid, instance_id=str(instance_id).strip().lower()).first()
         if instance_key:
             return self.session.query(Series).filter_by(tvdbid=tvdbid, instance_key=str(instance_key).strip().lower()).first()
-        return self.session.query(Series).filter_by(tvdbid=tvdbid, is_4k=is_4k).first()
+        return self.session.query(Series).filter_by(tvdbid=tvdbid).first()
     
     def get_by_id(self, seriesid: int) -> Series | None:
         return self.session.query(Series).filter_by(id=seriesid).first()
@@ -88,33 +90,34 @@ class SeriesRepository:
             logger.error("Attempting to create Series without tvdbid. Mapped: %s Raw: %s", mapped, kwargs)
             raise ValueError("tvdbid is required to create Series")
 
+        if 'instance_id' not in mapped:
+            if 'instance_key' in mapped and mapped.get('instance_key'):
+                key = str(mapped.get('instance_key') or '').strip().lower()
+                item = settings.resolve_arr_instance('sonarr', instance_key=key) or {}
+                mapped['instance_id'] = str(item.get('instance_id') or f"sonarr:{key}").strip().lower()
+            else:
+                item = settings.resolve_arr_instance('sonarr', role='primary') or {}
+                mapped['instance_id'] = str(item.get('instance_id') or 'sonarr:primary').strip().lower()
+
         if 'instance_key' not in mapped:
-            is_4k = bool(mapped.get('is_4k', False))
-            # Derive from configured instances; fall back to hardcoded for backward compat
-            default_key = None
-            for item in (getattr(settings, 'configured_arr_instances', []) or []):
-                if str(item.get('arr_type', '')).lower() == 'sonarr' and bool(item.get('is_4k', False)) == is_4k:
-                    default_key = str(item.get('instance_key', '')).lower()
-                    break
-            if not default_key:
-                default_key = 'sonarr_4k' if is_4k else 'sonarr_std'
-            mapped['instance_key'] = default_key
+            item = settings.resolve_arr_instance('sonarr', instance_id=mapped.get('instance_id')) or settings.resolve_arr_instance('sonarr', role='primary') or {}
+            mapped['instance_key'] = str(item.get('instance_key') or 'sonarr_std').strip().lower()
 
         series = Series(**mapped)
         self.session.add(series)
         self.session.commit()
         return series
 
-    def delete_by_tvdbid(self, tvdbid: int, is_4k: bool = False, instance_key: str | None = None) -> bool:
-        series = self.get_by_tvdbid(tvdbid, is_4k, instance_key=instance_key)
+    def delete_by_tvdbid(self, tvdbid: int, instance_key: str | None = None, instance_id: str | None = None) -> bool:
+        series = self.get_by_tvdbid(tvdbid, instance_key=instance_key, instance_id=instance_id)
         if series:
             self.session.delete(series)
             self.session.commit()
             return True
         return False
 
-    def update(self, tvdbid: int, **kwargs) -> Series | None:
-        series = self.get_by_tvdbid(tvdbid)
+    def update(self, tvdbid: int, instance_id: str | None = None, instance_key: str | None = None, **kwargs) -> Series | None:
+        series = self.get_by_tvdbid(tvdbid, instance_key=instance_key, instance_id=instance_id)
         if series:
             allowed = {c.name for c in Series.__table__.columns}
             mapped = _map_keys_to_allowed(kwargs, allowed)

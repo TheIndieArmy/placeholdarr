@@ -19,6 +19,11 @@ from services.startup_gate import startup_sync_complete
 import asyncio
 import threading
 from sqlalchemy.sql import text
+from sqlalchemy import inspect
+
+
+_runtime_services_lock = threading.Lock()
+_runtime_services_started = False
 
 
 def _onboarding_is_complete() -> bool:
@@ -28,7 +33,81 @@ def _onboarding_is_complete() -> bool:
         status = get_onboarding_status()
         return bool(status.get('setup_complete'))
     except Exception as e:
-        logger.warning(f"Failed to read onboarding status; defaulting to startup allowed: {e}", extra={'emoji_type': 'warning'})
+        logger.warning(f"Failed to read onboarding status; defaulting to onboarding-incomplete: {e}", extra={'emoji_type': 'warning'})
+        return False
+
+
+def _ensure_core_tables(engine) -> bool:
+    """Best-effort schema readiness check for core runtime tables."""
+    required = {'app_config', 'movie', 'series', 'episode', 'job'}
+    try:
+        existing = set(inspect(engine).get_table_names())
+    except Exception as e:
+        logger.warning(f"Failed to inspect tables after init_db: {e}", extra={'emoji_type': 'warning'})
+        existing = set()
+
+    missing = sorted(required - existing)
+    if not missing:
+        return True
+
+    logger.warning(
+        f"Core tables missing after init_db: {missing}; attempting direct create_all fallback",
+        extra={'emoji_type': 'warning'},
+    )
+    try:
+        from services.postgres.db import Base
+        import services.postgres.models  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+        existing = set(inspect(engine).get_table_names())
+        missing = sorted(required - existing)
+        if not missing:
+            logger.info("Recovered missing core tables via direct create_all fallback", extra={'emoji_type': 'success'})
+            return True
+    except Exception as e:
+        logger.error(f"Direct create_all fallback failed: {e}", extra={'emoji_type': 'error'})
+
+    logger.error(f"Core tables still missing after recovery attempts: {missing}", extra={'emoji_type': 'error'})
+    return False
+
+
+def start_runtime_background_services(reason: str = 'startup') -> bool:
+    """Start schedulers/workers/queue monitor once per process."""
+    global _runtime_services_started
+    with _runtime_services_lock:
+        if _runtime_services_started:
+            logger.info(
+                f"Runtime background services already running; skipping duplicate start (reason={reason})",
+                extra={'emoji_type': 'info'},
+            )
+            return False
+
+        # --- Schedule all Radarr/Sonarr syncs (startup and cron) ---
+        schedule_all_syncs()
+
+        # Start worker loops from the main process for deterministic behavior.
+        try:
+            from services.worker import run_loop as _worker_run_loop
+            try:
+                worker_count = int(getattr(settings, 'WORKER_COUNT', 4) or 4)
+            except Exception:
+                worker_count = 4
+            for i in range(max(1, worker_count)):
+                t = threading.Thread(target=_worker_run_loop, name=f'worker-loop-{i+1}', daemon=True)
+                t.start()
+                logger.info(f'Worker loop thread started: worker-loop-{i+1}', extra={'emoji_type': 'gear'})
+        except Exception as e:
+            logger.error(f'Failed to start worker loop(s): {e}', extra={'emoji_type': 'error'})
+
+        try:
+            start_queue_monitor_producer()
+        except Exception as e:
+            logger.error(f'Failed to start queue monitor producer: {e}', extra={'emoji_type': 'error'})
+
+        _runtime_services_started = True
+        logger.info(
+            f"Runtime background services started (reason={reason})",
+            extra={'emoji_type': 'success'},
+        )
         return True
 
 # Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
@@ -127,6 +206,14 @@ async def lifespan(app: FastAPI):
 
         engine = get_engine()
         init_db(engine)
+        if not _ensure_core_tables(engine):
+            startup_sync_complete.set()
+            logger.error(
+                "Database schema is not ready; deferring startup pipelines to avoid crashing",
+                extra={'emoji_type': 'error'},
+            )
+            yield
+            return
 
         try:
             from services.app_config import apply_persisted_settings
@@ -144,7 +231,7 @@ async def lifespan(app: FastAPI):
         if not onboarding_complete:
             startup_sync_complete.set()
             logger.info(
-                'Onboarding incomplete; startup sync, schedulers, workers, and queue monitoring are deferred until setup is completed and the app is restarted.',
+                'Onboarding incomplete; startup sync, schedulers, workers, and queue monitoring are deferred until setup is completed.',
                 extra={'emoji_type': 'info'},
             )
             yield
@@ -160,10 +247,14 @@ async def lifespan(app: FastAPI):
         try:
             # Reset queued content to PENDING so startup seeding doesn't leave items stranded
             # Movies, Series, and Episodes may be queued from previous runs; migrate them to PENDING.
-            session.query(Movie).filter(Movie.status == 'QUEUED').update(
-                {Movie.status: 'PENDING'},
-                synchronize_session=False
-            )
+            try:
+                session.query(Movie).filter(Movie.status == 'QUEUED').update(
+                    {Movie.status: 'PENDING'},
+                    synchronize_session=False
+                )
+            except Exception as e:
+                session.rollback()
+                logger.warning(f"Skipping movie queued reset because movie table is unavailable: {e}", extra={'emoji_type': 'warning'})
             try:
                 session.query(Series).filter(Series.status == 'QUEUED').update(
                     {Series.status: 'PENDING'},
@@ -206,19 +297,7 @@ async def lifespan(app: FastAPI):
         finally:
             session.close()
 
-        for name, sched in globals().items():
-            if name.endswith('_scheduler') and hasattr(sched, 'start'):
-                sched.start()
-                logger.info(f"Started scheduler: {name}", extra={'emoji_type': 'gear'})
-
-        # Note: background job worker startup is intentionally omitted here.
-        # Worker startup and job processing are controlled separately during
-        # development so the database-seeding (list-capture) can run without
-        # triggering downstream processing.
-
-
-        # --- Schedule all Radarr syncs (startup and cron) ---
-        schedule_all_syncs()
+        start_runtime_background_services(reason='lifespan_onboarding_complete')
 
         # Execute startup source-of-truth orchestration in a background thread so
         # Uvicorn can start accepting webhook events immediately. Workers wait on
@@ -304,12 +383,7 @@ async def lifespan(app: FastAPI):
 
             if attempt == 0:
                 from core.config import settings
-                arrs_configured = any([
-                    getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None),
-                    getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None),
-                    getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None),
-                    getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None),
-                ])
+                arrs_configured = bool(getattr(settings, 'configured_arr_instances', []) or [])
                 if not arrs_configured:
                     logger.warning("No *arr services configured in .env", extra={'emoji_type': 'warning'})
 
@@ -322,26 +396,6 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(arr_webhook_check_loop())
     else:
         logger.debug('No webhook checker available (services_old.integrations missing); skipping arr webhook loop', extra={'emoji_type': 'debug'})
-    # After startup seeding and scheduling, start the worker loop(s).
-    # We always start workers from the main process so behavior is deterministic for users.
-    try:
-        from services.worker import run_loop as _worker_run_loop
-        try:
-            worker_count = int(getattr(settings, 'WORKER_COUNT', 4) or 4)
-        except Exception:
-            worker_count = 4
-        for i in range(max(1, worker_count)):
-            t = threading.Thread(target=_worker_run_loop, name=f'worker-loop-{i+1}', daemon=True)
-            t.start()
-            logger.info(f'Worker loop thread started: worker-loop-{i+1}', extra={'emoji_type': 'gear'})
-    except Exception as e:
-        logger.error(f'Failed to start worker loop(s): {e}', extra={'emoji_type': 'error'})
-
-    try:
-        start_queue_monitor_producer()
-    except Exception as e:
-        logger.error(f'Failed to start queue monitor producer: {e}', extra={'emoji_type': 'error'})
-
     yield
 
     try:
@@ -360,6 +414,17 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         payload = await request.json()
         instance = request.query_params.get("instance", "").strip() or None
+
+        # During onboarding, accept webhook calls but intentionally ignore them.
+        # Post-onboarding startup full sync is the source of truth and avoids
+        # processing transient events while settings are still being configured.
+        if not _onboarding_is_complete():
+            logger.info(
+                f"Webhook accepted but ignored because onboarding is incomplete instance={instance or 'unknown'}",
+                extra={'emoji_type': 'info'},
+            )
+            return {"status": "accepted", "ignored": True, "reason": "onboarding_incomplete"}
+
         try:
             from services.handlers import handle_webhook as new_handle, validate_webhook_payload
         except Exception:

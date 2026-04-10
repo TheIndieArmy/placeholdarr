@@ -23,71 +23,44 @@ class FullSyncRunRef:
     run_id: str
 
 
-def _create_run(content_type: str, is_4k: bool = False, run_note: str | None = None) -> FullSyncRunRef:
-    suffix = '4k' if is_4k else 'standard'
+def _create_run(content_type: str, is_secondary: bool = False, run_note: str | None = None, instance_key: str | None = None) -> FullSyncRunRef:
+    suffix = 'secondary' if is_secondary else 'primary'
     run_id = f'fullsync:{content_type}:{suffix}:{uuid.uuid4()}'
     sync_types = ('movie',) if content_type == 'movie' else ('series',)
     logger.info(
         f"Starting startup {content_type} fullsync ({suffix}) run {run_id} ({run_note or 'no note'})",
         extra={'emoji_type': 'gear'},
     )
-    run_full_sync(dry_run=False, types=sync_types, is_4k=is_4k)
+    run_full_sync(dry_run=False, types=sync_types, instance_key=instance_key)
     logger.info(f"Finished startup {content_type} fullsync ({suffix}) run {run_id}", extra={'emoji_type': 'success'})
     return FullSyncRunRef(run_id=run_id)
 
 
 def capture_movies_fullsync_and_create_run(run_note: str | None = None) -> FullSyncRunRef:
-    return _create_run('movie', is_4k=False, run_note=run_note)
+    return _create_run('movie', is_secondary=False, run_note=run_note)
 
 
 def capture_series_fullsync_and_create_run(run_note: str | None = None) -> FullSyncRunRef:
-    return _create_run('series', is_4k=False, run_note=run_note)
+    return _create_run('series', is_secondary=False, run_note=run_note)
 
 
 def _configured_arr_instances() -> list[dict]:
     instances: list[dict] = []
-    if getattr(settings, 'RADARR_URL', None) and getattr(settings, 'RADARR_API_KEY', None):
+    for item in (getattr(settings, 'configured_arr_instances', []) or []):
+        arr_type = str(item.get('arr_type') or '').strip().lower()
+        instance_key = str(item.get('instance_key') or '').strip().lower()
+        base_url = str(item.get('url') or '').strip()
+        api_key = str(item.get('api_key') or '').strip()
+        if arr_type not in {'radarr', 'sonarr'} or not instance_key or not base_url or not api_key:
+            continue
         instances.append(
             {
-                'instance_key': settings.RADARR_STD_INSTANCE_KEY,
-                'arr_type': 'radarr',
-                'content_type': 'movie',
-                'base_url': settings.RADARR_URL,
-                'api_key': settings.RADARR_API_KEY,
-                'is_4k': False,
-            }
-        )
-    if getattr(settings, 'RADARR_4K_URL', None) and getattr(settings, 'RADARR_4K_API_KEY', None):
-        instances.append(
-            {
-                'instance_key': settings.RADARR_4K_INSTANCE_KEY,
-                'arr_type': 'radarr',
-                'content_type': 'movie',
-                'base_url': settings.RADARR_4K_URL,
-                'api_key': settings.RADARR_4K_API_KEY,
-                'is_4k': True,
-            }
-        )
-    if getattr(settings, 'SONARR_URL', None) and getattr(settings, 'SONARR_API_KEY', None):
-        instances.append(
-            {
-                'instance_key': settings.SONARR_STD_INSTANCE_KEY,
-                'arr_type': 'sonarr',
-                'content_type': 'series',
-                'base_url': settings.SONARR_URL,
-                'api_key': settings.SONARR_API_KEY,
-                'is_4k': False,
-            }
-        )
-    if getattr(settings, 'SONARR_4K_URL', None) and getattr(settings, 'SONARR_4K_API_KEY', None):
-        instances.append(
-            {
-                'instance_key': settings.SONARR_4K_INSTANCE_KEY,
-                'arr_type': 'sonarr',
-                'content_type': 'series',
-                'base_url': settings.SONARR_4K_URL,
-                'api_key': settings.SONARR_4K_API_KEY,
-                'is_4k': True,
+                'instance_key': instance_key,
+                'arr_type': arr_type,
+                'content_type': 'movie' if arr_type == 'radarr' else 'series',
+                'base_url': base_url,
+                'api_key': api_key,
+                'role': str(item.get('role') or 'primary').strip().lower() or 'primary',
             }
         )
     return instances
@@ -153,12 +126,14 @@ def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -
     try:
         for instance in instances:
             stats['instances'] += 1
-            suffix = '4k' if instance['is_4k'] else 'standard'
+            is_secondary = str(instance.get('role') or 'primary').strip().lower() != 'primary'
+            suffix = 'secondary' if is_secondary else 'primary'
             try:
                 run = _create_run(
                     instance['content_type'],
-                    is_4k=instance['is_4k'],
+                    is_secondary=is_secondary,
                     run_note=f"startup {instance['arr_type']} {suffix} fullsync",
+                    instance_key=instance['instance_key'],
                 )
                 run_ids.append(run.run_id)
                 row = _get_or_create_arr_state(session, instance['instance_key'], instance['arr_type'])
@@ -208,7 +183,6 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             target_ids,
                             base_url=instance['base_url'],
                             api_key=instance['api_key'],
-                            is_4k=bool(instance['is_4k']),
                             instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
@@ -224,7 +198,6 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             target_ids,
                             base_url=instance['base_url'],
                             api_key=instance['api_key'],
-                            is_4k=bool(instance['is_4k']),
                             instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1

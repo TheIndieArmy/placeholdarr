@@ -28,18 +28,19 @@ def _window_bounds(now_date: date, lookahead_days: int) -> tuple[date, date]:
     return (now_date - timedelta(days=_PAST_DAYS), now_date + timedelta(days=future_days))
 
 
-def _iter_calendar_endpoints() -> list[tuple[str, str, str, bool]]:
-    endpoints: list[tuple[str, str, str, bool]] = []
+def _iter_calendar_endpoints() -> list[tuple[str, str, str, str, str]]:
+    endpoints: list[tuple[str, str, str, str, str]] = []
 
-    if getattr(settings, "RADARR_URL", None) and getattr(settings, "RADARR_API_KEY", None):
-        endpoints.append(("movie", settings.RADARR_URL, settings.RADARR_API_KEY, False))
-    if getattr(settings, "RADARR_4K_URL", None) and getattr(settings, "RADARR_4K_API_KEY", None):
-        endpoints.append(("movie", settings.RADARR_4K_URL, settings.RADARR_4K_API_KEY, True))
-
-    if getattr(settings, "SONARR_URL", None) and getattr(settings, "SONARR_API_KEY", None):
-        endpoints.append(("series", settings.SONARR_URL, settings.SONARR_API_KEY, False))
-    if getattr(settings, "SONARR_4K_URL", None) and getattr(settings, "SONARR_4K_API_KEY", None):
-        endpoints.append(("series", settings.SONARR_4K_URL, settings.SONARR_4K_API_KEY, True))
+    for item in (getattr(settings, "configured_arr_instances", []) or []):
+        arr_type = str(item.get("arr_type") or "").strip().lower()
+        url = str(item.get("url") or "").strip()
+        api_key = str(item.get("api_key") or "").strip()
+        instance_key = str(item.get("instance_key") or "").strip().lower()
+        instance_id = str(item.get("instance_id") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"} or not url or not api_key or not instance_key:
+            continue
+        content_type = "movie" if arr_type == "radarr" else "series"
+        endpoints.append((content_type, url, api_key, instance_key, instance_id))
 
     return endpoints
 
@@ -66,7 +67,7 @@ def run_calendar_date_refresh() -> dict:
 
     session = get_session()
     try:
-        for content_type, base_url, api_key, is_4k in _iter_calendar_endpoints():
+        for content_type, base_url, api_key, instance_key, instance_id in _iter_calendar_endpoints():
             if content_type == "movie":
                 rows = fetch_radarr_calendar(start_date, end_date, base_url, api_key)
                 for row in rows:
@@ -76,7 +77,7 @@ def run_calendar_date_refresh() -> dict:
                         continue
                     stats["movie_rows_seen"] += 1
 
-                    query = session.query(Movie).filter(Movie.is_4k == bool(is_4k))
+                    query = session.query(Movie).filter(Movie.instance_key == instance_key)
                     if radarr_id:
                         movie = query.filter(Movie.radarrid == int(radarr_id)).first()
                     else:
@@ -115,7 +116,7 @@ def run_calendar_date_refresh() -> dict:
                         session.query(Episode)
                         .join(Season, Episode.season_id == Season.id)
                         .join(Series, Season.series_id == Series.id)
-                        .filter(and_(Episode.sonarrid == int(episode_sonarr_id), Series.is_4k == bool(is_4k)))
+                        .filter(and_(Episode.sonarrid == int(episode_sonarr_id), Series.instance_key == instance_key))
                         .first()
                     )
                     if not episode:

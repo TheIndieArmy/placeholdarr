@@ -5,41 +5,43 @@ class MovieRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_by_tmdbid(self, tmdbid: int, is_4k: bool = False, instance_key: str | None = None) -> Movie | None:
+    def get_by_tmdbid(self, tmdbid: int, instance_key: str | None = None, instance_id: str | None = None) -> Movie | None:
+        if instance_id:
+            return self.session.query(Movie).filter_by(tmdbid=tmdbid, instance_id=str(instance_id).strip().lower()).first()
         if instance_key:
             return self.session.query(Movie).filter_by(tmdbid=tmdbid, instance_key=str(instance_key).strip().lower()).first()
-        return self.session.query(Movie).filter_by(tmdbid=tmdbid, is_4k=is_4k).first()
+        return self.session.query(Movie).filter_by(tmdbid=tmdbid).first()
     
     def get_by_id(self, movieid: int) -> Movie | None:
         return self.session.query(Movie).filter_by(id=movieid).first()
 
     def add(self, **kwargs) -> Movie:
+        if 'instance_id' not in kwargs:
+            if 'instance_key' in kwargs and kwargs.get('instance_key'):
+                key = str(kwargs.get('instance_key') or '').strip().lower()
+                item = settings.resolve_arr_instance('radarr', instance_key=key) or {}
+                kwargs['instance_id'] = str(item.get('instance_id') or f"radarr:{key}").strip().lower()
+            else:
+                item = settings.resolve_arr_instance('radarr', role='primary') or {}
+                kwargs['instance_id'] = str(item.get('instance_id') or 'radarr:primary').strip().lower()
         if 'instance_key' not in kwargs:
-            is_4k = bool(kwargs.get('is_4k', False))
-            # Derive from configured instances; fall back to hardcoded for backward compat
-            default_key = None
-            for item in (getattr(settings, 'configured_arr_instances', []) or []):
-                if str(item.get('arr_type', '')).lower() == 'radarr' and bool(item.get('is_4k', False)) == is_4k:
-                    default_key = str(item.get('instance_key', '')).lower()
-                    break
-            if not default_key:
-                default_key = 'radarr_4k' if is_4k else 'radarr_std'
-            kwargs['instance_key'] = default_key
+            item = settings.resolve_arr_instance('radarr', instance_id=kwargs.get('instance_id')) or settings.resolve_arr_instance('radarr', role='primary') or {}
+            kwargs['instance_key'] = str(item.get('instance_key') or 'radarr_std').strip().lower()
         movie = Movie(**kwargs)
         self.session.add(movie)
         self.session.commit()
         return movie
 
-    def delete_by_tmdbid(self, tmdbid: int) -> bool:
-        movie = self.get_by_tmdbid(tmdbid)
+    def delete_by_tmdbid(self, tmdbid: int, instance_id: str | None = None, instance_key: str | None = None) -> bool:
+        movie = self.get_by_tmdbid(tmdbid, instance_id=instance_id, instance_key=instance_key)
         if movie:
             self.session.delete(movie)
             self.session.commit()
             return True
         return False
 
-    def update(self, tmdbid: int, **kwargs) -> Movie | None:
-        movie = self.get_by_tmdbid(tmdbid)
+    def update(self, tmdbid: int, instance_id: str | None = None, instance_key: str | None = None, **kwargs) -> Movie | None:
+        movie = self.get_by_tmdbid(tmdbid, instance_id=instance_id, instance_key=instance_key)
         if movie:
             for k, v in kwargs.items():
                 setattr(movie, k, v)

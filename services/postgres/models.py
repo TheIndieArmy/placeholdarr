@@ -14,15 +14,16 @@ class Movie(Base):
     __tablename__ = "movie"
     __table_args__ = (
         Index('ix_movie_determination', 'determination'),
-        Index('ux_movie_tmdbid_instance_key', 'tmdbid', 'instance_key', unique=True),
+        Index('ux_movie_tmdbid_instance_id', 'tmdbid', 'instance_id', unique=True),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     tmdbid = Column(Integer, nullable=False)
-    # ARR instance key for this row (for example: radarr_std, radarr_4k)
+    # Canonical ARR instance identity for this row.
+    instance_id = Column(String, nullable=False, default='radarr:primary')
+    # ARR instance key for this row (for example: radarr_primary, radarr_secondary)
     instance_key = Column(String, nullable=False, default='radarr_std')
-    is_4k  = Column(Boolean, default=False)
     # New preferred placeholder folder (where we'd create a placeholder)
     placeholder_folder = Column(String, nullable=True)
     # Radarr configured library path (the folder configured in Radarr for the movie)
@@ -93,6 +94,13 @@ class Movie(Base):
     last_found_in_radarr = Column(DateTime(timezone=True), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='movie')
+
+    @hybrid_property
+    def is_4k(self) -> bool:
+        """Compatibility shim derived from instance identity (no dedicated DB column)."""
+        key = str(getattr(self, 'instance_key', '') or '').strip().lower()
+        instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
+        return ('4k' in key) or key.endswith('_secondary') or instance_id.endswith(':secondary')
 
     def __repr__(self):
         return (
@@ -319,15 +327,16 @@ class Series(Base):
     __tablename__ = "series"
     __table_args__ = (
         Index('ix_series_plex_dummy_id', 'plex_dummy_id'),
-        Index('ux_series_tvdbid_instance_key', 'tvdbid', 'instance_key', unique=True),
+        Index('ux_series_tvdbid_instance_id', 'tvdbid', 'instance_id', unique=True),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String, nullable=False)
     year = Column(Integer, nullable=False)
     tvdbid = Column(Integer, nullable=False)
-    # ARR instance key for this row (for example: sonarr_std, sonarr_4k)
+    # Canonical ARR instance identity for this row.
+    instance_id = Column(String, nullable=False, default='sonarr:primary')
+    # ARR instance key for this row (for example: sonarr_primary, sonarr_secondary)
     instance_key = Column(String, nullable=False, default='sonarr_std')
-    is_4k  = Column(Boolean, default=False)
     # preferred placeholder folder for series-level placeholders
     placeholder_folder = Column(String, nullable=True)
     sonarrpath = Column(String, nullable=True)
@@ -375,6 +384,13 @@ class Series(Base):
 
     subflows = relationship('SubFlow', back_populates='series')
     season = relationship('Season', back_populates='series')
+
+    @hybrid_property
+    def is_4k(self) -> bool:
+        """Compatibility shim derived from instance identity (no dedicated DB column)."""
+        key = str(getattr(self, 'instance_key', '') or '').strip().lower()
+        instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
+        return ('4k' in key) or key.endswith('_secondary') or instance_id.endswith(':secondary')
 
     def __repr__(self):
         return (

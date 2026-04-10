@@ -40,6 +40,14 @@ def _build_endpoint(base_url: str, resource: str) -> str:
     return f"{root}/api/v3/{resource.lstrip('/')}"
 
 
+def _default_radarr_endpoint() -> tuple[str, str]:
+    return settings.resolve_arr_endpoint("radarr", role="primary")
+
+
+def _default_sonarr_endpoint() -> tuple[str, str]:
+    return settings.resolve_arr_endpoint("sonarr", role="primary")
+
+
 def _get_json(url: str, params: dict, timeout: int = 30):
     safe_url = url
     try:
@@ -131,8 +139,8 @@ def _request_json(
 
 
 def fetch_radarr_movies(url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
-    url = url or settings.RADARR_URL
-    api_key = api_key or settings.RADARR_API_KEY
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -149,8 +157,8 @@ def fetch_radarr_movies(url: Optional[str] = None, api_key: Optional[str] = None
 
 def fetch_radarr_movie(movie_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Dict]:
     """Fetch one Radarr movie by id."""
-    url = url or settings.RADARR_URL
-    api_key = api_key or settings.RADARR_API_KEY
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key or not movie_id:
         return None
 
@@ -168,8 +176,8 @@ def fetch_radarr_movie(movie_id: int, url: Optional[str] = None, api_key: Option
 
 
 def fetch_sonarr_series(url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -186,8 +194,8 @@ def fetch_sonarr_series(url: Optional[str] = None, api_key: Optional[str] = None
 
 def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Dict]:
     """Fetch one Sonarr series by id."""
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:
         return None
 
@@ -205,8 +213,8 @@ def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key:
 
 
 def fetch_sonarr_episodes(series_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -227,8 +235,8 @@ def fetch_sonarr_episodefile(episode_file_id: int, url: Optional[str] = None, ap
     Used as a conditional fallback when /episode returns episodeFileId but omits
     an embedded episodeFile object.
     """
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not episode_file_id:
         return None
 
@@ -256,8 +264,8 @@ def fetch_radarr_calendar(
     Returns movie payloads that include release/date metadata without requiring
     a full movie index pull.
     """
-    url = url or settings.RADARR_URL
-    api_key = api_key or settings.RADARR_API_KEY
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -292,8 +300,8 @@ def fetch_sonarr_calendar(
 
     Returns episode payloads with airDate metadata and series identifiers.
     """
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -376,8 +384,8 @@ def fetch_radarr_history(
     url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> List[Dict]:
-    url = url or settings.RADARR_URL
-    api_key = api_key or settings.RADARR_API_KEY
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -400,8 +408,8 @@ def fetch_sonarr_history(
     url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> List[Dict]:
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return []
 
@@ -423,8 +431,8 @@ def trigger_radarr_movie_search(
     api_key: Optional[str] = None,
 ) -> bool:
     """Trigger a targeted Radarr movie search command."""
-    url = url or settings.RADARR_URL
-    api_key = api_key or settings.RADARR_API_KEY
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key or not movie_id:
         return False
 
@@ -442,8 +450,8 @@ def set_radarr_movie_monitored(
     api_key: Optional[str] = None,
 ) -> bool:
     """Set Radarr monitored state for a movie by id."""
-    url = url or settings.RADARR_URL
-    api_key = api_key or settings.RADARR_API_KEY
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key or not movie_id:
         return False
 
@@ -464,8 +472,8 @@ def fetch_sonarr_episode_item(
     api_key: Optional[str] = None,
 ) -> Optional[Dict]:
     """Fetch one Sonarr episode by id."""
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not episode_id:
         return None
 
@@ -490,8 +498,8 @@ def set_sonarr_episode_monitored(
     api_key: Optional[str] = None,
 ) -> Dict[str, int]:
     """Set monitored state for Sonarr episode ids one-by-one."""
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return {'updated': 0, 'failed': len(episode_ids or [])}
 
@@ -530,8 +538,8 @@ def set_sonarr_series_monitored(
     api_key: Optional[str] = None,
 ) -> bool:
     """Set series monitored state and optionally specific seasons."""
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:
         return False
 
@@ -567,8 +575,8 @@ def trigger_sonarr_search(
     api_key: Optional[str] = None,
 ) -> bool:
     """Trigger Sonarr search at episode, season, or series scope."""
-    url = url or settings.SONARR_URL
-    api_key = api_key or settings.SONARR_API_KEY
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:
         return False
 

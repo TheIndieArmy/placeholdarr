@@ -4,6 +4,7 @@ import calendar as _calendar
 import os
 import glob as _glob
 import re
+import threading
 import unicodedata
 from datetime import date, datetime, timezone, timedelta
 from typing import Any
@@ -25,6 +26,34 @@ from services.source_of_truth.calendar_phase import _compute_calendar_decision, 
 router = APIRouter()
 
 
+def _launch_post_onboarding_startup_sync() -> None:
+    def _runner() -> None:
+        from services.startup_gate import startup_sync_complete
+        try:
+            from main import start_runtime_background_services
+            from services.source_of_truth.startup import run_startup_source_of_truth
+
+            start_runtime_background_services(reason='post_onboarding_completion')
+
+            logger.info(
+                "Launching first-run startup sync after onboarding completion",
+                extra={"emoji_type": "gear"},
+            )
+            result = run_startup_source_of_truth()
+            logger.info(
+                "Post-onboarding startup sync completed"
+                f" mode={result.get('startup_sync_mode')}"
+                f" run_ids={result.get('run_ids') or []}",
+                extra={"emoji_type": "success"},
+            )
+        except Exception as exc:
+            logger.error(f"Post-onboarding startup sync failed: {exc}", extra={"emoji_type": "error"})
+        finally:
+            startup_sync_complete.set()
+
+    threading.Thread(target=_runner, name="post-onboarding-startup-sync", daemon=True).start()
+
+
 def _slugify_title(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode("ascii")
     lowered = normalized.lower()
@@ -33,7 +62,7 @@ def _slugify_title(text: str) -> str:
     return lowered.strip("-")
 
 
-def _arr_base_url(item_type: str, instance_key: str, is_4k: bool) -> str:
+def _arr_base_url(item_type: str, instance_key: str, instance_id: str | None = None) -> str:
     def _normalize_ui_base(url: str) -> str:
         normalized = str(url or "").rstrip("/")
         normalized = re.sub(r"/api(?:/v\d+)?$", "", normalized, flags=re.IGNORECASE)
@@ -48,13 +77,98 @@ def _arr_base_url(item_type: str, instance_key: str, is_4k: bool) -> str:
         if key and item_key == key and item_type_key == target_type:
             return _normalize_ui_base(str(item.get("url") or ""))
 
-    if item_type == "movie":
-        if is_4k or key == str(getattr(settings, "RADARR_4K_INSTANCE_KEY", "radarr_4k")).strip().lower():
-            return _normalize_ui_base(str(getattr(settings, "RADARR_4K_URL", "") or ""))
-        return _normalize_ui_base(str(getattr(settings, "RADARR_URL", "") or ""))
-    if is_4k or key == str(getattr(settings, "SONARR_4K_INSTANCE_KEY", "sonarr_4k")).strip().lower():
-        return _normalize_ui_base(str(getattr(settings, "SONARR_4K_URL", "") or ""))
-    return _normalize_ui_base(str(getattr(settings, "SONARR_URL", "") or ""))
+    base_url, _api_key = settings.resolve_arr_endpoint(target_type, instance_id=instance_id, instance_key=instance_key)
+    return _normalize_ui_base(base_url)
+
+
+def _arr_instance_maps() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in (getattr(settings, "configured_arr_instances", []) or []):
+        key = str(item.get("instance_key") or "").strip().lower()
+        instance_id = str(item.get("instance_id") or "").strip().lower()
+        entry = {
+            "instance_key": key,
+            "instance_id": instance_id,
+            "label": str(item.get("label") or key or instance_id).strip() or key or instance_id,
+            "arr_type": str(item.get("arr_type") or "").strip().lower(),
+            "role": str(item.get("role") or "").strip().lower(),
+            "url": str(item.get("url") or "").strip(),
+            "api_key": str(item.get("api_key") or "").strip(),
+        }
+        if key:
+            by_key[key] = entry
+        if instance_id:
+            by_id[instance_id] = entry
+    return by_key, by_id
+
+
+def _arr_instance_meta(instance_key: str | None = None, instance_id: str | None = None) -> dict[str, Any]:
+    by_key, by_id = _arr_instance_maps()
+    identity = str(instance_id or "").strip().lower()
+    if identity and identity in by_id:
+        return by_id[identity]
+    key = str(instance_key or "").strip().lower()
+    if key and key in by_key:
+        return by_key[key]
+    return {
+        "instance_key": key,
+        "instance_id": identity,
+        "label": key or identity,
+        "arr_type": "",
+        "role": "",
+        "url": "",
+        "api_key": "",
+    }
+
+
+def _legacy_is_4k(instance_meta: dict[str, Any]) -> bool:
+    return str(instance_meta.get("role") or "").strip().lower() != "primary"
+
+
+def _arr_endpoint_fingerprint() -> dict[str, tuple[str, str]]:
+    fingerprint: dict[str, tuple[str, str]] = {}
+    for item in (getattr(settings, "configured_arr_instances", []) or []):
+        instance_id = str(item.get("instance_id") or "").strip().lower()
+        key = str(item.get("instance_key") or "").strip().lower()
+        identity = instance_id or key
+        if not identity:
+            continue
+        url = str(item.get("url") or "").strip().rstrip("/")
+        api_key = str(item.get("api_key") or "").strip()
+        fingerprint[identity] = (url, api_key)
+    return fingerprint
+
+
+def _launch_arr_change_full_sync(reason: str) -> None:
+    def _runner() -> None:
+        try:
+            from services.source_of_truth.sync_runner import run_full_sync
+
+            logger.info(
+                f"Launching ARR-change startup sync reason={reason}",
+                extra={"emoji_type": "gear"},
+            )
+            run_count = 0
+            for item in (getattr(settings, "configured_arr_instances", []) or []):
+                arr_type = str(item.get("arr_type") or "").strip().lower()
+                if arr_type not in {"radarr", "sonarr"}:
+                    continue
+                run_full_sync(
+                    dry_run=False,
+                    batch_size=50,
+                    types=("movie",) if arr_type == "radarr" else ("series",),
+                    instance_key=str(item.get("instance_key") or "").strip().lower() or None,
+                )
+                run_count += 1
+            logger.info(
+                f"ARR-change full sync completed runs={run_count}",
+                extra={"emoji_type": "success"},
+            )
+        except Exception as exc:
+            logger.error(f"ARR-change startup sync failed: {exc}", extra={"emoji_type": "error"})
+
+    threading.Thread(target=_runner, name="arr-change-startup-sync", daemon=True).start()
 
 
 def _title_slug_from_payload(payload: dict | None, title: str) -> str:
@@ -65,8 +179,8 @@ def _title_slug_from_payload(payload: dict | None, title: str) -> str:
     return _slugify_title(title)
 
 
-def _arr_item_link(item_type: str, instance_key: str, is_4k: bool, title: str, payload: dict | None) -> str | None:
-    base_url = _arr_base_url(item_type=item_type, instance_key=instance_key, is_4k=is_4k)
+def _arr_item_link(item_type: str, instance_key: str, instance_id: str | None, title: str, payload: dict | None) -> str | None:
+    base_url = _arr_base_url(item_type=item_type, instance_key=instance_key, instance_id=instance_id)
     if not base_url:
         return None
     slug = _title_slug_from_payload(payload=payload, title=title)
@@ -1311,13 +1425,14 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
             .all()
         )
         for movie in movies:
+            instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
             movie_unresolved = (not bool(movie.has_file)) and (not bool(movie.has_placeholder))
             movie_is_future = movie_unresolved and movie.determination == "not_needed"
             movie_has_missing = movie_unresolved and not movie_is_future
             arr_link = _arr_item_link(
                 item_type="movie",
                 instance_key=movie.instance_key,
-                is_4k=bool(movie.is_4k),
+                instance_id=getattr(movie, "instance_id", None),
                 title=movie.title,
                 payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
             )
@@ -1330,8 +1445,10 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                     "year": movie.year,
                     "poster_url": movie.remote_poster,
                     "backdrop_url": movie.remote_fanart,
-                    "is_4k": bool(movie.is_4k),
+                    "is_4k": _legacy_is_4k(instance_meta),
                     "instance_key": movie.instance_key,
+                    "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
+                    "instance_label": instance_meta.get("label") or movie.instance_key,
                     "arr_link": arr_link,
                     "determination": movie.determination,
                     "status": movie.status,
@@ -1357,6 +1474,7 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
             .all()
         )
         for series in series_rows:
+            instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
             counts = series_episode_counts.get(
                 series.id,
                 {
@@ -1376,7 +1494,7 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
             arr_link = _arr_item_link(
                 item_type="series",
                 instance_key=series.instance_key,
-                is_4k=bool(series.is_4k),
+                instance_id=getattr(series, "instance_id", None),
                 title=series.title,
                 payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
             )
@@ -1389,8 +1507,10 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                     "year": series.year,
                     "poster_url": series.remote_poster,
                     "backdrop_url": series.remote_fanart or series.remote_banner,
-                    "is_4k": bool(series.is_4k),
+                    "is_4k": _legacy_is_4k(instance_meta),
                     "instance_key": series.instance_key,
+                    "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
+                    "instance_label": instance_meta.get("label") or series.instance_key,
                     "arr_link": arr_link,
                     "determination": None,
                     "status": series.status,
@@ -1427,10 +1547,11 @@ async def movie_detail(movie_id: int):
         arr_link = _arr_item_link(
             item_type="movie",
             instance_key=movie.instance_key,
-            is_4k=bool(movie.is_4k),
+            instance_id=getattr(movie, "instance_id", None),
             title=movie.title,
             payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
         )
+        instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
         return {
             "ok": True,
             "type": "movie",
@@ -1446,8 +1567,10 @@ async def movie_detail(movie_id: int):
             "studio": movie.radarr_studio,
             "ratings": movie.radarr_ratings or {},
             "collection": movie.radarr_collection,
-            "is_4k": bool(movie.is_4k),
+            "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": movie.instance_key,
+            "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
+            "instance_label": instance_meta.get("label") or movie.instance_key,
             "arr_link": arr_link,
             "imdbid": movie.imdbid,
             "tmdbid": movie.tmdbid,
@@ -1481,10 +1604,11 @@ async def series_detail(series_id: int):
         arr_link = _arr_item_link(
             item_type="series",
             instance_key=series.instance_key,
-            is_4k=bool(series.is_4k),
+            instance_id=getattr(series, "instance_id", None),
             title=series.title,
             payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
         )
+        instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
         seasons_raw = (
             session.query(Season)
             .filter(Season.series_id == series_id, Season.is_deleted == False)
@@ -1545,8 +1669,10 @@ async def series_detail(series_id: int):
             "genres": series.sonarr_genres or [],
             "network": series.sonarr_network,
             "ratings": series.sonarr_ratings or {},
-            "is_4k": bool(series.is_4k),
+            "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": series.instance_key,
+            "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
+            "instance_label": instance_meta.get("label") or series.instance_key,
             "arr_link": arr_link,
             "imdbid": series.imdbid,
             "tvdbid": series.tvdbid,
@@ -1616,10 +1742,11 @@ async def calendar_view(month: str = Query("")):
             arr_link = _arr_item_link(
                 item_type="movie",
                 instance_key=movie.instance_key,
-                is_4k=bool(movie.is_4k),
+                instance_id=getattr(movie, "instance_id", None),
                 title=movie.title,
                 payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
             )
+            movie_instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
             items_by_date.setdefault(release_date.isoformat(), []).append(
                 {
                     "id": f"movie-{movie.id}",
@@ -1634,7 +1761,7 @@ async def calendar_view(month: str = Query("")):
                     "reason": decision.reason,
                     "has_file": bool(movie.has_file),
                     "has_placeholder": bool(movie.has_placeholder),
-                    "is_4k": bool(movie.is_4k),
+                    "is_4k": _legacy_is_4k(movie_instance_meta),
                     "instance_key": movie.instance_key,
                     "arr_link": arr_link,
                     "release_type": release_type,
@@ -1659,7 +1786,7 @@ async def calendar_view(month: str = Query("")):
                 Series.id.label("series_id"),
                 Series.title.label("series_title"),
                 Series.instance_key.label("instance_key"),
-                Series.is_4k.label("is_4k"),
+                Series.instance_id.label("instance_id"),
                 Series.sonarr_payload_raw.label("sonarr_payload_raw"),
             )
             .join(Season, Season.id == Episode.season_id)
@@ -1691,10 +1818,11 @@ async def calendar_view(month: str = Query("")):
             arr_link = _arr_item_link(
                 item_type="series",
                 instance_key=episode.instance_key,
-                is_4k=bool(episode.is_4k),
+                instance_id=episode.instance_id,
                 title=episode.series_title,
                 payload=episode.sonarr_payload_raw if isinstance(episode.sonarr_payload_raw, dict) else None,
             )
+            episode_instance_meta = _arr_instance_meta(episode.instance_key, episode.instance_id)
             items_by_date.setdefault(air_date.isoformat(), []).append(
                 {
                     "id": f"episode-{episode.episode_id}",
@@ -1714,7 +1842,7 @@ async def calendar_view(month: str = Query("")):
                     "reason": decision.reason,
                     "has_file": bool(episode.has_file),
                     "has_placeholder": bool(episode.has_placeholder),
-                    "is_4k": bool(episode.is_4k),
+                    "is_4k": _legacy_is_4k(episode_instance_meta),
                     "instance_key": episode.instance_key,
                     "arr_link": arr_link,
                 }
@@ -1800,7 +1928,15 @@ async def settings_save(request: Request):
         f"Settings save request received: partial={partial} context={context or {}} keys={sorted(values.keys())}",
         extra={"emoji_type": "processing"},
     )
+    before_arr_fingerprint = _arr_endpoint_fingerprint()
+    was_setup_complete = bool(get_onboarding_status().get("setup_complete"))
     result = save_settings(values, partial=partial, context=context if isinstance(context, dict) else None)
+    after_arr_fingerprint = _arr_endpoint_fingerprint()
+    arr_endpoints_changed = before_arr_fingerprint != after_arr_fingerprint
+    if result.get("ok") and not partial and not was_setup_complete and bool((result.get("status") or {}).get("setup_complete")):
+        _launch_post_onboarding_startup_sync()
+    elif result.get("ok") and not partial and arr_endpoints_changed:
+        _launch_arr_change_full_sync(reason="arr_endpoint_changed")
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

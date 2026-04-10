@@ -77,7 +77,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
       notes: [
         "Placeholdarr currently supports up to 2 Radarr instances per deployment",
         "Each instance must have its own webhook with the correct instance parameter",
-        "The instance parameter is auto-generated from your Radarr server name",
+        "The instance parameter uses each instance's stable webhook key shown in ARR settings",
       ],
     },
     {
@@ -122,7 +122,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
       notes: [
         "Placeholdarr currently supports up to 2 Sonarr instances per deployment",
         "Each instance must have its own webhook with the correct instance parameter",
-        "The instance parameter is auto-generated from your Sonarr server name",
+        "The instance parameter uses each instance's stable webhook key shown in ARR settings",
       ],
     },
   ],

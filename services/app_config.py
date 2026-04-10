@@ -146,103 +146,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "RADARR_URL",
-            {
-                "section": "ARR Integrations",
-                "label": "Radarr URL",
-                "description": "Standard Radarr base URL, for example http://radarr.local:7878/api/v3 or http://radarr.local:7878 (both accepted). Leave blank if Radarr is not used.",
-                "type": "url",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "RADARR_API_KEY",
-            {
-                "section": "ARR Integrations",
-                "label": "Radarr API Key",
-                "description": "API key used to authenticate standard Radarr requests. Required when Radarr URL is configured.",
-                "type": "string",
-                "required": False,
-                "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
-            "RADARR_4K_URL",
-            {
-                "section": "ARR Integrations",
-                "label": "Radarr 4K URL",
-                "description": "Optional second Radarr instance URL for 4K media workflows. Leave blank to disable 4K Radarr support.",
-                "type": "url",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "RADARR_4K_API_KEY",
-            {
-                "section": "ARR Integrations",
-                "label": "Radarr 4K API Key",
-                "description": "API key for the optional 4K Radarr instance. Required only when Radarr 4K URL is configured.",
-                "type": "string",
-                "required": False,
-                "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
-            "SONARR_URL",
-            {
-                "section": "ARR Integrations",
-                "label": "Sonarr URL",
-                "description": "Standard Sonarr base URL, for example http://sonarr.local:8989/api/v3 or http://sonarr.local:8989 (both accepted). Leave blank if Sonarr is not used.",
-                "type": "url",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "SONARR_API_KEY",
-            {
-                "section": "ARR Integrations",
-                "label": "Sonarr API Key",
-                "description": "API key used to authenticate standard Sonarr requests. Required when Sonarr URL is configured.",
-                "type": "string",
-                "required": False,
-                "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
-            "SONARR_4K_URL",
-            {
-                "section": "ARR Integrations",
-                "label": "Sonarr 4K URL",
-                "description": "Optional second Sonarr instance URL for 4K media workflows. Leave blank to disable 4K Sonarr support.",
-                "type": "url",
-                "required": False,
-                "restart_required": False,
-            },
-        ),
-        (
-            "SONARR_4K_API_KEY",
-            {
-                "section": "ARR Integrations",
-                "label": "Sonarr 4K API Key",
-                "description": "API key for the optional 4K Sonarr instance. Required only when Sonarr 4K URL is configured.",
-                "type": "string",
-                "required": False,
-                "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
             "ARR_INSTANCES_JSON",
             {
                 "section": "ARR Integrations",
                 "label": "ARR Instances JSON (Advanced)",
-                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 2 Radarr and 2 Sonarr instances per deployment.",
+                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 2 Radarr and 2 Sonarr instances per deployment. Changing an instance URL or API key triggers a full resync; label-only changes do not.",
                 "type": "string",
                 "required": False,
                 "restart_required": False,
@@ -355,20 +263,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "CALENDAR_PLACEHOLDER_MODE",
-            {
-                "section": "Calendar",
-                "label": "TV placeholder granularity",
-                "description": "Episode: add placeholders as each episode enters the window. Season: add all known episodes in a season when any episode enters the window.",
-                "type": "choice",
-                "restart_required": False,
-                "options": [
-                    {"value": "episode", "label": "Episode — per episode as it enters lookahead"},
-                    {"value": "season", "label": "Season — whole season when one episode qualifies"},
-                ],
-            },
-        ),
-        (
             "ENABLE_COMING_SOON_COUNTDOWN",
             {
                 "section": "Calendar",
@@ -390,17 +284,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLAYBACK_COOLDOWN",
-            {
-                "section": "Playback",
-                "label": "Playback cooldown (seconds)",
-                "description": "Deduplication window for repeated playback events on the same title. Set to 0 to disable.",
-                "type": "int",
-                "min": 0,
-                "restart_required": False,
-            },
-        ),
-        (
             "TV_PLAY_MODE",
             {
                 "section": "Playback",
@@ -415,35 +298,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ],
             },
         ),
-        (
-            "MAX_MONITOR_TIME",
-            {
-                "section": "Playback",
-                "label": "Max monitor time (seconds)",
-                "description": "Maximum time a playback-triggered monitoring window remains active before cleanup.",
-                "type": "int",
-                "min": 1,
-                "restart_required": False,
-            },
-        ),
-        (
-            "AVAILABLE_CLEANUP_DELAY",
-            {
-                "section": "Playback",
-                "label": "Available cleanup delay (seconds)",
-                "description": "Delay before cleanup actions after content becomes available.",
-                "type": "int",
-                "min": 0,
-                "restart_required": False,
-            },
-        ),
         
         (
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
                 "label": "Movie placeholder search instance",
-                "description": "When a movie placeholder plays, which Radarr instance should be searched. Primary = standard instance only. Secondary = 4K instance only. Both = search all configured instances.",
+                "description": "When a movie placeholder plays, which Radarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
@@ -458,7 +319,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "TV placeholder search instance",
-                "description": "When a TV placeholder plays, which Sonarr instance should be searched. Primary = standard instance only. Secondary = 4K instance only. Both = search all configured instances.",
+                "description": "When a TV placeholder plays, which Sonarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
@@ -473,7 +334,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Movie real-file playback mode",
-                "description": "Applies when a real movie file is played. Match routes to the instance whose library path contains the file. Primary always searches the standard instance. Secondary always searches the 4K instance. Both searches all configured instances.",
+                "description": "Applies when a real movie file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
@@ -489,7 +350,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "TV real-file playback mode",
-                "description": "Applies when a real TV file is played. Match routes to the instance whose library path contains the file. Primary always searches the standard instance. Secondary always searches the 4K instance. Both searches all configured instances.",
+                "description": "Applies when a real TV file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
@@ -703,8 +564,6 @@ def _apply_runtime_library_defaults() -> None:
     # Keep 4K folders aligned to simplified layout so legacy call sites keep working.
     _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie)
     _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv)
-    _set_runtime_value("ENABLE_STANDARD_PROFILE", True)
-    _set_runtime_value("ENABLE_4K_PROFILE", False)
 
 
 def _parse_octal_mode(raw: Any, default: int = 0o777) -> int:
@@ -860,8 +719,6 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                 _set_runtime_value("TV_LIBRARY_FOLDER", tv_path)
                 _set_runtime_value("MOVIE_LIBRARY_4K_FOLDER", movie_path)
                 _set_runtime_value("TV_LIBRARY_4K_FOLDER", tv_path)
-                _set_runtime_value("ENABLE_STANDARD_PROFILE", True)
-                _set_runtime_value("ENABLE_4K_PROFILE", False)
 
         enable_plex = bool(validated.get("ENABLE_PLEX", getattr(settings, "ENABLE_PLEX", False)))
         if enable_plex:
