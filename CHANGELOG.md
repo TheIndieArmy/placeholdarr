@@ -9,12 +9,18 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Added
 - Added `OBSERVATION_MIN_CHUNKS_PER_PASS` to guarantee observation passes perform real placeholder checks before the pass time cap can stop them.
+- Added `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` to control conditional section-refresh fallback when path refresh + immediate observation still leaves unresolved placeholders.
+- Added `OBSERVATION_BULK_STRICT_KEYS_ONLY` and `OBSERVATION_STRICT_KEYS_MIN_PLACEHOLDERS` to gate strict snapshot-key candidate matching in larger observation passes.
+- Added observation pass metrics for `candidates`, `skipped_not_in_snapshot_keys`, and `strict_keys_only` mode to improve overlap and match-scope diagnostics.
 - Added Sonarr full-sync progress logging so long series/episode imports report ongoing progress during episode expansion.
 - Added Postgres health checks and app startup dependency ordering in Compose to reduce first-boot race conditions.
 
 ### Changed
 - Restored Plex to global path and section refresh fanout so placeholder creation and primer refreshes notify Plex again.
+- Added grouped path refresh orchestration (`Created` + `Deleted` batches) with a reusable section-fallback helper for media-server fanout.
 - Updated primer flow to run create -> refresh -> observe -> status projection for the exact placeholders it seeds, preventing Plex ingest ambiguity before hardlink materialization.
+- Updated primer and materializer fallback flow to trigger section refresh and re-observe unresolved placeholders when initial targeted refresh/observe does not fully resolve IDs.
+- Updated immediate fallback observations to allow title fallback where strict identity keys are not yet available from media-server snapshots.
 - Clarified materialization logging and documentation around the single-pass refresh/observe strategy used for large first-run syncs.
 - Updated Postgres storage mount path in Compose to use the Postgres 18 data layout.
 
@@ -23,6 +29,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - Fixed database readiness handling by retrying initial connections and creating the target database once Postgres becomes reachable.
 - Fixed observation passes that could consume their budget on snapshot setup and perform zero chunk checks.
 - Ignored local `.appdata` runtime state in Git.
+- Ignored workspace custom-agent state under `.github/agents` in Git.
 
 ## [0.8.5] - 2026-04-09
 
