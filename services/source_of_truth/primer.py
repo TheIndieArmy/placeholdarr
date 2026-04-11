@@ -6,7 +6,7 @@ import shutil
 from sqlalchemy import or_
 
 from core.config import settings
-from services.media_servers.refresh import refresh_all_paths
+from services.media_servers.refresh import refresh_all_sections
 from core.logger import logger
 from services.placeholders import (
     ensure_placeholder_file,
@@ -322,6 +322,8 @@ def run_primer_phase() -> dict:
         "force_reprimed": 0,
         "refresh_requested": 0,
         "refresh_failed": 0,
+        "section_refresh_requested": 0,
+        "section_refresh_failed": 0,
         "observed_plex": 0,
         "observed_jellyfin": 0,
         "observed_emby": 0,
@@ -431,9 +433,16 @@ def run_primer_phase() -> dict:
         variant_session.close()
 
     if changed_folders:
-        refresh_stats = refresh_all_paths(changed_folders)
+        # Reliability-first primer: trigger section refresh immediately so Plex
+        # indexes newly primed files before the first observation pass.
+        refresh_stats = refresh_all_sections(
+            has_movies=bool(touched_movie_ids),
+            has_episodes=bool(touched_episode_ids),
+        )
         stats["refresh_requested"] = int(refresh_stats.get("refreshed", 0) or 0)
         stats["refresh_failed"] = int(refresh_stats.get("failed", 0) or 0)
+        stats["section_refresh_requested"] = int(refresh_stats.get("refreshed", 0) or 0)
+        stats["section_refresh_failed"] = int(refresh_stats.get("failed", 0) or 0)
 
         # Observe the specific placeholders we just primed so we confirm Plex has
         # scanned and assigned rating keys to the independent-copy inodes BEFORE
@@ -464,12 +473,52 @@ def run_primer_phase() -> dict:
                     observe_stats = observe_placeholders_with_polling(
                         observe_session,
                         primer_placeholders,
-                        allow_title_fallback=False,
+                        allow_title_fallback=True,
                     )
                     stats["observed_plex"] = observe_stats.get("observed_plex", 0)
                     stats["observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
                     stats["observed_emby"] = observe_stats.get("observed_emby", 0)
                     stats["observe_failed"] = observe_stats.get("observe_failed", 0)
+
+                    # Conditional fallback: only broaden to section refresh if targeted
+                    # path refresh + observation still left unresolved primer placeholders.
+                    if (
+                        bool(getattr(settings, "MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", True))
+                        and stats["observe_failed"] > 0
+                        and (touched_movie_ids or touched_episode_ids)
+                    ):
+                        fallback_stats = refresh_all_sections(
+                            has_movies=bool(touched_movie_ids),
+                            has_episodes=bool(touched_episode_ids),
+                        )
+                        section_refreshed = int(fallback_stats.get("refreshed", 0) or 0)
+                        section_failed = int(fallback_stats.get("failed", 0) or 0)
+                        stats["refresh_requested"] += section_refreshed
+                        stats["refresh_failed"] += section_failed
+                        stats["section_refresh_requested"] += section_refreshed
+                        stats["section_refresh_failed"] += section_failed
+
+                        unresolved_primer_placeholders = [
+                            row
+                            for row in primer_placeholders
+                            if getattr(row, "has_placeholder", False)
+                            and not getattr(row, "plex_placeholder_id", None)
+                        ]
+                        if unresolved_primer_placeholders:
+                            logger.info(
+                                "Primer fallback section refresh completed; re-observing unresolved seeded placeholders "
+                                f"count={len(unresolved_primer_placeholders)}",
+                                extra={"emoji_type": "info"},
+                            )
+                            fallback_observe_stats = observe_placeholders_with_polling(
+                                observe_session,
+                                unresolved_primer_placeholders,
+                                allow_title_fallback=True,
+                            )
+                            stats["observed_plex"] += fallback_observe_stats.get("observed_plex", 0)
+                            stats["observed_jellyfin"] += fallback_observe_stats.get("observed_jellyfin", 0)
+                            stats["observed_emby"] += fallback_observe_stats.get("observed_emby", 0)
+                            stats["observe_failed"] = fallback_observe_stats.get("observe_failed", 0)
 
                     # Enqueue status projection for any primer placeholders that
                     # now have a Plex rating key so their titles get written.
@@ -493,7 +542,9 @@ def run_primer_phase() -> dict:
         (
             f"Primer phase complete: movies={stats['materialized_movies']} "
             f"episodes={stats['materialized_episodes']} force_reprimed={stats['force_reprimed']} "
-            f"refresh_requested={stats['refresh_requested']} "
+            f"refresh_requested={stats['refresh_requested']} refresh_failed={stats['refresh_failed']} "
+            f"section_refresh_requested={stats['section_refresh_requested']} "
+            f"section_refresh_failed={stats['section_refresh_failed']} "
             f"observed_plex={stats['observed_plex']} observe_failed={stats['observe_failed']} "
             f"status_projection_enqueued={stats['status_projection_enqueued']}"
         ),

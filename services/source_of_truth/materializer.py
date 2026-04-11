@@ -8,7 +8,7 @@ from sqlalchemy import func, or_
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.refresh import refresh_all_paths
+from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback, refresh_all_sections
 from services.placeholders import (
     ensure_episode_nfo,
     ensure_movie_nfo,
@@ -604,10 +604,18 @@ def _run_materialization_for_ids(
         extra={"emoji_type": "success"},
     )
 
-    refresh_stats = refresh_all_paths(changed_paths)
-    delete_refresh_stats = refresh_all_paths(delete_refresh_paths, update_type="Deleted")
-    stats["media_refresh_requested"] = refresh_stats.get("refreshed", 0) + delete_refresh_stats.get("refreshed", 0)
-    stats["media_refresh_failed"] = refresh_stats.get("failed", 0) + delete_refresh_stats.get("failed", 0)
+    refresh_stats = refresh_all_path_batches_with_section_fallback(
+        [
+            (changed_paths, "Created"),
+            (delete_refresh_paths, "Deleted"),
+        ],
+        has_movies=bool(movie_ids),
+        has_episodes=bool(episode_ids),
+        enable_section_fallback=False,
+        fallback_wait_seconds=0,
+    )
+    stats["media_refresh_requested"] = int(refresh_stats.get("refreshed", 0) or 0)
+    stats["media_refresh_failed"] = int(refresh_stats.get("failed", 0) or 0)
 
     logger.info(
         f"Media server refreshes completed after placeholder materialization: "
@@ -635,12 +643,50 @@ def _run_materialization_for_ids(
     observe_stats = observe_placeholders_with_polling(
         session,
         observed_candidates,
-        allow_title_fallback=False,
+        allow_title_fallback=True,
     )
     stats["media_id_observed_plex"] = observe_stats.get("observed_plex", 0)
     stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
     stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)
     stats["media_id_observe_failed"] = observe_stats.get("observe_failed", 0)
+
+    # Conditional fallback: only trigger a broad section refresh when targeted
+    # path refresh + immediate observation still left unresolved placeholders.
+    if (
+        bool(getattr(settings, "MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", True))
+        and stats["media_id_observe_failed"] > 0
+        and (movie_ids or episode_ids)
+    ):
+        fallback_stats = refresh_all_sections(
+            has_movies=bool(movie_ids),
+            has_episodes=bool(episode_ids),
+        )
+        section_refreshed = int(fallback_stats.get("refreshed", 0) or 0)
+        section_failed = int(fallback_stats.get("failed", 0) or 0)
+        stats["media_refresh_requested"] += section_refreshed
+        stats["media_refresh_failed"] += section_failed
+
+        unresolved_ids_after_first_observe = unresolved_placeholder_ids(observed_candidates)
+        if unresolved_ids_after_first_observe:
+            unresolved_candidates = (
+                session.query(Placeholder)
+                .filter(Placeholder.id.in_(unresolved_ids_after_first_observe))
+                .all()
+            )
+            logger.info(
+                "Materialization fallback section refresh completed; re-observing unresolved placeholders "
+                f"count={len(unresolved_candidates)}",
+                extra={"emoji_type": "info"},
+            )
+            fallback_observe_stats = observe_placeholders_with_polling(
+                session,
+                unresolved_candidates,
+                allow_title_fallback=True,
+            )
+            stats["media_id_observed_plex"] += fallback_observe_stats.get("observed_plex", 0)
+            stats["media_id_observed_jellyfin"] += fallback_observe_stats.get("observed_jellyfin", 0)
+            stats["media_id_observed_emby"] += fallback_observe_stats.get("observed_emby", 0)
+            stats["media_id_observe_failed"] = fallback_observe_stats.get("observe_failed", 0)
 
     if getattr(settings, "ENABLE_PLEX", False):
         ready_for_plex_projection = [

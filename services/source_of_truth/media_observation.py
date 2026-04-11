@@ -1081,8 +1081,50 @@ def _observation_min_chunks_per_pass() -> int:
 		return 1
 
 
+def _observation_bulk_strict_keys_only() -> bool:
+	try:
+		return bool(getattr(settings, 'OBSERVATION_BULK_STRICT_KEYS_ONLY', True))
+	except Exception:
+		return True
+
+
+def _observation_strict_keys_min_placeholders() -> int:
+	try:
+		return max(1, int(getattr(settings, 'OBSERVATION_STRICT_KEYS_MIN_PLACEHOLDERS', 100) or 100))
+	except Exception:
+		return 100
+
+
 def _timing_ms(started: float) -> int:
 	return int(round((time.monotonic() - started) * 1000.0))
+
+
+def _select_snapshot_key_candidates(
+	placeholders: list[Placeholder],
+	reverse_matches: dict[str, Any],
+	strict_mode: bool,
+) -> tuple[list[Placeholder], int, int]:
+	"""Return (candidates, candidate_count, skipped_count) for snapshot-key filtered matching."""
+	if not strict_mode:
+		return placeholders, len(placeholders), 0
+
+	movie_map = reverse_matches.get('movie_plex_item_by_movie_id', {}) or {}
+	episode_map = reverse_matches.get('episode_plex_item_by_episode_id', {}) or {}
+
+	candidates: list[Placeholder] = []
+	skipped = 0
+	for placeholder in placeholders:
+		movie_id = getattr(placeholder, 'movie_id', None)
+		episode_id = getattr(placeholder, 'episode_id', None)
+		if movie_id is not None and int(movie_id) in movie_map:
+			candidates.append(placeholder)
+			continue
+		if episode_id is not None and int(episode_id) in episode_map:
+			candidates.append(placeholder)
+			continue
+		skipped += 1
+
+	return candidates, len(candidates), skipped
 
 
 def _build_observation_prefetch(session, placeholders: list[Placeholder]) -> dict[str, Any]:
@@ -1125,6 +1167,7 @@ def _build_observation_prefetch(session, placeholders: list[Placeholder]) -> dic
 def _build_reverse_snapshot_match_maps(
 	prefetch: dict[str, Any],
 	plex_snapshot: dict[str, Any] | None,
+	strict_keys_only: bool = False,
 ) -> dict[str, Any]:
 	"""Build fast DB-targeted match maps by walking snapshot indexes once."""
 	result: dict[str, Any] = {
@@ -1154,20 +1197,23 @@ def _build_reverse_snapshot_match_maps(
 			movies_by_imdb.setdefault(imdb, []).append(movie_id)
 		norm_title = _normalize_title(getattr(movie, 'title', None))
 		year = int(getattr(movie, 'year', 0) or 0)
-		if norm_title and year:
-			movies_by_title_year.setdefault((norm_title, year), []).append(movie_id)
-		if norm_title:
-			movies_by_title.setdefault(norm_title, []).append(movie_id)
+		if not strict_keys_only:
+			if norm_title and year:
+				movies_by_title_year.setdefault((norm_title, year), []).append(movie_id)
+			if norm_title:
+				movies_by_title.setdefault(norm_title, []).append(movie_id)
 
 	# Walk unique movie items discovered in snapshot indexes.
 	seen_movie_keys: set[str] = set()
 	movie_candidates: list[Any] = []
-	for bucket in (
+	movie_buckets = [
 		plex_snapshot.get('movies_by_tmdb', {}),
 		plex_snapshot.get('movies_by_path_tmdb', {}),
 		plex_snapshot.get('movies_by_imdb', {}),
-		plex_snapshot.get('movies_by_title_year', {}),
-	):
+	]
+	if not strict_keys_only:
+		movie_buckets.append(plex_snapshot.get('movies_by_title_year', {}))
+	for bucket in movie_buckets:
 		for item in bucket.values():
 			key = str(getattr(item, 'ratingKey', '') or '') or str(id(item))
 			if key in seen_movie_keys:
@@ -1190,7 +1236,7 @@ def _build_reverse_snapshot_match_maps(
 				if len(ids) == 1:
 					matched_movie_id = ids[0]
 
-		if matched_movie_id is None:
+		if not strict_keys_only and matched_movie_id is None:
 			norm_title = _normalize_title(getattr(item, 'title', None))
 			year = int(getattr(item, 'year', 0) or 0)
 			if norm_title and year:
@@ -1198,7 +1244,7 @@ def _build_reverse_snapshot_match_maps(
 				if len(ids) == 1:
 					matched_movie_id = ids[0]
 
-		if matched_movie_id is None:
+		if not strict_keys_only and matched_movie_id is None:
 			norm_title = _normalize_title(getattr(item, 'title', None))
 			if norm_title:
 				ids = movies_by_title.get(norm_title, [])
@@ -1224,19 +1270,21 @@ def _build_reverse_snapshot_match_maps(
 		tvdb = str(getattr(series, 'tvdbid', '') or '').strip()
 		if tvdb:
 			episodes_by_tvdb_sxe.setdefault((tvdb, season_num, ep_num), []).append(episode_id)
-		series_title = _normalize_title(getattr(series, 'title', None))
-		if series_title:
-			episodes_by_title_sxe.setdefault((series_title, season_num, ep_num), []).append(episode_id)
+		if not strict_keys_only:
+			series_title = _normalize_title(getattr(series, 'title', None))
+			if series_title:
+				episodes_by_title_sxe.setdefault((series_title, season_num, ep_num), []).append(episode_id)
 
 	for key, item in (plex_snapshot.get('episodes_by_tvdb_sxe', {}) or {}).items():
 		ids = episodes_by_tvdb_sxe.get(key, [])
 		if len(ids) == 1 and ids[0] not in result['episode_plex_item_by_episode_id']:
 			result['episode_plex_item_by_episode_id'][ids[0]] = item
 
-	for key, item in (plex_snapshot.get('episodes_by_series_title_sxe', {}) or {}).items():
-		ids = episodes_by_title_sxe.get(key, [])
-		if len(ids) == 1 and ids[0] not in result['episode_plex_item_by_episode_id']:
-			result['episode_plex_item_by_episode_id'][ids[0]] = item
+	if not strict_keys_only:
+		for key, item in (plex_snapshot.get('episodes_by_series_title_sxe', {}) or {}).items():
+			ids = episodes_by_title_sxe.get(key, [])
+			if len(ids) == 1 and ids[0] not in result['episode_plex_item_by_episode_id']:
+				result['episode_plex_item_by_episode_id'][ids[0]] = item
 
 	return result
 
@@ -1492,6 +1540,9 @@ def _run_observation_pass(
 		'plex_progress': 0,
 		'chunks_processed': 0,
 		'pass_capped': False,
+		'candidate_count': 0,
+		'skipped_not_in_snapshot_keys': 0,
+		'strict_keys_only': False,
 		'snapshot_build_ms': 0,
 		'match_lookup_ms': 0,
 		'status_projection_ms': 0,
@@ -1509,23 +1560,52 @@ def _run_observation_pass(
 		pass_stats['snapshot_build_ms'] += _timing_ms(snapshot_started)
 
 	prefetch = _build_observation_prefetch(session, placeholders)
-	reverse_matches = _build_reverse_snapshot_match_maps(prefetch, plex_snapshot)
+	strict_keys_only = bool(
+		_is_enabled('plex')
+		and plex_snapshot is not None
+		and _observation_bulk_strict_keys_only()
+		and len(placeholders) >= _observation_strict_keys_min_placeholders()
+	)
+	pass_stats['strict_keys_only'] = strict_keys_only
+	reverse_matches = _build_reverse_snapshot_match_maps(
+		prefetch,
+		plex_snapshot,
+		strict_keys_only=strict_keys_only,
+	)
 	observation_context: dict[str, Any] = {
 		**prefetch,
 		**reverse_matches,
 	}
 
-	for chunk_start in range(0, len(placeholders), chunk_size):
+	process_placeholders, candidate_count, skipped_count = _select_snapshot_key_candidates(
+		placeholders,
+		reverse_matches,
+		strict_mode=strict_keys_only,
+	)
+	pass_stats['candidate_count'] = int(candidate_count)
+	pass_stats['skipped_not_in_snapshot_keys'] = int(skipped_count)
+
+	if strict_keys_only:
+		candidate_ids = {int(getattr(p, 'id', 0) or 0) for p in process_placeholders}
+		still_unresolved.extend(
+			[
+				placeholder
+				for placeholder in placeholders
+				if int(getattr(placeholder, 'id', 0) or 0) not in candidate_ids
+			]
+		)
+
+	for chunk_start in range(0, len(process_placeholders), chunk_size):
 		if (
 			max_pass_seconds > 0
 			and (time.monotonic() - pass_started) >= max_pass_seconds
 			and pass_stats['chunks_processed'] >= _observation_min_chunks_per_pass()
 		):
-			still_unresolved.extend(placeholders[chunk_start:])
+			still_unresolved.extend(process_placeholders[chunk_start:])
 			pass_stats['pass_capped'] = True
 			break
 
-		chunk = placeholders[chunk_start:chunk_start + chunk_size]
+		chunk = process_placeholders[chunk_start:chunk_start + chunk_size]
 		pending_status_intents: list[dict[str, Any]] = []
 		match_started = time.monotonic()
 		for placeholder in chunk:
@@ -1688,6 +1768,9 @@ def observe_placeholders_with_polling(
 			f"Observation poll pass #{stats['attempts']}: "
 			f"start={start_unresolved} remaining={len(unresolved)} "
 			f"resolved_delta={resolved_delta} progress_delta={progress_delta} "
+			f"candidates={int(pass_stats.get('candidate_count', 0) or 0)} "
+			f"skipped_not_in_snapshot_keys={int(pass_stats.get('skipped_not_in_snapshot_keys', 0) or 0)} "
+			f"strict_keys_only={bool(pass_stats.get('strict_keys_only', False))} "
 			f"status_updates_plex={pass_stats['status_updates_plex']} "
 			f"elapsed={pass_elapsed:.1f}s "
 			f"timing_ms[snapshot={int(pass_stats.get('snapshot_build_ms', 0) or 0)} "

@@ -36,6 +36,8 @@ services_old/
 docs/
 tests/
 .archive/
+.github/agents
+
 
 # Local deployment overrides (contain host-specific paths/secrets)
 docker-compose.override.yml
