@@ -1,5 +1,6 @@
 import sys
 import os
+import signal
 import subprocess
 import time
 from dotenv import load_dotenv
@@ -170,6 +171,14 @@ def check_port(port: int) -> bool:
 # single FastAPI app instance is created below with a lifespan handler
 
 async def lifespan(app: FastAPI):
+    # Keep Ctrl-C disabled for accidental local interrupts, but allow
+    # normal process termination via SIGTERM/SIGHUP (Docker stop, VS Code
+    # terminal delete, remote session disconnect).
+    # These must be applied here — AFTER uvicorn.run() installs handlers.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
     load_env_and_migrate()
     logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
 

@@ -1,12 +1,186 @@
 from __future__ import annotations
 
 import os
+import re
+import xml.etree.ElementTree as ET
 from urllib.parse import quote
 
 import requests
 
 from core.config import settings
 from core.logger import logger
+
+
+def _plex_base_and_token() -> tuple[str | None, str | None]:
+    plex_url = getattr(settings, "PLEX_URL", None)
+    plex_token = getattr(settings, "PLEX_TOKEN", None)
+    if not plex_url or not plex_token:
+        return None, None
+    return str(plex_url).rstrip('/'), str(plex_token)
+
+
+def get_plex_section_scan_state(section_ids: set[int] | list[int]) -> dict[str, object]:
+    """Return best-effort scanning state for target Plex library sections.
+
+    Primary signal comes from Plex activities/task feed. Section-level
+    refreshing state is used as a fallback when activities are unavailable.
+    """
+    target_ids = sorted({int(x) for x in (section_ids or [])})
+    if not target_ids:
+        return {
+            "target_section_ids": [],
+            "any_target_scanning": False,
+            "all_target_idle": True,
+            "unknown_state": False,
+            "reason": "no_expected_sections",
+            "source": "none",
+        }
+
+    if not getattr(settings, "plex_enabled", False):
+        return {
+            "target_section_ids": target_ids,
+            "any_target_scanning": False,
+            "all_target_idle": True,
+            "unknown_state": False,
+            "reason": "plex_disabled",
+            "source": "none",
+        }
+
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return {
+            "target_section_ids": target_ids,
+            "any_target_scanning": False,
+            "all_target_idle": False,
+            "unknown_state": True,
+            "reason": "plex_unavailable",
+            "source": "none",
+        }
+
+    scanning_ids: set[int] = set()
+    unknown_ids: set[int] = set()
+
+    # 1) Task/activity feed (preferred)
+    try:
+        response = requests.get(
+            f"{plex_url}/activities",
+            headers={"X-Plex-Token": plex_token},
+            timeout=10,
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.text)
+        for activity in root.findall('.//Activity'):
+            attrs = dict(activity.attrib or {})
+            text_blob = " ".join(str(v) for v in attrs.values()).lower()
+            # Only consider active scan-like activities.
+            if not any(token in text_blob for token in ("scan", "scanning", "library", "refresh")):
+                continue
+
+            section_id = None
+            for key in ("librarySectionID", "sectionID", "sectionId", "librarySectionId"):
+                raw = attrs.get(key)
+                if raw is None:
+                    continue
+                try:
+                    section_id = int(str(raw).strip())
+                    break
+                except Exception:
+                    continue
+
+            if section_id is None:
+                # Best-effort parse from context-like fields if present.
+                for key in ("Context", "context", "title", "subtitle"):
+                    raw = str(attrs.get(key, "") or "")
+                    match = re.search(r"/library/sections/(\d+)", raw)
+                    if match:
+                        section_id = int(match.group(1))
+                        break
+
+            if section_id is not None and section_id in target_ids:
+                scanning_ids.add(section_id)
+    except Exception:
+        # Continue to section.refreshing fallback.
+        pass
+
+    # 2) Section refreshing fallback when tasks were not decisive.
+    unresolved = [sid for sid in target_ids if sid not in scanning_ids]
+    if unresolved:
+        try:
+            from services.media_servers.plex_lookup import get_plex_server
+
+            plex = get_plex_server()
+            if plex is None:
+                unknown_ids.update(unresolved)
+            else:
+                for section_id in unresolved:
+                    try:
+                        section = plex.library.sectionByID(section_id)
+                        refreshing = getattr(section, "refreshing", None)
+                        if refreshing is None:
+                            raw = getattr(getattr(section, "_data", None), "attrib", {}).get("refreshing")
+                            refreshing = raw
+                        if refreshing is None:
+                            unknown_ids.add(section_id)
+                            continue
+                        is_scanning = str(refreshing).strip().lower() in {"1", "true", "yes"}
+                        if is_scanning:
+                            scanning_ids.add(section_id)
+                    except Exception:
+                        unknown_ids.add(section_id)
+        except Exception:
+            unknown_ids.update(unresolved)
+
+    unknown_state = bool(unknown_ids)
+    any_target_scanning = bool(scanning_ids)
+    all_target_idle = (not any_target_scanning) and (not unknown_state)
+    if unknown_state:
+        reason = "unknown_target_scan_state"
+    elif any_target_scanning:
+        reason = "target_sections_scanning"
+    else:
+        reason = "target_sections_idle"
+
+    return {
+        "target_section_ids": target_ids,
+        "any_target_scanning": any_target_scanning,
+        "all_target_idle": all_target_idle,
+        "unknown_state": unknown_state,
+        "reason": reason,
+        "source": "activities_plus_section_refreshing",
+        "scanning_section_ids": sorted(scanning_ids),
+        "unknown_section_ids": sorted(unknown_ids),
+    }
+
+
+def refresh_plex_section_ids(section_ids: list[int] | set[int]) -> dict[str, int]:
+    """Trigger full refresh for explicit Plex section ids."""
+    if not getattr(settings, "plex_enabled", False):
+        return {"refreshed": 0, "failed": 0}
+
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return {"refreshed": 0, "failed": 0}
+
+    refreshed = 0
+    failed = 0
+    for section_id in sorted({int(x) for x in (section_ids or [])}):
+        try:
+            url = f"{plex_url}/library/sections/{section_id}/refresh"
+            response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
+            response.raise_for_status()
+            logger.info(
+                f"Triggered full Plex section refresh: section_id={section_id}",
+                extra={"emoji_type": "info"},
+            )
+            refreshed += 1
+        except Exception as e:
+            logger.warning(
+                f"Plex section refresh failed for section_id={section_id}: {e}",
+                extra={"emoji_type": "warning"},
+            )
+            failed += 1
+
+    return {"refreshed": refreshed, "failed": failed}
 
 
 def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
@@ -93,8 +267,7 @@ def refresh_plex_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
     if not getattr(settings, "plex_enabled", False):
         return {"refreshed": 0, "failed": 0}
 
-    plex_url = getattr(settings, "PLEX_URL", None)
-    plex_token = getattr(settings, "PLEX_TOKEN", None)
+    plex_url, plex_token = _plex_base_and_token()
     if not plex_url or not plex_token:
         return {"refreshed": 0, "failed": 0}
 
@@ -108,23 +281,4 @@ def refresh_plex_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
         if sid:
             section_ids.append(int(sid))
 
-    refreshed = 0
-    failed = 0
-    for section_id in dict.fromkeys(section_ids):
-        try:
-            url = f"{str(plex_url).rstrip('/')}/library/sections/{section_id}/refresh"
-            response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
-            response.raise_for_status()
-            logger.info(
-                f"Triggered full Plex section refresh: section_id={section_id}",
-                extra={"emoji_type": "info"},
-            )
-            refreshed += 1
-        except Exception as e:
-            logger.warning(
-                f"Plex section refresh failed for section_id={section_id}: {e}",
-                extra={"emoji_type": "warning"},
-            )
-            failed += 1
-
-    return {"refreshed": refreshed, "failed": failed}
+    return refresh_plex_section_ids(section_ids)

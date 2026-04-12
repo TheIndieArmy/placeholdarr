@@ -26,6 +26,7 @@ export interface StatsResponse {
 }
 
 export interface ActivityRow {
+  id?: string | number;
   type: "job" | "event";
   source?: string | null;
   event_type?: string | null;
@@ -35,6 +36,15 @@ export interface ActivityRow {
   error?: string | null;
   details?: string | null;
   time?: string | null;
+  progress?: {
+    running?: boolean;
+    sections?: Array<{
+      name: string;
+      status: "pending" | "working" | "done" | "failed" | "skipped" | string;
+      metrics?: Array<{ label: string; value: string | number | null | undefined }>;
+    }>;
+    log_file?: string;
+  };
 }
 
 export interface PlaceholderActivityRow {

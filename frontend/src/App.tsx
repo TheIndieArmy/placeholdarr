@@ -461,7 +461,7 @@ export function App() {
           const placeholderRows = await getPlaceholderActivity(100);
           if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
-          const payload = await getLibrary(400);
+          const payload = await getLibrary(1000);
           if (!stopped) setLibrary(payload.items || []);
         } else if (currentTab === "calendar") {
           const payload = await getCalendar(calendarMonth);
@@ -515,7 +515,7 @@ export function App() {
     if (library.length > 0) return;
 
     let stopped = false;
-    getLibrary(400)
+    getLibrary(1000)
       .then((payload) => {
         if (!stopped) {
           setLibrary(payload.items || []);
@@ -1373,6 +1373,28 @@ function ActivityPanel(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const tab = props.activityTab || "system";
   const placeholderRows = props.placeholderRows || [];
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+
+  const rowKey = (row: ActivityRow, idx: number) => `${row.type}-${String((row as any).id ?? row.time ?? idx)}`;
+
+  useEffect(() => {
+    setExpandedRows((prev) => {
+      const next = { ...prev };
+      props.rows.forEach((row, idx) => {
+        if ((row as any).job_type !== "full_sync_progress") {
+          return;
+        }
+        const key = rowKey(row, idx);
+        if (next[key] !== undefined) {
+          return;
+        }
+        const status = String(row.status || "").toLowerCase();
+        const isFinal = status === "done" || status === "success" || status === "failed";
+        next[key] = !isFinal;
+      });
+      return next;
+    });
+  }, [props.rows]);
 
   // Check if there are any failures
   const failedCount = props.rows.filter(r => r.status === "FAILED").length;
@@ -1482,14 +1504,68 @@ function ActivityPanel(props: {
                     const statusColor = status === "done" || status === "success" ? "text-green-400" : status === "failed" ? "text-red-400" : "text-slate-400";
                     const dotColor = status === "done" || status === "success" ? "bg-green-500" : status === "failed" ? "bg-red-500" : "bg-slate-500";
                     const errorMessage = row.error ? ` — ${row.error}` : "";
+                    const key = rowKey(row, idx);
+                    const hasProgress = String((row as any).job_type || "") === "full_sync_progress" && Array.isArray((row as any).progress?.sections);
+                    const isExpanded = !!expandedRows[key];
+                    const progressSections = hasProgress ? ((row as any).progress.sections as Array<any>) : [];
+
+                    const toggleProgress = () => {
+                      setExpandedRows((prev) => ({ ...prev, [key]: !prev[key] }));
+                    };
+
+                    const statusTokenClass = (token: string) => {
+                      const normalized = String(token || "").toLowerCase();
+                      if (normalized === "done") return "text-green-300 bg-green-700/20 border-green-500/30";
+                      if (normalized === "failed") return "text-red-300 bg-red-700/20 border-red-500/30";
+                      if (normalized === "working") return "text-sky-300 bg-sky-700/20 border-sky-500/30";
+                      if (normalized === "skipped") return "text-amber-300 bg-amber-700/20 border-amber-500/30";
+                      return "text-slate-300 bg-slate-700/20 border-slate-500/30";
+                    };
 
                     return (
-                      <tr key={`${row.type}-${row.time || idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
+                      <tr key={key} className="hover:bg-[#1e2430]/40 transition-colors">
                         <td className="px-5 py-4 text-sm text-slate-400 whitespace-nowrap">{timeAgo(row.time || null)}</td>
                         <td className="px-5 py-4 text-sm text-slate-300">
                           <span className="font-medium">{displayName}</span>
                           {detailLine && <div className="text-xs text-slate-500 mt-0.5">{detailLine}</div>}
                           {errorMessage && <span className="text-xs text-red-300/70">{errorMessage}</span>}
+                          {hasProgress && (
+                            <div className="mt-2">
+                              <button
+                                type="button"
+                                onClick={toggleProgress}
+                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
+                              >
+                                <span className="material-symbols-outlined" style={{ fontSize: 13 }}>{isExpanded ? "expand_less" : "expand_more"}</span>
+                                {isExpanded ? "Hide Progress" : "Show Progress"}
+                              </button>
+                              {isExpanded && (
+                                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                                  {progressSections.map((section: any, sidx: number) => {
+                                    const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+                                    return (
+                                      <div key={`${key}-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
+                                        <div className="mb-1 flex items-center justify-between">
+                                          <span className="text-[10px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
+                                          <span className={`rounded border px-1.5 py-0.5 text-[9px] font-headline uppercase tracking-wider ${statusTokenClass(String(section?.status || "pending"))}`}>
+                                            {String(section?.status || "pending")}
+                                          </span>
+                                        </div>
+                                        <div className="space-y-0.5 text-[11px] text-slate-400">
+                                          {metrics.map((metric: any, midx: number) => (
+                                            <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
+                                              <span>{String(metric?.label || "Metric")}</span>
+                                              <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-2">

@@ -27,7 +27,7 @@ export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivity
   return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
 }
 
-export function getLibrary(limit = 400): Promise<LibraryResponse> {
+export function getLibrary(limit = 1000): Promise<LibraryResponse> {
   return fetchJson<LibraryResponse>(`/api/library?limit=${limit}`);
 }
 

@@ -26,6 +26,10 @@ from services.source_of_truth.observation_trail import (
     TRAIL_JOB_TYPE,
     process_observation_trail_job,
 )
+from services.source_of_truth.observation_hybrid import (
+    HYBRID_SLICE_JOB_TYPE,
+    process_hybrid_observation_slice_job,
+)
 from services.source_of_truth.import_grace import (
     IMPORT_GRACE_JOB_TYPE,
     process_import_grace_job,
@@ -221,6 +225,12 @@ def _process_claimed_job(session, job: Job):
 
     if job.job_type == TRAIL_JOB_TYPE:
         result = process_observation_trail_job(session, job)
+        if result.get('done', False):
+            _mark_job_done(session, job)
+        return
+
+    if job.job_type == HYBRID_SLICE_JOB_TYPE:
+        result = process_hybrid_observation_slice_job(session, job)
         if result.get('done', False):
             _mark_job_done(session, job)
         return

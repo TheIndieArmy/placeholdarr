@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,7 +9,7 @@ from sqlalchemy import func, or_
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback, refresh_all_sections
+from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback
 from services.placeholders import (
     ensure_episode_nfo,
     ensure_movie_nfo,
@@ -19,20 +20,102 @@ from services.placeholders import (
     resolve_calendar_variant_dummy_path,
 )
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Movie, Placeholder, Season, Series
+from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
 from services.source_of_truth.determiner import DETERMINATION_NEEDS, DETERMINATION_OBSOLETE
 from services.source_of_truth.media_observation import observe_placeholders_with_polling
-from services.source_of_truth.observation_trail import enqueue_observation_trail, unresolved_placeholder_ids
+from services.source_of_truth.observation_controller import enqueue_observation_continuation
+from services.source_of_truth.observation_hybrid import HYBRID_SLICE_JOB_TYPE, enqueue_hybrid_observation_slice
+from services.source_of_truth.observation_selection import rank_placeholder_ids_for_observation
+from services.source_of_truth.observation_trail import unresolved_placeholder_ids
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
 )
+from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_reconciler import enqueue_status_projection
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 
 
 REQUEST_STATUS = "REQUEST"
 REQUEST_REASON = "placeholder_request"
+
+
+def _materialization_overlap_enabled() -> bool:
+    return bool(
+        getattr(settings, "MATERIALIZATION_OVERLAP_ENABLED", False)
+        and getattr(settings, "HYBRID_OBSERVATION_SLICES_ENABLED", False)
+    )
+
+
+def _overlap_checkpoint_threshold(media_type: str) -> int:
+    if str(media_type).lower() == "movie":
+        value = int(getattr(settings, "MATERIALIZATION_OVERLAP_MOVIE_CHECKPOINT_COUNT", 200) or 200)
+    else:
+        value = int(getattr(settings, "MATERIALIZATION_OVERLAP_EPISODE_CHECKPOINT_COUNT", 400) or 400)
+    return max(1, value)
+
+
+def _overlap_staleness_seconds() -> int:
+    return max(10, int(getattr(settings, "MATERIALIZATION_OVERLAP_MAX_STALENESS_SECONDS", 120) or 120))
+
+
+def _overlap_min_candidates() -> int:
+    return max(1, int(getattr(settings, "MATERIALIZATION_OVERLAP_MIN_CANDIDATES", 100) or 100))
+
+
+def _overlap_max_pending_slices() -> int:
+    return max(1, int(getattr(settings, "MATERIALIZATION_OVERLAP_MAX_PENDING_SLICES_PER_SOURCE", 1) or 1))
+
+
+def _overlap_refresh_min_interval_seconds() -> int:
+    return max(0, int(getattr(settings, "MATERIALIZATION_OVERLAP_REFRESH_MIN_INTERVAL_SECONDS", 90) or 90))
+
+
+def _overlap_refresh_lease_seconds() -> int:
+    return max(0, int(getattr(settings, "MATERIALIZATION_OVERLAP_REFRESH_LEASE_SECONDS", 180) or 180))
+
+
+def _should_trigger_overlap_checkpoint(
+    *,
+    processed_since_checkpoint: int,
+    count_threshold: int,
+    last_checkpoint_mono: float,
+    now_mono: float,
+    staleness_seconds: int,
+) -> tuple[bool, str | None]:
+    if processed_since_checkpoint >= max(1, int(count_threshold or 1)):
+        return True, "count_threshold"
+    if (now_mono - float(last_checkpoint_mono)) >= max(1, int(staleness_seconds or 1)):
+        return True, "time_staleness"
+    return False, None
+
+
+def _target_refresh_section_ids(*, has_movies: bool, has_episodes: bool) -> list[int]:
+    section_ids: list[int] = []
+    if has_movies:
+        movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+        if movie_section is not None:
+            section_ids.append(int(movie_section))
+    if has_episodes:
+        tv_section = getattr(settings, "PLEX_TV_SECTION_ID", None)
+        if tv_section is not None:
+            section_ids.append(int(tv_section))
+    return sorted(set(section_ids))
+
+
+def _active_hybrid_slice_count(session) -> int:
+    try:
+        return int(
+            session.query(Job)
+            .filter(
+                Job.job_type == HYBRID_SLICE_JOB_TYPE,
+                Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
+            )
+            .count()
+            or 0
+        )
+    except Exception:
+        return 0
 
 
 def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
@@ -294,6 +377,7 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             ).order_by(Placeholder.id.desc()).first()
             if placeholder_row:
                 _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
+            placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
             
             session.add(movie)
             if owns_session:
@@ -306,6 +390,7 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
                 "nfo_written": nfo_written,
                 "path": target_path,
                 "movie_id": movie.id,
+                "placeholder_id": placeholder_id,
             }
 
         if determination == DETERMINATION_OBSOLETE:
@@ -402,6 +487,7 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             ).order_by(Placeholder.id.desc()).first()
             if placeholder_row:
                 _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
+            placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
             
             session.add(episode)
             if owns_session:
@@ -415,6 +501,7 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
                 "series_nfo_written": series_nfo_written,
                 "path": target_path,
                 "episode_id": episode.id,
+                "placeholder_id": placeholder_id,
             }
 
         if determination == DETERMINATION_OBSOLETE:
@@ -491,6 +578,18 @@ def _run_materialization_for_ids(
         "media_id_observed_jellyfin": 0,
         "media_id_observed_emby": 0,
         "media_id_observe_failed": 0,
+        "hybrid_slice_enqueued": 0,
+        "hybrid_slice_job_id": None,
+        "hybrid_slice_coalesced": 0,
+        "overlap_enabled": 0,
+        "overlap_checkpoint_count": 0,
+        "overlap_slices_enqueued": 0,
+        "overlap_slices_coalesced": 0,
+        "overlap_refresh_suppressed": 0,
+        "overlap_skipped_min_candidates": 0,
+        "overlap_skipped_pending_guard": 0,
+        "overlap_first_checkpoint_at_seconds": None,
+        "overlap_last_trigger": None,
         "observation_trail_enqueued": 0,
         "observation_trail_job_id": None,
         "observation_trail_group_id": None,
@@ -500,6 +599,108 @@ def _run_materialization_for_ids(
     stats["movies_considered"] = len(movie_ids)
     stats["episodes_considered"] = len(episode_ids)
     activity_reason = _activity_reason_from_observation_source(observation_source)
+    overlap_enabled = _materialization_overlap_enabled()
+    overlap_started = time.monotonic()
+    overlap_state: dict[str, Any] = {
+        "movie_processed": 0,
+        "episode_processed": 0,
+        "pending_candidate_ids": set(),
+        "pending_created_paths": set(),
+        "pending_delete_paths": set(),
+        "last_checkpoint_mono": overlap_started,
+        "checkpoint_sequence": 0,
+    }
+    if overlap_enabled:
+        stats["overlap_enabled"] = 1
+
+    def _emit_overlap_checkpoint(trigger_reason: str, *, force: bool = False) -> None:
+        if not overlap_enabled:
+            return
+
+        now_mono = time.monotonic()
+        overlap_state["checkpoint_sequence"] += 1
+        stats["overlap_checkpoint_count"] += 1
+        stats["overlap_last_trigger"] = str(trigger_reason)
+        if stats.get("overlap_first_checkpoint_at_seconds") is None:
+            stats["overlap_first_checkpoint_at_seconds"] = int(max(0.0, now_mono - overlap_started))
+
+        candidate_ids = rank_placeholder_ids_for_observation(
+            session,
+            [int(x) for x in overlap_state["pending_candidate_ids"] if x is not None],
+        )
+        if not force and len(candidate_ids) < _overlap_min_candidates():
+            stats["overlap_skipped_min_candidates"] += 1
+            overlap_state["last_checkpoint_mono"] = now_mono
+            overlap_state["movie_processed"] = 0
+            overlap_state["episode_processed"] = 0
+            return
+
+        active_slices = _active_hybrid_slice_count(session)
+        if not force and active_slices >= _overlap_max_pending_slices():
+            stats["overlap_skipped_pending_guard"] += 1
+            overlap_state["last_checkpoint_mono"] = now_mono
+            overlap_state["movie_processed"] = 0
+            overlap_state["episode_processed"] = 0
+            return
+
+        created_paths = set(overlap_state["pending_created_paths"])
+        delete_paths = set(overlap_state["pending_delete_paths"])
+        if created_paths or delete_paths:
+            target_sections = _target_refresh_section_ids(
+                has_movies=bool(movie_ids),
+                has_episodes=bool(episode_ids),
+            )
+            lease = try_acquire_refresh_lease(
+                section_ids=target_sections,
+                source="materialization_overlap_checkpoint",
+                min_interval_seconds=_overlap_refresh_min_interval_seconds(),
+                lease_seconds=_overlap_refresh_lease_seconds(),
+            )
+            if bool(lease.get("allowed", False)):
+                refresh_stats = refresh_all_path_batches_with_section_fallback(
+                    [
+                        (created_paths, "Created"),
+                        (delete_paths, "Deleted"),
+                    ],
+                    has_movies=bool(movie_ids),
+                    has_episodes=bool(episode_ids),
+                    enable_section_fallback=False,
+                    fallback_wait_seconds=0,
+                )
+                stats["media_refresh_requested"] += int(refresh_stats.get("refreshed", 0) or 0)
+                stats["media_refresh_failed"] += int(refresh_stats.get("failed", 0) or 0)
+                overlap_state["pending_created_paths"].clear()
+                overlap_state["pending_delete_paths"].clear()
+            else:
+                stats["overlap_refresh_suppressed"] += 1
+                logger.info(
+                    "Materialization overlap refresh suppressed by durable throttle "
+                    f"reason={lease.get('reason')} blocked_sections={lease.get('blocked_section_ids')}",
+                    extra={"emoji_type": "info"},
+                )
+
+        if candidate_ids:
+            overlap_source = f"{observation_source}:overlap"
+            hybrid_result = enqueue_hybrid_observation_slice(
+                session,
+                placeholder_ids=candidate_ids,
+                source=overlap_source,
+                trigger_reason=f"materialization_overlap:{trigger_reason}",
+                delay_seconds=0,
+            )
+            if hybrid_result.get("enqueued"):
+                stats["overlap_slices_enqueued"] += 1
+                if hybrid_result.get("coalesced"):
+                    stats["overlap_slices_coalesced"] += 1
+                stats["hybrid_slice_enqueued"] = 1
+                stats["hybrid_slice_job_id"] = hybrid_result.get("job_id")
+                if hybrid_result.get("coalesced"):
+                    stats["hybrid_slice_coalesced"] = 1
+                overlap_state["pending_candidate_ids"].clear()
+
+        overlap_state["last_checkpoint_mono"] = now_mono
+        overlap_state["movie_processed"] = 0
+        overlap_state["episode_processed"] = 0
 
     for movie_id in movie_ids:
         result = apply_movie_materialization(movie_id, session=session, activity_reason=activity_reason)
@@ -525,6 +726,10 @@ def _run_materialization_for_ids(
                 path = result.get("path")
                 if path:
                     changed_paths.add(path)
+                    overlap_state["pending_created_paths"].add(path)
+            placeholder_id = result.get("placeholder_id")
+            if placeholder_id:
+                overlap_state["pending_candidate_ids"].add(int(placeholder_id))
             if result.get("nfo_written"):
                 stats["nfo_written"] += 1
         elif action == "deleted_or_absent":
@@ -545,8 +750,25 @@ def _run_materialization_for_ids(
                 stats["series_nfo_deleted"] += 1
             for refresh_path in result.get("refresh_paths", []) or []:
                 delete_refresh_paths.add(refresh_path)
+                overlap_state["pending_delete_paths"].add(refresh_path)
         else:
             stats["noop"] += 1
+
+        if overlap_enabled:
+            overlap_state["movie_processed"] += 1
+            now_mono = time.monotonic()
+            should_trigger, trigger_kind = _should_trigger_overlap_checkpoint(
+                processed_since_checkpoint=int(overlap_state["movie_processed"]),
+                count_threshold=_overlap_checkpoint_threshold("movie"),
+                last_checkpoint_mono=float(overlap_state["last_checkpoint_mono"]),
+                now_mono=now_mono,
+                staleness_seconds=_overlap_staleness_seconds(),
+            )
+            if should_trigger:
+                _emit_overlap_checkpoint(f"movie_{trigger_kind}")
+
+    if overlap_enabled and movie_ids:
+        _emit_overlap_checkpoint("movie_phase_flush", force=True)
 
     for episode_id in episode_ids:
         result = apply_episode_materialization(episode_id, session=session, activity_reason=activity_reason)
@@ -572,6 +794,10 @@ def _run_materialization_for_ids(
                 path = result.get("path")
                 if path:
                     changed_paths.add(path)
+                    overlap_state["pending_created_paths"].add(path)
+            placeholder_id = result.get("placeholder_id")
+            if placeholder_id:
+                overlap_state["pending_candidate_ids"].add(int(placeholder_id))
             # count episode and series-level NFO writes
             if result.get("nfo_written") or result.get("series_nfo_written"):
                 stats["nfo_written"] += 1
@@ -594,8 +820,25 @@ def _run_materialization_for_ids(
                 stats["series_nfo_deleted"] += 1
             for refresh_path in result.get("refresh_paths", []) or []:
                 delete_refresh_paths.add(refresh_path)
+                overlap_state["pending_delete_paths"].add(refresh_path)
         else:
             stats["noop"] += 1
+
+        if overlap_enabled:
+            overlap_state["episode_processed"] += 1
+            now_mono = time.monotonic()
+            should_trigger, trigger_kind = _should_trigger_overlap_checkpoint(
+                processed_since_checkpoint=int(overlap_state["episode_processed"]),
+                count_threshold=_overlap_checkpoint_threshold("episode"),
+                last_checkpoint_mono=float(overlap_state["last_checkpoint_mono"]),
+                now_mono=now_mono,
+                staleness_seconds=_overlap_staleness_seconds(),
+            )
+            if should_trigger:
+                _emit_overlap_checkpoint(f"episode_{trigger_kind}")
+
+    if overlap_enabled and (movie_ids or episode_ids):
+        _emit_overlap_checkpoint("final_loop_flush", force=True)
 
     logger.info(
         "Materialization batch summary: "
@@ -644,49 +887,12 @@ def _run_materialization_for_ids(
         session,
         observed_candidates,
         allow_title_fallback=True,
+        auto_enqueue_trail_on_defer=False,
     )
     stats["media_id_observed_plex"] = observe_stats.get("observed_plex", 0)
     stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
     stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)
     stats["media_id_observe_failed"] = observe_stats.get("observe_failed", 0)
-
-    # Conditional fallback: only trigger a broad section refresh when targeted
-    # path refresh + immediate observation still left unresolved placeholders.
-    if (
-        bool(getattr(settings, "MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", True))
-        and stats["media_id_observe_failed"] > 0
-        and (movie_ids or episode_ids)
-    ):
-        fallback_stats = refresh_all_sections(
-            has_movies=bool(movie_ids),
-            has_episodes=bool(episode_ids),
-        )
-        section_refreshed = int(fallback_stats.get("refreshed", 0) or 0)
-        section_failed = int(fallback_stats.get("failed", 0) or 0)
-        stats["media_refresh_requested"] += section_refreshed
-        stats["media_refresh_failed"] += section_failed
-
-        unresolved_ids_after_first_observe = unresolved_placeholder_ids(observed_candidates)
-        if unresolved_ids_after_first_observe:
-            unresolved_candidates = (
-                session.query(Placeholder)
-                .filter(Placeholder.id.in_(unresolved_ids_after_first_observe))
-                .all()
-            )
-            logger.info(
-                "Materialization fallback section refresh completed; re-observing unresolved placeholders "
-                f"count={len(unresolved_candidates)}",
-                extra={"emoji_type": "info"},
-            )
-            fallback_observe_stats = observe_placeholders_with_polling(
-                session,
-                unresolved_candidates,
-                allow_title_fallback=True,
-            )
-            stats["media_id_observed_plex"] += fallback_observe_stats.get("observed_plex", 0)
-            stats["media_id_observed_jellyfin"] += fallback_observe_stats.get("observed_jellyfin", 0)
-            stats["media_id_observed_emby"] += fallback_observe_stats.get("observed_emby", 0)
-            stats["media_id_observe_failed"] = fallback_observe_stats.get("observe_failed", 0)
 
     if getattr(settings, "ENABLE_PLEX", False):
         ready_for_plex_projection = [
@@ -704,23 +910,28 @@ def _run_materialization_for_ids(
             )
 
     unresolved_ids = unresolved_placeholder_ids(observed_candidates)
-    # Always enqueue observation trail for unresolved placeholders
     if unresolved_ids:
-        enqueue_result = enqueue_observation_trail(
+        continuation = enqueue_observation_continuation(
             session,
             placeholder_ids=unresolved_ids,
             source=observation_source,
+            trigger_reason="materialization_unresolved",
+            delay_seconds=0,
         )
-        if enqueue_result.get("enqueued"):
+        if continuation.get("hybrid_enqueued"):
+            stats["hybrid_slice_enqueued"] = 1
+            stats["hybrid_slice_job_id"] = continuation.get("hybrid_job_id")
+            stats["hybrid_slice_coalesced"] = 1 if continuation.get("hybrid_coalesced") else 0
+        if continuation.get("trail_enqueued"):
             stats["observation_trail_enqueued"] = 1
-            stats["observation_trail_job_id"] = enqueue_result.get("job_id")
-            stats["observation_trail_group_id"] = enqueue_result.get("group_id")
-            logger.info(
-                "Deferred observation trail enqueued "
-                f"job_id={enqueue_result.get('job_id')} "
-                f"unresolved={len(unresolved_ids)}",
-                extra={"emoji_type": "info"},
-            )
+            stats["observation_trail_job_id"] = continuation.get("trail_job_id")
+            stats["observation_trail_group_id"] = continuation.get("trail_group_id")
+        logger.info(
+            "Materialization unresolved continuation summary "
+            f"unresolved={len(unresolved_ids)} hybrid_enqueued={bool(continuation.get('hybrid_enqueued'))} "
+            f"trail_enqueued={bool(continuation.get('trail_enqueued'))}",
+            extra={"emoji_type": "info"},
+        )
 
     return stats
 

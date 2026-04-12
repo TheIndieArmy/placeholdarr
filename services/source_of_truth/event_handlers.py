@@ -12,7 +12,7 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Season, Series, Movie, Placeholder
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
-from services.source_of_truth.observation_trail import enqueue_observation_trail
+from services.source_of_truth.observation_controller import enqueue_observation_continuation
 from services.source_of_truth.status_reconciler import enqueue_status_projection
 from services.source_of_truth.arr_api import (
     fetch_radarr_movie,
@@ -310,13 +310,14 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
                 placeholder_ids = [int(row.id) for row in active_rows if getattr(row, "id", None)]
                 followup["placeholder_ids"] = placeholder_ids
                 if placeholder_ids:
-                    obs_result = enqueue_observation_trail(
+                    obs_result = enqueue_observation_continuation(
                         follow_session,
                         placeholder_ids=placeholder_ids,
                         source="event_series_add_existing_placeholder",
+                        trigger_reason="event_existing_placeholder",
                         delay_seconds=0,
                     )
-                    followup["observation_trail_enqueued"] = 1 if obs_result.get("enqueued") else 0
+                    followup["observation_trail_enqueued"] = 1 if obs_result.get("trail_enqueued") else 0
 
                     proj_result = enqueue_status_projection(placeholder_ids, session=follow_session)
                     followup["status_projection_enqueued"] = 1 if proj_result.get("ok") else 0
@@ -427,13 +428,14 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
                 placeholder_ids = [int(row.id) for row in active_rows if getattr(row, "id", None)]
                 followup["placeholder_ids"] = placeholder_ids
                 if placeholder_ids:
-                    obs_result = enqueue_observation_trail(
+                    obs_result = enqueue_observation_continuation(
                         follow_session,
                         placeholder_ids=placeholder_ids,
                         source="event_movie_add_existing_placeholder",
+                        trigger_reason="event_existing_placeholder",
                         delay_seconds=0,
                     )
-                    followup["observation_trail_enqueued"] = 1 if obs_result.get("enqueued") else 0
+                    followup["observation_trail_enqueued"] = 1 if obs_result.get("trail_enqueued") else 0
 
                     proj_result = enqueue_status_projection(placeholder_ids, session=follow_session)
                     followup["status_projection_enqueued"] = 1 if proj_result.get("ok") else 0

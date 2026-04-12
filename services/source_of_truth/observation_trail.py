@@ -12,6 +12,7 @@ from core.config import settings
 from core.logger import logger
 from services.postgres.models import Job, ObservationTrailAttempt, Placeholder
 from services.source_of_truth.media_observation import observe_placeholders_with_polling
+from services.source_of_truth.observation_selection import rank_placeholder_ids_for_observation
 
 
 TRAIL_JOB_TYPE = "placeholder_observation_trail"
@@ -28,6 +29,29 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def _trail_max_attempts() -> int:
+    return max(1, _as_int(getattr(settings, "OBSERVATION_TRAIL_MAX_ATTEMPTS", 6), 6))
+
+
+def _stubborn_demotion_after_attempts() -> int:
+    return max(1, _as_int(getattr(settings, "OBSERVATION_TRAIL_STUBBORN_DEMOTION_AFTER_ATTEMPTS", 4), 4))
+
+
+def _stubborn_delay_seconds() -> int:
+    return max(60, _as_int(getattr(settings, "OBSERVATION_TRAIL_STUBBORN_DELAY_SECONDS", 900), 900))
+
+
+def _single_flight_retry_after_seconds(candidate_count: int, attempt_number: int) -> int:
+    base = 30
+    if candidate_count >= 500:
+        base = 120
+    elif candidate_count >= 250:
+        base = 90
+    elif candidate_count >= 100:
+        base = 60
+    return min(_stubborn_delay_seconds(), base + max(0, attempt_number - 1) * 15)
 
 
 def _service_enabled(service: str) -> bool:
@@ -115,7 +139,10 @@ def enqueue_observation_trail(
     if not _service_enabled("plex"):
         return {"enqueued": False, "reason": "plex_disabled"}
 
-    ids = sorted(set(int(x) for x in placeholder_ids if x is not None))
+    ids = rank_placeholder_ids_for_observation(
+        session,
+        [int(x) for x in placeholder_ids if x is not None],
+    )
     if not ids:
         return {"enqueued": False, "reason": "no_placeholder_ids"}
 
@@ -129,6 +156,7 @@ def enqueue_observation_trail(
         "placeholder_ids": ids,
         "total_candidates": len(ids),
         "attempt": 0,
+        "max_attempts": _trail_max_attempts(),
     }
 
     job_id = _insert_trail_job_with_session(
@@ -154,6 +182,7 @@ def process_observation_trail_job(session, job: Job) -> dict[str, Any]:
     placeholder_ids = [int(x) for x in (payload.get("placeholder_ids") or []) if x is not None]
     total_candidates = max(0, _as_int(payload.get("total_candidates"), len(placeholder_ids)))
     attempt_number = max(1, _as_int(payload.get("attempt"), 0) + 1)
+    max_attempts = max(1, _as_int(payload.get("max_attempts"), _trail_max_attempts()))
 
     rows = (
         session.query(Placeholder)
@@ -182,6 +211,7 @@ def process_observation_trail_job(session, job: Job) -> dict[str, Any]:
                 session,
                 candidates,
                 allow_title_fallback=True,
+                auto_enqueue_trail_on_defer=False,
             )
     except Exception as e:
         error_message = str(e)
@@ -200,7 +230,74 @@ def process_observation_trail_job(session, job: Job) -> dict[str, Any]:
     )
     unresolved_ids = unresolved_placeholder_ids(refreshed_rows)
     after_count = len(unresolved_ids)
-    resolved_reason = "resolved_all" if after_count <= 0 else str(observe_stats.get("stop_reason") or "unresolved_after_followup")
+    resolved_reason = "resolved_all" if after_count <= 0 else str(observe_stats.get("stop_reason") or "unresolved_after_observer")
+
+    logger.debug(
+        "Observation trail decision snapshot "
+        f"job_id={job.id} attempt={attempt_number}/{max_attempts} source={source} "
+        f"before={before_count} after={after_count} reason={resolved_reason}",
+        extra={"emoji_type": "debug"},
+    )
+
+    # If another observation run is active, reschedule this trail job shortly
+    # instead of marking it done so deferred follow-up guarantees are preserved.
+    if resolved_reason == "single_flight_busy":
+        retry_after_seconds = _single_flight_retry_after_seconds(after_count or before_count, attempt_number)
+        payload["attempt"] = max(0, attempt_number - 1)
+        payload["last_resolution_reason"] = resolved_reason
+        payload["last_unresolved_ids"] = unresolved_ids
+        payload["single_flight_retry_after_seconds"] = retry_after_seconds
+        job.payload = payload
+        job.status = "PENDING"
+        job.run_after = _safe_now() + timedelta(seconds=retry_after_seconds)
+        job.error_message = None
+        job.updated_at = func.now()
+        session.add(job)
+        logger.info(
+            "Observation trail deferred by single-flight lock: "
+            f"job_id={job.id} retry_after={retry_after_seconds}s unresolved={after_count}",
+            extra={"emoji_type": "info"},
+        )
+        return {
+            "done": False,
+            "attempt": attempt_number,
+            "unresolved": after_count,
+            "reason": resolved_reason,
+        }
+
+    if after_count > 0 and resolved_reason in {"idle_no_progress_deferred", "no_progress_max_polls"}:
+        if attempt_number < max_attempts:
+            demoted = attempt_number >= _stubborn_demotion_after_attempts()
+            retry_after_seconds = _stubborn_delay_seconds() if demoted else (120 if resolved_reason == "idle_no_progress_deferred" else 90)
+            payload["attempt"] = attempt_number
+            payload["last_resolution_reason"] = resolved_reason
+            payload["last_unresolved_ids"] = unresolved_ids
+            payload["next_retry_after_seconds"] = retry_after_seconds
+            payload["stubborn_tail_demoted"] = demoted
+            job.payload = payload
+            job.status = "PENDING"
+            job.run_after = _safe_now() + timedelta(seconds=retry_after_seconds)
+            job.error_message = None
+            job.updated_at = func.now()
+            session.add(job)
+            logger.info(
+                "Observation trail continuation scheduled "
+                f"job_id={job.id} reason={resolved_reason} attempt={attempt_number}/{max_attempts} "
+                f"retry_after={retry_after_seconds}s unresolved={after_count} demoted={demoted}",
+                extra={"emoji_type": "info"},
+            )
+            return {
+                "done": False,
+                "attempt": attempt_number,
+                "unresolved": after_count,
+                "reason": f"retry:{resolved_reason}",
+            }
+
+        logger.info(
+            "Observation trail reached max retries for unresolved placeholders "
+            f"job_id={job.id} attempt={attempt_number}/{max_attempts} unresolved={after_count} reason={resolved_reason}",
+            extra={"emoji_type": "warning"},
+        )
 
     elapsed_ms = int(math.ceil((time.monotonic() - start) * 1000.0))
 
@@ -215,7 +312,7 @@ def process_observation_trail_job(session, job: Job) -> dict[str, Any]:
             observed_jellyfin=int(observe_stats.get("observed_jellyfin", 0) or 0),
             observed_emby=int(observe_stats.get("observed_emby", 0) or 0),
             observe_failed=int(observe_stats.get("observe_failed", 0) or 0),
-            max_attempts=1,
+            max_attempts=max_attempts,
             elapsed_ms=elapsed_ms,
             resolution_reason=resolved_reason,
             unresolved_placeholder_ids=unresolved_ids,

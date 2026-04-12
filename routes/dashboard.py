@@ -1,5 +1,6 @@
 """Dashboard routes: lightweight UI showing stats, activity, errors, and live logs."""
 
+import ast
 import calendar as _calendar
 import os
 import glob as _glob
@@ -947,6 +948,251 @@ def _build_sync_placeholder_rows(session, sync_job: dict[str, Any]) -> list[dict
     return result
 
 
+def _extract_log_timestamp(line: str) -> datetime | None:
+    token = str(line or "")[:23]
+    try:
+        return datetime.strptime(token, "%Y-%m-%d %H:%M:%S,%f").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _runtime_log_dir() -> str:
+    explicit_file = str(getattr(settings, "LOG_FILE", "") or "").strip()
+    if explicit_file:
+        return os.path.dirname(explicit_file) or "."
+    explicit_dir = str(getattr(settings, "LOG_DIR", "") or "").strip()
+    if explicit_dir:
+        return explicit_dir
+    appdata = str(getattr(settings, "APPDATA_PATH", "/config") or "/config").strip() or "/config"
+    return os.path.join(appdata, "logs")
+
+
+def _latest_runtime_log_file() -> str | None:
+    pattern = os.path.join(_runtime_log_dir(), "placeholdarr-*.log")
+    log_files = _glob.glob(pattern)
+    if not log_files:
+        return None
+    by_mtime = sorted(log_files, key=lambda p: os.path.getmtime(p), reverse=True)
+    for path in by_mtime:
+        try:
+            if os.path.getsize(path) >= 2048:
+                return path
+        except Exception:
+            continue
+    return by_mtime[0]
+
+
+def _parse_metrics_dict(fragment: str) -> dict[str, Any]:
+    try:
+        parsed = ast.literal_eval(fragment)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
+def _build_full_sync_progress_row() -> dict[str, Any] | None:
+    log_file = _latest_runtime_log_file()
+    if not log_file:
+        return None
+
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except Exception:
+        return None
+
+    if not lines:
+        return None
+
+    series_total = 0
+    series_processed = 0
+    episodes_discovered = 0
+    movie_started = False
+    series_started = False
+    determination: dict[str, Any] = {}
+    materialization: dict[str, Any] = {}
+    last_observation: dict[str, Any] = {}
+    observation_summary: dict[str, Any] = {}
+    status_projection_queued = 0
+    last_time: datetime | None = None
+
+    re_series_fetch = re.compile(r"Series fullsync: fetched\s+(\d+)\s+series", re.IGNORECASE)
+    re_series_progress = re.compile(r"Series fullsync progress:\s*(\d+)/(\d+)\s+series processed\s*\((\d+)\s+episodes", re.IGNORECASE)
+    re_determination = re.compile(r"Determination phase complete:\s*(\{.*\})")
+    re_materialization = re.compile(r"Materialization phase complete:\s*(\{.*\})")
+    re_observation_poll = re.compile(
+        r"Observation poll pass #(\d+):\s*start_unresolved=(\d+)\s+remaining_unresolved=(\d+)\s+"
+        r"resolved_delta=(\d+)\s+progress_delta=(\d+).*?awaiting_plex_scan=(\d+).*?status_updates_plex=(\d+)",
+        re.IGNORECASE,
+    )
+    re_observation_summary = re.compile(r"Observation summary:\s*ready=(\d+)/(\d+),\s*still_waiting=(\d+),\s*reason=([a-z_]+)", re.IGNORECASE)
+    re_status_projection = re.compile(r"status projection queued placeholders=(\d+)", re.IGNORECASE)
+
+    for raw in lines:
+        line = str(raw or "")
+        ts = _extract_log_timestamp(line)
+        if ts is not None:
+            last_time = ts
+
+        if "Starting startup movie fullsync" in line:
+            movie_started = True
+        if "Starting startup series fullsync" in line:
+            series_started = True
+
+        match = re_series_fetch.search(line)
+        if match:
+            series_total = max(series_total, int(match.group(1)))
+
+        match = re_series_progress.search(line)
+        if match:
+            series_processed = max(series_processed, int(match.group(1)))
+            series_total = max(series_total, int(match.group(2)))
+            episodes_discovered = max(episodes_discovered, int(match.group(3)))
+
+        match = re_determination.search(line)
+        if match:
+            determination = _parse_metrics_dict(match.group(1))
+
+        match = re_materialization.search(line)
+        if match:
+            materialization = _parse_metrics_dict(match.group(1))
+
+        match = re_observation_poll.search(line)
+        if match:
+            last_observation = {
+                "pass": int(match.group(1)),
+                "start_unresolved": int(match.group(2)),
+                "remaining_unresolved": int(match.group(3)),
+                "resolved_delta": int(match.group(4)),
+                "progress_delta": int(match.group(5)),
+                "awaiting_plex_scan": int(match.group(6)),
+                "status_updates_plex": int(match.group(7)),
+            }
+
+        match = re_observation_summary.search(line)
+        if match:
+            observation_summary = {
+                "ready": int(match.group(1)),
+                "expected": int(match.group(2)),
+                "still_waiting": int(match.group(3)),
+                "reason": str(match.group(4) or ""),
+            }
+
+        match = re_status_projection.search(line)
+        if match:
+            status_projection_queued += int(match.group(1))
+
+    if not any([movie_started, series_started, determination, materialization, last_observation, observation_summary]):
+        return None
+
+    observation_running = bool(last_observation) and int(last_observation.get("remaining_unresolved", 0) or 0) > 0
+    if observation_summary:
+        reason = str(observation_summary.get("reason") or "").lower()
+        if reason == "all_resolved" and int(observation_summary.get("still_waiting", 0) or 0) <= 0:
+            observation_running = False
+
+    overall_status = "WORKING" if observation_running else "DONE"
+    if int(materialization.get("errors", 0) or 0) > 0:
+        overall_status = "FAILED"
+
+    sections: list[dict[str, Any]] = []
+    discovery_status = "done" if (series_total > 0 or movie_started) else "pending"
+    sections.append(
+        {
+            "name": "Discovery",
+            "status": discovery_status,
+            "metrics": [
+                {"label": "Movies discovered", "value": int(determination.get("movies_total", 0) or 0)},
+                {"label": "Series discovered", "value": int(series_total or 0)},
+                {"label": "Episodes discovered", "value": int(max(episodes_discovered, int(determination.get("episodes_total", 0) or 0)))},
+                {"label": "Series progress", "value": f"{int(series_processed)}/{int(series_total)}" if series_total else str(int(series_processed))},
+            ],
+        }
+    )
+
+    determination_status = "done" if bool(determination) else "pending"
+    sections.append(
+        {
+            "name": "Determination",
+            "status": determination_status,
+            "metrics": [
+                {"label": "Needs placeholder", "value": int(determination.get("needs_placeholder", 0) or 0)},
+                {"label": "Already had placeholder", "value": int(determination.get("placeholder_exists", 0) or 0)},
+                {"label": "Not needed", "value": int(determination.get("not_needed", 0) or 0)},
+            ],
+        }
+    )
+
+    materialization_status = "done" if bool(materialization) and overall_status != "WORKING" else ("working" if bool(materialization) else "pending")
+    if int(materialization.get("errors", 0) or 0) > 0:
+        materialization_status = "failed"
+    sections.append(
+        {
+            "name": "Materialization",
+            "status": materialization_status,
+            "metrics": [
+                {"label": "Created", "value": int(materialization.get("created", 0) or 0)},
+                {"label": "Files created", "value": int(materialization.get("files_created", 0) or 0)},
+                {"label": "NFO written", "value": int(materialization.get("nfo_written", 0) or 0)},
+                {"label": "Refreshes called", "value": int(materialization.get("media_refresh_requested", 0) or 0)},
+                {"label": "Hybrid candidates", "value": int(materialization.get("media_id_observe_failed", 0) or 0)},
+            ],
+        }
+    )
+
+    observation_status = "working" if observation_running else ("done" if (last_observation or observation_summary) else "pending")
+    if overall_status == "FAILED":
+        observation_status = "failed"
+    sections.append(
+        {
+            "name": "Observation",
+            "status": observation_status,
+            "metrics": [
+                {"label": "Poll pass", "value": int(last_observation.get("pass", 0) or 0)},
+                {"label": "Remaining unresolved", "value": int(last_observation.get("remaining_unresolved", observation_summary.get("still_waiting", 0) if observation_summary else 0) or 0)},
+                {"label": "Awaiting Plex scan", "value": int(last_observation.get("awaiting_plex_scan", 0) or 0)},
+                {"label": "Pass status updates", "value": int(last_observation.get("status_updates_plex", 0) or 0)},
+                {"label": "Last progress delta", "value": int(last_observation.get("progress_delta", 0) or 0)},
+            ],
+        }
+    )
+
+    status_projection_status = "done" if status_projection_queued > 0 and not observation_running else ("working" if observation_running else "pending")
+    sections.append(
+        {
+            "name": "Status Projection",
+            "status": status_projection_status,
+            "metrics": [
+                {"label": "Projection jobs queued", "value": int(status_projection_queued)},
+            ],
+        }
+    )
+
+    current_unresolved = int(last_observation.get("remaining_unresolved", 0) or 0)
+    summary_details = (
+        f"Materialization created {int(materialization.get('created', 0) or 0)} placeholders • "
+        f"Observation unresolved {current_unresolved} • "
+        f"Poll pass {int(last_observation.get('pass', 0) or 0)}"
+    )
+
+    return {
+        "id": "full-sync-progress",
+        "type": "job",
+        "job_type": "full_sync_progress",
+        "display_name": "Full Sync Progress",
+        "status": overall_status,
+        "details": summary_details,
+        "time": (last_time.isoformat() if last_time else None),
+        "progress": {
+            "running": bool(observation_running),
+            "sections": sections,
+            "log_file": os.path.basename(log_file),
+        },
+    }
+
+
 @router.get("/api/activity")
 async def activity(limit: int = Query(50, ge=1, le=200)):
     """Return recent user-relevant activity: syncs, errors, and meaningful jobs."""
@@ -1182,6 +1428,21 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             inject = missing_grouped[: min(3, len(top))]
             top = top[: max(0, len(top) - len(inject))] + inject
             top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
+
+        sync_progress_row = _build_full_sync_progress_row()
+        if sync_progress_row:
+            top = [
+                sync_progress_row,
+                *[
+                    row
+                    for row in top
+                    if not (
+                        str(row.get("job_type") or "") == "full_sync_progress"
+                        and str(row.get("id") or "") == "full-sync-progress"
+                    )
+                ],
+            ]
+            top = top[:limit]
 
         return top
     finally:
@@ -1526,7 +1787,6 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
         items.sort(
             key=lambda item: (
                 0 if item.get("has_placeholder") else 1,
-                0 if item.get("type") == "movie" else 1,
                 str(item.get("title") or "").lower(),
             )
         )
@@ -1990,13 +2250,23 @@ async def logs(
             appdata = str(getattr(settings, "APPDATA_PATH", "/config") or "/config").strip() or "/config"
             log_dir = os.path.join(appdata, "logs")
 
-    # Find the most recent log file
+    # Find the latest non-trivial log file.
+    # Filename sort can pick the wrong file when multiple runs exist, and
+    # very small run files can be from short utility imports.
     pattern = os.path.join(log_dir, "placeholdarr-*.log")
-    log_files = sorted(_glob.glob(pattern))
+    log_files = _glob.glob(pattern)
     if not log_files:
         return {"lines": [], "file": None}
 
-    log_file = log_files[-1]
+    by_mtime = sorted(log_files, key=lambda p: os.path.getmtime(p), reverse=True)
+    log_file = by_mtime[0]
+    for candidate in by_mtime:
+        try:
+            if os.path.getsize(candidate) >= 2048:
+                log_file = candidate
+                break
+        except Exception:
+            continue
 
     # Read last N lines efficiently
     try:
@@ -2005,9 +2275,9 @@ async def logs(
     except FileNotFoundError:
         return {"lines": [], "file": None}
 
-    lines = all_lines[-tail:]
-
-    # Optional level filter (threshold semantics)
+    # Optional level filter (threshold semantics) — applied to ALL lines before
+    # tailing so that changing the level shows the last N *matching* lines from
+    # the full history, not the last N raw lines filtered down to almost nothing.
     normalized_level = str(level or "all").strip().lower()
     thresholds = {
         "debug": 10,
@@ -2033,7 +2303,11 @@ async def logs(
 
     threshold = thresholds.get(normalized_level)
     if threshold is not None:
-        lines = [l for l in lines if (_line_level_value(l) or -1) >= threshold]
+        lines = [l for l in all_lines if (_line_level_value(l) or -1) >= threshold]
+    else:
+        lines = all_lines
+
+    lines = lines[-tail:]
 
     return {
         "lines": [l.rstrip("\n") for l in lines],

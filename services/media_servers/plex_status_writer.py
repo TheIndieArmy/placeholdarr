@@ -10,41 +10,51 @@ from sqlalchemy.orm import Session
 from core.logger import logger
 from services.media_servers.plex_lookup import get_plex_server
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
+from services.status_projection import project_summary, project_title
 
 
-def _prepend_status_to_summary(
-    summary: str | None,
-    status: str | None,
-    fallback: str | None = None,
-    secondary_fallback: str | None = None,
-) -> str:
-    text = str(summary or "")
-    text = re.sub(r"^\[.*?\]\s*", "", text)
+def _base_summary(summary: str | None, fallback: str | None = None, secondary_fallback: str | None = None) -> str:
+    text = re.sub(r"^\[.*?\]\s*", "", str(summary or ""))
     if not text.strip():
         for candidate in (fallback, secondary_fallback):
             candidate_text = str(candidate or "").strip()
             if candidate_text:
                 text = candidate_text
                 break
-    if status:
-        return f"[{status}] {text}".strip()
     return text.strip()
 
 
-def _update_item_summary(item: Any, desired_summary: str, retry_interval: int, retry_timeout: int) -> bool:
+def _update_item_projection(
+    item: Any,
+    *,
+    desired_title: str,
+    desired_summary: str,
+    current_title: str,
+    current_summary: str,
+    retry_interval: int,
+    retry_timeout: int,
+) -> tuple[bool, bool, bool]:
     deadline = time.monotonic() + max(0, int(retry_timeout))
+    changed_title = desired_title != current_title
+    changed_summary = desired_summary != current_summary
+    if not changed_title and not changed_summary:
+        return True, False, False
+
     while True:
         try:
-            item.editSummary(desired_summary, locked=True)
+            if changed_title:
+                item.editTitle(desired_title, locked=True)
+            if changed_summary:
+                item.editSummary(desired_summary, locked=True)
             try:
                 item.reload()
             except Exception:
                 pass
-            return True
+            return True, changed_title, changed_summary
         except Exception as ex:
             if time.monotonic() >= deadline:
-                logger.debug(f"Plex summary update timed out: {ex}", extra={"emoji_type": "debug"})
-                return False
+                logger.debug(f"Plex projection update timed out: {ex}", extra={"emoji_type": "debug"})
+                return False, changed_title, changed_summary
             sleep_for = min(max(1, int(retry_interval)), max(1, int(deadline - time.monotonic())))
             time.sleep(sleep_for)
 
@@ -136,21 +146,42 @@ def batch_update_plex_statuses(
             )
             continue
 
+        current_title = str(getattr(plex_item, "title", "") or "")
         current_summary = str(getattr(plex_item, "summary", "") or "")
-        desired_summary = _prepend_status_to_summary(
-            current_summary,
+        desired_title = project_title(current_title, desired_status)
+        desired_summary = project_summary(
+            _base_summary(
+                current_summary,
+                fallback=getattr(movie, "plex_overview", None),
+                secondary_fallback=getattr(movie, "radarr_overview", None),
+            ),
             desired_status,
-            fallback=getattr(movie, "plex_overview", None),
-            secondary_fallback=getattr(movie, "radarr_overview", None),
         )
-        if current_summary == desired_summary:
+        ok, changed_title, changed_summary = _update_item_projection(
+            plex_item,
+            desired_title=desired_title,
+            desired_summary=desired_summary,
+            current_title=current_title,
+            current_summary=current_summary,
+            retry_interval=retry_interval,
+            retry_timeout=retry_timeout,
+        )
+        if ok and not changed_title and not changed_summary:
             stats["unchanged"] += 1
             stats["details"].append({"entity_id": entity_id, "title": movie.title, "result": "unchanged"})
             continue
 
-        if _update_item_summary(plex_item, desired_summary, retry_interval, retry_timeout):
+        if ok:
             stats["status_updates"] += 1
-            stats["details"].append({"entity_id": entity_id, "title": movie.title, "result": "updated"})
+            stats["details"].append(
+                {
+                    "entity_id": entity_id,
+                    "title": movie.title,
+                    "result": "updated",
+                    "title_updated": bool(changed_title),
+                    "summary_updated": bool(changed_summary),
+                }
+            )
         else:
             stats["errors"] += 1
             stats["details"].append({"entity_id": entity_id, "title": movie.title, "result": "write_failed"})
@@ -208,21 +239,42 @@ def batch_update_plex_statuses(
                     stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "plex_episode_not_found"})
                     continue
 
+                current_title = str(getattr(plex_episode, "title", "") or "")
                 current_summary = str(getattr(plex_episode, "summary", "") or "")
-                desired_summary = _prepend_status_to_summary(
-                    current_summary,
+                desired_title = project_title(current_title, intent.get("status"))
+                desired_summary = project_summary(
+                    _base_summary(
+                        current_summary,
+                        fallback=getattr(episode, "plex_overview", None),
+                        secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
+                    ),
                     intent.get("status"),
-                    fallback=getattr(episode, "plex_overview", None),
-                    secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
                 )
-                if current_summary == desired_summary:
+                ok, changed_title, changed_summary = _update_item_projection(
+                    plex_episode,
+                    desired_title=desired_title,
+                    desired_summary=desired_summary,
+                    current_title=current_title,
+                    current_summary=current_summary,
+                    retry_interval=retry_interval,
+                    retry_timeout=retry_timeout,
+                )
+                if ok and not changed_title and not changed_summary:
                     stats["unchanged"] += 1
                     stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "unchanged"})
                     continue
 
-                if _update_item_summary(plex_episode, desired_summary, retry_interval, retry_timeout):
+                if ok:
                     stats["status_updates"] += 1
-                    stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "updated"})
+                    stats["details"].append(
+                        {
+                            "entity_id": entity_id,
+                            "series": series.title,
+                            "result": "updated",
+                            "title_updated": bool(changed_title),
+                            "summary_updated": bool(changed_summary),
+                        }
+                    )
                 else:
                     stats["errors"] += 1
                     stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "write_failed"})
@@ -254,21 +306,42 @@ def batch_update_plex_statuses(
                 stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "plex_episode_not_found"})
                 continue
 
+            current_title = str(getattr(plex_episode, "title", "") or "")
             current_summary = str(getattr(plex_episode, "summary", "") or "")
-            desired_summary = _prepend_status_to_summary(
-                current_summary,
+            desired_title = project_title(current_title, desired_status)
+            desired_summary = project_summary(
+                _base_summary(
+                    current_summary,
+                    fallback=getattr(episode, "plex_overview", None),
+                    secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
+                ),
                 desired_status,
-                fallback=getattr(episode, "plex_overview", None),
-                secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
             )
-            if current_summary == desired_summary:
+            ok, changed_title, changed_summary = _update_item_projection(
+                plex_episode,
+                desired_title=desired_title,
+                desired_summary=desired_summary,
+                current_title=current_title,
+                current_summary=current_summary,
+                retry_interval=retry_interval,
+                retry_timeout=retry_timeout,
+            )
+            if ok and not changed_title and not changed_summary:
                 stats["unchanged"] += 1
                 stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "unchanged"})
                 continue
 
-            if _update_item_summary(plex_episode, desired_summary, retry_interval, retry_timeout):
+            if ok:
                 stats["status_updates"] += 1
-                stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "updated"})
+                stats["details"].append(
+                    {
+                        "entity_id": entity_id,
+                        "series": series.title,
+                        "result": "updated",
+                        "title_updated": bool(changed_title),
+                        "summary_updated": bool(changed_summary),
+                    }
+                )
             else:
                 stats["errors"] += 1
                 stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "write_failed"})
@@ -286,21 +359,42 @@ def batch_update_plex_statuses(
             stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "plex_episode_not_found"})
             continue
 
+        current_title = str(getattr(plex_episode, "title", "") or "")
         current_summary = str(getattr(plex_episode, "summary", "") or "")
-        desired_summary = _prepend_status_to_summary(
-            current_summary,
+        desired_title = project_title(current_title, desired_status)
+        desired_summary = project_summary(
+            _base_summary(
+                current_summary,
+                fallback=getattr(episode, "plex_overview", None),
+                secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
+            ),
             desired_status,
-            fallback=getattr(episode, "plex_overview", None),
-            secondary_fallback=getattr(episode, "sonarr_episode_overview", None),
         )
-        if current_summary == desired_summary:
+        ok, changed_title, changed_summary = _update_item_projection(
+            plex_episode,
+            desired_title=desired_title,
+            desired_summary=desired_summary,
+            current_title=current_title,
+            current_summary=current_summary,
+            retry_interval=retry_interval,
+            retry_timeout=retry_timeout,
+        )
+        if ok and not changed_title and not changed_summary:
             stats["unchanged"] += 1
             stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "unchanged"})
             continue
 
-        if _update_item_summary(plex_episode, desired_summary, retry_interval, retry_timeout):
+        if ok:
             stats["status_updates"] += 1
-            stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "updated"})
+            stats["details"].append(
+                {
+                    "entity_id": entity_id,
+                    "series": series.title,
+                    "result": "updated",
+                    "title_updated": bool(changed_title),
+                    "summary_updated": bool(changed_summary),
+                }
+            )
         else:
             stats["errors"] += 1
             stats["details"].append({"entity_id": entity_id, "series": series.title, "result": "write_failed"})

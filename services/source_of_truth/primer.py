@@ -21,6 +21,8 @@ from services.source_of_truth.materializer import (
     apply_movie_materialization,
 )
 from services.source_of_truth.media_observation import observe_placeholders_with_polling
+from services.source_of_truth.observation_controller import enqueue_observation_continuation
+from services.source_of_truth.observation_trail import unresolved_placeholder_ids
 from services.source_of_truth.status_reconciler import enqueue_status_projection
 
 
@@ -329,6 +331,8 @@ def run_primer_phase() -> dict:
         "observed_emby": 0,
         "observe_failed": 0,
         "status_projection_enqueued": 0,
+        "observation_trail_enqueued": 0,
+        "observation_trail_job_id": None,
     }
 
     # Hardlink mode needs primer protections by default. Non-hardlink mode only
@@ -474,51 +478,33 @@ def run_primer_phase() -> dict:
                         observe_session,
                         primer_placeholders,
                         allow_title_fallback=True,
+                        auto_enqueue_trail_on_defer=False,
                     )
                     stats["observed_plex"] = observe_stats.get("observed_plex", 0)
                     stats["observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
                     stats["observed_emby"] = observe_stats.get("observed_emby", 0)
                     stats["observe_failed"] = observe_stats.get("observe_failed", 0)
 
-                    # Conditional fallback: only broaden to section refresh if targeted
-                    # path refresh + observation still left unresolved primer placeholders.
-                    if (
-                        bool(getattr(settings, "MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", True))
-                        and stats["observe_failed"] > 0
-                        and (touched_movie_ids or touched_episode_ids)
-                    ):
-                        fallback_stats = refresh_all_sections(
-                            has_movies=bool(touched_movie_ids),
-                            has_episodes=bool(touched_episode_ids),
+                    unresolved_ids = unresolved_placeholder_ids(primer_placeholders)
+                    if unresolved_ids:
+                        continuation = enqueue_observation_continuation(
+                            observe_session,
+                            placeholder_ids=unresolved_ids,
+                            source="startup_primer",
+                            trigger_reason="primer_unresolved",
+                            delay_seconds=0,
                         )
-                        section_refreshed = int(fallback_stats.get("refreshed", 0) or 0)
-                        section_failed = int(fallback_stats.get("failed", 0) or 0)
-                        stats["refresh_requested"] += section_refreshed
-                        stats["refresh_failed"] += section_failed
-                        stats["section_refresh_requested"] += section_refreshed
-                        stats["section_refresh_failed"] += section_failed
-
-                        unresolved_primer_placeholders = [
-                            row
-                            for row in primer_placeholders
-                            if getattr(row, "has_placeholder", False)
-                            and not getattr(row, "plex_placeholder_id", None)
-                        ]
-                        if unresolved_primer_placeholders:
+                        if continuation.get("trail_enqueued"):
+                            stats["observation_trail_enqueued"] = 1
+                            stats["observation_trail_job_id"] = continuation.get("trail_job_id")
                             logger.info(
-                                "Primer fallback section refresh completed; re-observing unresolved seeded placeholders "
-                                f"count={len(unresolved_primer_placeholders)}",
+                                "Primer unresolved continuation summary "
+                                f"unresolved={len(unresolved_ids)} "
+                                f"hybrid_enqueued={bool(continuation.get('hybrid_enqueued'))} "
+                                f"trail_enqueued={bool(continuation.get('trail_enqueued'))} "
+                                f"trail_job_id={continuation.get('trail_job_id')}",
                                 extra={"emoji_type": "info"},
                             )
-                            fallback_observe_stats = observe_placeholders_with_polling(
-                                observe_session,
-                                unresolved_primer_placeholders,
-                                allow_title_fallback=True,
-                            )
-                            stats["observed_plex"] += fallback_observe_stats.get("observed_plex", 0)
-                            stats["observed_jellyfin"] += fallback_observe_stats.get("observed_jellyfin", 0)
-                            stats["observed_emby"] += fallback_observe_stats.get("observed_emby", 0)
-                            stats["observe_failed"] = fallback_observe_stats.get("observe_failed", 0)
 
                     # Enqueue status projection for any primer placeholders that
                     # now have a Plex rating key so their titles get written.

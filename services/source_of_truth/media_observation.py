@@ -14,24 +14,281 @@ it only enriches identity fields and does not own user-facing status.
 
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote_plus
 
 import requests
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from core.config import settings
 from core.logger import logger
+from services.media_servers.plex import get_plex_section_scan_state, refresh_plex_section_ids
 from services.media_servers.plex_identity import persist_episode_hierarchy_plex_identity, persist_movie_plex_identity
 from services.media_servers.plex_lookup import find_show_by_id, get_plex_server
 from services.media_servers.plex_status_writer import batch_update_plex_statuses
-from services.postgres.models import Episode, Movie, Placeholder, Season, Series
+from services.postgres.db import get_engine, get_session
+from services.postgres.models import Episode, Movie, ObservationFlight, Placeholder, Season, Series
+from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 
 
 
 def _safe_now() -> datetime:
 	return datetime.now(timezone.utc)
+
+
+OBSERVATION_SINGLE_FLIGHT_LOCK_KEY = 4815162342
+OBSERVATION_SINGLE_FLIGHT_ROW_KEY = 'global_observation_single_flight'
+
+
+def _single_flight_enabled() -> bool:
+	return bool(getattr(settings, 'OBSERVATION_SINGLE_FLIGHT_ENABLED', True))
+
+
+def _single_flight_wait_seconds() -> float:
+	try:
+		return max(0.0, float(getattr(settings, 'OBSERVATION_SINGLE_FLIGHT_WAIT_SECONDS', 15.0) or 0.0))
+	except Exception:
+		return 15.0
+
+
+def _single_flight_retry_seconds() -> float:
+	try:
+		return max(0.05, float(getattr(settings, 'OBSERVATION_SINGLE_FLIGHT_RETRY_SECONDS', 0.25) or 0.25))
+	except Exception:
+		return 0.25
+
+
+def _single_flight_stale_seconds() -> int:
+	try:
+		return max(60, int(getattr(settings, 'OBSERVATION_FLIGHT_STALE_SECONDS', 300) or 300))
+	except Exception:
+		return 300
+
+
+def _single_flight_holder() -> str:
+	import os
+	return str(os.getenv('HOSTNAME') or 'unknown-host')
+
+
+def _observation_snapshot_cache_passes() -> int:
+	try:
+		return max(0, int(getattr(settings, 'OBSERVATION_SNAPSHOT_CACHE_PASSES', 2) or 0))
+	except Exception:
+		return 2
+
+
+def _cleanup_stale_flight_rows() -> None:
+	if not _single_flight_enabled():
+		return
+	now = _safe_now()
+	cutoff = now.timestamp() - float(_single_flight_stale_seconds())
+	session = get_session()
+	try:
+		rows = (
+			session.query(ObservationFlight)
+			.filter(
+				ObservationFlight.flight_key == OBSERVATION_SINGLE_FLIGHT_ROW_KEY,
+				ObservationFlight.is_active == True,  # noqa: E712
+			)
+			.all()
+		)
+		changed = False
+		for row in rows:
+			hb = getattr(row, 'heartbeat_at', None) or getattr(row, 'acquired_at', None)
+			if not hb:
+				continue
+			if hb.timestamp() < cutoff:
+				row.is_active = False
+				row.last_reason = 'stale_timeout_cleanup'
+				row.released_at = now
+				row.updated_at = func.now()
+				session.add(row)
+				changed = True
+		if changed:
+			session.commit()
+			logger.info(
+				'Cleaned stale persisted observation flight row(s).',
+				extra={'emoji_type': 'info'},
+			)
+		else:
+			session.rollback()
+	except Exception:
+		try:
+			session.rollback()
+		except Exception:
+			pass
+	finally:
+		try:
+			session.close()
+		except Exception:
+			pass
+
+
+def _mark_flight_active(*, source: str, lock_attempts: int) -> None:
+	session = get_session()
+	try:
+		row = (
+			session.query(ObservationFlight)
+			.filter(ObservationFlight.flight_key == OBSERVATION_SINGLE_FLIGHT_ROW_KEY)
+			.first()
+		)
+		if not row:
+			row = ObservationFlight(flight_key=OBSERVATION_SINGLE_FLIGHT_ROW_KEY)
+			session.add(row)
+			session.flush()
+		now = _safe_now()
+		row.holder = _single_flight_holder()
+		row.source = str(source or 'unknown')
+		row.is_active = True
+		row.lock_attempts = max(1, int(lock_attempts or 1))
+		row.acquired_at = now
+		row.heartbeat_at = now
+		row.released_at = None
+		row.last_reason = 'active'
+		row.updated_at = func.now()
+		session.add(row)
+		session.commit()
+	except Exception:
+		try:
+			session.rollback()
+		except Exception:
+			pass
+	finally:
+		try:
+			session.close()
+		except Exception:
+			pass
+
+
+def _heartbeat_active_flight() -> None:
+	session = get_session()
+	try:
+		row = (
+			session.query(ObservationFlight)
+			.filter(ObservationFlight.flight_key == OBSERVATION_SINGLE_FLIGHT_ROW_KEY)
+			.first()
+		)
+		if not row:
+			session.rollback()
+			return
+		row.heartbeat_at = _safe_now()
+		row.updated_at = func.now()
+		session.add(row)
+		session.commit()
+	except Exception:
+		try:
+			session.rollback()
+		except Exception:
+			pass
+	finally:
+		try:
+			session.close()
+		except Exception:
+			pass
+
+
+def _mark_flight_released(*, reason: str) -> None:
+	session = get_session()
+	try:
+		row = (
+			session.query(ObservationFlight)
+			.filter(ObservationFlight.flight_key == OBSERVATION_SINGLE_FLIGHT_ROW_KEY)
+			.first()
+		)
+		if not row:
+			session.rollback()
+			return
+		row.is_active = False
+		row.last_reason = str(reason or 'released')
+		row.released_at = _safe_now()
+		row.heartbeat_at = _safe_now()
+		row.updated_at = func.now()
+		session.add(row)
+		session.commit()
+	except Exception:
+		try:
+			session.rollback()
+		except Exception:
+			pass
+	finally:
+		try:
+			session.close()
+		except Exception:
+			pass
+
+
+def _try_acquire_single_flight_lock() -> tuple[Any | None, bool, int]:
+	if not _single_flight_enabled():
+		return None, True, 0
+
+	_cleanup_stale_flight_rows()
+
+	conn = None
+	try:
+		conn = get_engine().connect()
+	except Exception as exc:
+		logger.warning(
+			f"Observation single-flight disabled for this run (could not open lock connection): {exc}",
+			extra={'emoji_type': 'warning'},
+		)
+		return None, True, 0
+
+	attempts = 0
+	deadline = time.monotonic() + _single_flight_wait_seconds()
+	while True:
+		attempts += 1
+		try:
+			got = bool(
+				conn.execute(
+					text('SELECT pg_try_advisory_lock(:k)'),
+					{'k': OBSERVATION_SINGLE_FLIGHT_LOCK_KEY},
+				).scalar()
+			)
+		except Exception as exc:
+			try:
+				conn.close()
+			except Exception:
+				pass
+			logger.warning(
+				f"Observation single-flight lock attempt failed: {exc}",
+				extra={'emoji_type': 'warning'},
+			)
+			return None, False, attempts
+
+		if got:
+			logger.info(
+				f"Observation single-flight acquired after {attempts} attempt(s).",
+				extra={'emoji_type': 'info'},
+			)
+			return conn, True, attempts
+
+		if time.monotonic() >= deadline:
+			logger.info(
+				f"Observation single-flight busy after {attempts} attempt(s); deferring this run.",
+				extra={'emoji_type': 'info'},
+			)
+			try:
+				conn.close()
+			except Exception:
+				pass
+			return None, False, attempts
+
+		time.sleep(_single_flight_retry_seconds())
+
+
+def _release_single_flight_lock(conn: Any | None) -> None:
+	if conn is None:
+		return
+	try:
+		conn.execute(text('SELECT pg_advisory_unlock(:k)'), {'k': OBSERVATION_SINGLE_FLIGHT_LOCK_KEY})
+	except Exception:
+		pass
+	finally:
+		try:
+			conn.close()
+		except Exception:
+			pass
 
 
 def _set_plex_observed(placeholder: Placeholder, rating_key: str | int) -> None:
@@ -1127,6 +1384,30 @@ def _select_snapshot_key_candidates(
 	return candidates, len(candidates), skipped
 
 
+def _select_snapshot_present_candidates(
+	placeholders: list[Placeholder],
+	reverse_matches: dict[str, Any],
+) -> tuple[list[Placeholder], list[Placeholder]]:
+	"""Return placeholders present in the Plex snapshot and those still awaiting scan."""
+	movie_map = reverse_matches.get('movie_plex_item_by_movie_id', {}) or {}
+	episode_map = reverse_matches.get('episode_plex_item_by_episode_id', {}) or {}
+
+	present: list[Placeholder] = []
+	awaiting_scan: list[Placeholder] = []
+	for placeholder in placeholders:
+		movie_id = getattr(placeholder, 'movie_id', None)
+		episode_id = getattr(placeholder, 'episode_id', None)
+		if movie_id is not None and int(movie_id) in movie_map:
+			present.append(placeholder)
+			continue
+		if episode_id is not None and int(episode_id) in episode_map:
+			present.append(placeholder)
+			continue
+		awaiting_scan.append(placeholder)
+
+	return present, awaiting_scan
+
+
 def _build_observation_prefetch(session, placeholders: list[Placeholder]) -> dict[str, Any]:
 	"""Prefetch DB rows needed during a pass to avoid per-item queries."""
 	movie_ids: set[int] = set()
@@ -1340,8 +1621,9 @@ def observe_placeholder_media_ids(
 			movie_plex_item_by_movie_id = (observation_context or {}).get('movie_plex_item_by_movie_id', {})
 			episode_plex_item_by_episode_id = (observation_context or {}).get('episode_plex_item_by_episode_id', {})
 			if movie is not None:
-				if int(movie.id) in movie_plex_item_by_movie_id:
-					plex_item = movie_plex_item_by_movie_id.get(int(movie.id))
+				movie_id = int(getattr(movie, 'id', getattr(placeholder, 'movie_id', 0) or 0) or 0)
+				if movie_id and movie_id in movie_plex_item_by_movie_id:
+					plex_item = movie_plex_item_by_movie_id.get(movie_id)
 				elif plex_snapshot is not None:
 					plex_item = _resolve_plex_movie_item_from_snapshot(
 						plex_snapshot,
@@ -1366,8 +1648,9 @@ def observe_placeholder_media_ids(
 					plex_id = str(getattr(plex_item, 'ratingKey', '') or '') or None
 					plex_ready = _plex_item_metadata_ready(plex_item) if plex_snapshot is not None else bool(plex_id)
 			elif episode is not None and season and series:
-				if int(episode.id) in episode_plex_item_by_episode_id:
-					plex_item = episode_plex_item_by_episode_id.get(int(episode.id))
+				episode_id = int(getattr(episode, 'id', getattr(placeholder, 'episode_id', 0) or 0) or 0)
+				if episode_id and episode_id in episode_plex_item_by_episode_id:
+					plex_item = episode_plex_item_by_episode_id.get(episode_id)
 				elif plex_snapshot is not None:
 					plex_item = _resolve_plex_episode_item_from_snapshot(plex_snapshot, episode, season, series)
 					if plex_item is None:
@@ -1488,34 +1771,200 @@ def _expected_plex_section_ids(placeholders: list[Placeholder]) -> set[int]:
 	return section_ids
 
 
-def _run_plex_scan_gate(expected_section_ids: set[int], *, phase: str) -> dict[str, Any]:
-	"""
-	Gate for Plex section scan: always enabled, no activity checking.
-	Busy/activity checker was removed in Phase 1.
-	"""
+def _overlap_refresh_min_interval_seconds() -> int:
+	try:
+		return max(0, int(getattr(settings, 'MATERIALIZATION_OVERLAP_REFRESH_MIN_INTERVAL_SECONDS', 90) or 90))
+	except Exception:
+		return 90
+
+
+def _overlap_refresh_lease_seconds() -> int:
+	try:
+		return max(0, int(getattr(settings, 'MATERIALIZATION_OVERLAP_REFRESH_LEASE_SECONDS', 180) or 180))
+	except Exception:
+		return 180
+
+
+def _can_issue_post_observation_refresh(*, now_mono: float, last_refresh_mono: float | None, refresh_lease_until: float) -> bool:
+	if now_mono < float(refresh_lease_until):
+		return False
+	min_interval = float(_overlap_refresh_min_interval_seconds())
+	if last_refresh_mono is not None and (now_mono - float(last_refresh_mono)) < min_interval:
+		return False
+	return True
+
+
+def _post_observation_target_scan_state(expected_section_ids: set[int], *, phase: str) -> dict[str, Any]:
+	state = get_plex_section_scan_state(expected_section_ids)
+	state['phase'] = phase
+	return state
+
+
+def _trigger_post_observation_refresh(expected_section_ids: set[int]) -> dict[str, Any]:
 	if not expected_section_ids:
+		return {'requested': False, 'reason': 'no_expected_sections', 'refreshed': 0, 'failed': 0}
+
+	section_ids = sorted(int(x) for x in expected_section_ids)
+	lease = try_acquire_refresh_lease(
+		section_ids=section_ids,
+		source='post_observation_idle_refresh',
+		min_interval_seconds=_overlap_refresh_min_interval_seconds(),
+		lease_seconds=_overlap_refresh_lease_seconds(),
+	)
+	if not bool(lease.get('allowed', False)):
 		return {
-			'ok': True,
-			'reason': 'no_expected_sections',
-			'waited_seconds': 0,
-			'checks': 0,
-			'scan_detected': False,
+			'requested': False,
+			'reason': f"throttled:{lease.get('reason')}",
+			'refreshed': 0,
+			'failed': 0,
 		}
 
-	# Busy/activity checker removed: always proceed
+	refresh_stats = refresh_plex_section_ids(section_ids)
 	return {
-		'ok': True,
-		'reason': 'scan_gate_always_ok',
-		'waited_seconds': 0,
-		'checks': 0,
-		'scan_detected': False,
+		'requested': True,
+		'reason': 'refresh_triggered',
+		'refreshed': int(refresh_stats.get('refreshed', 0) or 0),
+		'failed': int(refresh_stats.get('failed', 0) or 0),
 	}
 
 
 # Sleep durations (seconds) per consecutive no-progress poll.
 # Schedule: 5 → 10 → 20 → 20, then stop on the 5th consecutive no-progress.
 # Total worst-case sleep: 5 + 10 + 20 + 20 = 55 s.
-_NO_PROGRESS_SLEEP_SCHEDULE = [5, 10, 20, 20]
+_NO_PROGRESS_SLEEP_SCHEDULE = [5, 10, 20, 20, 20]
+
+
+def _placeholder_ids(rows: list[Placeholder]) -> list[int]:
+	ids: list[int] = []
+	for row in rows:
+		row_id = getattr(row, 'id', None)
+		if row_id is None:
+			continue
+		ids.append(int(row_id))
+	return ids
+
+
+def _merge_observation_context(target: dict[str, Any], extra: dict[str, Any]) -> None:
+	for key, value in (extra or {}).items():
+		if isinstance(value, dict):
+			target.setdefault(key, {})
+			target[key].update(value)
+		else:
+			target[key] = value
+
+
+def _apply_mid_pass_refill(
+	session,
+	*,
+	process_placeholders: list[Placeholder],
+	still_unresolved: list[Placeholder],
+	next_chunk_start: int,
+	observation_context: dict[str, Any],
+	plex_snapshot: dict[str, Any] | None,
+	pass_stats: dict[str, Any],
+	strict_keys_only: bool,
+	snapshot_authority_mode: bool,
+	mid_pass_refill_callback: Callable[..., list[int]] | None,
+) -> tuple[list[Placeholder], list[Placeholder], dict[str, Any], bool]:
+	if mid_pass_refill_callback is None:
+		return process_placeholders, still_unresolved, observation_context, False
+
+	remaining_placeholders = process_placeholders[next_chunk_start:]
+	active_ids = _placeholder_ids(still_unresolved) + _placeholder_ids(remaining_placeholders)
+	unresolved_ids = _placeholder_ids(still_unresolved)
+	active_id_set = set(active_ids)
+	extra_ids = [
+		int(x)
+		for x in (
+			mid_pass_refill_callback(
+				active_placeholder_ids=active_ids,
+				unresolved_placeholder_ids=unresolved_ids,
+				pass_stats=dict(pass_stats),
+			)
+			or []
+		)
+		if x is not None and int(x) not in active_id_set
+	]
+	if not extra_ids:
+		return process_placeholders, still_unresolved, observation_context, False
+
+	extra_rows = session.query(Placeholder).filter(Placeholder.id.in_(extra_ids)).all()
+	if not extra_rows:
+		return process_placeholders, still_unresolved, observation_context, False
+
+	row_by_id = {int(getattr(row, 'id')): row for row in extra_rows if getattr(row, 'id', None) is not None}
+	ordered_extra_rows = [
+		row_by_id[row_id]
+		for row_id in extra_ids
+		if row_id in row_by_id
+		and bool(getattr(row_by_id[row_id], 'has_placeholder', False))
+		and not _is_placeholder_fully_resolved(row_by_id[row_id])
+	]
+	if not ordered_extra_rows:
+		return process_placeholders, still_unresolved, observation_context, False
+
+	extra_prefetch = _build_observation_prefetch(session, ordered_extra_rows)
+	extra_reverse_matches = _build_reverse_snapshot_match_maps(
+		extra_prefetch,
+		plex_snapshot,
+		strict_keys_only=True if snapshot_authority_mode else strict_keys_only,
+	)
+	modified_waiting = False
+	added_count = 0
+
+	if snapshot_authority_mode:
+		extra_process, extra_waiting = _select_snapshot_present_candidates(
+			ordered_extra_rows,
+			extra_reverse_matches,
+		)
+		pass_stats['awaiting_plex_scan_count'] = int(pass_stats.get('awaiting_plex_scan_count', 0) or 0) + len(extra_waiting)
+		pass_stats['candidate_count'] = int(pass_stats.get('candidate_count', 0) or 0) + len(extra_process)
+		for placeholder in extra_waiting:
+			still_unresolved.append(placeholder)
+			if bool(getattr(placeholder, 'plex_placeholder_id', None)):
+				continue
+			if getattr(placeholder, 'media_lookup_error', None) == 'plex_metadata_pending':
+				continue
+			placeholder.media_lookup_error = 'awaiting_plex_scan'
+			placeholder.media_lookup_last_attempt_at = func.now()
+			placeholder.updated_at = func.now()
+			session.add(placeholder)
+			modified_waiting = True
+	else:
+		extra_process, extra_candidate_count, extra_skipped = _select_snapshot_key_candidates(
+			ordered_extra_rows,
+			extra_reverse_matches,
+			strict_mode=strict_keys_only,
+		)
+		pass_stats['candidate_count'] = int(pass_stats.get('candidate_count', 0) or 0) + int(extra_candidate_count or 0)
+		pass_stats['skipped_not_in_snapshot_keys'] = int(pass_stats.get('skipped_not_in_snapshot_keys', 0) or 0) + int(extra_skipped or 0)
+		if strict_keys_only:
+			extra_candidate_ids = {int(getattr(p, 'id', 0) or 0) for p in extra_process}
+			for placeholder in ordered_extra_rows:
+				if int(getattr(placeholder, 'id', 0) or 0) not in extra_candidate_ids:
+					still_unresolved.append(placeholder)
+
+	if extra_process:
+		process_placeholders.extend(extra_process)
+		added_count = len(extra_process)
+
+	if modified_waiting:
+		commit_started = time.monotonic()
+		try:
+			session.commit()
+		except Exception:
+			session.rollback()
+			raise
+		pass_stats['db_commit_ms'] += _timing_ms(commit_started)
+
+	if added_count <= 0:
+		return process_placeholders, still_unresolved, observation_context, modified_waiting
+
+	_merge_observation_context(observation_context, extra_prefetch)
+	_merge_observation_context(observation_context, extra_reverse_matches)
+	pass_stats['mid_pass_refill_events'] = int(pass_stats.get('mid_pass_refill_events', 0) or 0) + 1
+	pass_stats['mid_pass_refill_added'] = int(pass_stats.get('mid_pass_refill_added', 0) or 0) + added_count
+	return process_placeholders, still_unresolved, observation_context, True
 
 
 def _run_observation_pass(
@@ -1523,6 +1972,7 @@ def _run_observation_pass(
 	placeholders: list[Placeholder],
 	allow_title_fallback: bool = True,
 	plex_snapshot: dict[str, Any] | None = None,
+	mid_pass_refill_callback: Callable[..., list[int]] | None = None,
 ) -> tuple[list[Placeholder], dict[str, Any], int, int, dict[str, Any] | None]:
 	"""Build a single Plex snapshot then probe every placeholder in the list.
 
@@ -1543,10 +1993,14 @@ def _run_observation_pass(
 		'candidate_count': 0,
 		'skipped_not_in_snapshot_keys': 0,
 		'strict_keys_only': False,
+		'snapshot_authority_mode': False,
+		'awaiting_plex_scan_count': 0,
 		'snapshot_build_ms': 0,
 		'match_lookup_ms': 0,
 		'status_projection_ms': 0,
 		'db_commit_ms': 0,
+		'mid_pass_refill_events': 0,
+		'mid_pass_refill_added': 0,
 	}
 	still_unresolved: list[Placeholder] = []
 	resolved_delta = 0
@@ -1560,32 +2014,52 @@ def _run_observation_pass(
 		pass_stats['snapshot_build_ms'] += _timing_ms(snapshot_started)
 
 	prefetch = _build_observation_prefetch(session, placeholders)
+	snapshot_authority_mode = bool(_is_enabled('plex') and plex_snapshot is not None)
 	strict_keys_only = bool(
-		_is_enabled('plex')
-		and plex_snapshot is not None
+		snapshot_authority_mode
 		and _observation_bulk_strict_keys_only()
 		and len(placeholders) >= _observation_strict_keys_min_placeholders()
 	)
 	pass_stats['strict_keys_only'] = strict_keys_only
+	pass_stats['snapshot_authority_mode'] = snapshot_authority_mode
 	reverse_matches = _build_reverse_snapshot_match_maps(
 		prefetch,
 		plex_snapshot,
-		strict_keys_only=strict_keys_only,
+		strict_keys_only=True if snapshot_authority_mode else strict_keys_only,
 	)
 	observation_context: dict[str, Any] = {
 		**prefetch,
 		**reverse_matches,
 	}
 
-	process_placeholders, candidate_count, skipped_count = _select_snapshot_key_candidates(
-		placeholders,
-		reverse_matches,
-		strict_mode=strict_keys_only,
-	)
+	if snapshot_authority_mode:
+		process_placeholders, awaiting_scan_placeholders = _select_snapshot_present_candidates(
+			placeholders,
+			reverse_matches,
+		)
+		candidate_count = len(process_placeholders)
+		skipped_count = len(awaiting_scan_placeholders)
+		pass_stats['awaiting_plex_scan_count'] = int(skipped_count)
+		still_unresolved.extend(awaiting_scan_placeholders)
+		for placeholder in awaiting_scan_placeholders:
+			if bool(getattr(placeholder, 'plex_placeholder_id', None)):
+				continue
+			if getattr(placeholder, 'media_lookup_error', None) == 'plex_metadata_pending':
+				continue
+			placeholder.media_lookup_error = 'awaiting_plex_scan'
+			placeholder.media_lookup_last_attempt_at = func.now()
+			placeholder.updated_at = func.now()
+			session.add(placeholder)
+	else:
+		process_placeholders, candidate_count, skipped_count = _select_snapshot_key_candidates(
+			placeholders,
+			reverse_matches,
+			strict_mode=strict_keys_only,
+		)
 	pass_stats['candidate_count'] = int(candidate_count)
 	pass_stats['skipped_not_in_snapshot_keys'] = int(skipped_count)
 
-	if strict_keys_only:
+	if strict_keys_only and not snapshot_authority_mode:
 		candidate_ids = {int(getattr(p, 'id', 0) or 0) for p in process_placeholders}
 		still_unresolved.extend(
 			[
@@ -1594,6 +2068,15 @@ def _run_observation_pass(
 				if int(getattr(placeholder, 'id', 0) or 0) not in candidate_ids
 			]
 		)
+
+	if snapshot_authority_mode and not process_placeholders and still_unresolved:
+		commit_started = time.monotonic()
+		try:
+			session.commit()
+		except Exception:
+			session.rollback()
+			raise
+		pass_stats['db_commit_ms'] += _timing_ms(commit_started)
 
 	for chunk_start in range(0, len(process_placeholders), chunk_size):
 		if (
@@ -1660,6 +2143,20 @@ def _run_observation_pass(
 		pass_stats['db_commit_ms'] += _timing_ms(commit_started)
 		pass_stats['chunks_processed'] += 1
 
+		next_chunk_start = chunk_start + chunk_size
+		process_placeholders, still_unresolved, observation_context, _ = _apply_mid_pass_refill(
+			session,
+			process_placeholders=process_placeholders,
+			still_unresolved=still_unresolved,
+			next_chunk_start=next_chunk_start,
+			observation_context=observation_context,
+			plex_snapshot=plex_snapshot,
+			pass_stats=pass_stats,
+			strict_keys_only=strict_keys_only,
+			snapshot_authority_mode=snapshot_authority_mode,
+			mid_pass_refill_callback=mid_pass_refill_callback,
+		)
+
 	progress_delta = pass_stats['plex_progress']
 	return still_unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot
 
@@ -1668,8 +2165,10 @@ def observe_placeholders_with_polling(
 	session,
 	placeholders: list[Placeholder],
 	allow_title_fallback: bool = False,
+	mid_pass_refill_callback: Callable[..., list[int]] | None = None,
+	auto_enqueue_trail_on_defer: bool = True,
 ) -> dict[str, Any]:
-	"""Observe placeholder media ids using direct polling with fixed intervals (no activity gating)."""
+	"""Observe placeholder media ids using polling with post-observation scan-state decisions."""
 	stats: dict[str, Any] = {
 		'observed_candidates': len(placeholders),
 		'observed_plex': 0,
@@ -1681,6 +2180,8 @@ def observe_placeholders_with_polling(
 		'resolved_total': 0,
 		'stopped_early': False,
 		'stop_reason': None,
+		'single_flight_lock_attempts': 0,
+		'single_flight_busy': False,
 		'passes_capped': 0,
 		'timing': {
 			'snapshot_build_ms': 0,
@@ -1688,6 +2189,8 @@ def observe_placeholders_with_polling(
 			'status_projection_ms': 0,
 			'db_commit_ms': 0,
 		},
+		'mid_pass_refill_events': 0,
+		'mid_pass_refill_added': 0,
 	}
 	if not placeholders:
 		return stats
@@ -1706,6 +2209,7 @@ def observe_placeholders_with_polling(
 			session,
 			unresolved,
 			allow_title_fallback=allow_title_fallback,
+			mid_pass_refill_callback=mid_pass_refill_callback,
 		)
 		stats['observed_plex'] += pass_stats.get('observed_plex', 0)
 		stats['observed_jellyfin'] += pass_stats.get('observed_jellyfin', 0)
@@ -1715,216 +2219,217 @@ def observe_placeholders_with_polling(
 		stats['timing']['match_lookup_ms'] += int(pass_stats.get('match_lookup_ms', 0) or 0)
 		stats['timing']['status_projection_ms'] += int(pass_stats.get('status_projection_ms', 0) or 0)
 		stats['timing']['db_commit_ms'] += int(pass_stats.get('db_commit_ms', 0) or 0)
+		stats['mid_pass_refill_events'] += int(pass_stats.get('mid_pass_refill_events', 0) or 0)
+		stats['mid_pass_refill_added'] += int(pass_stats.get('mid_pass_refill_added', 0) or 0)
 		stats['resolved_total'] = resolved_delta
 		stats['observe_failed'] = max(0, len(unresolved))
 		stats['stop_reason'] = 'single_pass_non_plex'
 		return stats
 
-	total_expected = len(unresolved)
-	resolved_total = 0
-	expected_section_ids = _expected_plex_section_ids(unresolved)
-	
-	# Initial scan gate: no activity checking (always succeeds)
-	initial_scan_gate = _run_plex_scan_gate(expected_section_ids, phase='initial')
-	if not initial_scan_gate.get('ok', False):
-		stats['observe_failed'] = len(unresolved)
-		stats['stop_reason'] = str(initial_scan_gate.get('reason') or 'scan_gate_failed')
-		logger.warning(
-			f"Observation stopped before polling: reason={stats['stop_reason']}.",
-			extra={'emoji_type': 'warning'},
-		)
-		return stats
-
-	# Polling loop: adaptive interval 5→10→20→20, stop on 5th consecutive no-progress.
-	# Any progress resets the interval back to 5 s.
-	no_progress_count = 0
-	plex_snapshot_cache: dict[str, Any] | None = None
-	snapshot_reuse_streak = 0
-
-	while unresolved:
-		stats['attempts'] += 1
-		pass_started = time.monotonic()
-		start_unresolved = len(unresolved)
-		unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot_cache = _run_observation_pass(
-			session,
-			unresolved,
-			allow_title_fallback=allow_title_fallback,
-			plex_snapshot=plex_snapshot_cache,
-		)
-		pass_elapsed = time.monotonic() - pass_started
-		stats['observed_plex'] += pass_stats['observed_plex']
-		stats['observed_jellyfin'] += pass_stats['observed_jellyfin']
-		stats['observed_emby'] += pass_stats['observed_emby']
-		stats['status_updates_plex'] += pass_stats['status_updates_plex']
-		stats['timing']['snapshot_build_ms'] += int(pass_stats.get('snapshot_build_ms', 0) or 0)
-		stats['timing']['match_lookup_ms'] += int(pass_stats.get('match_lookup_ms', 0) or 0)
-		stats['timing']['status_projection_ms'] += int(pass_stats.get('status_projection_ms', 0) or 0)
-		stats['timing']['db_commit_ms'] += int(pass_stats.get('db_commit_ms', 0) or 0)
-		resolved_total += resolved_delta
-		stats['resolved_total'] = resolved_total
-		if pass_stats.get('pass_capped'):
-			stats['passes_capped'] += 1
-		logger.info(
-			f"Observation poll pass #{stats['attempts']}: "
-			f"start={start_unresolved} remaining={len(unresolved)} "
-			f"resolved_delta={resolved_delta} progress_delta={progress_delta} "
-			f"candidates={int(pass_stats.get('candidate_count', 0) or 0)} "
-			f"skipped_not_in_snapshot_keys={int(pass_stats.get('skipped_not_in_snapshot_keys', 0) or 0)} "
-			f"strict_keys_only={bool(pass_stats.get('strict_keys_only', False))} "
-			f"status_updates_plex={pass_stats['status_updates_plex']} "
-			f"elapsed={pass_elapsed:.1f}s "
-			f"timing_ms[snapshot={int(pass_stats.get('snapshot_build_ms', 0) or 0)} "
-			f"match={int(pass_stats.get('match_lookup_ms', 0) or 0)} "
-			f"project={int(pass_stats.get('status_projection_ms', 0) or 0)} "
-			f"commit={int(pass_stats.get('db_commit_ms', 0) or 0)}] "
-			f"chunks={int(pass_stats.get('chunks_processed', 0) or 0)} "
-			f"pass_capped={bool(pass_stats.get('pass_capped', False))}.",
-			extra={'emoji_type': 'info'},
-		)
-
-		if not unresolved:
-			stats['stop_reason'] = 'all_resolved'
+	lock_conn = None
+	flight_release_reason = 'released'
+	try:
+		lock_conn, has_single_flight, lock_attempts = _try_acquire_single_flight_lock()
+		stats['single_flight_lock_attempts'] = int(lock_attempts)
+		if not has_single_flight:
+			stats['single_flight_busy'] = True
+			stats['observe_failed'] = len(unresolved)
+			stats['stop_reason'] = 'single_flight_busy'
+			flight_release_reason = 'single_flight_busy'
 			logger.info(
-				f"Observation complete: all expected items are ready ({resolved_total}/{total_expected}).",
-				extra={'emoji_type': 'success'},
+				f"Observation single-flight busy; deferring {len(unresolved)} unresolved placeholder(s).",
+				extra={'emoji_type': 'info'},
 			)
-			break
+			return stats
 
-		# Reuse scoped snapshots briefly for speed, but force periodic refresh so
-		# newly scanned Plex content can be discovered on subsequent passes.
-		if _is_enabled('plex'):
-			if progress_delta <= 0:
-				plex_snapshot_cache = None
-				snapshot_reuse_streak = 0
-			else:
-				snapshot_reuse_streak += 1
-				if snapshot_reuse_streak >= 2:
+		_mark_flight_active(source='observe_placeholders_with_polling', lock_attempts=lock_attempts)
+
+		total_expected = len(unresolved)
+		resolved_total = 0
+		expected_section_ids = _expected_plex_section_ids(unresolved)
+
+		# Polling loop: adaptive interval 5→10→20→20, stop on 5th consecutive no-progress.
+		# Any progress resets the interval back to 5 s.
+		no_progress_count = 0
+		idle_no_progress_streak = 0
+		plex_snapshot_cache: dict[str, Any] | None = None
+		snapshot_reuse_streak = 0
+		snapshot_cache_passes = _observation_snapshot_cache_passes()
+
+		while unresolved:
+			_heartbeat_active_flight()
+			stats['attempts'] += 1
+			pass_started = time.monotonic()
+			start_unresolved = len(unresolved)
+			unresolved, pass_stats, resolved_delta, progress_delta, plex_snapshot_cache = _run_observation_pass(
+				session,
+				unresolved,
+				allow_title_fallback=allow_title_fallback,
+				plex_snapshot=plex_snapshot_cache,
+				mid_pass_refill_callback=mid_pass_refill_callback,
+			)
+			pass_elapsed = time.monotonic() - pass_started
+			stats['observed_plex'] += pass_stats['observed_plex']
+			stats['observed_jellyfin'] += pass_stats['observed_jellyfin']
+			stats['observed_emby'] += pass_stats['observed_emby']
+			stats['status_updates_plex'] += pass_stats['status_updates_plex']
+			stats['timing']['snapshot_build_ms'] += int(pass_stats.get('snapshot_build_ms', 0) or 0)
+			stats['timing']['match_lookup_ms'] += int(pass_stats.get('match_lookup_ms', 0) or 0)
+			stats['timing']['status_projection_ms'] += int(pass_stats.get('status_projection_ms', 0) or 0)
+			stats['timing']['db_commit_ms'] += int(pass_stats.get('db_commit_ms', 0) or 0)
+			stats['mid_pass_refill_events'] += int(pass_stats.get('mid_pass_refill_events', 0) or 0)
+			stats['mid_pass_refill_added'] += int(pass_stats.get('mid_pass_refill_added', 0) or 0)
+			resolved_total += resolved_delta
+			stats['resolved_total'] = resolved_total
+			if pass_stats.get('pass_capped'):
+				stats['passes_capped'] += 1
+			# Format skip metric based on active mode
+			skip_metric_name = 'awaiting_plex_scan' if pass_stats.get('snapshot_authority_mode') else 'skipped_not_in_snapshot_keys'
+			skip_metric_value = pass_stats.get('awaiting_plex_scan_count', 0) if pass_stats.get('snapshot_authority_mode') else pass_stats.get('skipped_not_in_snapshot_keys', 0)
+			
+			logger.info(
+				f"Observation poll pass #{stats['attempts']}: "
+				f"start_unresolved={start_unresolved} remaining_unresolved={len(unresolved)} "
+				f"resolved_delta={resolved_delta} progress_delta={progress_delta} "
+				f"candidates_from_snapshot={int(pass_stats.get('candidate_count', 0) or 0)} "
+				f"{skip_metric_name}={int(skip_metric_value or 0)} "
+				f"strict_keys_only={bool(pass_stats.get('strict_keys_only', False))} "
+				f"status_updates_plex={pass_stats['status_updates_plex']} "
+				f"elapsed={pass_elapsed:.1f}s "
+				f"timing_ms[snapshot_build={int(pass_stats.get('snapshot_build_ms', 0) or 0)} "
+				f"match={int(pass_stats.get('match_lookup_ms', 0) or 0)} "
+				f"project={int(pass_stats.get('status_projection_ms', 0) or 0)} "
+				f"commit={int(pass_stats.get('db_commit_ms', 0) or 0)}] "
+				f"chunks={int(pass_stats.get('chunks_processed', 0) or 0)} "
+				f"pass_capped={bool(pass_stats.get('pass_capped', False))}.",
+				extra={'emoji_type': 'info'},
+			)
+
+			if not unresolved:
+				stats['stop_reason'] = 'all_resolved'
+				flight_release_reason = 'all_resolved'
+				logger.info(
+					f"Observation complete: all expected items are ready ({resolved_total}/{total_expected}).",
+					extra={'emoji_type': 'success'},
+				)
+				break
+
+			# Reuse scoped snapshots briefly for speed, but force periodic refresh so
+			# newly scanned Plex content can be discovered on subsequent passes.
+			if _is_enabled('plex'):
+				if progress_delta <= 0:
+					# No progress can indicate a stale snapshot while Plex is still ingesting.
+					# Invalidate immediately so the next pass rebuilds from fresh scan state.
+					plex_snapshot_cache = None
+					snapshot_reuse_streak = 0
+				elif plex_snapshot_cache is not None and snapshot_cache_passes > 0:
+					snapshot_reuse_streak += 1
+					if snapshot_reuse_streak >= snapshot_cache_passes:
+						plex_snapshot_cache = None
+						snapshot_reuse_streak = 0
+				else:
 					plex_snapshot_cache = None
 					snapshot_reuse_streak = 0
 
-		if progress_delta > 0:
-			# Progress: identity found or metadata confirmed — reset escalation state.
-			no_progress_count = 0
-			time.sleep(_NO_PROGRESS_SLEEP_SCHEDULE[0])
-			continue
+			if progress_delta > 0:
+				# Progress: identity found or metadata confirmed — reset escalation state.
+				no_progress_count = 0
+				idle_no_progress_streak = 0
+				time.sleep(_NO_PROGRESS_SLEEP_SCHEDULE[0])
+				continue
 
-		# No progress this pass.
-		if no_progress_count >= len(_NO_PROGRESS_SLEEP_SCHEDULE):
-			# Exhausted all retries — stop without sleeping.
-			stats['stopped_early'] = True
-			stats['stop_reason'] = 'no_progress_max_polls'
-			logger.warning(
-				f"Observation made no progress for {no_progress_count + 1} consecutive polls "
-				f"(schedule exhausted); finishing {len(unresolved)} unresolved.",
-				extra={'emoji_type': 'warning'},
+			# No progress this pass.
+			scan_state = _post_observation_target_scan_state(expected_section_ids, phase='post_observation_no_progress')
+			refresh_requested = False
+			if bool(scan_state.get('all_target_idle', False)):
+				idle_no_progress_streak += 1
+
+				refresh_result = _trigger_post_observation_refresh(expected_section_ids)
+				refresh_requested = bool(refresh_result.get('requested', False))
+				logger.info(
+					"Post-observation idle refresh decision: "
+					f"requested={refresh_requested} "
+					f"refreshed={int(refresh_result.get('refreshed', 0) or 0)} "
+					f"failed={int(refresh_result.get('failed', 0) or 0)} "
+					f"reason={refresh_result.get('reason')}.",
+					extra={'emoji_type': 'info'},
+				)
+
+				if idle_no_progress_streak >= 2 and not refresh_requested:
+					stats['stopped_early'] = True
+					stats['stop_reason'] = 'idle_no_progress_deferred'
+					flight_release_reason = 'idle_no_progress_deferred'
+					logger.info(
+						"Observation reached two consecutive idle/no-progress passes with no refresh lease; deferring follow-up.",
+						extra={'emoji_type': 'info'},
+					)
+					break
+			else:
+				# Busy/unknown scan state never refreshes and does not count toward idle defer streak.
+				idle_no_progress_streak = 0
+
+			if no_progress_count >= len(_NO_PROGRESS_SLEEP_SCHEDULE):
+				if bool(scan_state.get('any_target_scanning', False)):
+					sleep_seconds = max(_NO_PROGRESS_SLEEP_SCHEDULE[-1], 20)
+					no_progress_count = max(0, len(_NO_PROGRESS_SLEEP_SCHEDULE) - 1)
+					logger.info(
+						"No-progress schedule exhausted, but target library is still scanning; continuing same-slice observation.",
+						extra={'emoji_type': 'info'},
+					)
+					time.sleep(sleep_seconds)
+					continue
+
+				# Exhausted all retries — stop without sleeping.
+				stats['stopped_early'] = True
+				stats['stop_reason'] = 'no_progress_max_polls'
+				flight_release_reason = 'no_progress_max_polls'
+				logger.warning(
+					f"Observation made no progress for {no_progress_count + 1} consecutive polls "
+					f"(schedule exhausted); finishing {len(unresolved)} unresolved.",
+					extra={'emoji_type': 'warning'},
+				)
+				break
+
+			sleep_seconds = _NO_PROGRESS_SLEEP_SCHEDULE[no_progress_count]
+			no_progress_count += 1
+			logger.info(
+				f"No progress this pass ({resolved_total}/{total_expected} ready); "
+				f"escalating to {sleep_seconds}s interval (no-progress streak: {no_progress_count}).",
+				extra={'emoji_type': 'info'},
 			)
-			break
-
-		sleep_seconds = _NO_PROGRESS_SLEEP_SCHEDULE[no_progress_count]
-		no_progress_count += 1
-		logger.info(
-			f"No progress this pass ({resolved_total}/{total_expected} ready); "
-			f"escalating to {sleep_seconds}s interval (no-progress streak: {no_progress_count}).",
-			extra={'emoji_type': 'info'},
-		)
-		time.sleep(sleep_seconds)
+			time.sleep(sleep_seconds)
+	finally:
+		_mark_flight_released(reason=flight_release_reason)
+		_release_single_flight_lock(lock_conn)
 
 	stats['observe_failed'] = len(unresolved)
 	if not stats.get('stop_reason') and unresolved:
 		stats['stop_reason'] = 'unresolved_after_observer'
 
-	# When polling exhausts retries, handle two categories of remaining items:
-	#   1. metadata_pending — ratingKey known but Plex hasn't populated metadata yet.
-	#      Apply status projection now (using whatever Plex has at this moment) and
-	#      clear the pending state.  No trail needed — we've resolved what we can.
-	#   2. no_identity — Plex never found the item; enqueue a deferred 15-min trail.
-	if unresolved and stats.get('stop_reason') == 'no_progress_max_polls':
-		metadata_pending = [
-			p for p in unresolved
-			if bool(getattr(p, 'plex_placeholder_id', None))
-			and getattr(p, 'media_lookup_error', None) == 'plex_metadata_pending'
-		]
-		no_identity = [
-			p for p in unresolved
-			if not bool(getattr(p, 'plex_placeholder_id', None))
-		]
-		found_identity = [p for p in unresolved if bool(getattr(p, 'plex_placeholder_id', None))]
-
-		labels_by_id = _placeholder_customer_labels(session, unresolved)
-		metadata_labels = [labels_by_id.get(int(getattr(p, 'id', 0) or 0), 'unknown') for p in metadata_pending]
-		missing_identity_labels = [labels_by_id.get(int(getattr(p, 'id', 0) or 0), 'unknown') for p in no_identity]
-
-		logger.warning(
-			"Polling exhausted with unresolved placeholders: "
-			f"total_unresolved={len(unresolved)} "
-			f"found_identity={len(found_identity)} "
-			f"missing_metadata={len(metadata_pending)} "
-			f"missing_identity={len(no_identity)}.",
-			extra={'emoji_type': 'warning'},
-		)
-		logger.info(
-			f"Unresolved missing metadata (show + code): {_format_label_list(metadata_labels)}",
-			extra={'emoji_type': 'info'},
-		)
-		logger.info(
-			f"Unresolved missing identity (show + code): {_format_label_list(missing_identity_labels)}",
-			extra={'emoji_type': 'info'},
-		)
-
-		if metadata_pending and _should_send_status_updates():
-			fallback_intents: list[dict[str, Any]] = []
-			for p in metadata_pending:
-				status = _placeholder_display_status(p)
-				movie_id = getattr(p, 'movie_id', None)
-				episode_id = getattr(p, 'episode_id', None)
-				if movie_id is not None:
-					fallback_intents.append({'entity_type': Movie, 'entity_id': int(movie_id), 'status': status})
-				elif episode_id is not None:
-					fallback_intents.append({'entity_type': Episode, 'entity_id': int(episode_id), 'status': status})
-			if fallback_intents:
-				try:
-					batch_update_plex_statuses(session, fallback_intents)
-					logger.info(
-						f"Applied fallback status update for {len(metadata_pending)} metadata-pending item(s) "
-						f"after polling exhaustion.",
-						extra={'emoji_type': 'info'},
-					)
-				except Exception as exc:
-					logger.warning(
-						f"Fallback status update failed for metadata-pending items: {exc}",
-						extra={'emoji_type': 'warning'},
-					)
-			for p in metadata_pending:
-				p.media_lookup_error = None
-				p.updated_at = func.now()
-				session.add(p)
+	if auto_enqueue_trail_on_defer and unresolved and stats.get('stop_reason') in {'idle_no_progress_deferred', 'no_progress_max_polls'}:
+		unresolved_ids = [int(p.id) for p in unresolved if getattr(p, 'id', None)]
+		if unresolved_ids:
 			try:
-				session.commit()
-			except Exception:
-				session.rollback()
-
-		if no_identity:
-			no_identity_ids = [int(p.id) for p in no_identity if getattr(p, 'id', None)]
-			if no_identity_ids:
-				try:
-					# Local import to avoid circular dependency (observation_trail imports us).
-					from services.source_of_truth.observation_trail import enqueue_observation_trail  # noqa: PLC0415
-					enqueue_result = enqueue_observation_trail(
-						session,
-						placeholder_ids=no_identity_ids,
-						source='poller_early_stop',
-						delay_seconds=900,
-					)
-					logger.info(
-						f"Enqueued 15-minute follow-up observation trail for {len(no_identity_ids)} item(s) with no Plex identity: "
-						f"job_id={enqueue_result.get('job_id')}, enqueued={enqueue_result.get('enqueued')}.",
-						extra={'emoji_type': 'info'},
-					)
-				except Exception as exc:
-					logger.warning(
-						f"Could not enqueue follow-up observation trail: {exc}",
-						extra={'emoji_type': 'warning'},
-					)
+				# Local import to avoid circular dependency (observation_trail imports us).
+				from services.source_of_truth.observation_trail import enqueue_observation_trail  # noqa: PLC0415
+				delay_seconds = 900 if stats.get('stop_reason') == 'idle_no_progress_deferred' else 300
+				enqueue_result = enqueue_observation_trail(
+					session,
+					placeholder_ids=unresolved_ids,
+					source=str(stats.get('stop_reason') or 'poller_deferred'),
+					delay_seconds=delay_seconds,
+				)
+				logger.info(
+					f"Enqueued follow-up observation trail after stop_reason={stats.get('stop_reason')} "
+					f"for {len(unresolved_ids)} unresolved item(s): "
+					f"job_id={enqueue_result.get('job_id')}, enqueued={enqueue_result.get('enqueued')}.",
+					extra={'emoji_type': 'info'},
+				)
+			except Exception as exc:
+				logger.warning(
+					f"Could not enqueue follow-up observation trail after idle/no-progress defer: {exc}",
+					extra={'emoji_type': 'warning'},
+				)
 
 	logger.info(
 		"Observation summary: "

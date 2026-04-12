@@ -8,6 +8,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ## [Unreleased]
 
 ### Added
+- Added a live Full Sync progress activity row that updates through discovery, determination, materialization, observation, and status projection, with expandable step metrics in the dashboard.
+- Added adaptive hybrid refill controls (`HYBRID_OBSERVATION_MID_PASS_REFILL_ENABLED`, scan-vs-idle newest ratios, and single-flight retry shaping knobs) to improve large-run observation throughput.
+- Added continuation and trail tuning knobs for stubborn-tail demotion and delayed retry pacing in long unresolved cohorts.
 - Added `OBSERVATION_MIN_CHUNKS_PER_PASS` to guarantee observation passes perform real placeholder checks before the pass time cap can stop them.
 - Added `MEDIA_REFRESH_SECTION_FALLBACK_ENABLED` to control conditional section-refresh fallback when path refresh + immediate observation still leaves unresolved placeholders.
 - Added `OBSERVATION_BULK_STRICT_KEYS_ONLY` and `OBSERVATION_STRICT_KEYS_MIN_PLACEHOLDERS` to gate strict snapshot-key candidate matching in larger observation passes.
@@ -16,6 +19,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - Added Postgres health checks and app startup dependency ordering in Compose to reduce first-boot race conditions.
 
 ### Changed
+- Refactored observation continuation and hybrid processing for large library adds: trail enqueue is now conditional, hybrid slices can refill mid-pass, and refill candidate selection adaptively blends newest/oldest items based on active Plex scan state.
+- Updated observation callers (materializer, primer, hybrid, trail) to avoid duplicate deferred trail-lane enqueue behavior and keep follow-up scheduling on a single authoritative path.
+- Updated app shutdown signal handling so Ctrl-C remains blocked while SIGTERM/SIGHUP are honored, restoring expected stop behavior from VS Code terminal deletion and container stop flows.
+- Updated dashboard library loading and ordering to avoid series starvation behind movie-priority slicing in large result sets.
 - Restored Plex to global path and section refresh fanout so placeholder creation and primer refreshes notify Plex again.
 - Added grouped path refresh orchestration (`Created` + `Deleted` batches) with a reusable section-fallback helper for media-server fanout.
 - Updated primer flow to run create -> refresh -> observe -> status projection for the exact placeholders it seeds, preventing Plex ingest ambiguity before hardlink materialization.
@@ -25,6 +32,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - Updated Postgres storage mount path in Compose to use the Postgres 18 data layout.
 
 ### Fixed
+- Fixed dashboard inventory truncation behavior where mixed library results could show only movies (for example, 400 movies and 0 series) under large datasets.
+- Fixed workflow ergonomics for controlled long runs by adding an explicit app stop helper script at `scripts/stop_app.sh`.
 - Fixed concurrent NFO sidecar writes by switching atomic text writes to unique temp files, eliminating `tvshow.nfo.tmp` races across parallel jobs.
 - Fixed database readiness handling by retrying initial connections and creating the target database once Postgres becomes reachable.
 - Fixed observation passes that could consume their budget on snapshot setup and perform zero chunk checks.

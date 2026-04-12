@@ -207,6 +207,12 @@ class Job(Base):
         Index('ux_job_combined_refresh_groupid', 'group_id', unique=True, postgresql_where=text("job_type='combined_refresh' AND status IN ('PENDING','CLAIMED','WORKING')")),
     # Partial unique index to prevent multiple active enrichment jobs with same group_id
     Index('ux_job_enrichment_groupid', 'group_id', unique=True, postgresql_where=text("job_type='enrichment' AND status IN ('PENDING','CLAIMED','WORKING')")),
+    # Partial unique index to prevent duplicate active deferred observation trail jobs.
+    Index('ux_job_obs_trail_groupid', 'group_id', unique=True, postgresql_where=text("job_type='placeholder_observation_trail' AND status IN ('PENDING','CLAIMED','WORKING')")),
+    # Partial unique index for Plex-busy deferred observation trail jobs.
+    Index('ux_job_plex_busy_deferred_groupid', 'group_id', unique=True, postgresql_where=text("job_type='plex_busy_deferred_observation_trail' AND status IN ('PENDING','CLAIMED','WORKING')")),
+    # Partial unique index to keep at most one active hybrid observation slice per group.
+    Index('ux_job_obs_hybrid_slice_groupid', 'group_id', unique=True, postgresql_where=text("job_type='placeholder_observation_hybrid_slice' AND status IN ('PENDING','CLAIMED','WORKING')")),
     )
 
     def __repr__(self):
@@ -242,6 +248,34 @@ class ObservationTrailAttempt(Base):
         return (
             f"<ObservationTrailAttempt(id={self.id}, trail_job_id={self.trail_job_id}, "
             f"attempt={self.attempt_number})>"
+        )
+
+
+class ObservationFlight(Base):
+    """Persisted snapshot of current single-flight observation ownership."""
+
+    __tablename__ = 'observation_flight'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    flight_key = Column(String, nullable=False, unique=True)
+    holder = Column(String, nullable=True)
+    source = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=False)
+    lock_attempts = Column(Integer, nullable=False, default=0)
+    acquired_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    released_at = Column(DateTime(timezone=True), nullable=True)
+    last_reason = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+    updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
+
+    __table_args__ = (
+        Index('ix_observation_flight_active', 'is_active'),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ObservationFlight(id={self.id}, flight_key={self.flight_key!r}, "
+            f"active={self.is_active})>"
         )
 
 
