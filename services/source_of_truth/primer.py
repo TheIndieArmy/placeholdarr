@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from datetime import date as _date
 
 from sqlalchemy import or_
 
@@ -470,13 +471,38 @@ def run_primer_phase() -> dict:
                     .all()
                 )
                 if primer_placeholders:
+                    # Separate future/no-summary episode placeholders from observable ones.
+                    # Future episodes have no Plex library entry yet (no video file on disk),
+                    # so including them in observation wastes polling slots and inflates the
+                    # deferred-count that triggers scan_busy_max_extensions_deferred early
+                    # exit.  We force-project them directly after observation finishes so
+                    # downstream status is still written from Sonarr metadata.
+                    _today = _date.today()
+                    future_ep_placeholder_ids: list[int] = []
+                    observable_placeholders = []
+                    for _ph in primer_placeholders:
+                        if _ph.episode_id is not None:
+                            _ep = (
+                                observe_session.query(Episode)
+                                .filter(Episode.id == _ph.episode_id)
+                                .first()
+                            )
+                            if _ep and (
+                                (_ep.air_date and _ep.air_date > _today)
+                                or not (_ep.sonarr_episode_overview or "").strip()
+                            ):
+                                future_ep_placeholder_ids.append(int(_ph.id))
+                                continue
+                        observable_placeholders.append(_ph)
+
                     logger.info(
-                        f"Primer observing {len(primer_placeholders)} seeded placeholder(s) to confirm Plex ingest",
+                        f"Primer observing {len(observable_placeholders)} seeded placeholder(s) to confirm Plex ingest "
+                        f"(excluded {len(future_ep_placeholder_ids)} future/no-summary episode(s) from observation)",
                         extra={"emoji_type": "info"},
                     )
                     observe_stats = observe_placeholders_with_polling(
                         observe_session,
-                        primer_placeholders,
+                        observable_placeholders,
                         allow_title_fallback=True,
                         auto_enqueue_trail_on_defer=False,
                     )
@@ -485,7 +511,7 @@ def run_primer_phase() -> dict:
                     stats["observed_emby"] = observe_stats.get("observed_emby", 0)
                     stats["observe_failed"] = observe_stats.get("observe_failed", 0)
 
-                    unresolved_ids = unresolved_placeholder_ids(primer_placeholders)
+                    unresolved_ids = unresolved_placeholder_ids(observable_placeholders)
                     if unresolved_ids:
                         continuation = enqueue_observation_continuation(
                             observe_session,
@@ -506,15 +532,18 @@ def run_primer_phase() -> dict:
                                 extra={"emoji_type": "info"},
                             )
 
-                    # Enqueue status projection for any primer placeholders that
-                    # now have a Plex rating key so their titles get written.
+                    # Enqueue status projection for:
+                    # 1. Observable placeholders that now have a Plex rating key.
+                    # 2. Future/no-summary episode placeholders -- force-project them regardless
+                    #    of plex_placeholder_id so Sonarr-sourced metadata is written downstream
+                    #    even though Plex hasn't indexed these yet.
                     if getattr(settings, "ENABLE_PLEX", False):
                         ready_for_projection = [
                             int(row.id)
-                            for row in primer_placeholders
+                            for row in observable_placeholders
                             if getattr(row, "has_placeholder", False)
                             and getattr(row, "plex_placeholder_id", None)
-                        ]
+                        ] + future_ep_placeholder_ids
                         if ready_for_projection:
                             enqueue_status_projection(ready_for_projection, session=observe_session)
                             stats["status_projection_enqueued"] = len(ready_for_projection)

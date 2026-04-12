@@ -9,32 +9,14 @@ from services.source_of_truth.observation_selection import rank_placeholder_ids_
 from services.source_of_truth.observation_trail import enqueue_observation_trail
 
 
-def _conditional_trail_enabled() -> bool:
-    return bool(getattr(settings, "OBSERVATION_CONTINUATION_TRAIL_CONDITIONAL_ENABLED", True))
-
-
-def _trail_max_candidates() -> int:
-    try:
-        return max(1, int(getattr(settings, "OBSERVATION_CONTINUATION_TRAIL_MAX_CANDIDATES", 150)))
-    except Exception:
-        return 150
-
-
-def _should_enqueue_trail(*, hybrid_enabled: bool, hybrid_result: dict[str, Any], candidate_count: int) -> tuple[bool, str]:
+def _should_enqueue_trail(*, hybrid_enabled: bool, hybrid_result: dict[str, Any]) -> tuple[bool, str]:
     if not hybrid_enabled:
         return True, "hybrid_disabled"
 
     if not bool(hybrid_result.get("enqueued")):
         return True, "hybrid_not_enqueued"
 
-    if not _conditional_trail_enabled():
-        return True, "conditional_policy_disabled"
-
-    max_candidates = _trail_max_candidates()
-    if int(candidate_count) <= max_candidates:
-        return True, "within_trail_candidate_limit"
-
-    return False, f"candidate_count_exceeds_limit:{max_candidates}"
+    return False, "hybrid_primary_continuation"
 
 
 def enqueue_observation_continuation(
@@ -89,7 +71,6 @@ def enqueue_observation_continuation(
     should_enqueue_trail, trail_reason = _should_enqueue_trail(
         hybrid_enabled=hybrid_enabled,
         hybrid_result=hybrid_result,
-        candidate_count=len(ids),
     )
     if should_enqueue_trail:
         trail_result = enqueue_observation_trail(
