@@ -19,6 +19,7 @@ from services.source_of_truth.arr_api import (
 )
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
+from services.media_servers.jellyfin import get_jellyfin_file_path
 
 
 PLAYBACK_FALLBACK_JOB_TYPE = 'playback_fallback'
@@ -427,6 +428,30 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
     imdb_id = _extract_imdb_id(payload)
     season_number, episode_number = _extract_season_episode(payload)
     file_path = _extract_file_path(payload)
+    # If no path found in the payload, attempt to fetch it from Jellyfin using ItemId/UserId
+    if not file_path:
+        try:
+            item_id = None
+            # Payload may include ItemId or nested Item.Id
+            if isinstance(payload.get('ItemId'), (str, int)):
+                item_id = str(payload.get('ItemId'))
+            elif isinstance(payload.get('Item'), dict) and payload.get('Item').get('Id'):
+                item_id = str(payload.get('Item').get('Id'))
+
+            if item_id and getattr(settings, 'ENABLE_JELLYFIN', False):
+                user_id = None
+                user_obj = payload.get('User') or payload.get('user') or {}
+                if isinstance(user_obj, dict):
+                    user_id = user_obj.get('Id') or user_obj.get('id')
+                if not user_id:
+                    user_id = payload.get('UserId') or payload.get('userId')
+
+                fetched_path = get_jellyfin_file_path(item_id, user_id)
+                if fetched_path:
+                    file_path = _normalize_path(fetched_path)
+                    logger.debug(f"Fetched Jellyfin file path for item {item_id}: {file_path}", extra={'emoji_type': 'debug'})
+        except Exception as e:
+            logger.debug(f"Error fetching Jellyfin file path: {e}", extra={'emoji_type': 'debug'})
     declared_media_type = _extract_declared_media_type(payload)
     path_info = _resolve_media_from_path(session, file_path)
 

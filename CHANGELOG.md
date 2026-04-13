@@ -13,7 +13,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Detailed Episode Info**: Now capture detailed episode information from Sonarr, including extended metadata and screenshots.
 - **NFO Screenshot Art**: Added support for embedding episode screenshot art in generated NFO files for richer Plex display.
 - **Refresh Throttle**: Introduced `library_refresh_throttle` table and new refresh throttling logic to prevent excessive section refreshes.
-- **Settings Debug Scripts**: Added scripts in `scratch/` for verifying settings and refresh suppression logic.
+- **Jellyfin helper**: Add `get_jellyfin_file_path()` in `services/media_servers/jellyfin.py` and use it to resolve file paths during playback fallback when payloads lack an explicit path.
 
 ### Changed
 - **Observation/Hybrid/Trail Removal**: Removed all observation, hybrid, and trail job logic, related tables, and config knobs. The system no longer performs placeholder observation passes or deferred trail jobs. All related code, jobs, and settings have been deleted or deprecated.
@@ -22,6 +22,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Refresh Logic**: Refactored refresh throttling to use new `library_refresh_throttle` table and logic, replacing legacy observation flight tracking.
 - **Status/NFO Refresh**: NFO refresh jobs now trigger section refreshes directly and no longer attempt remote item metadata refreshes for Emby/Jellyfin.
 - **Scheduler**: Status projection reconciliation step removed from scheduled pipelines.
+
 
 ### Removed
 - **Observation System**: All observation, hybrid, and trail job code, database tables, and config settings.

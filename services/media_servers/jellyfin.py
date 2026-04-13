@@ -286,3 +286,33 @@ def refresh_jellyfin_item_metadata(item_id: str) -> bool:
             extra={"emoji_type": "warning"},
         )
     return False
+
+def get_jellyfin_file_path(item_id: str, user_id: str | None = None) -> str:
+    """
+    Fetch the file path for a Jellyfin item by ItemId (and optional UserId).
+    Returns the file path as a string, or an empty string if not found.
+    """
+    if not item_id or not getattr(settings, "jellyfin_enabled", False):
+        return ""
+    sess = _session()
+    endpoint = _build_url(f"Users/{user_id}/Items/{item_id}" if user_id else f"Items/{item_id}")
+    params = {"Fields": "Path,MediaSources"}
+    try:
+        resp = sess.get(endpoint, params=params, timeout=10)
+        if resp.status_code != 200:
+            logger.warning(f"get_jellyfin_file_path: Failed to fetch item {item_id} (status {resp.status_code})", extra={'emoji_type': 'warning'})
+            return ""
+        item = resp.json() or {}
+        # Try direct Path field
+        path = item.get("Path")
+        if path:
+            return path
+        # Try MediaSources
+        for source in item.get("MediaSources") or []:
+            source_path = source.get("Path") or source.get("DisplayPath")
+            if source_path:
+                return source_path
+        return ""
+    except Exception as ex:
+        logger.error(f"get_jellyfin_file_path: Exception for item {item_id}: {ex}", extra={'emoji_type': 'error'})
+        return ""
