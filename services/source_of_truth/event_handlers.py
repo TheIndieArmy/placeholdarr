@@ -12,12 +12,11 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Season, Series, Movie, Placeholder
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
-from services.source_of_truth.observation_controller import enqueue_observation_continuation
-from services.source_of_truth.status_reconciler import enqueue_status_projection
 from services.source_of_truth.arr_api import (
     fetch_radarr_movie,
     fetch_sonarr_episodes,
     fetch_sonarr_series_item,
+    fetch_sonarr_episode_item,
 )
 from services.source_of_truth.determiner import run_determination_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities
@@ -213,6 +212,13 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             if season_created:
                 stats["seasons_upserted"] += 1
 
+            sonarr_ep_id = ep.get("id")
+            # Fetch detailed episode payload to capture thumbnails/runtime (bulk /episode omits them)
+            if sonarr_ep_id:
+                detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
+                if detailed_ep:
+                    ep = detailed_ep
+
             episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
             ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
 
@@ -295,34 +301,8 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             observation_source="event_series_add",
         )
 
-        followup = {"observation_trail_enqueued": 0, "status_projection_enqueued": 0, "placeholder_ids": []}
-
-        # Gap fix parity with movie-add: when placeholders already exist, scoped
-        # materialization is a no-op, so enqueue observation + status projection.
-        if int(determination_stats.get("placeholder_exists", 0) or 0) > 0:
-            follow_session = get_session()
-            try:
-                active_rows = (
-                    follow_session.query(Placeholder)
-                    .filter(Placeholder.episode_id.in_(episode_ids), Placeholder.has_placeholder == True)  # noqa: E712
-                    .all()
-                )
-                placeholder_ids = [int(row.id) for row in active_rows if getattr(row, "id", None)]
-                followup["placeholder_ids"] = placeholder_ids
-                if placeholder_ids:
-                    obs_result = enqueue_observation_continuation(
-                        follow_session,
-                        placeholder_ids=placeholder_ids,
-                        source="event_series_add_existing_placeholder",
-                        trigger_reason="event_existing_placeholder",
-                        delay_seconds=0,
-                    )
-                    followup["observation_trail_enqueued"] = 1 if obs_result.get("trail_enqueued") else 0
-
-                    proj_result = enqueue_status_projection(placeholder_ids, session=follow_session)
-                    followup["status_projection_enqueued"] = 1 if proj_result.get("ok") else 0
-            finally:
-                follow_session.close()
+        # Followup logic removed as observation system is deprecated.
+        pass
 
         return {
             "ok": True,
@@ -333,7 +313,6 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             "upsert_stats": stats,
             "determination": determination_stats,
             "materialization": materialization_stats,
-            "followup": followup,
         }
     except Exception:
         session.rollback()
@@ -390,14 +369,6 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
                 row.has_placeholder = False
                 if hasattr(row, "lifecycle_status"):
                     row.lifecycle_status = "MISSING"
-                row.plex_placeholder_id = None
-                row.jellyfin_placeholder_id = None
-                row.emby_placeholder_id = None
-                row.plex_id_observed_at = None
-                row.jellyfin_id_observed_at = None
-                row.emby_id_observed_at = None
-                row.media_lookup_error = None
-                row.media_lookup_last_attempt_at = None
                 row.last_observed_at = func.now()
                 row.updated_at = func.now()
                 session.add(row)
@@ -413,34 +384,8 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             observation_source="event_movie_add",
         )
 
-        followup = {"observation_trail_enqueued": 0, "status_projection_enqueued": 0, "placeholder_ids": []}
-
-        # Gap fix: when placeholder already exists, scoped materialization is a no-op,
-        # so we still enqueue observation + status projection for this movie's active placeholders.
-        if int(determination_stats.get("placeholder_exists", 0) or 0) > 0:
-            follow_session = get_session()
-            try:
-                active_rows = (
-                    follow_session.query(Placeholder)
-                    .filter(Placeholder.movie_id == movie_row_id, Placeholder.has_placeholder == True)  # noqa: E712
-                    .all()
-                )
-                placeholder_ids = [int(row.id) for row in active_rows if getattr(row, "id", None)]
-                followup["placeholder_ids"] = placeholder_ids
-                if placeholder_ids:
-                    obs_result = enqueue_observation_continuation(
-                        follow_session,
-                        placeholder_ids=placeholder_ids,
-                        source="event_movie_add_existing_placeholder",
-                        trigger_reason="event_existing_placeholder",
-                        delay_seconds=0,
-                    )
-                    followup["observation_trail_enqueued"] = 1 if obs_result.get("trail_enqueued") else 0
-
-                    proj_result = enqueue_status_projection(placeholder_ids, session=follow_session)
-                    followup["status_projection_enqueued"] = 1 if proj_result.get("ok") else 0
-            finally:
-                follow_session.close()
+        # Followup logic removed as observation system is deprecated.
+        pass
 
         return {
             "ok": True,
@@ -449,7 +394,6 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             "movie_id": movie_row_id,
             "determination": determination_stats,
             "materialization": materialization_stats,
-            "followup": followup,
         }
     except Exception:
         session.rollback()

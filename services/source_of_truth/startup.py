@@ -13,8 +13,6 @@ from services.source_of_truth.calendar_date_refresh import run_calendar_date_ref
 from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
 from services.source_of_truth.filesystem import scan_once_if_needed
 from services.source_of_truth.materializer import run_materialization_pass
-from services.source_of_truth.primer import run_primer_phase
-from services.source_of_truth.status_reconciler import run_status_projection_reconciliation
 from services.source_of_truth.sync_runner import run_full_sync, sync_radarr_movies_by_ids, sync_sonarr_series_by_ids
 
 
@@ -255,57 +253,61 @@ def _resolve_startup_sync_mode(instances: list[dict]) -> str:
 
 def run_startup_source_of_truth() -> dict:
     """Execute configured startup fullsyncs, filesystem scan, determine, and materialize."""
-    run_ids: list[str] = []
-    instances = _configured_arr_instances()
-    selected_mode = _resolve_startup_sync_mode(instances)
-    startup_sync_stats: dict = {}
+    settings.REFRESH_TRIGGER_SUPPRESSED = True
+    try:
+        run_ids: list[str] = []
+        instances = _configured_arr_instances()
+        selected_mode = _resolve_startup_sync_mode(instances)
+        startup_sync_stats: dict = {}
 
-    logger.info(
-        f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
-        extra={'emoji_type': 'info'},
-    )
+        logger.info(
+            f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
+            extra={'emoji_type': 'info'},
+        )
 
-    if selected_mode == 'full':
-        startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
-    elif selected_mode == 'lite':
-        startup_sync_stats = _run_startup_lite_history_for_instances(instances)
-    elif selected_mode == 'off':
-        startup_sync_stats = {'instances': len(instances), 'skipped': True}
-    else:
-        # Defensive fallback. _resolve_startup_sync_mode should prevent this branch.
-        startup_sync_stats = {'instances': len(instances), 'skipped': True, 'reason': f'unknown_mode:{selected_mode}'}
+        if selected_mode == 'full':
+            startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
+        elif selected_mode == 'lite':
+            startup_sync_stats = _run_startup_lite_history_for_instances(instances)
+        elif selected_mode == 'off':
+            startup_sync_stats = {'instances': len(instances), 'skipped': True}
+        else:
+            # Defensive fallback. _resolve_startup_sync_mode should prevent this branch.
+            startup_sync_stats = {'instances': len(instances), 'skipped': True, 'reason': f'unknown_mode:{selected_mode}'}
 
-    scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
-    scan_result = scan_once_if_needed(scan_run_id)
-    if isinstance(scan_result, tuple):
-        scan_count, scan_info = scan_result
-    else:
-        scan_count, scan_info = scan_result, {'reason': 'ok'}
+        scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
+        scan_result = scan_once_if_needed(scan_run_id)
+        if isinstance(scan_result, tuple):
+            scan_count, scan_info = scan_result
+        else:
+            scan_count, scan_info = scan_result, {'reason': 'ok'}
 
-    reconcile_stats = run_placeholder_link_reconcile()
-    calendar_date_refresh_stats = run_calendar_date_refresh()
-    determination_stats = run_determination_pass()
-    primer_stats = run_primer_phase()
-    materialization_stats = run_materialization_pass()
-    calendar_stats = run_calendar_phase()
-    status_reconcile_stats = run_status_projection_reconciliation()
+        reconcile_stats = run_placeholder_link_reconcile()
+        calendar_date_refresh_stats = run_calendar_date_refresh()
+        determination_stats = run_determination_pass()
+        # Primer phase removed to accelerate startup and simplify sync pipeline.
+        primer_stats = {"skipped": True, "reason": "deprecated"}
+        materialization_stats = run_materialization_pass()
+        calendar_stats = run_calendar_phase()
+        status_reconcile_stats = {"skipped": True, "reason": "deprecated"}
 
-    return {
-        'ran': True,
-        'startup_sync_mode': selected_mode,
-        'fullsync_ran': selected_mode == 'full' and bool(run_ids),
-        'startup_sync': startup_sync_stats,
-        'run_ids': run_ids,
-        'scan': {
-            'count': scan_count,
-            'info': scan_info,
-        },
-        'reconcile': reconcile_stats,
-        'calendar_date_refresh': calendar_date_refresh_stats,
-        'determination': determination_stats,
-        'primer': primer_stats,
-        'materialization': materialization_stats,
-        'calendar': calendar_stats,
-        'status_reconcile': status_reconcile_stats,
-        'primer_cleanup': {},
-    }
+        return {
+            'ran': True,
+            'startup_sync_mode': selected_mode,
+            'fullsync_ran': selected_mode == 'full' and bool(run_ids),
+            'startup_sync': startup_sync_stats,
+            'run_ids': run_ids,
+            'scan': {
+                'count': scan_count,
+                'info': scan_info,
+            },
+            'reconcile': reconcile_stats,
+            'calendar_date_refresh': calendar_date_refresh_stats,
+            'determination': determination_stats,
+            'primer': primer_stats,
+            'materialization': materialization_stats,
+            'calendar': calendar_stats,
+            'status_reconcile': status_reconcile_stats,
+        }
+    finally:
+        settings.REFRESH_TRIGGER_SUPPRESSED = False

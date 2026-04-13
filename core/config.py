@@ -112,10 +112,7 @@ class Settings(BaseSettings):
     PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both", "off"] = "summary"
     PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
-    FORCE_PRIME_ON_STARTUP: bool = os.getenv("FORCE_PRIME_ON_STARTUP", "false").split('#')[0].strip().lower() == "true"
-    PRIMER_SERIES_COUNT: int = int(os.getenv("PRIMER_SERIES_COUNT", "3").split('#')[0].strip())
-    PRIMER_EPISODES_PER_SERIES: int = int(os.getenv("PRIMER_EPISODES_PER_SERIES", "3").split('#')[0].strip())
-    PRIMER_REFRESH_WAIT_SECONDS: int = int(os.getenv("PRIMER_REFRESH_WAIT_SECONDS", "60").split('#')[0].strip())
+    ENABLE_PRIMER: bool = False
 
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
@@ -165,34 +162,7 @@ class Settings(BaseSettings):
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())
     STATUS_JOB_BATCH_SIZE: int = int(os.getenv("STATUS_JOB_BATCH_SIZE", "250").split('#')[0].strip())
     STATUS_JOB_DEBOUNCE_SECONDS: float = float(os.getenv("STATUS_JOB_DEBOUNCE_SECONDS", "0.5").split('#')[0].strip())
-    PLEX_METADATA_READY_CONFIRM_POLLS: int = int(os.getenv("PLEX_METADATA_READY_CONFIRM_POLLS", "2").split('#')[0].strip())
-    OBSERVATION_PASS_CHUNK_SIZE: int = int(os.getenv("OBSERVATION_PASS_CHUNK_SIZE", "150").split('#')[0].strip())
-    OBSERVATION_MAX_PASS_SECONDS: int = int(os.getenv("OBSERVATION_MAX_PASS_SECONDS", "45").split('#')[0].strip())
-    OBSERVATION_MIN_CHUNKS_PER_PASS: int = int(os.getenv("OBSERVATION_MIN_CHUNKS_PER_PASS", "1").split('#')[0].strip())
-    OBSERVATION_SNAPSHOT_CACHE_PASSES: int = int(os.getenv("OBSERVATION_SNAPSHOT_CACHE_PASSES", "2").split('#')[0].strip())
     MEDIA_REFRESH_SECTION_FALLBACK_ENABLED: bool = os.getenv("MEDIA_REFRESH_SECTION_FALLBACK_ENABLED", "true").split('#')[0].strip().lower() == "true"
-    OBSERVATION_BULK_STRICT_KEYS_ONLY: bool = os.getenv("OBSERVATION_BULK_STRICT_KEYS_ONLY", "true").split('#')[0].strip().lower() == "true"
-    OBSERVATION_STRICT_KEYS_MIN_PLACEHOLDERS: int = int(os.getenv("OBSERVATION_STRICT_KEYS_MIN_PLACEHOLDERS", "100").split('#')[0].strip())
-    OBSERVATION_SINGLE_FLIGHT_ENABLED: bool = os.getenv("OBSERVATION_SINGLE_FLIGHT_ENABLED", "true").split('#')[0].strip().lower() == "true"
-    OBSERVATION_SINGLE_FLIGHT_WAIT_SECONDS: float = float(os.getenv("OBSERVATION_SINGLE_FLIGHT_WAIT_SECONDS", "15").split('#')[0].strip())
-    OBSERVATION_SINGLE_FLIGHT_RETRY_SECONDS: float = float(os.getenv("OBSERVATION_SINGLE_FLIGHT_RETRY_SECONDS", "0.25").split('#')[0].strip())
-    OBSERVATION_FLIGHT_STALE_SECONDS: int = int(os.getenv("OBSERVATION_FLIGHT_STALE_SECONDS", "300").split('#')[0].strip())
-    HYBRID_OBSERVATION_SLICES_ENABLED: bool = True
-    HYBRID_OBSERVATION_INITIAL_DELAY_SECONDS: int = 15
-    HYBRID_OBSERVATION_CADENCE_SECONDS: int = 120
-    HYBRID_OBSERVATION_MAX_ATTEMPTS: int = 4
-    HYBRID_OBSERVATION_MIN_UNRESOLVED: int = 1
-    HYBRID_OBSERVATION_TARGET_SLICE_SIZE: int = int(os.getenv("HYBRID_OBSERVATION_TARGET_SLICE_SIZE", "400").split('#')[0].strip())
-    HYBRID_OBSERVATION_LOW_WATERMARK: int = int(os.getenv("HYBRID_OBSERVATION_LOW_WATERMARK", "120").split('#')[0].strip())
-    HYBRID_OBSERVATION_MID_PASS_REFILL_ENABLED: bool = os.getenv("HYBRID_OBSERVATION_MID_PASS_REFILL_ENABLED", "true").split('#')[0].strip().lower() == "true"
-    HYBRID_OBSERVATION_REFILL_NEWEST_RATIO_SCANNING: float = float(os.getenv("HYBRID_OBSERVATION_REFILL_NEWEST_RATIO_SCANNING", "0.7").split('#')[0].strip())
-    HYBRID_OBSERVATION_REFILL_NEWEST_RATIO_IDLE: float = float(os.getenv("HYBRID_OBSERVATION_REFILL_NEWEST_RATIO_IDLE", "0.25").split('#')[0].strip())
-    HYBRID_OBSERVATION_SINGLE_FLIGHT_RETRY_BASE_SECONDS: int = int(os.getenv("HYBRID_OBSERVATION_SINGLE_FLIGHT_RETRY_BASE_SECONDS", "30").split('#')[0].strip())
-    HYBRID_OBSERVATION_SINGLE_FLIGHT_RETRY_MAX_SECONDS: int = int(os.getenv("HYBRID_OBSERVATION_SINGLE_FLIGHT_RETRY_MAX_SECONDS", "180").split('#')[0].strip())
-    OBSERVATION_CONTINUATION_TRAIL_CONDITIONAL_ENABLED: bool = os.getenv("OBSERVATION_CONTINUATION_TRAIL_CONDITIONAL_ENABLED", "true").split('#')[0].strip().lower() == "true"
-    OBSERVATION_CONTINUATION_TRAIL_MAX_CANDIDATES: int = int(os.getenv("OBSERVATION_CONTINUATION_TRAIL_MAX_CANDIDATES", "150").split('#')[0].strip())
-    OBSERVATION_TRAIL_STUBBORN_DEMOTION_AFTER_ATTEMPTS: int = int(os.getenv("OBSERVATION_TRAIL_STUBBORN_DEMOTION_AFTER_ATTEMPTS", "4").split('#')[0].strip())
-    OBSERVATION_TRAIL_STUBBORN_DELAY_SECONDS: int = int(os.getenv("OBSERVATION_TRAIL_STUBBORN_DELAY_SECONDS", "900").split('#')[0].strip())
     MATERIALIZATION_OVERLAP_ENABLED: bool = True
     MATERIALIZATION_OVERLAP_MOVIE_CHECKPOINT_COUNT: int = 200
     MATERIALIZATION_OVERLAP_EPISODE_CHECKPOINT_COUNT: int = 400
@@ -202,6 +172,7 @@ class Settings(BaseSettings):
     MATERIALIZATION_OVERLAP_REFRESH_MIN_INTERVAL_SECONDS: int = 90
     MATERIALIZATION_OVERLAP_REFRESH_LEASE_SECONDS: int = 180
     ENABLE_STATUS_ORCHESTRATOR_CALENDAR: bool = os.getenv("ENABLE_STATUS_ORCHESTRATOR_CALENDAR", "true").split('#')[0].strip().lower() == "true"
+    REFRESH_TRIGGER_SUPPRESSED: bool = False
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.
 

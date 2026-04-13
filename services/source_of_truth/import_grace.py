@@ -8,7 +8,7 @@ from services.postgres.models import Episode, Job, Movie, Placeholder
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
-from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE, STATUS_PROJECTION_JOB_TYPE
+from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
@@ -58,17 +58,6 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
     return scheduled
 
 
-def _enqueue_status_projection_job(session, placeholder_ids: list[int]) -> None:
-    if not placeholder_ids:
-        return
-    session.add(
-        Job(
-            job_type=STATUS_PROJECTION_JOB_TYPE,
-            payload={"placeholder_ids": placeholder_ids},
-            status="PENDING",
-            run_after=datetime.now(timezone.utc),
-        )
-    )
 
 
 def _enqueue_nfo_refresh_job(session, placeholder_ids: list[int]) -> None:
@@ -118,7 +107,6 @@ def _schedule_import_grace(
 
     initial_status = str(schedule[0]["status_text"])
     active_ids = _set_countdown_status(session, placeholder_ids, initial_status)
-    _enqueue_status_projection_job(session, active_ids)
     _enqueue_nfo_refresh_job(session, active_ids)
 
     for item in schedule[1:]:
@@ -284,7 +272,8 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             )
             remaining_ids = [int(row.id) for row in rows]
             logger.info(f"Finalize: Found {len(remaining_ids)} remaining placeholders to clean up", extra={'emoji_type': 'info'})
-            _enqueue_status_projection_job(session, remaining_ids)
+            # Status projection removed
+            pass
 
         logger.info(
             f"Import grace finalization complete: {len(remaining_ids)} remaining placeholders queued for projection",
@@ -310,7 +299,6 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
         extra={'emoji_type': 'debug'}
     )
     active_ids = _set_countdown_status(session, placeholder_ids, status_text)
-    _enqueue_status_projection_job(session, active_ids)
     _enqueue_nfo_refresh_job(session, active_ids)
 
     logger.debug(

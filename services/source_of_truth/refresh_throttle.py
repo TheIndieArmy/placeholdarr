@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 
 from services.postgres.db import get_session
-from services.postgres.models import ObservationFlight
+from services.postgres.models import LibraryRefreshThrottle
 
 
 _REFRESH_KEY_PREFIX = "refresh_throttle"
@@ -13,10 +13,6 @@ _REFRESH_KEY_PREFIX = "refresh_throttle"
 
 def _safe_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _key_for_section(section_id: int) -> str:
-    return f"{_REFRESH_KEY_PREFIX}:section:{int(section_id)}"
 
 
 def try_acquire_refresh_lease(
@@ -46,40 +42,42 @@ def try_acquire_refresh_lease(
         }
 
     now = _safe_now()
-    min_interval = max(0, int(min_interval_seconds or 0))
-    lease = max(0, int(lease_seconds or 0))
+    min_interval = max(0, int(min_interval_seconds or 1))
+    lease = max(0, int(lease_seconds or 1))
 
     session = get_session()
     try:
-        rows_by_section: dict[int, ObservationFlight] = {}
+        rows_by_section: dict[int, LibraryRefreshThrottle] = {}
         blocked_ids: list[int] = []
         block_reason = ""
 
+        # Atomically check all target sections
         for section_id in target_ids:
-            key = _key_for_section(section_id)
             row = (
-                session.query(ObservationFlight)
-                .filter(ObservationFlight.flight_key == key)
+                session.query(LibraryRefreshThrottle)
+                .filter(LibraryRefreshThrottle.section_id == section_id)
                 .with_for_update()
                 .first()
             )
             if not row:
-                row = ObservationFlight(flight_key=key)
+                row = LibraryRefreshThrottle(section_id=section_id, source=source)
                 session.add(row)
                 session.flush()
 
-            lease_until = getattr(row, "released_at", None)
-            if lease_until and lease_until > now:
+            # Check if current lease is still active
+            expires_at = getattr(row, "expires_at", None)
+            if expires_at and expires_at > now:
                 blocked_ids.append(section_id)
-                block_reason = "lease"
+                block_reason = "lease_active"
                 continue
 
-            last_refresh_at = getattr(row, "acquired_at", None)
-            if last_refresh_at and min_interval > 0:
-                elapsed = (now - last_refresh_at).total_seconds()
+            # Check if min interval requirement is met
+            last_acquired = getattr(row, "acquired_at", None)
+            if last_acquired and min_interval > 0:
+                elapsed = (now - last_acquired).total_seconds()
                 if elapsed < float(min_interval):
                     blocked_ids.append(section_id)
-                    block_reason = "min_interval"
+                    block_reason = "throttle"
                     continue
 
             rows_by_section[section_id] = row
@@ -93,16 +91,12 @@ def try_acquire_refresh_lease(
                 "reason": block_reason or "blocked",
             }
 
-        lease_until = now + timedelta(seconds=lease)
+        # Grant leases
+        expires_at = now + timedelta(seconds=lease)
         for section_id, row in rows_by_section.items():
-            row.holder = source
             row.source = source
-            row.is_active = True
-            row.lock_attempts = int(getattr(row, "lock_attempts", 0) or 0) + 1
             row.acquired_at = now
-            row.heartbeat_at = now
-            row.released_at = lease_until
-            row.last_reason = f"refresh_lease:{source}"
+            row.expires_at = expires_at
             row.updated_at = func.now()
             session.add(row)
 
@@ -113,7 +107,8 @@ def try_acquire_refresh_lease(
             "blocked_section_ids": [],
             "reason": "granted",
         }
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to acquire refresh lease: {e}", extra={"emoji_type": "error"})
         try:
             session.rollback()
         except Exception:
@@ -125,7 +120,4 @@ def try_acquire_refresh_lease(
             "reason": "error",
         }
     finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+        session.close()

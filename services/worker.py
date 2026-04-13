@@ -22,23 +22,13 @@ from services.source_of_truth.event_playback import (
     process_playback_fallback_job,
     process_playback_start_event,
 )
-from services.source_of_truth.observation_trail import (
-    TRAIL_JOB_TYPE,
-    process_observation_trail_job,
-)
-from services.source_of_truth.observation_hybrid import (
-    HYBRID_SLICE_JOB_TYPE,
-    process_hybrid_observation_slice_job,
-)
 from services.source_of_truth.import_grace import (
     IMPORT_GRACE_JOB_TYPE,
     process_import_grace_job,
 )
 from services.source_of_truth.status_reconciler import (
     NFO_REFRESH_JOB_TYPE,
-    STATUS_PROJECTION_JOB_TYPE,
     process_nfo_refresh_job,
-    process_status_projection_job,
 )
 
 
@@ -223,24 +213,6 @@ def _process_claimed_job(session, job: Job):
         _mark_job_done(session, job)
         return
 
-    if job.job_type == TRAIL_JOB_TYPE:
-        result = process_observation_trail_job(session, job)
-        if result.get('done', False):
-            _mark_job_done(session, job)
-        return
-
-    if job.job_type == HYBRID_SLICE_JOB_TYPE:
-        result = process_hybrid_observation_slice_job(session, job)
-        if result.get('done', False):
-            _mark_job_done(session, job)
-        return
-
-    if job.job_type == STATUS_PROJECTION_JOB_TYPE:
-        result = process_status_projection_job(session, job)
-        if not result.get('ok', False):
-            raise ValueError(str(result.get('reason') or 'status_projection_failed'))
-        _mark_job_done(session, job)
-        return
 
     if job.job_type == NFO_REFRESH_JOB_TYPE:
         result = process_nfo_refresh_job(session, job)

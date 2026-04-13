@@ -585,6 +585,11 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     imdbid = getattr(series, "imdbid", None)
     sonarrid = getattr(episode, "sonarrid", None)
     still_url = escape(str(getattr(episode, "sonarr_episode_still", "") or ""))
+    if not still_url:
+        still_url = escape(str(getattr(series, "remote_fanart", "") or ""))
+    runtime = _to_int(getattr(episode, "sonarr_runtime", None))
+    certification = str(getattr(series, "sonarr_certification", "") or "").strip()
+    network = str(getattr(series, "sonarr_network", "") or "").strip()
     directors = getattr(episode, "sonarr_episode_directors", None)
     credits = getattr(episode, "sonarr_episode_credits", None)
 
@@ -613,6 +618,12 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     if imdbid:
         lines.append(f"  <imdbid>{escape(str(imdbid))}</imdbid>")
         lines.append(f"  <uniqueid type=\"imdb\">{escape(str(imdbid))}</uniqueid>")
+    if runtime:
+        lines.append(f"  <runtime>{runtime}</runtime>")
+    if certification:
+        lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
+    if network:
+        lines.append(f"  <studio>{escape(network)}</studio>")
     if still_url:
         lines.append(f"  <thumb>{still_url}</thumb>")
     _append_people_as_tag(lines, 'credits', credits)
@@ -649,6 +660,7 @@ def _series_nfo_xml(series: Any) -> str:
     poster_url = escape(str(getattr(series, "remote_poster", "") or ""))
     fanart_url = escape(str(getattr(series, "remote_fanart", "") or ""))
     banner_url = escape(str(getattr(series, "remote_banner", "") or ""))
+    runtime = _to_int(getattr(series, "sonarr_runtime", None))
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
@@ -680,6 +692,8 @@ def _series_nfo_xml(series: Any) -> str:
         lines.append(f"  <uniqueid type=\"tmdb\">{escape(str(tmdbid))}</uniqueid>")
     if tvmazeid:
         lines.append(f"  <uniqueid type=\"tvmaze\">{escape(str(tvmazeid))}</uniqueid>")
+    if runtime:
+        lines.append(f"  <runtime>{runtime}</runtime>")
     if poster_url:
         lines.append(f"  <thumb aspect=\"poster\" preview=\"{poster_url}\">{poster_url}</thumb>")
     if fanart_url:

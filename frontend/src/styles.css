@@ -423,9 +423,10 @@ a { color: inherit; }
 .calendar-day-count { font-size: 11px; color: var(--muted); }
 .calendar-day-items { display: flex; flex-direction: column; gap: 6px; overflow: auto; }
 .calendar-item { border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.03); padding: 6px 7px; font-size: 12px; }
-.calendar-item.media-movie.release-inCinemas { border-left: 3px solid #f59e0b; }
-.calendar-item.media-movie.release-digitalRelease { border-left: 3px solid #38bdf8; }
-.calendar-item.media-movie.release-physicalRelease { border-left: 3px solid #c084fc; }
+.calendar-item.media-movie { border-left: 3px solid #4ade80; }
+.calendar-item.media-movie.release-inCinemas { border-left: 3px solid #4ade80; }
+.calendar-item.media-movie.release-digitalRelease { border-left: 3px solid #4ade80; }
+.calendar-item.media-movie.release-physicalRelease { border-left: 3px solid #4ade80; }
 .calendar-item.media-episode { border-left: 3px solid var(--accent); }
 .calendar-item-title-row { display: flex; align-items: center; gap: 6px; }
 .calendar-kind { min-width: 20px; }

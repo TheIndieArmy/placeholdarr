@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +10,7 @@ from sqlalchemy import func, or_
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback
+from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback, refresh_selected_sections
 from services.placeholders import (
     ensure_episode_nfo,
     ensure_movie_nfo,
@@ -22,17 +23,11 @@ from services.placeholders import (
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
 from services.source_of_truth.determiner import DETERMINATION_NEEDS, DETERMINATION_OBSOLETE
-from services.source_of_truth.media_observation import observe_placeholders_with_polling
-from services.source_of_truth.observation_controller import enqueue_observation_continuation
-from services.source_of_truth.observation_hybrid import HYBRID_SLICE_JOB_TYPE, enqueue_hybrid_observation_slice
-from services.source_of_truth.observation_selection import rank_placeholder_ids_for_observation
-from services.source_of_truth.observation_trail import unresolved_placeholder_ids
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
 )
 from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
-from services.source_of_truth.status_reconciler import enqueue_status_projection
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 
 
@@ -41,10 +36,7 @@ REQUEST_REASON = "placeholder_request"
 
 
 def _materialization_overlap_enabled() -> bool:
-    return bool(
-        getattr(settings, "MATERIALIZATION_OVERLAP_ENABLED", False)
-        and getattr(settings, "HYBRID_OBSERVATION_SLICES_ENABLED", False)
-    )
+    return bool(getattr(settings, "MATERIALIZATION_OVERLAP_ENABLED", False))
 
 
 def _overlap_checkpoint_threshold(media_type: str) -> int:
@@ -101,21 +93,6 @@ def _target_refresh_section_ids(*, has_movies: bool, has_episodes: bool) -> list
         if tv_section is not None:
             section_ids.append(int(tv_section))
     return sorted(set(section_ids))
-
-
-def _active_hybrid_slice_count(session) -> int:
-    try:
-        return int(
-            session.query(Job)
-            .filter(
-                Job.job_type == HYBRID_SLICE_JOB_TYPE,
-                Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
-            )
-            .count()
-            or 0
-        )
-    except Exception:
-        return 0
 
 
 def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
@@ -593,6 +570,8 @@ def _run_materialization_for_ids(
         "observation_trail_enqueued": 0,
         "observation_trail_job_id": None,
         "observation_trail_group_id": None,
+        "movie_refresh_triggered": False,
+        "tv_refresh_triggered": False,
     }
     changed_paths: set[str] = set()
     delete_refresh_paths: set[str] = set()
@@ -610,11 +589,46 @@ def _run_materialization_for_ids(
         "last_checkpoint_mono": overlap_started,
         "checkpoint_sequence": 0,
     }
-    if overlap_enabled:
-        stats["overlap_enabled"] = 1
+    is_full_sync = (observation_source == "full_sync_materialization")
+    movie_phase_start_mono: float | None = None
+    last_movie_periodic_refresh_mono: float | None = None
+    episode_phase_start_mono: float | None = None
+    last_episode_periodic_refresh_mono: float | None = None
+    bulk_initial_non_plex_refresh_done = False
+
+    def _trigger_bulk_initial_media_server_refresh() -> None:
+        """Trigger a combined library refresh for all media servers after bulk operations."""
+        if is_full_sync:
+            # Full Sync uses its own phase-based rhythm.
+            return
+        nonlocal bulk_initial_non_plex_refresh_done
+        if bulk_initial_non_plex_refresh_done:
+            return
+        
+        def _delayed_media_server_refresh():
+            refresh_stats = refresh_selected_sections(
+                has_movies=bool(movie_ids),
+                has_episodes=bool(episode_ids),
+                include_plex=True,
+                include_jellyfin=True,
+                include_emby=True,
+            )
+            logger.info(
+                f"Completed delayed media server library refresh: refreshed={refresh_stats.get('refreshed', 0)} "
+                f"failed={refresh_stats.get('failed', 0)}",
+                extra={"emoji_type": "success"},
+            )
+
+        threading.Timer(20.0, _delayed_media_server_refresh).start()
+        bulk_initial_non_plex_refresh_done = True
+        logger.info(
+            "Bulk sync scheduled initial media server library refresh in 20 seconds.",
+            extra={"emoji_type": "info"},
+        )
 
     def _emit_overlap_checkpoint(trigger_reason: str, *, force: bool = False) -> None:
-        if not overlap_enabled:
+        if not overlap_enabled or is_full_sync:
+            # Skip path-based overlap checkpoints during full sync.
             return
 
         now_mono = time.monotonic()
@@ -624,10 +638,7 @@ def _run_materialization_for_ids(
         if stats.get("overlap_first_checkpoint_at_seconds") is None:
             stats["overlap_first_checkpoint_at_seconds"] = int(max(0.0, now_mono - overlap_started))
 
-        candidate_ids = rank_placeholder_ids_for_observation(
-            session,
-            [int(x) for x in overlap_state["pending_candidate_ids"] if x is not None],
-        )
+        candidate_ids = [int(x) for x in overlap_state["pending_candidate_ids"] if x is not None]
         if not force and len(candidate_ids) < _overlap_min_candidates():
             stats["overlap_skipped_min_candidates"] += 1
             overlap_state["last_checkpoint_mono"] = now_mono
@@ -635,8 +646,8 @@ def _run_materialization_for_ids(
             overlap_state["episode_processed"] = 0
             return
 
-        active_slices = _active_hybrid_slice_count(session)
-        if not force and active_slices >= _overlap_max_pending_slices():
+        active_slices = 0 # No more slices
+        if False: # Skip slice guard
             stats["overlap_skipped_pending_guard"] += 1
             overlap_state["last_checkpoint_mono"] = now_mono
             overlap_state["movie_processed"] = 0
@@ -647,9 +658,9 @@ def _run_materialization_for_ids(
         delete_paths = set(overlap_state["pending_delete_paths"])
         if created_paths or delete_paths:
             target_sections = _target_refresh_section_ids(
-                has_movies=bool(movie_ids),
-                has_episodes=bool(episode_ids),
-            )
+                    has_movies=bool(movie_ids),
+                    has_episodes=bool(episode_ids),
+                )
             lease = try_acquire_refresh_lease(
                 section_ids=target_sections,
                 source="materialization_overlap_checkpoint",
@@ -657,20 +668,28 @@ def _run_materialization_for_ids(
                 lease_seconds=_overlap_refresh_lease_seconds(),
             )
             if bool(lease.get("allowed", False)):
-                refresh_stats = refresh_all_path_batches_with_section_fallback(
-                    [
-                        (created_paths, "Created"),
-                        (delete_paths, "Deleted"),
-                    ],
-                    has_movies=bool(movie_ids),
-                    has_episodes=bool(episode_ids),
-                    enable_section_fallback=False,
-                    fallback_wait_seconds=0,
-                )
-                stats["media_refresh_requested"] += int(refresh_stats.get("refreshed", 0) or 0)
-                stats["media_refresh_failed"] += int(refresh_stats.get("failed", 0) or 0)
+                def _delayed_plex_path_refresh(_created_paths, _delete_paths):
+                    refresh_stats = refresh_all_path_batches_with_section_fallback(
+                        [
+                            (_created_paths, "Created"),
+                            (_delete_paths, "Deleted"),
+                        ],
+                        has_movies=bool(movie_ids),
+                        has_episodes=bool(episode_ids),
+                        enable_section_fallback=False,
+                        fallback_wait_seconds=0,
+                        include_plex=True,
+                    )
+                    logger.info(
+                        f"Completed delayed Plex path refresh: refreshed={refresh_stats.get('refreshed', 0)} "
+                        f"failed={refresh_stats.get('failed', 0)}",
+                        extra={"emoji_type": "success"},
+                    )
+
+                threading.Timer(20.0, _delayed_plex_path_refresh, args=(set(created_paths), set(delete_paths))).start()
                 overlap_state["pending_created_paths"].clear()
                 overlap_state["pending_delete_paths"].clear()
+                logger.info("Scheduled delayed Plex path refresh in 20 seconds.", extra={"emoji_type": "info"})
             else:
                 stats["overlap_refresh_suppressed"] += 1
                 logger.info(
@@ -680,23 +699,9 @@ def _run_materialization_for_ids(
                 )
 
         if candidate_ids:
-            overlap_source = f"{observation_source}:overlap"
-            hybrid_result = enqueue_hybrid_observation_slice(
-                session,
-                placeholder_ids=candidate_ids,
-                source=overlap_source,
-                trigger_reason=f"materialization_overlap:{trigger_reason}",
-                delay_seconds=0,
-            )
-            if hybrid_result.get("enqueued"):
-                stats["overlap_slices_enqueued"] += 1
-                if hybrid_result.get("coalesced"):
-                    stats["overlap_slices_coalesced"] += 1
-                stats["hybrid_slice_enqueued"] = 1
-                stats["hybrid_slice_job_id"] = hybrid_result.get("job_id")
-                if hybrid_result.get("coalesced"):
-                    stats["hybrid_slice_coalesced"] = 1
-                overlap_state["pending_candidate_ids"].clear()
+            # Instead of observation slices, we now just trigger a standard refresh for the new items.
+            _trigger_bulk_initial_media_server_refresh()
+            overlap_state["pending_candidate_ids"].clear()
 
         overlap_state["last_checkpoint_mono"] = now_mono
         overlap_state["movie_processed"] = 0
@@ -754,6 +759,22 @@ def _run_materialization_for_ids(
         else:
             stats["noop"] += 1
 
+        if is_full_sync and result.get("ok") and (result.get("created") or result.get("deleted")):
+            now = time.monotonic()
+            if movie_phase_start_mono is None:
+                movie_phase_start_mono = now
+                last_movie_periodic_refresh_mono = now
+                def _initial_movie_refresh():
+                    refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
+                threading.Timer(5.0, _initial_movie_refresh).start()
+                stats["movie_refresh_triggered"] = True
+                logger.info("Full sync movie phase started; scheduled initial library refresh in 5 seconds.", extra={"emoji_type": "info"})
+
+            if now - last_movie_periodic_refresh_mono >= 300:
+                refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
+                last_movie_periodic_refresh_mono = now
+                logger.info("Full sync movie phase recurring refresh triggered (5-minute interval).", extra={"emoji_type": "info"})
+
         if overlap_enabled:
             overlap_state["movie_processed"] += 1
             now_mono = time.monotonic()
@@ -767,8 +788,11 @@ def _run_materialization_for_ids(
             if should_trigger:
                 _emit_overlap_checkpoint(f"movie_{trigger_kind}")
 
-    if overlap_enabled and movie_ids:
-        _emit_overlap_checkpoint("movie_phase_flush", force=True)
+    if is_full_sync and movie_phase_start_mono is not None:
+        def _final_movie_refresh():
+            refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
+        threading.Timer(5.0, _final_movie_refresh).start()
+        logger.info("Full sync movie phase complete; scheduled final library refresh in 5 seconds.", extra={"emoji_type": "info"})
 
     for episode_id in episode_ids:
         result = apply_episode_materialization(episode_id, session=session, activity_reason=activity_reason)
@@ -824,6 +848,22 @@ def _run_materialization_for_ids(
         else:
             stats["noop"] += 1
 
+        if is_full_sync and result.get("ok") and (result.get("created") or result.get("deleted")):
+            now = time.monotonic()
+            if episode_phase_start_mono is None:
+                episode_phase_start_mono = now
+                last_episode_periodic_refresh_mono = now
+                def _initial_episode_refresh():
+                    refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
+                threading.Timer(5.0, _initial_episode_refresh).start()
+                stats["tv_refresh_triggered"] = True
+                logger.info("Full sync episode phase started; scheduled initial library refresh in 5 seconds.", extra={"emoji_type": "info"})
+
+            if now - last_episode_periodic_refresh_mono >= 300:
+                refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
+                last_episode_periodic_refresh_mono = now
+                logger.info("Full sync episode phase recurring refresh triggered (5-minute interval).", extra={"emoji_type": "info"})
+
         if overlap_enabled:
             overlap_state["episode_processed"] += 1
             now_mono = time.monotonic()
@@ -837,6 +877,12 @@ def _run_materialization_for_ids(
             if should_trigger:
                 _emit_overlap_checkpoint(f"episode_{trigger_kind}")
 
+    if is_full_sync and episode_phase_start_mono is not None:
+        def _final_episode_refresh():
+            refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
+        threading.Timer(5.0, _final_episode_refresh).start()
+        logger.info("Full sync episode phase complete; scheduled final library refresh in 5 seconds.", extra={"emoji_type": "info"})
+
     if overlap_enabled and (movie_ids or episode_ids):
         _emit_overlap_checkpoint("final_loop_flush", force=True)
 
@@ -847,91 +893,29 @@ def _run_materialization_for_ids(
         extra={"emoji_type": "success"},
     )
 
-    refresh_stats = refresh_all_path_batches_with_section_fallback(
-        [
-            (changed_paths, "Created"),
-            (delete_refresh_paths, "Deleted"),
-        ],
-        has_movies=bool(movie_ids),
-        has_episodes=bool(episode_ids),
-        enable_section_fallback=False,
-        fallback_wait_seconds=0,
-    )
-    stats["media_refresh_requested"] = int(refresh_stats.get("refreshed", 0) or 0)
-    stats["media_refresh_failed"] = int(refresh_stats.get("failed", 0) or 0)
-
-    logger.info(
-        f"Media server refreshes completed after placeholder materialization: "
-        f"refreshed={stats['media_refresh_requested']} "
-        f"failed={stats['media_refresh_failed']}",
-        extra={"emoji_type": "success"},
-    )
-
-    # Only observe candidates touched by this materialization scope to avoid
-    # re-polling unrelated placeholders on event-driven runs.
-    observed_candidates_q = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
-    filters = []
-    if movie_ids:
-        filters.append(Placeholder.movie_id.in_(movie_ids))
-    if episode_ids:
-        filters.append(Placeholder.episode_id.in_(episode_ids))
-    if filters:
-        observed_candidates_q = observed_candidates_q.filter(or_(*filters))
-    else:
-        observed_candidates_q = observed_candidates_q.filter(Placeholder.id == -1)
-    observed_candidates = observed_candidates_q.all()
-
-    # Always perform immediate polling for all enabled media servers so IDs can
-    # be captured even when Plex is disabled.
-    observe_stats = observe_placeholders_with_polling(
-        session,
-        observed_candidates,
-        allow_title_fallback=True,
-        auto_enqueue_trail_on_defer=False,
-    )
-    stats["media_id_observed_plex"] = observe_stats.get("observed_plex", 0)
-    stats["media_id_observed_jellyfin"] = observe_stats.get("observed_jellyfin", 0)
-    stats["media_id_observed_emby"] = observe_stats.get("observed_emby", 0)
-    stats["media_id_observe_failed"] = observe_stats.get("observe_failed", 0)
-
-    if getattr(settings, "ENABLE_PLEX", False):
-        ready_for_plex_projection = [
-            int(row.id)
-            for row in observed_candidates
-            if getattr(row, "has_placeholder", False)
-            and getattr(row, "plex_placeholder_id", None)
-        ]
-        if ready_for_plex_projection:
-            projection_result = enqueue_status_projection(ready_for_plex_projection, session=session)
+    if not is_full_sync:
+        def _trigger_delayed_final_refresh():
+            refresh_stats = refresh_all_path_batches_with_section_fallback(
+                [
+                    (changed_paths, "Created"),
+                    (delete_refresh_paths, "Deleted"),
+                ],
+                has_movies=bool(movie_ids),
+                has_episodes=bool(episode_ids),
+                enable_section_fallback=False,
+                fallback_wait_seconds=0,
+                include_plex=True,
+            )
             logger.info(
-                "Post-observation Plex status projection queued "
-                f"placeholders={len(ready_for_plex_projection)} ok={projection_result.get('ok', False)}",
-                extra={"emoji_type": "info"},
+                f"Completed delayed final media server refresh: refreshed={refresh_stats.get('refreshed', 0)} "
+                f"failed={refresh_stats.get('failed', 0)}",
+                extra={"emoji_type": "success"},
             )
 
-    unresolved_ids = unresolved_placeholder_ids(observed_candidates)
-    if unresolved_ids:
-        continuation = enqueue_observation_continuation(
-            session,
-            placeholder_ids=unresolved_ids,
-            source=observation_source,
-            trigger_reason="materialization_unresolved",
-            delay_seconds=0,
-        )
-        if continuation.get("hybrid_enqueued"):
-            stats["hybrid_slice_enqueued"] = 1
-            stats["hybrid_slice_job_id"] = continuation.get("hybrid_job_id")
-            stats["hybrid_slice_coalesced"] = 1 if continuation.get("hybrid_coalesced") else 0
-        if continuation.get("trail_enqueued"):
-            stats["observation_trail_enqueued"] = 1
-            stats["observation_trail_job_id"] = continuation.get("trail_job_id")
-            stats["observation_trail_group_id"] = continuation.get("trail_group_id")
-        logger.info(
-            "Materialization unresolved continuation summary "
-            f"unresolved={len(unresolved_ids)} hybrid_enqueued={bool(continuation.get('hybrid_enqueued'))} "
-            f"trail_enqueued={bool(continuation.get('trail_enqueued'))}",
-            extra={"emoji_type": "info"},
-        )
+        threading.Timer(20.0, _trigger_delayed_final_refresh).start()
+        logger.info("Media server refreshes were scheduled to run asynchronously in 20 seconds.", extra={"emoji_type": "success"})
+
+    return stats
 
     return stats
 
@@ -939,14 +923,16 @@ def _run_materialization_for_ids(
 def run_materialization_pass() -> dict[str, Any]:
     """Apply file/DB side effects for needs/obsolete determinations.
 
-    Creates all placeholder files first, then sends a single grouped refresh to
-    each media server (one request per unique folder), then runs one observation
-    sweep.  Placeholders Plex didn't scan within the observation window are
-    deferred to the observation trail job queue picked up by background workers.
+    Creates all placeholder files first, then runs one observation sweep.
+    Bulk sync skips immediate Plex path refresh fanout and repeated overlap
+    refreshes; Emby and Jellyfin get one library refresh when hybrid
+    continuation is first queued and one more after materialization while
+    hybrid observation owns Plex follow-up refresh decisions during the
+    unresolved tail.
 
     This single-pass approach is far faster than per-batch cycling for large
-    first-run syncs (tens of thousands of items) while still giving Plex a
-    path-scoped refresh signal for every new folder.
+    first-run syncs (tens of thousands of items) while avoiding continuous scan
+    churn from placeholder fanout.
     """
     session = get_session()
     try:

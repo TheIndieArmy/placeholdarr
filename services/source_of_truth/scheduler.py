@@ -11,7 +11,6 @@ from services.source_of_truth.filesystem import scan_once_if_needed
 from services.source_of_truth.calendar_phase import run_calendar_phase
 from services.source_of_truth.calendar_date_refresh import run_calendar_date_refresh
 from services.source_of_truth.materializer import run_materialization_pass
-from services.source_of_truth.status_reconciler import run_status_projection_reconciliation
 from services.source_of_truth.sync_runner import run_full_sync
 
 
@@ -43,13 +42,11 @@ def _run_self_healing_pipeline(run_id: str) -> None:
         determination_stats = run_determination_pass()
         materialization_stats = run_materialization_pass()
         calendar_stats = run_calendar_phase()
-        status_reconcile_stats = run_status_projection_reconciliation()
         logger.info(
             "Scheduled self-heal completed "
             f"run_id={run_id} scan_count={scan_count} scan_info={scan_info} "
             f"reconcile={reconcile_stats} determination={determination_stats} "
-            f"materialization={materialization_stats} calendar={calendar_stats} "
-            f"status_reconcile={status_reconcile_stats}"
+            f"materialization={materialization_stats} calendar={calendar_stats}"
         )
     finally:
         _pipeline_lock.release()
@@ -127,12 +124,11 @@ def _run_calendar_only_syncs():
             determination_stats = run_determination_pass()
             materialization_stats = run_materialization_pass()
             calendar_stats = run_calendar_phase()
-            status_reconcile_stats = run_status_projection_reconciliation()
             logger.info(
                 "Scheduled calendar-only sync completed "
                 f"run_id={run_id} date_refresh={date_refresh_stats} "
                 f"determination={determination_stats} materialization={materialization_stats} "
-                f"calendar={calendar_stats} status_reconcile={status_reconcile_stats}"
+                f"calendar={calendar_stats}"
             )
         finally:
             _pipeline_lock.release()

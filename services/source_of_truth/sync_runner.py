@@ -16,6 +16,7 @@ from services.source_of_truth.arr_api import (
     fetch_sonarr_episodes,
     fetch_sonarr_series,
     fetch_sonarr_series_item,
+    fetch_sonarr_episode_item,
 )
 
 
@@ -408,6 +409,7 @@ def _episode_fields(series: Series, season: Season, entry: Dict, episode_file: D
         'episodefile_size': episode_file.get('size') or episode_file.get('sizeOnDisk'),
         'sonarr_episode_overview': entry.get('overview'),
         'sonarr_episode_tvdbid': _as_int(entry.get('tvdbId') or 0, 0) or None,
+        'sonarr_runtime': _as_int(entry.get('runtime') or 0, 0) or None,
         'sonarr_episode_still': _extract_image_url(entry, ('screenshot', 'still', 'cover')),
         'sonarr_episode_directors': entry.get('directors') if isinstance(entry.get('directors'), list) else None,
         'sonarr_episode_credits': entry.get('writers') if isinstance(entry.get('writers'), list) else None,
@@ -624,6 +626,12 @@ def run_full_sync(
                     season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
                     season_overview_by_number: Dict[int, str] = {}
                     include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
+                    total_episodes_in_series = len(episodes)
+                    if total_episodes_in_series > 0:
+                        logger.info(
+                            f"Enriching {total_episodes_in_series} episodes for '{series_row.title}'...",
+                            extra={'emoji_type': 'info'},
+                        )
                     for ep in episodes:
                         season_number = int(ep.get('seasonNumber') or 0)
                         if season_number == 0 and not include_specials:
@@ -633,8 +641,13 @@ def run_full_sync(
                         if season_created:
                             stats['seasons_created'] += 1
 
-                        episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
-                        ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
+                        sonarr_ep_id = ep.get('id')
+                        # Fetch detailed episode payload to capture thumbnails and extended metadata (episodes in bulk omit images)
+                        detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key) if sonarr_ep_id else None
+                        ep_effective = detailed_ep if detailed_ep else ep
+
+                        episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                        ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
                         overview = str(ep.get('overview') or '').strip()
                         if overview and season_number not in season_overview_by_number:
@@ -850,6 +863,13 @@ def sync_sonarr_series_by_ids(
                 season_rows_by_number[season_number] = season_row
                 if season_created:
                     stats['seasons_created'] += 1
+
+                # Fetch detailed episode payload to capture thumbnails/meta (bulk /episode omits them)
+                sonarr_ep_id = ep.get('id')
+                if sonarr_ep_id:
+                    detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
+                    if detailed_ep:
+                        ep = detailed_ep
 
                 episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
                 ep_fields = _episode_fields(series_row, season_row, ep, episode_file)

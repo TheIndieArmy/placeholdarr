@@ -107,7 +107,19 @@ class StatusOrchestrator:
                 {"event_type": "creation", "media_type": media_type, "days_until_release": None},
             )
 
+        # Ensure target_date is a date object (not datetime) for safe subtraction
+        if hasattr(target_date, "date") and not isinstance(target_date, date):
+            target_date = target_date.date()
+
         days_until = (target_date - now_date).days
+        logger.debug(
+            f"Computing initial creation status for Placeholder[{placeholder.id}]: "
+            f"target_date={target_date} ({type(target_date)}), "
+            f"now_date={now_date} ({type(now_date)}), "
+            f"days_until={days_until}, "
+            f"lookahead_days={lookahead_days}, "
+            f"placeholders_enabled={placeholders_enabled}"
+        )
         if not placeholders_enabled:
             return (
                 DisplayStatus.REQUEST.value,
@@ -539,15 +551,5 @@ class StatusOrchestrator:
                 enqueue_nfo_refresh(nfo_refresh_ids, session=session)
             except Exception as e:
                 logger.warning(f"Failed to enqueue NFO refresh: {e}", exc_info=True)
-        
-        # Stage 3: Enqueue status projection job
-        from services.source_of_truth.status_reconciler import enqueue_status_projection
-        projection_ids = list(dict.fromkeys(int(intent.placeholder_id) for intent in intents if intent.placeholder_id is not None))
-        
-        try:
-            enqueue_status_projection(projection_ids, session=session)
-            logger.debug(f"Enqueued status projection for {len(projection_ids)} placeholders")
-        except Exception as e:
-            logger.error(f"Failed to enqueue status projection: {e}", exc_info=True)
         
         return applied

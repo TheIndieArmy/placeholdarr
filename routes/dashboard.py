@@ -20,7 +20,7 @@ from services.app_config import get_onboarding_status, get_settings_payload, res
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
 from services.postgres.models import (
-    Movie, Series, Season, Episode, Placeholder, Job, EventLog, ObservationTrailAttempt,
+    Movie, Series, Season, Episode, Placeholder, Job, EventLog,
 )
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
@@ -476,7 +476,6 @@ def _humanize_job_type(job_type: str) -> str:
         "status_reconcile": "Status Reconciliation",
         "materialization": "Placeholder Creation",
         "webhook_event": "Webhook Event",
-        "status_projection": "Status Projection",
         "nfo_refresh": "Metadata Refresh",
         "import_grace": "Import Grace Check",
         "playback_fallback": "Playback Fallback",
@@ -573,7 +572,6 @@ def _is_user_relevant_job(job_type: str, status: str | None = None) -> bool:
         return True
     noisy = {
         "webhook_event",
-        "status_projection",
         "nfo_refresh",
         "determination",
         "materialization",
@@ -779,7 +777,7 @@ def _build_series_add_summary_row(session, event_row: dict[str, Any]) -> dict[st
     step_job_types = {
         "materialization": {"materialization"},
         "observation": {"placeholder_observation_trail", "observation_trail"},
-        "status_update": {"status_projection", "status_reconcile"},
+        "status_update": {"status_reconcile"},
     }
 
     matched_jobs = 0
@@ -1015,7 +1013,6 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
     materialization: dict[str, Any] = {}
     last_observation: dict[str, Any] = {}
     observation_summary: dict[str, Any] = {}
-    status_projection_queued = 0
     last_time: datetime | None = None
 
     re_series_fetch = re.compile(r"Series fullsync: fetched\s+(\d+)\s+series", re.IGNORECASE)
@@ -1028,13 +1025,21 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
         re.IGNORECASE,
     )
     re_observation_summary = re.compile(r"Observation summary:\s*ready=(\d+)/(\d+),\s*still_waiting=(\d+),\s*reason=([a-z_]+)", re.IGNORECASE)
-    re_status_projection = re.compile(r"status projection queued placeholders=(\d+)", re.IGNORECASE)
+    re_movie_refresh = re.compile(r"Full sync movie phase started; scheduled initial library refresh in 5 seconds", re.IGNORECASE)
+    re_tv_refresh = re.compile(r"Full sync episode phase started; scheduled initial library refresh in 5 seconds", re.IGNORECASE)
+    
+    movie_refresh_triggered = False
+    tv_refresh_triggered = False
+    run_timestamp = ""
 
     for raw in lines:
         line = str(raw or "")
         ts = _extract_log_timestamp(line)
         if ts is not None:
             last_time = ts
+            # Capture the start time of the most recent sync to use as a unique ID
+            if "Starting startup movie fullsync" in line or "Starting startup series fullsync" in line:
+                run_timestamp = ts.strftime("%Y%m%d%H%M%S")
 
         if "Starting startup movie fullsync" in line:
             movie_started = True
@@ -1080,9 +1085,11 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
                 "reason": str(match.group(4) or ""),
             }
 
-        match = re_status_projection.search(line)
-        if match:
-            status_projection_queued += int(match.group(1))
+        if re_movie_refresh.search(line):
+            movie_refresh_triggered = True
+        if re_tv_refresh.search(line):
+            tv_refresh_triggered = True
+
 
     if not any([movie_started, series_started, determination, materialization, last_observation, observation_summary]):
         return None
@@ -1136,49 +1143,24 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
                 {"label": "Created", "value": int(materialization.get("created", 0) or 0)},
                 {"label": "Files created", "value": int(materialization.get("files_created", 0) or 0)},
                 {"label": "NFO written", "value": int(materialization.get("nfo_written", 0) or 0)},
-                {"label": "Refreshes called", "value": int(materialization.get("media_refresh_requested", 0) or 0)},
-                {"label": "Hybrid candidates", "value": int(materialization.get("media_id_observe_failed", 0) or 0)},
+                {"label": "Movie Library Refresh", "value": "✅" if movie_refresh_triggered else "Pending"},
+                {"label": "TV Library Refresh", "value": "✅" if tv_refresh_triggered else "Pending"},
             ],
         }
     )
 
-    observation_status = "working" if observation_running else ("done" if (last_observation or observation_summary) else "pending")
-    if overall_status == "FAILED":
-        observation_status = "failed"
-    sections.append(
-        {
-            "name": "Observation",
-            "status": observation_status,
-            "metrics": [
-                {"label": "Poll pass", "value": int(last_observation.get("pass", 0) or 0)},
-                {"label": "Remaining unresolved", "value": int(last_observation.get("remaining_unresolved", observation_summary.get("still_waiting", 0) if observation_summary else 0) or 0)},
-                {"label": "Awaiting Plex scan", "value": int(last_observation.get("awaiting_plex_scan", 0) or 0)},
-                {"label": "Pass status updates", "value": int(last_observation.get("status_updates_plex", 0) or 0)},
-                {"label": "Last progress delta", "value": int(last_observation.get("progress_delta", 0) or 0)},
-            ],
-        }
-    )
-
-    status_projection_status = "done" if status_projection_queued > 0 and not observation_running else ("working" if observation_running else "pending")
-    sections.append(
-        {
-            "name": "Status Projection",
-            "status": status_projection_status,
-            "metrics": [
-                {"label": "Projection jobs queued", "value": int(status_projection_queued)},
-            ],
-        }
-    )
 
     current_unresolved = int(last_observation.get("remaining_unresolved", 0) or 0)
     summary_details = (
         f"Materialization created {int(materialization.get('created', 0) or 0)} placeholders • "
-        f"Observation unresolved {current_unresolved} • "
-        f"Poll pass {int(last_observation.get('pass', 0) or 0)}"
+        f"Movies: {'✅' if movie_refresh_triggered else 'Pending'} • "
+        f"TV: {'✅' if tv_refresh_triggered else 'Pending'}"
     )
 
+    row_id = f"full-sync-progress-{run_timestamp}" if run_timestamp else "full-sync-progress"
+
     return {
-        "id": "full-sync-progress",
+        "id": row_id,
         "type": "job",
         "job_type": "full_sync_progress",
         "display_name": "Full Sync Progress",
@@ -1584,23 +1566,8 @@ async def errors(limit: int = Query(50, ge=1, le=200)):
                 "time": e.updated_at.isoformat() if e.updated_at else None,
             })
 
-        # Observation trail errors
-        trail_errors = session.query(
-            ObservationTrailAttempt.id,
-            ObservationTrailAttempt.trail_job_id,
-            ObservationTrailAttempt.error_message,
-            ObservationTrailAttempt.created_at,
-        ).filter(
-            ObservationTrailAttempt.error_message.isnot(None)
-        ).order_by(ObservationTrailAttempt.created_at.desc()).limit(limit).all()
-        for t in trail_errors:
-            items.append({
-                "source": "observation",
-                "id": t.id,
-                "label": f"trail job #{t.trail_job_id}",
-                "error": t.error_message,
-                "time": t.created_at.isoformat() if t.created_at else None,
-            })
+        # Observation trail errors removed as system is deprecated.
+        pass
 
         # Placeholder lookup failures
         ph_errors = session.query(

@@ -5,15 +5,36 @@ import time
 from services.media_servers.jellyfin import refresh_jellyfin_paths, refresh_jellyfin_sections
 from services.media_servers.emby import refresh_emby_paths, refresh_emby_sections
 from services.media_servers.plex import refresh_plex_paths, refresh_plex_sections
+from core.config import settings
 from core.logger import logger
 
 
-def refresh_all_paths(folders: set[str], *, update_type: str = "Created") -> dict[str, int]:
+def refresh_all_paths(
+    folders: set[str],
+    *,
+    update_type: str = "Created",
+    include_plex: bool = True,
+    include_jellyfin: bool = True,
+    include_emby: bool = True,
+    bypass_suppression: bool = False,
+) -> dict[str, int]:
     """Fan out path-scoped refresh to all enabled media servers."""
+    if not bypass_suppression and getattr(settings, "REFRESH_TRIGGER_SUPPRESSED", False):
+        logger.debug("Media server path refresh suppressed by global sync flag.")
+        return {"refreshed": 0, "failed": 0}
+
     total_refreshed = 0
     total_failed = 0
 
-    for fn in (refresh_plex_paths, refresh_jellyfin_paths, refresh_emby_paths):
+    refreshers = []
+    if include_plex:
+        refreshers.append(refresh_plex_paths)
+    if include_jellyfin:
+        refreshers.append(refresh_jellyfin_paths)
+    if include_emby:
+        refreshers.append(refresh_emby_paths)
+
+    for fn in refreshers:
         result = fn(folders, update_type=update_type)
         total_refreshed += result.get("refreshed", 0)
         total_failed += result.get("failed", 0)
@@ -23,10 +44,41 @@ def refresh_all_paths(folders: set[str], *, update_type: str = "Created") -> dic
 
 def refresh_all_sections(has_movies: bool, has_episodes: bool) -> dict[str, int]:
     """Fan out library-level refresh to all enabled media servers."""
+    return refresh_selected_sections(
+        has_movies,
+        has_episodes,
+        include_plex=True,
+        include_jellyfin=True,
+        include_emby=True,
+    )
+
+
+def refresh_selected_sections(
+    has_movies: bool,
+    has_episodes: bool,
+    *,
+    include_plex: bool = True,
+    include_jellyfin: bool = True,
+    include_emby: bool = True,
+    bypass_suppression: bool = False,
+) -> dict[str, int]:
+    """Fan out library-level refresh to selected media servers."""
+    if not bypass_suppression and getattr(settings, "REFRESH_TRIGGER_SUPPRESSED", False):
+        logger.debug("Media server section refresh suppressed by global sync flag.")
+        return {"refreshed": 0, "failed": 0}
+
     total_refreshed = 0
     total_failed = 0
 
-    for fn in (refresh_plex_sections, refresh_jellyfin_sections, refresh_emby_sections):
+    refreshers = []
+    if include_plex:
+        refreshers.append(refresh_plex_sections)
+    if include_jellyfin:
+        refreshers.append(refresh_jellyfin_sections)
+    if include_emby:
+        refreshers.append(refresh_emby_sections)
+
+    for fn in refreshers:
         result = fn(has_movies, has_episodes)
         total_refreshed += result.get("refreshed", 0)
         total_failed += result.get("failed", 0)
@@ -41,6 +93,9 @@ def refresh_all_path_batches_with_section_fallback(
     has_episodes: bool,
     enable_section_fallback: bool = False,
     fallback_wait_seconds: int = 0,
+    include_plex: bool = True,
+    include_jellyfin: bool = True,
+    include_emby: bool = True,
 ) -> dict[str, int | bool]:
     """Run one or more path-refresh batches, then optionally issue one section fallback."""
     stats: dict[str, int | bool] = {
@@ -59,7 +114,13 @@ def refresh_all_path_batches_with_section_fallback(
         if not folders:
             continue
         any_paths = True
-        path_stats = refresh_all_paths(folders, update_type=update_type)
+        path_stats = refresh_all_paths(
+            folders,
+            update_type=update_type,
+            include_plex=include_plex,
+            include_jellyfin=include_jellyfin,
+            include_emby=include_emby,
+        )
         refreshed = int(path_stats.get("refreshed", 0) or 0)
         failed = int(path_stats.get("failed", 0) or 0)
         stats["refreshed"] = int(stats["refreshed"] or 0) + refreshed
