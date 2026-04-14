@@ -2,6 +2,7 @@
 
 import ast
 import calendar as _calendar
+from collections import defaultdict
 import os
 import glob as _glob
 import re
@@ -17,6 +18,7 @@ from sqlalchemy import and_, case, func, or_, text
 from core.config import settings
 from core.logger import logger
 from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
+from services.activity_snapshot import get_queue_download_activity_row
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
 from services.postgres.models import (
@@ -252,13 +254,64 @@ def _movie_calendar_release(movie: Movie) -> tuple[date | None, str | None, bool
     return None, preferred, True
 
 
-def _episode_calendar_subtitle(season_number: int | None, episode_number: int | None, title: str | None) -> str:
-    bits = []
-    if season_number is not None and episode_number is not None:
-        bits.append(f"S{int(season_number):02d}E{int(episode_number):02d}")
-    if title:
-        bits.append(title)
-    return " • ".join(bit for bit in bits if bit)
+def _episode_calendar_episode_code(season_number: int | None, episode_number: int | None) -> str:
+    if season_number is None or episode_number is None:
+        return ""
+    return f"S{int(season_number):02d}E{int(episode_number):02d}"
+
+
+def _merge_calendar_episodes_same_day(items: list[dict]) -> list[dict]:
+    """One calendar row per series per day when multiple episodes share an air date."""
+
+    movies = [i for i in items if i.get("media_type") == "movie"]
+    episodes = [i for i in items if i.get("media_type") == "episode"]
+    by_series: dict[int, list[dict]] = defaultdict(list)
+    loose: list[dict] = []
+    for ep in episodes:
+        sid = ep.get("series_id")
+        if sid is None:
+            loose.append(ep)
+        else:
+            by_series[int(sid)].append(ep)
+
+    out_episodes: list[dict] = []
+    for sid in sorted(by_series.keys()):
+        group = by_series[sid]
+        group.sort(
+            key=lambda x: (
+                int(x.get("season_number") if x.get("season_number") is not None else -1),
+                int(x.get("episode_number") if x.get("episode_number") is not None else -1),
+            )
+        )
+        if len(group) == 1:
+            out_episodes.append(group[0])
+            continue
+        first = group[0]
+        release_date = str(first.get("release_date") or "")
+        code = _episode_calendar_episode_code(first.get("season_number"), first.get("episode_number"))
+        if not code:
+            code = str(first.get("subtitle") or "").split(" (+", 1)[0].strip() or "TV"
+        extra = len(group) - 1
+        subtitle = f"{code} (+{extra})" if extra else code
+        merged = {
+            **first,
+            "id": f"episode-group-{sid}-{release_date}",
+            "item_id": int(first["item_id"]),
+            "subtitle": subtitle,
+            "group_episode_ids": [int(x["item_id"]) for x in group],
+            "group_episode_count": len(group),
+        }
+        out_episodes.append(merged)
+
+    out_episodes.extend(loose)
+    combined = movies + out_episodes
+    combined.sort(
+        key=lambda item: (
+            0 if item.get("media_type") == "movie" else 1,
+            str(item.get("title") or "").lower(),
+        )
+    )
+    return combined
 
 
 def _calendar_lookahead_payload(today: date, lookahead_days: int) -> dict:
@@ -489,6 +542,60 @@ def _humanize_snake_case(value: str | None) -> str:
     if not token:
         return "Unknown"
     return " ".join(part.capitalize() for part in token.split("_") if part)
+
+
+def _activity_details_for_event(event_type: str | None, payload: Any) -> str | None:
+    """One-line context (title / series / episode) for the activity table."""
+    if not isinstance(payload, dict):
+        return None
+    et = str(event_type or "").strip().lower()
+    movie = payload.get("movie") if isinstance(payload.get("movie"), dict) else {}
+    series = payload.get("series") if isinstance(payload.get("series"), dict) else {}
+    episode = payload.get("episode") if isinstance(payload.get("episode"), dict) else {}
+
+    def fmt_movie(m: dict[str, Any]) -> str | None:
+        t = str(m.get("title") or m.get("name") or "").strip()
+        if not t:
+            return None
+        y = m.get("year")
+        try:
+            y_int = int(y) if y is not None else None
+        except Exception:
+            y_int = None
+        return f"{t} ({y_int})" if y_int else t
+
+    def fmt_series(s: dict[str, Any]) -> str | None:
+        t = str(s.get("title") or "").strip()
+        if not t:
+            return None
+        y = s.get("year")
+        try:
+            y_int = int(y) if y is not None else None
+        except Exception:
+            y_int = None
+        return f"{t} ({y_int})" if y_int else t
+
+    def fmt_episode(e: dict[str, Any], s: dict[str, Any]) -> str | None:
+        st = fmt_series(s) if s else None
+        try:
+            sn = int(e.get("seasonNumber", e.get("season_number", 0)) or 0)
+        except Exception:
+            sn = 0
+        try:
+            en = int(e.get("episodeNumber", e.get("episode_number", 0)) or 0)
+        except Exception:
+            en = 0
+        et = str(e.get("title") or "").strip() or "Episode"
+        seg = f"S{sn:02d}E{en:02d} — {et}"
+        return f"{st} • {seg}" if st else seg
+
+    if et in {"movie_imported", "movie_added", "movieadd", "movie_deleted", "movie_file_deleted"}:
+        return fmt_movie(movie)
+    if et in {"series_add", "series_added", "seriesadd", "series_deleted"}:
+        return fmt_series(series)
+    if et in {"episode_imported", "episode_file_deleted"}:
+        return fmt_episode(episode, series)
+    return None
 
 
 def _humanize_event_type(event_type: str | None) -> str:
@@ -990,7 +1097,20 @@ def _parse_metrics_dict(fragment: str) -> dict[str, Any]:
     return {}
 
 
-def _build_full_sync_progress_row() -> dict[str, Any] | None:
+def _latest_startup_sync_anchor(lines: list[str]) -> tuple[int | None, str]:
+    mode_idx: int | None = None
+    mode = "unknown"
+    re_mode = re.compile(r"Startup sync mode selected:\s*(\w+)", re.IGNORECASE)
+    for idx, raw in enumerate(lines):
+        match = re_mode.search(str(raw or ""))
+        if not match:
+            continue
+        mode_idx = idx
+        mode = str(match.group(1) or "").strip().lower() or "unknown"
+    return mode_idx, mode
+
+
+def _build_startup_sync_progress_row() -> dict[str, Any] | None:
     log_file = _latest_runtime_log_file()
     if not log_file:
         return None
@@ -1003,6 +1123,11 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
 
     if not lines:
         return None
+
+    anchor_idx, startup_mode = _latest_startup_sync_anchor(lines)
+    if anchor_idx is None:
+        return None
+    scoped_lines = lines[anchor_idx:]
 
     series_total = 0
     series_processed = 0
@@ -1031,14 +1156,23 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
     movie_refresh_triggered = False
     tv_refresh_triggered = False
     run_timestamp = ""
+    lite_movies_requested = 0
+    lite_movies_seen = 0
+    lite_series_requested = 0
+    lite_series_seen = 0
+    lite_episodes_seen = 0
+    startup_completed = False
 
-    for raw in lines:
+    re_lite_movie = re.compile(r"Startup lite targeted movie sync .*: (\{.*\})", re.IGNORECASE)
+    re_lite_series = re.compile(r"Startup lite targeted series sync .*: (\{.*\})", re.IGNORECASE)
+    re_startup_completed = re.compile(r"Startup source-of-truth completed .*", re.IGNORECASE)
+
+    for raw in scoped_lines:
         line = str(raw or "")
         ts = _extract_log_timestamp(line)
         if ts is not None:
             last_time = ts
-            # Capture the start time of the most recent sync to use as a unique ID
-            if "Starting startup movie fullsync" in line or "Starting startup series fullsync" in line:
+            if "Startup sync mode selected:" in line:
                 run_timestamp = ts.strftime("%Y%m%d%H%M%S")
 
         if "Starting startup movie fullsync" in line:
@@ -1089,12 +1223,36 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
             movie_refresh_triggered = True
         if re_tv_refresh.search(line):
             tv_refresh_triggered = True
+        match = re_lite_movie.search(line)
+        if match:
+            lite_metrics = _parse_metrics_dict(match.group(1))
+            lite_movies_requested += int(lite_metrics.get("movies_requested", 0) or 0)
+            lite_movies_seen += int(lite_metrics.get("movies_seen", 0) or 0)
+        match = re_lite_series.search(line)
+        if match:
+            lite_metrics = _parse_metrics_dict(match.group(1))
+            lite_series_requested += int(lite_metrics.get("series_requested", 0) or 0)
+            lite_series_seen += int(lite_metrics.get("series_seen", 0) or 0)
+            lite_episodes_seen += int(lite_metrics.get("episodes_seen", 0) or 0)
+        if re_startup_completed.search(line):
+            startup_completed = True
 
-
-    if not any([movie_started, series_started, determination, materialization, last_observation, observation_summary]):
+    if not any(
+        [
+            movie_started,
+            series_started,
+            determination,
+            materialization,
+            last_observation,
+            observation_summary,
+            lite_movies_seen,
+            lite_series_seen,
+            startup_completed,
+        ]
+    ):
         return None
 
-    observation_running = bool(last_observation) and int(last_observation.get("remaining_unresolved", 0) or 0) > 0
+    observation_running = startup_mode == "full" and bool(last_observation) and int(last_observation.get("remaining_unresolved", 0) or 0) > 0
     if observation_summary:
         reason = str(observation_summary.get("reason") or "").lower()
         if reason == "all_resolved" and int(observation_summary.get("still_waiting", 0) or 0) <= 0:
@@ -1103,18 +1261,56 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
     overall_status = "WORKING" if observation_running else "DONE"
     if int(materialization.get("errors", 0) or 0) > 0:
         overall_status = "FAILED"
+    if startup_completed and overall_status == "WORKING":
+        overall_status = "DONE"
+
+    materialization_known = bool(materialization)
+    movie_refresh_effective = movie_refresh_triggered or bool(
+        materialization.get("movie_refresh_triggered") if materialization else False
+    )
+    tv_refresh_effective = tv_refresh_triggered or bool(
+        materialization.get("tv_refresh_triggered") if materialization else False
+    )
+
+    def _lite_library_refresh_pending_label() -> str:
+        if not materialization_known:
+            return "Checking…"
+        return "Not required"
 
     sections: list[dict[str, Any]] = []
-    discovery_status = "done" if (series_total > 0 or movie_started) else "pending"
+    if startup_mode == "lite":
+        discovery_status = "done" if (lite_movies_seen > 0 or lite_series_seen > 0 or startup_completed) else "pending"
+    else:
+        discovery_status = "done" if (series_total > 0 or movie_started) else "pending"
     sections.append(
         {
             "name": "Discovery",
             "status": discovery_status,
             "metrics": [
-                {"label": "Movies discovered", "value": int(determination.get("movies_total", 0) or 0)},
-                {"label": "Series discovered", "value": int(series_total or 0)},
-                {"label": "Episodes discovered", "value": int(max(episodes_discovered, int(determination.get("episodes_total", 0) or 0)))},
-                {"label": "Series progress", "value": f"{int(series_processed)}/{int(series_total)}" if series_total else str(int(series_processed))},
+                {
+                    "label": "Movies discovered",
+                    "value": int(lite_movies_seen if startup_mode == "lite" else int(determination.get("movies_total", 0) or 0)),
+                },
+                {
+                    "label": "Series discovered",
+                    "value": int(lite_series_seen if startup_mode == "lite" else int(series_total or 0)),
+                },
+                {
+                    "label": "Episodes discovered",
+                    "value": int(
+                        lite_episodes_seen
+                        if startup_mode == "lite"
+                        else max(episodes_discovered, int(determination.get("episodes_total", 0) or 0))
+                    ),
+                },
+                {
+                    "label": "Series progress",
+                    "value": (
+                        f"{int(lite_series_seen)}/{int(lite_series_requested or lite_series_seen)}"
+                        if startup_mode == "lite"
+                        else (f"{int(series_processed)}/{int(series_total)}" if series_total else str(int(series_processed)))
+                    ),
+                },
             ],
         }
     )
@@ -1143,33 +1339,133 @@ def _build_full_sync_progress_row() -> dict[str, Any] | None:
                 {"label": "Created", "value": int(materialization.get("created", 0) or 0)},
                 {"label": "Files created", "value": int(materialization.get("files_created", 0) or 0)},
                 {"label": "NFO written", "value": int(materialization.get("nfo_written", 0) or 0)},
-                {"label": "Movie Library Refresh", "value": "✅" if movie_refresh_triggered else "Pending"},
-                {"label": "TV Library Refresh", "value": "✅" if tv_refresh_triggered else "Pending"},
+                {
+                    "label": "Movie Library Refresh",
+                    "value": (
+                        "✅"
+                        if movie_refresh_effective
+                        else (_lite_library_refresh_pending_label() if startup_mode == "lite" else "Pending")
+                    ),
+                },
+                {
+                    "label": "TV Library Refresh",
+                    "value": (
+                        "✅"
+                        if tv_refresh_effective
+                        else (_lite_library_refresh_pending_label() if startup_mode == "lite" else "Pending")
+                    ),
+                },
             ],
         }
     )
 
 
-    current_unresolved = int(last_observation.get("remaining_unresolved", 0) or 0)
+    movie_refresh_summary = (
+        "✅"
+        if movie_refresh_effective
+        else (_lite_library_refresh_pending_label() if startup_mode == "lite" else "Pending")
+    )
+    tv_refresh_summary = (
+        "✅"
+        if tv_refresh_effective
+        else (_lite_library_refresh_pending_label() if startup_mode == "lite" else "Pending")
+    )
     summary_details = (
         f"Materialization created {int(materialization.get('created', 0) or 0)} placeholders • "
-        f"Movies: {'✅' if movie_refresh_triggered else 'Pending'} • "
-        f"TV: {'✅' if tv_refresh_triggered else 'Pending'}"
+        f"Movies: {movie_refresh_summary} • "
+        f"TV: {tv_refresh_summary}"
     )
 
-    row_id = f"full-sync-progress-{run_timestamp}" if run_timestamp else "full-sync-progress"
+    row_id_prefix = "lite-sync-progress" if startup_mode == "lite" else "full-sync-progress"
+    row_id = f"{row_id_prefix}-{run_timestamp}" if run_timestamp else row_id_prefix
+
+    log_mtime_dt: datetime | None = None
+    try:
+        log_mtime_dt = datetime.fromtimestamp(os.path.getmtime(log_file), tz=timezone.utc)
+    except Exception:
+        log_mtime_dt = None
+
+    display_times = [t for t in (last_time, log_mtime_dt) if isinstance(t, datetime)]
+    display_time = max(display_times) if display_times else log_mtime_dt
 
     return {
         "id": row_id,
         "type": "job",
-        "job_type": "full_sync_progress",
-        "display_name": "Full Sync Progress",
+        "job_type": "lite_sync_progress" if startup_mode == "lite" else "full_sync_progress",
+        "display_name": "Lite Sync Progress" if startup_mode == "lite" else "Full Sync Progress",
         "status": overall_status,
         "details": summary_details,
-        "time": (last_time.isoformat() if last_time else None),
+        "time": (display_time.isoformat() if display_time else None),
         "progress": {
             "running": bool(observation_running),
             "sections": sections,
+            "log_file": os.path.basename(log_file),
+        },
+    }
+
+
+def _build_calendar_sync_row() -> dict[str, Any] | None:
+    log_file = _latest_runtime_log_file()
+    if not log_file:
+        return None
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except Exception:
+        return None
+
+    pattern = re.compile(r"Calendar date refresh complete:\s*(\{.*\})")
+    latest: dict[str, Any] | None = None
+    latest_ts: datetime | None = None
+    for raw in lines:
+        line = str(raw or "")
+        match = pattern.search(line)
+        if not match:
+            continue
+        parsed = _parse_metrics_dict(match.group(1))
+        if not parsed:
+            continue
+        latest = parsed
+        latest_ts = _extract_log_timestamp(line)
+    if not latest:
+        return None
+
+    status = "FAILED" if int(latest.get("errors", 0) or 0) > 0 else "DONE"
+    return {
+        "id": f"calendar-sync-{latest_ts.isoformat() if latest_ts else 'latest'}",
+        "type": "job",
+        "job_type": "calendar_sync_progress",
+        "display_name": "Calendar Sync",
+        "status": status,
+        "details": (
+            f"Window {latest.get('start_date', '--')} to {latest.get('end_date', '--')} • "
+            f"Movies updated {int(latest.get('movie_rows_updated', 0) or 0)} • "
+            f"Episodes updated {int(latest.get('episode_rows_updated', 0) or 0)}"
+        ),
+        "time": latest_ts.isoformat() if latest_ts else None,
+        "progress": {
+            "running": False,
+            "sections": [
+                {
+                    "name": "Calendar Window",
+                    "status": "done" if status != "FAILED" else "failed",
+                    "metrics": [
+                        {"label": "Lookahead start", "value": str(latest.get("start_date") or "--")},
+                        {"label": "Lookahead end", "value": str(latest.get("end_date") or "--")},
+                    ],
+                },
+                {
+                    "name": "Date Refresh Stats",
+                    "status": "done" if status != "FAILED" else "failed",
+                    "metrics": [
+                        {"label": "Movie rows seen", "value": int(latest.get("movie_rows_seen", 0) or 0)},
+                        {"label": "Movie rows updated", "value": int(latest.get("movie_rows_updated", 0) or 0)},
+                        {"label": "Episode rows seen", "value": int(latest.get("episode_rows_seen", 0) or 0)},
+                        {"label": "Episode rows updated", "value": int(latest.get("episode_rows_updated", 0) or 0)},
+                        {"label": "Errors", "value": int(latest.get("errors", 0) or 0)},
+                    ],
+                },
+            ],
             "log_file": os.path.basename(log_file),
         },
     }
@@ -1235,6 +1531,8 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             display_name = _humanize_event_type(e.event_type)
             if status_text.upper() == "FAILED":
                 display_name = f"[Failed] {display_name}"
+            payload_dict = e.payload if isinstance(e.payload, dict) else {}
+            detail_line = _activity_details_for_event(e.event_type, payload_dict)
             event_list.append(
                 {
                     "id": e.id,
@@ -1244,6 +1542,7 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
                     "source": e.source,
                     "status": e.status,
                     "error": e.error_message,
+                    "details": detail_line,
                     "time": e.created_at.isoformat() if e.created_at else None,
                 }
             )
@@ -1255,6 +1554,17 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             display_name = _humanize_event_type(event_type)
             if failed > 0:
                 display_name = f"[Failed] {display_name}"
+            sample_payload = None
+            for e in events:
+                if str(e.event_type or "").strip().lower() != event_type:
+                    continue
+                if isinstance(e.payload, dict):
+                    sample_payload = e.payload
+                    break
+            grouped_detail = _activity_details_for_event(event_type, sample_payload) if sample_payload else None
+            group_details = f"Grouped {count} similar events • Failures {failed}"
+            if grouped_detail:
+                group_details = f"{grouped_detail} • {group_details}"
             event_list.append(
                 {
                     "id": f"group:{event_type}",
@@ -1262,7 +1572,7 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
                     "event_type": event_type,
                     "display_name": f"{display_name} (x{count})",
                     "status": "FAILED" if failed > 0 else "DONE",
-                    "details": f"Grouped from recent events • Failures {failed}",
+                    "details": group_details,
                     "time": latest.isoformat() if latest else None,
                 }
             )
@@ -1375,8 +1685,13 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
                 )
             )
 
+        sync_progress_row = _build_startup_sync_progress_row()
+        calendar_sync_row = _build_calendar_sync_row()
+        queue_activity_row = get_queue_download_activity_row()
+        extra_rows = [r for r in (sync_progress_row, calendar_sync_row, queue_activity_row) if r]
+
         # Merge and sort by time descending: show recent + high-priority (failures)
-        combined = sorted(event_list + job_list, key=lambda x: x.get("time") or "", reverse=True)
+        combined = sorted(event_list + job_list + extra_rows, key=lambda x: x.get("time") or "", reverse=True)
         unique = []
         seen_keys = set()
         for row in combined:
@@ -1411,20 +1726,7 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             top = top[: max(0, len(top) - len(inject))] + inject
             top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
 
-        sync_progress_row = _build_full_sync_progress_row()
-        if sync_progress_row:
-            top = [
-                sync_progress_row,
-                *[
-                    row
-                    for row in top
-                    if not (
-                        str(row.get("job_type") or "") == "full_sync_progress"
-                        and str(row.get("id") or "") == "full-sync-progress"
-                    )
-                ],
-            ]
-            top = top[:limit]
+        top = top[:limit]
 
         return top
     finally:
@@ -2050,6 +2352,7 @@ async def calendar_view(month: str = Query("")):
                 payload=episode.sonarr_payload_raw if isinstance(episode.sonarr_payload_raw, dict) else None,
             )
             episode_instance_meta = _arr_instance_meta(episode.instance_key, episode.instance_id)
+            ep_code = _episode_calendar_episode_code(episode.season_number, episode.episode_number)
             items_by_date.setdefault(air_date.isoformat(), []).append(
                 {
                     "id": f"episode-{episode.episode_id}",
@@ -2057,11 +2360,9 @@ async def calendar_view(month: str = Query("")):
                     "series_id": episode.series_id,
                     "media_type": "episode",
                     "title": episode.series_title or episode.episode_title,
-                    "subtitle": _episode_calendar_subtitle(
-                        episode.season_number,
-                        episode.episode_number,
-                        episode.episode_title,
-                    ),
+                    "subtitle": ep_code or None,
+                    "season_number": int(episode.season_number) if episode.season_number is not None else None,
+                    "episode_number": int(episode.episode_number) if episode.episode_number is not None else None,
                     "release_date": air_date.isoformat(),
                     "in_lookahead_window": in_window,
                     "days_until": decision.days_until,
@@ -2079,8 +2380,8 @@ async def calendar_view(month: str = Query("")):
                 if in_window:
                     in_window_count += 1
 
-        for day_items in items_by_date.values():
-            day_items.sort(key=lambda item: (0 if item.get("media_type") == "movie" else 1, str(item.get("title") or "").lower()))
+        for iso_key, day_items in list(items_by_date.items()):
+            items_by_date[iso_key] = _merge_calendar_episodes_same_day(day_items)
 
         weeks = []
         for week in month_grid:

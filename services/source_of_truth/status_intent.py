@@ -109,3 +109,17 @@ class StatusIntent:
             return True
         # Caller can override with trigger_nfo_refresh=True if needed
         return False
+
+    def wants_player_metadata_refresh_after_nfo(self) -> bool:
+        """Whether to run post-NFO player status projection.
+
+        Initial materialization that settles on plain REQUEST already wrote a
+        REQUEST-flavored NFO; a broad library/path refresh handles discovery.
+        All other NFO-driving status changes benefit from direct title/summary
+        projection so bracketed status text updates quickly in client UIs.
+        """
+        if not self.trigger_nfo_refresh:
+            return False
+        if self.source == StatusSource.INITIAL_CREATION and self.new_status == DisplayStatus.REQUEST.value:
+            return False
+        return True

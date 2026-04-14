@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import xml.etree.ElementTree as ET
+from typing import Literal
 from urllib.parse import quote
 
 import requests
@@ -150,6 +151,97 @@ def get_plex_section_scan_state(section_ids: set[int] | list[int]) -> dict[str, 
         "scanning_section_ids": sorted(scanning_ids),
         "unknown_section_ids": sorted(unknown_ids),
     }
+
+
+PlexMetadataRefreshResult = Literal["ok", "not_found", "failed", "skipped"]
+
+
+def refresh_plex_item_metadata(rating_key: str | int) -> PlexMetadataRefreshResult:
+    """Trigger a metadata refresh for a single Plex library item by rating key.
+
+    Returns ``not_found`` when Plex responds 404 (typically a stale ``ratingKey``
+    after a library item was removed and re-added — Plex assigns a new key).
+    """
+    if not getattr(settings, "plex_enabled", False):
+        return "skipped"
+    key = str(rating_key or "").strip()
+    if not key:
+        return "skipped"
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return "skipped"
+    try:
+        url = f"{plex_url}/library/metadata/{key}/refresh"
+        response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=20)
+        response.raise_for_status()
+        logger.debug(
+            f"Plex item metadata refresh ok rating_key={key}",
+            extra={"emoji_type": "refresh"},
+        )
+        return "ok"
+    except requests.exceptions.HTTPError as e:
+        resp = getattr(e, "response", None)
+        code = getattr(resp, "status_code", None) if resp is not None else None
+        snippet = ""
+        try:
+            if resp is not None and resp.text:
+                snippet = str(resp.text).replace("\n", " ")[:400]
+        except Exception:
+            snippet = ""
+        if code == 404:
+            logger.warning(
+                f"Plex item metadata refresh not found (stale rating_key?) rating_key={key} "
+                f"http_status={code} body={snippet!r}",
+                extra={"emoji_type": "warning"},
+            )
+            return "not_found"
+        logger.warning(
+            f"Plex item metadata refresh failed rating_key={key} http_status={code} "
+            f"body={snippet!r}: {e}",
+            extra={"emoji_type": "warning"},
+        )
+        return "failed"
+
+
+def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) -> PlexMetadataRefreshResult:
+    """Directly update Plex item title/summary via PlexAPI edit methods."""
+    if not getattr(settings, "plex_enabled", False):
+        return "skipped"
+    key = str(rating_key or "").strip()
+    if not key:
+        return "skipped"
+    try:
+        from services.media_servers.plex_lookup import get_plex_server
+
+        plex = get_plex_server()
+        if plex is None:
+            return "failed"
+        item = plex.fetchItem(f"/library/metadata/{key}")
+        item.editTitle(str(title or ""))
+        item.editSummary(str(summary or ""))
+        item.reload()
+        title_ok = str(getattr(item, "title", "") or "") == str(title or "")
+        summary_ok = str(getattr(item, "summary", "") or "") == str(summary or "")
+        return "ok" if (title_ok and summary_ok) else "failed"
+    except Exception as ex:
+        text = str(ex).lower()
+        if "404" in text or "not found" in text:
+            logger.warning(
+                f"Plex direct update not found (stale rating_key?) rating_key={key}: {ex}",
+                extra={"emoji_type": "warning"},
+            )
+            return "not_found"
+        logger.warning(
+            f"Plex direct update failed rating_key={key}: {ex}",
+            extra={"emoji_type": "warning"},
+        )
+        return "failed"
+    except Exception as e:
+        logger.warning(
+            f"Plex item metadata refresh failed rating_key={key}: {e}",
+            extra={"emoji_type": "warning"},
+        )
+        return "failed"
 
 
 def refresh_plex_section_ids(section_ids: list[int] | set[int]) -> dict[str, int]:

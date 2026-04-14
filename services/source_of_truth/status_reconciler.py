@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import os
-from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 from core.config import settings
 from core.logger import logger
-from services.media_servers.emby import refresh_emby_item_metadata, refresh_emby_paths
-from services.media_servers.jellyfin import refresh_jellyfin_item_metadata, refresh_jellyfin_paths
 from services.placeholders import ensure_episode_nfo, ensure_movie_nfo, ensure_series_nfo
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder, Job, Season, Series
-from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback
+from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
 
 
 NFO_REFRESH_JOB_TYPE = "nfo_refresh"
@@ -50,7 +47,24 @@ def _set_job_placeholder_ids(job: Job, placeholder_ids: list[int]) -> None:
     job.payload = payload
 
 
-def _enqueue_batched_placeholder_job(job_type: str, placeholder_ids: list[int], session) -> dict:
+def _job_player_metadata_refresh(job: Job) -> bool:
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    return bool(payload.get("player_metadata_refresh", True))
+
+
+def _placeholder_player_merge_flag(placeholder_ids: list[int], by_id: dict[int, bool] | None) -> bool:
+    if not by_id:
+        return True
+    return any(bool(by_id.get(int(pid), True)) for pid in placeholder_ids)
+
+
+def _enqueue_batched_placeholder_job(
+    job_type: str,
+    placeholder_ids: list[int],
+    session,
+    *,
+    player_metadata_refresh_by_id: dict[int, bool] | None = None,
+) -> dict:
     ids_remaining = _normalize_placeholder_ids(placeholder_ids)
     if not ids_remaining:
         return {"ok": False, "reason": "no_placeholder_ids"}
@@ -93,7 +107,13 @@ def _enqueue_batched_placeholder_job(job_type: str, placeholder_ids: list[int], 
         if not additions:
             continue
 
+        merged_flag = _job_player_metadata_refresh(job) or _placeholder_player_merge_flag(
+            additions, player_metadata_refresh_by_id
+        )
         _set_job_placeholder_ids(job, existing_ids + additions)
+        payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
+        payload["player_metadata_refresh"] = merged_flag
+        job.payload = payload
         job.updated_at = now
         session.add(job)
         touched_job_ids.append(int(job.id))
@@ -104,9 +124,10 @@ def _enqueue_batched_placeholder_job(job_type: str, placeholder_ids: list[int], 
     while ids_remaining:
         chunk = ids_remaining[:batch_size]
         ids_remaining = ids_remaining[batch_size:]
+        chunk_player_flag = _placeholder_player_merge_flag(chunk, player_metadata_refresh_by_id)
         job = Job(
             job_type=job_type,
-            payload={"placeholder_ids": chunk},
+            payload={"placeholder_ids": chunk, "player_metadata_refresh": chunk_player_flag},
             status="PENDING",
             run_after=run_after,
         )
@@ -198,10 +219,8 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
 
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     refreshed = 0
-    touched_paths: set[str] = set()
-    has_movies = False
-    has_episodes = False
-
+    # (Placeholder row, entity dedupe key) for rows whose NFO was rewritten this run
+    refreshed_for_player_push: list[tuple[Placeholder, tuple[str, int]]] = []
     for placeholder in placeholders:
         if not getattr(placeholder, "has_placeholder", False):
             continue
@@ -210,23 +229,33 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
         if movie and _refresh_movie_nfo(placeholder, movie):
             refreshed += 1
-            has_movies = True
-            if placeholder.path:
-                touched_paths.add(os.path.dirname(placeholder.path))
+            refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))
             continue
         if episode and _refresh_episode_nfo(session, placeholder, episode):
             refreshed += 1
-            has_episodes = True
-            if placeholder.path:
-                touched_paths.add(os.path.dirname(placeholder.path))
+            refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
 
-    if touched_paths:
-        refresh_all_path_batches_with_section_fallback(
-            [(touched_paths, "NFO_Refresh")],
-            has_movies=has_movies,
-            has_episodes=has_episodes,
-            include_plex=True,
-        )
+    do_player = _job_player_metadata_refresh(job)
+
+    if do_player and refreshed_for_player_push:
+        # One media-server refresh sequence per underlying movie/episode row, even if several
+        # placeholder rows pointed at the same title (rare) or a batch carried duplicates.
+        seen_entity: set[tuple[str, int]] = set()
+        unique_for_projection: list[Placeholder] = []
+        for placeholder, entity_key in refreshed_for_player_push:
+            if not getattr(placeholder, "has_placeholder", False):
+                continue
+            if entity_key in seen_entity:
+                continue
+            seen_entity.add(entity_key)
+            unique_for_projection.append(placeholder)
+        try:
+            push_placeholder_batch_player_metadata(session, unique_for_projection)
+        except Exception as ex:
+            logger.warning(
+                f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",
+                extra={"emoji_type": "warning"},
+            )
 
     return {
         "ok": True,
@@ -237,7 +266,12 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
 
 
 
-def enqueue_nfo_refresh(placeholder_ids: list[int], session=None) -> dict:
+def enqueue_nfo_refresh(
+    placeholder_ids: list[int],
+    session=None,
+    *,
+    player_metadata_refresh: dict[int, bool] | None = None,
+) -> dict:
     """Enqueue a durable NFO refresh job for placeholders whose projected status changed."""
     owns_session = session is None
     session = session or get_session()
@@ -247,7 +281,12 @@ def enqueue_nfo_refresh(placeholder_ids: list[int], session=None) -> dict:
         if not normalized_ids:
             return {"ok": False, "reason": "no_placeholder_ids"}
 
-        return _enqueue_batched_placeholder_job(NFO_REFRESH_JOB_TYPE, normalized_ids, session)
+        return _enqueue_batched_placeholder_job(
+            NFO_REFRESH_JOB_TYPE,
+            normalized_ids,
+            session,
+            player_metadata_refresh_by_id=player_metadata_refresh,
+        )
     except Exception as e:
         logger.error(f"Failed to enqueue NFO refresh job: {e}", exc_info=True)
         session.rollback()

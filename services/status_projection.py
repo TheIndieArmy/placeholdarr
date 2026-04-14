@@ -15,6 +15,22 @@ def get_projection_mode() -> str:
     return "summary"
 
 
+def _updates_scope() -> str:
+    raw = str(getattr(settings, "PLACEHOLDER_STATUS_UPDATES", "ALL") or "ALL").strip().upper()
+    if raw in {"OFF", "REQUEST", "ALL"}:
+        return raw
+    return "ALL"
+
+
+def should_project_status(status: str | None) -> bool:
+    scope = _updates_scope()
+    if scope == "OFF":
+        return False
+    if scope == "REQUEST":
+        return str(status or "").strip().upper() == "REQUEST"
+    return True
+
+
 def strip_status_from_title(title: str | None) -> str:
     text = str(title or "").strip()
     if not text:
@@ -38,7 +54,7 @@ def strip_status_from_summary(summary: str | None) -> str:
 def project_title(title: str | None, status: str | None) -> str:
     clean_title = strip_status_from_title(title)
     clean_status = str(status or "").strip()
-    if not clean_status or get_projection_mode() not in {"title", "both"}:
+    if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"title", "both"}:
         return clean_title
     return f"{clean_title} - [{clean_status}]".strip()
 
@@ -46,6 +62,6 @@ def project_title(title: str | None, status: str | None) -> str:
 def project_summary(summary: str | None, status: str | None) -> str:
     clean_summary = strip_status_from_summary(summary)
     clean_status = str(status or "").strip()
-    if not clean_status or get_projection_mode() not in {"summary", "both"}:
+    if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"summary", "both"}:
         return clean_summary
     return f"[{clean_status}] {clean_summary}".strip()

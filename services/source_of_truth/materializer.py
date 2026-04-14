@@ -719,7 +719,10 @@ def _run_materialization_for_ids(
 
         action = result.get("action")
         if action == "created_or_exists":
-            stats["created"] += 1
+            if result.get("created"):
+                stats["created"] += 1
+            else:
+                stats["noop"] += 1
             logger.debug(
                 f"Placeholder materialized for movie_id={movie_id}: "
                 f"state={'created' if result.get('created') else 'already_present'} "
@@ -806,7 +809,10 @@ def _run_materialization_for_ids(
 
         action = result.get("action")
         if action == "created_or_exists":
-            stats["created"] += 1
+            if result.get("created"):
+                stats["created"] += 1
+            else:
+                stats["noop"] += 1
             logger.debug(
                 f"Placeholder materialized for episode_id={episode_id}: "
                 f"state={'created' if result.get('created') else 'already_present'} "

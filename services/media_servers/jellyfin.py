@@ -8,6 +8,11 @@ import requests
 
 from core.config import settings
 from core.logger import logger
+from services.postgres.db import get_session
+from services.postgres.models import AppConfig
+
+_JELLYFIN_USER_ID_CACHE: str | None = None
+_JELLYFIN_USER_ID_CACHE_KEY = "JELLYFIN_CACHED_USER_ID"
 
 
 def _build_url(endpoint: str) -> str:
@@ -23,6 +28,51 @@ def _session() -> requests.Session:
         "Content-Type": "application/json",
     })
     return s
+
+
+def _get_persisted_jellyfin_user_id() -> str | None:
+    session = get_session()
+    try:
+        row = session.query(AppConfig).filter(AppConfig.key == _JELLYFIN_USER_ID_CACHE_KEY).first()
+        val = str((row.value if row else "") or "").strip()
+        return val or None
+    except Exception:
+        return None
+    finally:
+        session.close()
+
+
+def _set_persisted_jellyfin_user_id(user_id: str | None) -> None:
+    session = get_session()
+    try:
+        row = session.query(AppConfig).filter(AppConfig.key == _JELLYFIN_USER_ID_CACHE_KEY).first()
+        value = str(user_id or "").strip() or None
+        if row is None:
+            row = AppConfig(
+                key=_JELLYFIN_USER_ID_CACHE_KEY,
+                value=value,
+                value_type="string",
+                restart_required=False,
+                description="Cached Jellyfin user id for direct metadata projection.",
+            )
+            session.add(row)
+        else:
+            row.value = value
+            row.value_type = "string"
+            row.restart_required = False
+            row.description = "Cached Jellyfin user id for direct metadata projection."
+            session.add(row)
+        session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _invalidate_jellyfin_user_id_cache() -> None:
+    global _JELLYFIN_USER_ID_CACHE
+    _JELLYFIN_USER_ID_CACHE = None
+    _set_persisted_jellyfin_user_id(None)
 
 
 def _post_media_updated(sess: requests.Session, paths: list[str], update_type: str = "Created") -> bool:
@@ -253,6 +303,111 @@ def refresh_jellyfin_sections(has_movies: bool, has_episodes: bool) -> dict[str,
             )
 
     return {"refreshed": refreshed, "failed": failed}
+
+
+def jellyfin_search_items(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run GET /Items with arbitrary query params; returns Items list or []."""
+    if not getattr(settings, "jellyfin_enabled", False):
+        return []
+    sess = _session()
+    try:
+        resp = sess.get(_build_url("Items"), params=params, timeout=15)
+        if resp.status_code != 200:
+            logger.debug(
+                f"Jellyfin Items search returned {resp.status_code}: {resp.text}",
+                extra={"emoji_type": "debug"},
+            )
+            return []
+        body = resp.json() or {}
+        items = body.get("Items") or []
+        return items if isinstance(items, list) else []
+    except Exception as ex:
+        logger.debug(f"Jellyfin Items search failed: {ex}", extra={"emoji_type": "debug"})
+        return []
+
+
+def _jellyfin_user_id(sess: requests.Session) -> str | None:
+    global _JELLYFIN_USER_ID_CACHE
+    if _JELLYFIN_USER_ID_CACHE:
+        return _JELLYFIN_USER_ID_CACHE
+    persisted = _get_persisted_jellyfin_user_id()
+    if persisted:
+        _JELLYFIN_USER_ID_CACHE = persisted
+        return persisted
+    try:
+        resp = sess.get(_build_url("Users"), timeout=10)
+        if resp.status_code != 200:
+            return None
+        users = resp.json() or []
+        if not isinstance(users, list) or not users:
+            return None
+        uid = str(users[0].get("Id") or "").strip()
+        if uid:
+            _JELLYFIN_USER_ID_CACHE = uid
+            _set_persisted_jellyfin_user_id(uid)
+            return uid
+    except Exception:
+        return None
+    return None
+
+
+def _jellyfin_get_item_for_update(sess: requests.Session, item_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    uid = _jellyfin_user_id(sess)
+    endpoint = _build_url(f"Users/{uid}/Items/{item_id}" if uid else f"Items/{item_id}")
+    resp = sess.get(endpoint, params={"Fields": "Overview,Name"}, timeout=15)
+    if resp.status_code == 200:
+        return resp.json() or {}, uid
+    if uid and resp.status_code in (401, 403, 404):
+        _invalidate_jellyfin_user_id_cache()
+        uid = _jellyfin_user_id(sess)
+        if uid:
+            resp_retry = sess.get(_build_url(f"Users/{uid}/Items/{item_id}"), params={"Fields": "Overview,Name"}, timeout=15)
+            if resp_retry.status_code == 200:
+                return resp_retry.json() or {}, uid
+    # Fallback to global item route if user-scoped fetch fails.
+    if uid:
+        resp2 = sess.get(_build_url(f"Items/{item_id}"), params={"Fields": "Overview,Name"}, timeout=15)
+        if resp2.status_code == 200:
+            return resp2.json() or {}, None
+    return None, uid
+
+
+def update_jellyfin_item_text(item_id: str, *, title: str, overview: str) -> bool:
+    """Directly set Jellyfin item Name/Overview via Items/{id} payload update."""
+    if not getattr(settings, "jellyfin_enabled", False):
+        return False
+    target = str(item_id or "").strip()
+    if not target:
+        return False
+    sess = _session()
+    try:
+        full, uid = _jellyfin_get_item_for_update(sess, target)
+        if not isinstance(full, dict):
+            logger.debug(f"Jellyfin direct update lookup failed item_id={target}", extra={"emoji_type": "debug"})
+            return False
+        full["Name"] = str(title or "")
+        full["Overview"] = str(overview or "")
+        post = sess.post(_build_url(f"Items/{target}"), json=full, timeout=20)
+        if post.status_code not in (200, 204):
+            minimal = {"Id": target, "Name": full["Name"], "Overview": full["Overview"]}
+            post2 = sess.post(_build_url(f"Items/{target}"), json=minimal, timeout=20)
+            if post2.status_code not in (200, 204):
+                logger.warning(
+                    f"Jellyfin direct update failed item_id={target} status={post.status_code}/{post2.status_code}",
+                    extra={"emoji_type": "warning"},
+                )
+                return False
+        verify_endpoint = _build_url(f"Users/{uid}/Items/{target}" if uid else f"Items/{target}")
+        verify = sess.get(verify_endpoint, params={"Fields": "Overview,Name"}, timeout=15)
+        if uid and verify.status_code in (401, 403, 404):
+            _invalidate_jellyfin_user_id_cache()
+        if verify.status_code == 200:
+            latest = verify.json() or {}
+            return str(latest.get("Name") or "") == full["Name"] and str(latest.get("Overview") or "") == full["Overview"]
+        return True
+    except Exception as ex:
+        logger.warning(f"Jellyfin direct update failed item_id={target}: {ex}", extra={"emoji_type": "warning"})
+        return False
 
 
 def refresh_jellyfin_item_metadata(item_id: str) -> bool:

@@ -161,3 +161,24 @@ def find_movie_by_id(tmdb_id, title=None, year=None):
     except Exception as ex:
         logger.error(f"Error finding movie by ID: {ex}", extra={"emoji_type": "error"})
         return None
+
+
+def find_episode_by_series_tvdb(
+    tvdb_id,
+    season_number: int,
+    episode_number: int,
+    *,
+    series_title: str | None = None,
+):
+    """Resolve a Plex episode from the series TVDB id and SxxEyy indices."""
+    show = find_show_by_id(tvdb_id, title=series_title)
+    if not show:
+        return None
+    try:
+        return show.episode(season=int(season_number), episode=int(episode_number))
+    except Exception as ex:
+        logger.debug(
+            f"find_episode_by_series_tvdb: no episode S{season_number}E{episode_number} for tvdb={tvdb_id}: {ex}",
+            extra={"emoji_type": "debug"},
+        )
+        return None

@@ -20,7 +20,7 @@ Design principle:
 
 import logging
 from typing import List, Dict, Optional
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -547,8 +547,16 @@ class StatusOrchestrator:
         if nfo_refresh_ids:
             logger.debug(f"Triggering NFO refresh for {len(nfo_refresh_ids)} placeholders")
             from services.source_of_truth.status_reconciler import enqueue_nfo_refresh
+
+            player_refresh: dict[int, bool] = {}
+            for intent in intents:
+                if not intent.trigger_nfo_refresh:
+                    continue
+                pid = int(intent.placeholder_id)
+                want = intent.wants_player_metadata_refresh_after_nfo()
+                player_refresh[pid] = player_refresh.get(pid, False) or want
             try:
-                enqueue_nfo_refresh(nfo_refresh_ids, session=session)
+                enqueue_nfo_refresh(nfo_refresh_ids, session=session, player_metadata_refresh=player_refresh)
             except Exception as e:
                 logger.warning(f"Failed to enqueue NFO refresh: {e}", exc_info=True)
         

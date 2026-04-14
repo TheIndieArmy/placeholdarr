@@ -44,6 +44,15 @@ export interface ActivityRow {
       metrics?: Array<{ label: string; value: string | number | null | undefined }>;
     }>;
     log_file?: string;
+    /** Batched queue-monitor titles (Radarr/Sonarr download emulation). */
+    queue_items?: Array<{
+      kind?: string;
+      title?: string;
+      subtitle?: string;
+      instance?: string;
+      line?: string;
+      arr_percent?: number | null;
+    }>;
   };
 }
 
@@ -227,6 +236,11 @@ export interface CalendarItem {
   id: string;
   item_id: number;
   series_id?: number;
+  season_number?: number | null;
+  episode_number?: number | null;
+  /** Same calendar day + series; spotlight uses first `item_id`. */
+  group_episode_ids?: number[];
+  group_episode_count?: number;
   media_type: "movie" | "episode";
   title: string;
   subtitle?: string;

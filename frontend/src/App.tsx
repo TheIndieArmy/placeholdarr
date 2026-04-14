@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ARR_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
@@ -25,12 +25,14 @@ import type {
   LibraryItem,
   MovieDetailResponse,
   SeriesDetailResponse,
+  SeriesEpisodeDetail,
   SettingsField,
   SettingsPayload,
   StatsResponse,
 } from "./types/api";
 
 const REFRESH_MS = 5000;
+const LOG_TAIL_LINES = 2000;
 const SETTINGS_SECTION_ORDER = ["Media Integrations", "ARR Integrations", "Paths", "Library sync", "Calendar", "Playback", "Advanced"];
 const BEHAVIOR_WIZARD_SECTIONS = ["ARR Integrations", "Library sync", "Calendar", "Playback", "Advanced"] as const;
 const WIZARD_STEPS = [
@@ -473,7 +475,7 @@ export function App() {
           const rows = await getErrors(100);
           if (!stopped) setErrors(rows || []);
         } else if (currentTab === "logs") {
-          const payload = await getLogs(logLevel, 500);
+          const payload = await getLogs(logLevel, LOG_TAIL_LINES);
           if (!stopped) {
             setLogs(payload.lines || []);
             setLogFile(payload.file || "");
@@ -988,25 +990,6 @@ export function App() {
             )}
           </nav>
 
-          {/* Footer */}
-          <div className="px-6 mt-auto pt-6 border-t border-[#424753]/20">
-            <button type="button"
-              className="w-full text-white font-headline text-xs font-bold uppercase tracking-widest py-3 rounded-lg shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-2"
-              style={{ backgroundColor: brandAccent.hex }}>
-              <span className="material-symbols-outlined text-sm">sync</span>
-              Sync Library
-            </button>
-            <div className="mt-6 space-y-2">
-              <a href="#" className={`flex items-center gap-3 text-xs font-headline tracking-widest uppercase transition-colors ${isStudioGlass ? "text-slate-400 hover:text-slate-100" : "text-slate-500 hover:text-slate-900"}`}>
-                <span className="material-symbols-outlined text-sm">help</span>
-                <span>Support</span>
-              </a>
-              <a href="#" className={`flex items-center gap-3 text-xs font-headline tracking-widest uppercase transition-colors ${isStudioGlass ? "text-slate-400 hover:text-slate-100" : "text-slate-500 hover:text-slate-900"}`}>
-                <span className="material-symbols-outlined text-sm">description</span>
-                <span>Docs</span>
-              </a>
-            </div>
-          </div>
         </aside>
 
         {/* Main area */}
@@ -1351,8 +1334,8 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
       onClick={props.onClick}
     >
       <div className="stat-head">
-        <div className="stat-title" style={{ color: accent.text }}>{props.title}</div>
         <div className="stat-value" style={{ color: accent.hex }}>{props.value ?? "--"}</div>
+        <div className="stat-title" style={{ color: accent.text }}>{props.title}</div>
       </div>
       <div className="stat-sub" style={{ color: alphaColor(accent.hex, 0.8) }}>{props.sub}</div>
     </article>
@@ -1381,7 +1364,8 @@ function ActivityPanel(props: {
     setExpandedRows((prev) => {
       const next = { ...prev };
       props.rows.forEach((row, idx) => {
-        if ((row as any).job_type !== "full_sync_progress") {
+        const jt = String((row as any).job_type || "");
+        if (jt !== "full_sync_progress" && jt !== "queue_monitor_batch") {
           return;
         }
         const key = rowKey(row, idx);
@@ -1505,9 +1489,16 @@ function ActivityPanel(props: {
                     const dotColor = status === "done" || status === "success" ? "bg-green-500" : status === "failed" ? "bg-red-500" : "bg-slate-500";
                     const errorMessage = row.error ? ` — ${row.error}` : "";
                     const key = rowKey(row, idx);
-                    const hasProgress = String((row as any).job_type || "") === "full_sync_progress" && Array.isArray((row as any).progress?.sections);
+                    const jobType = String((row as any).job_type || "");
+                    const hasSectionProgress = Array.isArray((row as any).progress?.sections);
+                    const queueItems: Array<any> =
+                      jobType === "queue_monitor_batch" && Array.isArray((row as any).progress?.queue_items)
+                        ? ((row as any).progress.queue_items as Array<any>)
+                        : [];
+                    const hasQueueProgress = queueItems.length > 0;
+                    const hasExpandable = hasSectionProgress || hasQueueProgress;
                     const isExpanded = !!expandedRows[key];
-                    const progressSections = hasProgress ? ((row as any).progress.sections as Array<any>) : [];
+                    const progressSections = hasSectionProgress ? ((row as any).progress.sections as Array<any>) : [];
 
                     const toggleProgress = () => {
                       setExpandedRows((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -1529,7 +1520,7 @@ function ActivityPanel(props: {
                           <span className="font-medium">{displayName}</span>
                           {detailLine && <div className="text-xs text-slate-500 mt-0.5">{detailLine}</div>}
                           {errorMessage && <span className="text-xs text-red-300/70">{errorMessage}</span>}
-                          {hasProgress && (
+                          {hasExpandable && (
                             <div className="mt-2">
                               <button
                                 type="button"
@@ -1537,9 +1528,9 @@ function ActivityPanel(props: {
                                 className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
                               >
                                 <span className="material-symbols-outlined" style={{ fontSize: 13 }}>{isExpanded ? "expand_less" : "expand_more"}</span>
-                                {isExpanded ? "Hide Progress" : "Show Progress"}
+                                {isExpanded ? "Hide details" : "Show details"}
                               </button>
-                              {isExpanded && (
+                              {isExpanded && hasSectionProgress && (
                                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                                   {progressSections.map((section: any, sidx: number) => {
                                     const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
@@ -1562,6 +1553,29 @@ function ActivityPanel(props: {
                                       </div>
                                     );
                                   })}
+                                </div>
+                              )}
+                              {isExpanded && hasQueueProgress && (
+                                <div className="mt-2 space-y-2">
+                                  {queueItems.map((it: any, qix: number) => (
+                                    <div
+                                      key={`${key}-q-${qix}`}
+                                      className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px]"
+                                    >
+                                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                        <span className="font-medium text-slate-200">
+                                          {String(it?.title || "—")}
+                                          {it?.subtitle ? (
+                                            <span className="text-slate-500 font-normal"> · {String(it.subtitle)}</span>
+                                          ) : null}
+                                        </span>
+                                        {it?.instance ? (
+                                          <span className="text-[9px] font-headline uppercase tracking-wider text-slate-500">{String(it.instance)}</span>
+                                        ) : null}
+                                      </div>
+                                      <div className="text-slate-400 mt-0.5">{String(it?.line || "—")}</div>
+                                    </div>
+                                  ))}
                                 </div>
                               )}
                             </div>
@@ -2177,6 +2191,7 @@ function CalendarPanel(props: {
   const [overlayAnchor, setOverlayAnchor] = useState({ x: 0, y: 0 });
   const [overlayPosition, setOverlayPosition] = useState({ top: 12, left: 12, width: 680 });
   const [releaseMenuOpen, setReleaseMenuOpen] = useState(false);
+  const [calendarSpotlightExpandedEpisodeIds, setCalendarSpotlightExpandedEpisodeIds] = useState<number[]>([]);
 
   function calculateOverlayPosition(anchorX: number, anchorY: number) {
     const container = overlayContainerRef.current;
@@ -2234,6 +2249,24 @@ function CalendarPanel(props: {
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [releaseMenuOpen]);
 
+  const calendarSpotlightEpisodeIds = useMemo(() => {
+    if (!props.selectedItem || props.selectedItem.media_type !== "episode") return [] as number[];
+    const grouped = props.selectedItem.group_episode_ids;
+    if (grouped && grouped.length) return [...grouped];
+    return [props.selectedItem.item_id];
+  }, [props.selectedItem]);
+
+  useEffect(() => {
+    const item = props.selectedItem;
+    if (!item || item.media_type !== "episode") {
+      setCalendarSpotlightExpandedEpisodeIds([]);
+      return;
+    }
+    const grouped = item.group_episode_ids;
+    const ids = grouped && grouped.length ? [...grouped] : [item.item_id];
+    setCalendarSpotlightExpandedEpisodeIds(ids.length === 1 ? ids : []);
+  }, [props.selectedItem?.id]);
+
   function handleLocalSelectItem(itemId: string, e: React.MouseEvent) {
     const container = overlayContainerRef.current;
     if (container) {
@@ -2275,21 +2308,28 @@ function CalendarPanel(props: {
     ? (props.spotlight.backdrop_url || props.spotlight.poster_url)
     : null;
 
-  // For episode cards, find the specific episode overview inside the series detail
-  const episodeOverview = (() => {
-    if (!props.selectedItem || props.selectedItem.media_type !== "episode") return null;
-    if (!props.spotlight || !('seasons' in props.spotlight)) return null;
-    for (const season of (props.spotlight as SeriesDetailResponse).seasons) {
-      const ep = season.episodes.find(e => e.id === props.selectedItem!.item_id);
-      if (ep?.overview) return ep.overview;
+  const spotlightSeries = props.spotlight && "seasons" in props.spotlight ? (props.spotlight as SeriesDetailResponse) : null;
+  const spotlightMovie = props.spotlight && !("seasons" in props.spotlight) ? (props.spotlight as MovieDetailResponse) : null;
+
+  const spotlightDescription = (() => {
+    if (props.spotlightLoading) return "Loading metadata...";
+    if (!props.selectedItem) return "Select a release on the calendar to inspect it here.";
+    if (props.selectedItem.media_type === "episode") {
+      const text = spotlightSeries?.overview?.trim();
+      return text || "No series synopsis available.";
     }
-    return null;
+    const movieText = spotlightMovie?.overview?.trim();
+    return movieText || props.selectedItem.reason || "Select a release on the calendar to inspect it here.";
   })();
 
-  const spotlightOverview = episodeOverview || props.spotlight?.overview || props.selectedItem?.reason || "Select a release on the calendar to inspect it here.";
   const spotlightArrLink = props.spotlight?.arr_link || props.selectedItem?.arr_link;
   const spotlightPoster = props.spotlight?.poster_url || null;
-  const spotlightMeta = props.selectedItem ? formatCalendarItemMeta(props.selectedItem) : [];
+  const spotlightMeta = props.selectedItem ? formatCalendarSpotlightMeta(props.selectedItem) : [];
+  const heroDateParts = props.selectedItem ? formatCalendarHeroDateParts(props.selectedItem.release_date) : null;
+  const calendarSpotlightEpisodeRows =
+    props.selectedItem?.media_type === "episode"
+      ? collectEpisodesForCalendarDay(spotlightSeries, calendarSpotlightEpisodeIds)
+      : [];
   const activeMediaFilters = Object.values(props.filters.mediaTypes).filter(Boolean).length;
   const activeReleaseFilters = Object.values(props.filters.releaseTypes).filter(Boolean).length;
   const totalVisible = props.summary.movieCount + props.summary.episodeCount;
@@ -2451,15 +2491,28 @@ function CalendarPanel(props: {
                 ) : (
                   <div className="absolute inset-0" style={{ background: `linear-gradient(135deg, ${alphaColor(accent.hex, 0.18)}, rgba(5,8,14,0.9))` }} />
                 )}
+                {heroDateParts ? (
+                  <div
+                    className="absolute top-3 left-3 z-[2] flex w-[3.25rem] flex-col items-center rounded-lg border border-white/25 bg-black/60 px-1.5 py-2 shadow-lg backdrop-blur-sm"
+                    aria-hidden
+                  >
+                    <span className="text-[9px] font-headline font-bold uppercase tracking-[0.12em] text-orange-100/90">
+                      {heroDateParts.month}
+                    </span>
+                    <span className="mt-0.5 text-[1.65rem] font-black leading-none text-white font-headline tabular-nums">
+                      {heroDateParts.day}
+                    </span>
+                  </div>
+                ) : null}
                 {/* Close button */}
                 <button
                   type="button"
                   onClick={closeOverlay}
-                  className="absolute top-3 right-3 flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-slate-300 hover:text-white hover:bg-black/70 transition-colors calendar-spotlight-close"
+                  className="absolute top-3 right-3 z-[2] flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-slate-300 hover:text-white hover:bg-black/70 transition-colors calendar-spotlight-close"
                 >
                   <span className="material-symbols-outlined" style={{ fontSize: 18 }}>close</span>
                 </button>
-                <div className="absolute inset-x-0 bottom-0 p-5 md:p-6">
+                <div className="absolute inset-x-0 bottom-0 z-[1] p-5 md:p-6">
                   <div className="flex items-end gap-4 md:gap-5">
                     <div className="hidden md:block flex-none w-24 h-36 rounded-xl overflow-hidden border border-white/20 shadow-2xl bg-[#151b25]">
                       {spotlightPoster ? (
@@ -2473,10 +2526,13 @@ function CalendarPanel(props: {
                     <div className="min-w-0 flex-1">
                       <div className="mb-2 flex flex-wrap items-center gap-2">
                         <span
-                          className="rounded px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider"
-                          style={{ backgroundColor: alphaColor(accent.hex, 0.28), borderColor: alphaColor(accent.hex, 0.45), border: `1px solid ${alphaColor(accent.hex, 0.45)}`, color: accent.text }}
+                          className={
+                            props.selectedItem.media_type === "movie"
+                              ? "rounded border border-teal-500/40 bg-teal-600/25 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-teal-100"
+                              : "rounded border border-orange-500/40 bg-orange-600/25 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-orange-100"
+                          }
                         >
-                          {props.selectedItem.media_type === "movie" ? "Movie" : "Episode"}
+                          {props.selectedItem.media_type === "movie" ? "Movie" : "TV"}
                         </span>
                         {props.selectedItem.release_type_label ? (
                           <span className="rounded border border-teal-500/30 bg-teal-600/20 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-teal-200">
@@ -2487,7 +2543,7 @@ function CalendarPanel(props: {
                       <h3 className="text-2xl md:text-3xl font-black tracking-tight text-white font-headline leading-tight">
                         {props.selectedItem.title}
                       </h3>
-                      {props.selectedItem.subtitle ? (
+                      {props.selectedItem.media_type === "movie" && props.selectedItem.subtitle ? (
                         <p className="mt-1 text-sm text-slate-300 truncate">{props.selectedItem.subtitle}</p>
                       ) : null}
                     </div>
@@ -2498,8 +2554,65 @@ function CalendarPanel(props: {
               {/* Body */}
               <div className="space-y-5 p-5 md:p-6">
                 <p className="text-base leading-relaxed text-slate-200">
-                  {props.spotlightLoading ? "Loading metadata..." : spotlightOverview}
+                  {spotlightDescription}
                 </p>
+
+                {props.selectedItem.media_type === "episode" ? (
+                  props.spotlightLoading ? (
+                    <div className="text-sm text-slate-500">Loading episodes…</div>
+                  ) : calendarSpotlightEpisodeRows.length ? (
+                    <div className="overflow-hidden rounded-xl border border-[#424753]/30 bg-black/25">
+                      {calendarSpotlightEpisodeRows.map((ep, idx) => {
+                        const expanded = calendarSpotlightExpandedEpisodeIds.includes(ep.id);
+                        const code = `S${String(ep.season_number).padStart(2, "0")}E${String(ep.episode_number).padStart(2, "0")}`;
+                        const epTitle = ep.title?.trim() || `Episode ${ep.episode_number}`;
+                        return (
+                          <div
+                            key={ep.id}
+                            className={idx > 0 ? "border-t border-[#424753]/25" : undefined}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCalendarSpotlightExpandedEpisodeIds((prev) =>
+                                  prev.includes(ep.id) ? prev.filter((x) => x !== ep.id) : [...prev, ep.id],
+                                );
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.04]"
+                            >
+                              <span className="flex-none font-mono text-[11px] font-semibold text-orange-200/95">{code}</span>
+                              <span className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-slate-100">{epTitle}</span>
+                              <span
+                                className={`material-symbols-outlined flex-none text-slate-500 transition-transform ${expanded ? "rotate-180" : ""}`}
+                                style={{ fontSize: 20 }}
+                              >
+                                expand_more
+                              </span>
+                            </button>
+                            {expanded ? (
+                              <div className="border-t border-[#424753]/20 bg-black/20 px-3 pb-3 pt-2">
+                                {ep.still_url ? (
+                                  <div className="mb-3 overflow-hidden rounded-lg border border-[#424753]/35 bg-[#0a0e14]">
+                                    <img
+                                      src={ep.still_url}
+                                      alt=""
+                                      className="max-h-48 w-full object-cover object-center"
+                                    />
+                                  </div>
+                                ) : null}
+                                <p className="text-sm leading-relaxed text-slate-300">
+                                  {ep.overview?.trim() || "No episode synopsis available."}
+                                </p>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-slate-500">Episode details not available.</div>
+                  )
+                ) : null}
 
                 {spotlightMeta.length ? (
                   <div className="grid grid-cols-2 gap-2 rounded-xl border border-[#424753]/30 bg-black/30 p-3 calendar-spotlight-meta">
@@ -2553,10 +2666,16 @@ function CalendarDayCell(props: {
   const visibleItems = props.day.items.filter(item => isCalendarItemVisible(item, props.filters));
   const { day } = props;
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const lookaheadFillOpacity = props.themeMode === "light" ? 0.16 : 0.08;
+  const dayCellStyle = day.is_today
+    ? { backgroundColor: alphaColor(accent.hex, 0.1) }
+    : day.in_lookahead_window
+      ? { backgroundColor: alphaColor(accent.hex, lookaheadFillOpacity) }
+      : undefined;
   return (
     <div className={`min-h-[150px] p-3 border-r border-[#424753]/20 last:border-r-0 transition-colors ${
       !day.is_current_month ? "opacity-35" : ""
-    } ${day.is_today ? "" : "hover:bg-[#1e2430]/50"}`} style={day.is_today ? { backgroundColor: alphaColor(accent.hex, 0.1) } : undefined}>
+    } ${day.is_today ? "" : "hover:bg-[#1e2430]/50"}`} style={dayCellStyle}>
       {/* Day number */}
       <div className="flex items-center justify-between mb-1">
         <span className={`text-xs font-bold font-headline leading-none ${
@@ -2564,21 +2683,14 @@ function CalendarDayCell(props: {
         }`} style={day.is_today ? { backgroundColor: accent.hex } : undefined}>
           {day.day_number}
         </span>
-        {day.in_lookahead_window && !day.is_today && (
-          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: alphaColor(accent.hex, 0.5) }} />
-        )}
       </div>
       {/* Items */}
       <div className="space-y-1.5">
         {visibleItems.map(item => {
           const metaBits = formatCalendarItemMeta(item).slice(0, 2);
-          const releaseColor = item.media_type === "movie"
-            ? item.release_type === "digitalRelease"
-              ? "border-l-teal-400"
-              : item.release_type === "physicalRelease"
-                ? "border-l-fuchsia-400"
-                : ""
-            : "border-l-orange-400";
+          // Movies: one fixed teal/green accent for every release type (matches prior "digital" look).
+          // TV: fixed orange, independent of app theme — same idea as movies.
+          const releaseColor = item.media_type === "movie" ? "border-l-teal-400" : "border-l-orange-400";
           const isSelected = props.selectedItemId === item.id;
 
           return (
@@ -2588,10 +2700,14 @@ function CalendarDayCell(props: {
               onClick={(e) => props.onSelectItem(item.id, e)}
               className={`w-full rounded-md border border-[#424753]/30 border-l-[3px] ${releaseColor} px-2.5 py-2 text-left transition-colors ${
                 isSelected ? "bg-[#2a3344]" : "bg-[#252c38]/80 hover:bg-[#2a3344]"
-              }`} style={item.media_type === "movie" && item.release_type !== "digitalRelease" && item.release_type !== "physicalRelease" ? { borderLeftColor: accent.hex } : undefined}
+              }`}
             >
               <div className="flex items-start gap-1.5">
-                <span className={`material-symbols-outlined mt-0.5 text-[12px] ${item.media_type === "movie" ? "" : "text-orange-300"}`} style={item.media_type === "movie" ? { color: accent.icon } : undefined}>
+                <span
+                  className={`material-symbols-outlined mt-0.5 text-[12px] ${
+                    item.media_type === "movie" ? "text-teal-400" : "text-orange-300"
+                  }`}
+                >
                   {item.media_type === "movie" ? "movie" : "tv"}
                 </span>
                 <div className="min-w-0 flex-1">
@@ -2758,6 +2874,23 @@ function LogsPanel(props: {
   onFilterChange: (value: string) => void;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const streamRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoFollowRef = useRef(true);
+
+  useLayoutEffect(() => {
+    const el = streamRef.current;
+    if (!el || !shouldAutoFollowRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [props.lines]);
+
+  const handleStreamScroll = () => {
+    const el = streamRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    // Treat near-bottom as "follow mode" to avoid jitter from fractional pixels.
+    shouldAutoFollowRef.current = distanceFromBottom <= 24;
+  };
+
   return (
     <div>
       {/* Title row */}
@@ -2801,7 +2934,11 @@ function LogsPanel(props: {
           </div>
           <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500">{props.lines.length} lines</span>
         </div>
-        <div className="font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto">
+        <div
+          ref={streamRef}
+          onScroll={handleStreamScroll}
+          className="font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto"
+        >
           {!props.lines.length && <div className="text-slate-600 p-2">No log lines to display.</div>}
           {props.lines.map((line, idx) => {
             const isError = line.includes("ERROR") || line.includes("CRITICAL");
@@ -4795,6 +4932,63 @@ function timeAgo(iso: string | null) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
+}
+
+function formatCalendarHeroDateParts(iso: string): { month: string; day: string } | null {
+  if (!iso) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const [y, m, d] = iso.split("-").map(Number);
+    const date = new Date(y, m - 1, d);
+    return {
+      month: date.toLocaleDateString(undefined, { month: "short" }).toUpperCase(),
+      day: String(d),
+    };
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    month: date.toLocaleDateString(undefined, { month: "short" }).toUpperCase(),
+    day: String(date.getDate()),
+  };
+}
+
+/** Spotlight card: date lives on hero; omit status / reason / redundant counts. */
+function formatCalendarSpotlightMeta(item: CalendarDay["items"][number]): Array<{ label: string; value: string }> {
+  const bits: Array<{ label: string; value: string }> = [];
+  if (item.media_type === "movie" && item.release_type_label) {
+    bits.push({
+      label: "Release",
+      value: item.release_type_label + (item.release_type_preferred ? "" : " fallback"),
+    });
+  }
+  if (typeof item.days_until === "number") {
+    const relative =
+      item.days_until === 0 ? "Today" : item.days_until === 1 ? "1 day" : `${item.days_until} days`;
+    bits.push({ label: "Countdown", value: relative });
+  }
+  return bits;
+}
+
+type CalendarSpotlightEpisodeRow = SeriesEpisodeDetail & { season_number: number };
+
+function collectEpisodesForCalendarDay(
+  series: SeriesDetailResponse | null,
+  episodeIds: number[],
+): CalendarSpotlightEpisodeRow[] {
+  if (!series || !episodeIds.length) return [];
+  const want = new Set(episodeIds);
+  const out: CalendarSpotlightEpisodeRow[] = [];
+  for (const season of series.seasons) {
+    for (const ep of season.episodes) {
+      if (want.has(ep.id)) {
+        out.push({ ...ep, season_number: season.season_number });
+      }
+    }
+  }
+  out.sort(
+    (a, b) => a.season_number - b.season_number || a.episode_number - b.episode_number,
+  );
+  return out;
 }
 
 function formatCalendarItemMeta(item: CalendarDay["items"][number]) {

@@ -189,9 +189,10 @@ a { color: inherit; }
 }
 .stat-head {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
   white-space: nowrap;
 }
 .stat-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }

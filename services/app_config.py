@@ -452,9 +452,55 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Advanced",
                 "label": "Queue check interval (seconds)",
-                "description": "Background queue polling cadence. Lower values react faster but increase API traffic.",
+                "description": (
+                    "Default polling cadence for the queue monitor when "
+                    "QUEUE_MONITOR_POLL_INTERVAL_SECONDS is 0. Lower values react faster but increase API traffic."
+                ),
                 "type": "int",
                 "min": 1,
+                "restart_required": True,
+            },
+        ),
+        (
+            "QUEUE_MONITOR_POLL_INTERVAL_SECONDS",
+            {
+                "section": "Advanced",
+                "label": "Queue monitor poll interval override (seconds)",
+                "description": (
+                    "When set to a positive value, the queue monitor polls Radarr/Sonarr /queue on this interval "
+                    "instead of CHECK_INTERVAL. Use 0 to follow CHECK_INTERVAL."
+                ),
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS",
+            {
+                "section": "Advanced",
+                "label": "ARR Refresh Monitored Downloads interval (seconds)",
+                "description": (
+                    "While queue-like placeholders exist, POST Radarr/Sonarr RefreshMonitoredDownloads on this "
+                    "cadence so their /queue updates faster than the built-in ~minute task. "
+                    "Default 6 seconds (slightly offset from a 5s poll). Set 0 to disable."
+                ),
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS",
+            {
+                "section": "Advanced",
+                "label": "First ARR queue refresh delay (seconds)",
+                "description": (
+                    "Delays the first RefreshMonitoredDownloads after startup so it does not align with the "
+                    "first poll tick when using a separate refresh interval."
+                ),
+                "type": "int",
+                "min": 0,
                 "restart_required": True,
             },
         ),

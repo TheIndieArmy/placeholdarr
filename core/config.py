@@ -102,6 +102,20 @@ class Settings(BaseSettings):
 
     # Application
     CHECK_INTERVAL: int = 10
+    # When >0, overrides CHECK_INTERVAL for the queue-monitor thread only (seconds between /queue polls).
+    # Use 0 to keep using CHECK_INTERVAL (backward compatible).
+    QUEUE_MONITOR_POLL_INTERVAL_SECONDS: int = int(
+        os.getenv("QUEUE_MONITOR_POLL_INTERVAL_SECONDS", "0").split('#')[0].strip() or "0"
+    )
+    # When >0, POST RefreshMonitoredDownloads to Radarr/Sonarr on this interval while queue-like placeholders exist.
+    # Decoupled from poll interval so you can stagger (e.g. poll every 5s, nudge ARR every 6s). 0 = disabled.
+    QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS: int = int(
+        os.getenv("QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS", "6").split("#")[0].strip()
+    )
+    # Delay before the first ARR refresh after producer start (seconds). Spreads work away from the first poll tick.
+    QUEUE_MONITOR_REFRESH_STAGGER_SECONDS: int = int(
+        os.getenv("QUEUE_MONITOR_REFRESH_STAGGER_SECONDS", "3").split('#')[0].strip()
+    )
 
     # Dummy file management
     DUMMY_FILE_PATH: str = ""

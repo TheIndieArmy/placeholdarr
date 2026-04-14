@@ -442,6 +442,38 @@ def trigger_radarr_movie_search(
     return result is not None
 
 
+def trigger_radarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
+    """Ask Radarr to run its Refresh Monitored Downloads task (updates queue sooner than the built-in timer)."""
+    base_url, api_key = settings.resolve_arr_endpoint("radarr", is_4k=is_4k)
+    if not base_url or not api_key:
+        return False
+    endpoint = _build_endpoint(base_url, "command")
+    result = _request_json(
+        "POST",
+        endpoint,
+        payload={"name": "RefreshMonitoredDownloads"},
+        api_key=api_key,
+        timeout=20,
+    )
+    return result is not None
+
+
+def trigger_sonarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
+    """Ask Sonarr to run its Refresh Monitored Downloads task."""
+    base_url, api_key = settings.resolve_arr_endpoint("sonarr", is_4k=is_4k)
+    if not base_url or not api_key:
+        return False
+    endpoint = _build_endpoint(base_url, "command")
+    result = _request_json(
+        "POST",
+        endpoint,
+        payload={"name": "RefreshMonitoredDownloads"},
+        api_key=api_key,
+        timeout=20,
+    )
+    return result is not None
+
+
 def set_radarr_movie_monitored(
     movie_id: int,
     monitored: bool = True,

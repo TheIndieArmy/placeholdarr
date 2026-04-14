@@ -8,7 +8,17 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-04-14
+
 ### Added
+- **Direct player metadata projection**: After placeholder NFO sidecars are rewritten, optionally push **projected title and summary** (bracketed status per `PLACEHOLDER_STATUS_PROJECTION_MODE`) straight to **Plex, Jellyfin, and Emby** via their item-update APIs. Uses cached server item ids when present, otherwise resolves items by TMDB (movies) or TVDB + season/episode (TV). This is **targeted text updates**, not “wait for a full library refresh to re-read NFOs” as the only fast path for UI text.
+- **`services/media_servers/player_metadata_refresh.py`**: Implements the above batch push and identity persistence helpers used from the NFO refresh job path.
+- **`PLACEHOLDER_STATUS_UPDATES`**: New scope for **which** statuses receive bracket projection in title/summary (`OFF`, `REQUEST`, or `ALL`), evaluated in `services/status_projection.py` alongside the existing projection mode; exposed in Advanced settings.
+- **Queue monitor**: Optional **`QUEUE_MONITOR_POLL_INTERVAL_SECONDS`** override (separate from `CHECK_INTERVAL`); periodic **Radarr/Sonarr `RefreshMonitoredDownloads`** while queue-like placeholders exist (`QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS`, staggered first run via `QUEUE_MONITOR_REFRESH_STAGGER_SECONDS`); shared poll context; ARR API trigger helpers.
+- **Activity snapshot** (`services/activity_snapshot.py`): In-memory queue download snapshot for richer **Activity** dashboard rows.
+- **Calendar API**: Episodes that share the same air date and series merge into one item with `SxxEyy (+N)` subtitles; payloads include `season_number`, `episode_number`, and optional `group_episode_ids` / `group_episode_count`.
+- **Calendar UI**: Hero **calendar-style** date (month + day); TV spotlight uses **series** synopsis, then **per-episode** rows (code + title) expandable to still + episode overview; **single-episode** days start expanded.
+- **Dashboard**: Lite sync startup card shows **“Checking…”** for library refresh until materialization completes; refresh lines also honor `movie_refresh_triggered` / `tv_refresh_triggered` from materialization stats; expanded activity parsing (e.g. calendar sync row with lookahead stats).
 - **Episode Runtime**: Added `sonarr_runtime` field to episodes, populated from Sonarr API for richer metadata.
 - **Detailed Episode Info**: Now capture detailed episode information from Sonarr, including extended metadata and screenshots.
 - **NFO Screenshot Art**: Added support for embedding episode screenshot art in generated NFO files for richer Plex display.
@@ -16,13 +26,11 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Jellyfin helper**: Add `get_jellyfin_file_path()` in `services/media_servers/jellyfin.py` and use it to resolve file paths during playback fallback when payloads lack an explicit path.
 
 ### Changed
-- **Observation/Hybrid/Trail Removal**: Removed all observation, hybrid, and trail job logic, related tables, and config knobs. The system no longer performs placeholder observation passes or deferred trail jobs. All related code, jobs, and settings have been deleted or deprecated.
-- **Observation & Status Projection Deprecated**: Observation and status projection logic are now deprecated, as Plex NFO support makes direct DB-driven status projection unnecessary. Status is now handled via NFO updates and section refreshes.
-- **Startup Pipeline**: Primer and status projection reconciliation are now deprecated and skipped in the startup pipeline for faster and simpler startup.
-- **Refresh Logic**: Refactored refresh throttling to use new `library_refresh_throttle` table and logic, replacing legacy observation flight tracking.
-- **Status/NFO Refresh**: NFO refresh jobs now trigger section refreshes directly and no longer attempt remote item metadata refreshes for Emby/Jellyfin.
-- **Scheduler**: Status projection reconciliation step removed from scheduled pipelines.
-
+- **Status intent → player push**: `StatusIntent.wants_player_metadata_refresh_after_nfo()` skips direct projection for **initial** materialization that ends on plain **REQUEST** (NFO already reflects REQUEST; broad discovery stays on library refresh). Other NFO-driving intents request the direct player-metadata pass.
+- **NFO refresh jobs**: Payload supports **`player_metadata_refresh`** (per job / per placeholder merge) so batches can run **NFO-only** or **NFO + direct projection** as needed (`status_reconciler`).
+- **Queue monitor producer**: Refactored polling context, integration with activity snapshot and ARR queue nudges, and related orchestration tweaks.
+- **Media server clients**: Plex / Jellyfin / Emby additions for **search-by-provider-id** and **item text updates** used by direct projection; Plex lookup/identity helpers extended for resolution paths.
+- **Materialization stats**: `created_or_exists` with **no write** (`already_present`) increments **`noop`** instead of **`created`**, so logs and dashboards match real file creates.
 
 ### Removed
 - **Observation System**: All observation, hybrid, and trail job code, database tables, and config settings.
@@ -30,6 +38,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Status Projection Jobs**: Status projection job and reconciliation logic removed; status projection is now handled inline or skipped.
 
 ### Fixed
+- **Materialization metrics**: Correct `created` vs `noop` accounting when placeholder files already exist on disk.
 - **Refresh Lease Handling**: Improved error handling and atomicity in refresh throttle logic.
 - **Startup/Shutdown**: Minor fixes to startup/shutdown signal handling and Compose dependency ordering.
 - **NFO/Metadata Consistency**: Improved NFO generation and metadata consistency for new episode fields and art.
