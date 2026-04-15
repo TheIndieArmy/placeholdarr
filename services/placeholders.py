@@ -644,9 +644,8 @@ def ensure_episode_nfo(media_path: str, episode: Any, season: Any, series: Any) 
 
 def _series_nfo_xml(series: Any) -> str:
     """Render a tvshow.nfo XML for a series object."""
-    status = str(getattr(series, "placeholder_status", "") or "REQUEST")
-    title = escape(project_title(str(getattr(series, "title", "") or ""), status))
-    overview = escape(project_summary(str(getattr(series, "sonarr_series_overview", "") or ""), status))
+    title = escape(str(getattr(series, "title", "") or ""))
+    overview = escape(str(getattr(series, "sonarr_series_overview", "") or ""))
     tvdbid = getattr(series, "tvdbid", None)
     imdbid = getattr(series, "imdbid", None)
     tmdbid = getattr(series, "sonarr_tmdbid", None)
@@ -667,7 +666,6 @@ def _series_nfo_xml(series: Any) -> str:
         "<tvshow>",
         f"  <title>{title}</title>",
         "  <tag>placeholder</tag>",
-        f"  <tag>status:{escape(status)}</tag>",
     ]
     year = getattr(series, "year", None)
     if year:
@@ -680,8 +678,6 @@ def _series_nfo_xml(series: Any) -> str:
         lines.append(f"  <id>{escape(str(tvdbid))}</id>")
     if overview:
         lines.append(f"  <plot>{overview}</plot>")
-    else:
-        lines.append(f"  <plot>{escape(project_summary('', status))}</plot>")
     if tvdbid:
         lines.append(f"  <tvdbid>{escape(str(tvdbid))}</tvdbid>")
         lines.append(f"  <uniqueid type=\"tvdb\" default=\"true\">{escape(str(tvdbid))}</uniqueid>")

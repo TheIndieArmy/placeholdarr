@@ -17,7 +17,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Queue monitor timeout setting in UI**: Exposed `QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS` in Advanced settings metadata.
 
 ### Changed
-- **Jellyfin movie ID resolution (reliability)**: Replaced legacy provider-id query assumptions with documented Jellyfin `GetItems` filters (`SearchTerm`, `IncludeItemTypes`, `Years`, `Fields=ProviderIds,...`) plus exact client-side `ProviderIds` matching, and removed permissive/fuzzy movie fallback paths that could target unrelated items.
+- **Jellyfin ID resolution (movies + TV)**: Replaced legacy provider-id query assumptions with documented Jellyfin `GetItems` filters (`SearchTerm`, `IncludeItemTypes`, `Years`, `Fields=ProviderIds,...`) plus exact client-side `ProviderIds` matching; hardened series/episode resolution to fail-safe matching; and removed permissive/fuzzy fallback paths that could target unrelated items.
+- **Jellyfin TV episode lookup finalization**: Normalized Jellyfin `/Items` query parameter casing to documented form and aligned episode resolution to a deterministic `parentId + recursive` query with strict in-code series/season/episode filtering, preferring exact TVDB provider matches and failing safe on ambiguity.
+- **TV projection scope tightening**: Status projection for TV now updates **episode** metadata only (not series-level projection text writes) across direct player projection paths.
+- **Series NFO status projection removal**: `tvshow.nfo` generation no longer writes status-projected title/plot or status tag text; episode NFO status projection remains intact and still follows projection config mode/scope.
 - **Jellyfin cache validation**: Movie/series cached Jellyfin IDs are validated before reuse; mismatches trigger re-resolution instead of persistent wrong-item updates.
 - **Direct player projection logging**: Added per-player outcome lines plus a batch summary (`ProjectionBatchSummary`) so projection behavior is diagnosable per run without requiring deep trace logs.
 - **Queue monitor semantics**: Empty Arr queue no longer clears activity snapshot; UI row now reflects ongoing search monitoring and timeout-driven terminal handling.

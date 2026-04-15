@@ -22,9 +22,8 @@ from services.media_servers.refresh import refresh_selected_sections
 from services.media_servers.plex_identity import (
     persist_episode_hierarchy_plex_identity,
     persist_movie_plex_identity,
-    persist_series_plex_identity,
 )
-from services.media_servers.plex_lookup import find_episode_by_series_tvdb, find_movie_by_id, find_show_by_id
+from services.media_servers.plex_lookup import find_episode_by_series_tvdb, find_movie_by_id
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.status_projection import project_summary, project_title
 
@@ -50,10 +49,6 @@ def _first_item_id(items: list[dict[str, Any]]) -> str | None:
         if iid:
             return iid
     return None
-
-
-def _norm_text(value: Any) -> str:
-    return str(value or "").strip().lower()
 
 
 def _provider_values(item: dict[str, Any], *keys: str) -> set[str]:
@@ -84,6 +79,20 @@ def _series_provider_match(item: dict[str, Any], series: Series) -> bool:
     return want_tvdb in tvdb_vals
 
 
+def _episode_provider_match(item: dict[str, Any], episode: Episode) -> bool:
+    want_tvdb_raw = getattr(episode, "sonarr_episode_tvdbid", None)
+    if want_tvdb_raw is None:
+        return False
+    try:
+        want_tvdb = str(int(want_tvdb_raw)).strip().lower()
+    except (TypeError, ValueError):
+        return False
+    if not want_tvdb:
+        return False
+    tvdb_vals = _provider_values(item, "Tvdb", "TvdbId")
+    return want_tvdb in tvdb_vals
+
+
 def _pick_jellyfin_movie_item_id(movie: Movie, items: list[dict[str, Any]]) -> str | None:
     """Prefer exact provider-id match only (fail-safe)."""
     if not isinstance(items, list) or not items:
@@ -101,24 +110,14 @@ def _pick_jellyfin_movie_item_id(movie: Movie, items: list[dict[str, Any]]) -> s
 def _pick_jellyfin_series_item_id(series: Series, items: list[dict[str, Any]]) -> str | None:
     if not isinstance(items, list) or not items:
         return None
-    want_tvdb = str(int(getattr(series, "tvdbid", 0) or 0)).strip().lower()
-    if want_tvdb:
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            tvdb_vals = _provider_values(it, "Tvdb", "TvdbId")
-            if want_tvdb in tvdb_vals:
-                iid = str(it.get("Id") or "").strip()
-                if iid:
-                    return iid
-    want_title = _norm_text(getattr(series, "title", None))
-    candidates = [it for it in items if _norm_text((it or {}).get("Name")) == want_title]
-    chosen = candidates[0] if candidates else None
-    if chosen:
-        iid = str(chosen.get("Id") or "").strip()
-        if iid:
-            return iid
-    return _first_item_id(items)
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if _series_provider_match(it, series):
+            iid = str(it.get("Id") or "").strip()
+            if iid:
+                return iid
+    return None
 
 
 def _find_jellyfin_movie_item_id(movie: Movie) -> str | None:
@@ -149,16 +148,16 @@ def _find_jellyfin_movie_item_id(movie: Movie) -> str | None:
     seen_ids: set[str] = set()
     for term in search_terms:
         query: dict[str, Any] = {
-            "Recursive": "true",
-            "IncludeItemTypes": "Movie",
-            "Fields": "ProviderIds,Name,ProductionYear,Path",
-            "Limit": 100,
-            "HasTmdbId": "true",
+            "recursive": "true",
+            "includeItemTypes": "Movie",
+            "fields": "ProviderIds,Name,ProductionYear,Path",
+            "limit": 100,
+            "hasTmdbId": "true",
         }
         if year:
-            query["Years"] = str(year)
+            query["years"] = str(year)
         if term:
-            query["SearchTerm"] = term
+            query["searchTerm"] = term
         items = jellyfin_search_items(query)
         deduped: list[dict[str, Any]] = []
         for it in items:
@@ -210,24 +209,44 @@ def _find_jellyfin_series_item_id(series: Series) -> str | None:
         cached_item = jellyfin_get_item_fields(cached, fields="ProviderIds,Name")
         if isinstance(cached_item, dict) and _series_provider_match(cached_item, series):
             return cached
-        logger.warning(
+        logger.debug(
             f"Jellyfin cached series id mismatch series_id={getattr(series, 'id', None)} cached_item_id={cached}; re-resolving",
-            extra={"emoji_type": "warning"},
+            extra={"emoji_type": "debug"},
         )
     tvdb = int(getattr(series, "tvdbid", 0) or 0)
+    title = str(getattr(series, "title", "") or "").strip()
+    year = int(getattr(series, "year", 0) or 0)
     if not tvdb:
         return None
-    for key in (f"Tvdb-{tvdb}", f"tvdb-{tvdb}", f"Tvdb.{tvdb}", f"tvdb.{tvdb}"):
-        items = jellyfin_search_items(
-            {
-                "Recursive": "true",
-                "IncludeItemTypes": "Series",
-                "AnyProviderIdEquals": key,
-                "Fields": "ProviderIds,Name",
-                "Limit": 5,
-            }
-        )
-        hit = _pick_jellyfin_series_item_id(series, items)
+    search_terms: list[str] = []
+    if title:
+        search_terms.append(title)
+    search_terms.append("")
+    seen_ids: set[str] = set()
+    for term in search_terms:
+        query: dict[str, Any] = {
+            "recursive": "true",
+            "includeItemTypes": "Series",
+            "fields": "ProviderIds,Name,ProductionYear,Path",
+            "limit": 100,
+            "hasTvdbId": "true",
+        }
+        if year:
+            query["years"] = str(year)
+        if term:
+            query["searchTerm"] = term
+        items = jellyfin_search_items(query)
+        deduped: list[dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            iid = str(it.get("Id") or "").strip()
+            if iid and iid in seen_ids:
+                continue
+            if iid:
+                seen_ids.add(iid)
+            deduped.append(it)
+        hit = _pick_jellyfin_series_item_id(series, deduped)
         if hit:
             return hit
     return None
@@ -256,39 +275,54 @@ def _find_emby_series_item_id(series: Series) -> str | None:
 def _find_jellyfin_episode_item_id(series: Series, season: Season, episode: Episode) -> str | None:
     cached = str(getattr(episode, "jellyfin_id", "") or "").strip()
     if cached:
-        return cached
-    etvdb = getattr(episode, "sonarr_episode_tvdbid", None)
-    if etvdb is not None:
-        try:
-            eid = int(etvdb)
-            for key in (f"Tvdb-{eid}", f"tvdb-{eid}", f"Tvdb.{eid}", f"tvdb.{eid}"):
-                items = jellyfin_search_items(
-                    {
-                        "Recursive": "true",
-                        "IncludeItemTypes": "Episode",
-                        "AnyProviderIdEquals": key,
-                        "Limit": 5,
-                    }
-                )
-                hit = _first_item_id(items)
-                if hit:
-                    return hit
-        except (TypeError, ValueError):
-            pass
-
+        cached_item = jellyfin_get_item_fields(
+            cached,
+            fields="ProviderIds,SeriesId,ParentIndexNumber,IndexNumber,Name,Path",
+        )
+        if isinstance(cached_item, dict):
+            if _episode_provider_match(cached_item, episode):
+                return cached
+            cached_series = str(cached_item.get("SeriesId") or "").strip()
+            season_ok = int(cached_item.get("ParentIndexNumber") or 0) == int(getattr(season, "season_number", 0) or 0)
+            episode_ok = int(cached_item.get("IndexNumber") or 0) == int(getattr(episode, "episode_number", 0) or 0)
+            if cached_series and season_ok and episode_ok:
+                return cached
+        logger.debug(
+            f"Jellyfin cached episode id mismatch episode_id={getattr(episode, 'id', None)} cached_item_id={cached}; re-resolving",
+            extra={"emoji_type": "debug"},
+        )
     parent_series_id = _find_jellyfin_series_item_id(series)
     if not parent_series_id:
         return None
     items = jellyfin_search_items(
         {
-            "ParentId": parent_series_id,
-            "IncludeItemTypes": "Episode",
-            "ParentIndexNumber": int(season.season_number),
-            "IndexNumber": int(episode.episode_number),
-            "Limit": 10,
+            "parentId": parent_series_id,
+            "includeItemTypes": "Episode",
+            "recursive": "true",
+            "fields": "SeriesId,ParentIndexNumber,IndexNumber,ProviderIds,Path",
+            "limit": 200,
         }
     )
-    return _first_item_id(items)
+    exact_matches: list[str] = []
+    tvdb_matches: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        iid = str(item.get("Id") or "").strip()
+        if not iid:
+            continue
+        series_id = str(item.get("SeriesId") or "").strip()
+        s_ok = int(item.get("ParentIndexNumber") or 0) == int(season.season_number or 0)
+        e_ok = int(item.get("IndexNumber") or 0) == int(episode.episode_number or 0)
+        if series_id == str(parent_series_id) and s_ok and e_ok:
+            exact_matches.append(iid)
+            if _episode_provider_match(item, episode):
+                tvdb_matches.append(iid)
+    if len(tvdb_matches) == 1:
+        return tvdb_matches[0]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    return None
 
 
 def _find_emby_episode_item_id(series: Series, season: Season, episode: Episode, placeholder: Placeholder) -> str | None:
@@ -566,30 +600,8 @@ def _push_episode(
         getattr(episode, "sonarr_episode_overview", None),
         status,
     )
-    projected_series_title, projected_series_summary = _project_text(
-        getattr(series, "title", None),
-        getattr(series, "sonarr_series_overview", None),
-        status,
-    )
-
     if getattr(settings, "jellyfin_enabled", False):
         jf_ep = _find_jellyfin_episode_item_id(series, season, episode)
-        jf_series = _find_jellyfin_series_item_id(series)
-        if jf_series:
-            if str(getattr(series, "jellyfin_id", "") or "").strip() != str(jf_series):
-                series.jellyfin_id = str(jf_series)
-                session.add(series)
-                session.flush()
-            jf_series_ok = update_jellyfin_item_text(jf_series, title=projected_series_title, overview=projected_series_summary)
-            _summary_mark(summary, "jellyfin", jf_series_ok)
-            logger.info(
-                "Jellyfin direct projection series outcome="
-                f"{'ok' if jf_series_ok else 'failed'} item_id={jf_series} "
-                f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            if not jf_series_ok:
-                _mark_fallback(fallback, "jellyfin", "episode")
         if jf_ep:
             if str(getattr(episode, "jellyfin_id", "") or "").strip() != str(jf_ep):
                 episode.jellyfin_id = str(jf_ep)
@@ -605,9 +617,9 @@ def _push_episode(
             )
             if not jf_ep_ok:
                 _mark_fallback(fallback, "jellyfin", "episode")
-        if not jf_ep and not jf_series:
+        if not jf_ep:
             logger.debug(
-                "Jellyfin TV item not resolved "
+                "Jellyfin episode item not resolved "
                 f"tvdbid={getattr(series, 'tvdbid', None)} "
                 f"S{season.season_number}E{episode.episode_number}",
                 extra={"emoji_type": "debug"},
@@ -619,18 +631,6 @@ def _push_episode(
 
     if getattr(settings, "emby_enabled", False):
         em_ep = _find_emby_episode_item_id(series, season, episode, placeholder)
-        em_series = _find_emby_series_item_id(series)
-        if em_series:
-            em_series_ok = update_emby_item_text(em_series, title=projected_series_title, overview=projected_series_summary)
-            _summary_mark(summary, "emby", em_series_ok)
-            logger.info(
-                "Emby direct projection series outcome="
-                f"{'ok' if em_series_ok else 'failed'} item_id={em_series} "
-                f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            if not em_series_ok:
-                _mark_fallback(fallback, "emby", "episode")
         if em_ep:
             em_ep_ok = update_emby_item_text(em_ep, title=projected_ep_title, overview=projected_ep_summary)
             _summary_mark(summary, "emby", em_ep_ok)
@@ -642,9 +642,9 @@ def _push_episode(
             )
             if not em_ep_ok:
                 _mark_fallback(fallback, "emby", "episode")
-        if not em_ep and not em_series:
+        if not em_ep:
             logger.debug(
-                "Emby TV item not resolved "
+                "Emby episode item not resolved "
                 f"tvdbid={getattr(series, 'tvdbid', None)} "
                 f"S{season.season_number}E{episode.episode_number}",
                 extra={"emoji_type": "debug"},
@@ -730,68 +730,7 @@ def _push_episode(
                 _summary_mark(summary, "plex", False)
                 _mark_fallback(fallback, "plex", "episode")
 
-        ser_key = _plex_coalesce_cached_rating_key(series)
-        if ser_key:
-            ser_out = update_plex_item_text(
-                ser_key,
-                title=projected_series_title,
-                summary=projected_series_summary,
-            )
-            logger.info(
-                "Plex direct projection series cached-key outcome="
-                f"{ser_out} rating_key={ser_key} series_id={int(getattr(series, 'id', 0) or 0)} "
-                f"status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            _summary_mark(summary, "plex", ser_out == "ok")
-            if ser_out in ("not_found", "failed"):
-                series.plex_id = None
-                series.plex_dummy_id = None
-                session.add(series)
-                session.flush()
-                show = find_show_by_id(getattr(series, "tvdbid", None), title=getattr(series, "title", None))
-                if show is not None and getattr(show, "ratingKey", None) is not None:
-                    persist_series_plex_identity(session, series, show)
-                    session.flush()
-                    retry_out = update_plex_item_text(
-                        show.ratingKey,
-                        title=projected_series_title,
-                        summary=projected_series_summary,
-                    )
-                    logger.info(
-                        "Plex direct projection series resolved-key outcome="
-                        f"{retry_out} rating_key={show.ratingKey} "
-                        f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
-                        extra={"emoji_type": "info"},
-                    )
-                    _summary_mark(summary, "plex", retry_out == "ok")
-                    if retry_out != "ok":
-                        _mark_fallback(fallback, "plex", "episode")
-                else:
-                    _summary_mark(summary, "plex", False)
-                    _mark_fallback(fallback, "plex", "episode")
-        else:
-            show = find_show_by_id(getattr(series, "tvdbid", None), title=getattr(series, "title", None))
-            if show is not None and getattr(show, "ratingKey", None) is not None:
-                persist_series_plex_identity(session, series, show)
-                session.flush()
-                outcome = update_plex_item_text(
-                    show.ratingKey,
-                    title=projected_series_title,
-                    summary=projected_series_summary,
-                )
-                logger.info(
-                    "Plex direct projection series lookup-only outcome="
-                    f"{outcome} rating_key={show.ratingKey} "
-                    f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
-                    extra={"emoji_type": "info"},
-                )
-                _summary_mark(summary, "plex", outcome == "ok")
-                if outcome != "ok":
-                    _mark_fallback(fallback, "plex", "episode")
-            else:
-                _summary_mark(summary, "plex", False)
-                _mark_fallback(fallback, "plex", "episode")
+        # Intentionally do not project series metadata for TV status updates.
     else:
         summary.plex_disabled += 1
 
