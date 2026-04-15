@@ -70,6 +70,14 @@ wheels/
 logs/
 media_handler.log
 
+# Local diagnostics / probe artifacts
+*_probe.txt
+*_probe.json
+tmp_*.txt
+tmp_*.json
+debug_*.txt
+debug_*.json
+
 # IDE
 .idea/
 .vscode/
