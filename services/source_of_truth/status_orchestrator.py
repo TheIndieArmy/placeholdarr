@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from services.source_of_truth.status_intent import StatusIntent, StatusSource, DisplayStatus
-from services.postgres.models import Placeholder, Movie, Series, Season, Episode
+from services.postgres.models import Placeholder, Movie, Series, Season, Episode, EventLog
 from services.postgres.db import get_session
 
 logger = logging.getLogger(__name__)
@@ -386,8 +386,12 @@ class StatusOrchestrator:
         
         for ph in placeholders:
             # If content became available (file imported), mark as AVAILABLE
-            # Clear any SEARCHING or DOWNLOADING status
-            if ph.display_status in {DisplayStatus.SEARCHING.value, DisplayStatus.DOWNLOADING.value}:
+            # Clear queue-like or "not found" status from before the import
+            if ph.display_status in {
+                DisplayStatus.SEARCHING.value,
+                DisplayStatus.DOWNLOADING.value,
+                DisplayStatus.NOT_FOUND.value,
+            }:
                 intents.append(StatusIntent(
                     placeholder_id=ph.id,
                     new_status=DisplayStatus.AVAILABLE.value,
@@ -486,6 +490,27 @@ class StatusOrchestrator:
             elif intent.new_status != DisplayStatus.DOWNLOADING.value:
                 ph.display_progress = None
             ph.updated_at = datetime.now(timezone.utc)
+
+            # Persist a durable status-transition event for timeline UX and troubleshooting.
+            # Kept lightweight: placeholder id + transition metadata; entity/title lookup is
+            # resolved later by activity APIs from current DB state.
+            session.add(
+                EventLog(
+                    event_type="placeholder_status_changed",
+                    source=str(intent.source.value),
+                    payload={
+                        "placeholder_id": int(ph.id),
+                        "old_status": str(old_status or ""),
+                        "new_status": str(intent.new_status or ""),
+                        "reason": str(intent.reason or ""),
+                    },
+                    status="DONE",
+                    attempts=0,
+                    max_attempts=0,
+                    updated_at=ph.updated_at,
+                    processed_at=ph.updated_at,
+                )
+            )
             
             session.commit()
             

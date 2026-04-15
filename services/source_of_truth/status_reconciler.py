@@ -236,6 +236,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
 
     do_player = _job_player_metadata_refresh(job)
+    logger.info(
+        f"NFO refresh job processed placeholder_ids={len(ids)} refreshed={refreshed} player_metadata_refresh={do_player}",
+        extra={"emoji_type": "info"},
+    )
 
     if do_player and refreshed_for_player_push:
         # One media-server refresh sequence per underlying movie/episode row, even if several
@@ -251,6 +255,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             unique_for_projection.append(placeholder)
         try:
             push_placeholder_batch_player_metadata(session, unique_for_projection)
+            logger.info(
+                f"Direct player projection attempted for placeholders={len(unique_for_projection)}",
+                extra={"emoji_type": "info"},
+            )
         except Exception as ex:
             logger.warning(
                 f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",

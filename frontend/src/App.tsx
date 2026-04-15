@@ -1495,8 +1495,12 @@ function ActivityPanel(props: {
                       jobType === "queue_monitor_batch" && Array.isArray((row as any).progress?.queue_items)
                         ? ((row as any).progress.queue_items as Array<any>)
                         : [];
-                    const hasQueueProgress = queueItems.length > 0;
-                    const hasExpandable = hasSectionProgress || hasQueueProgress;
+                    const groupedEvents: Array<any> = Array.isArray((row as any).progress?.grouped_events)
+                      ? ((row as any).progress.grouped_events as Array<any>)
+                      : [];
+                    const hasQueueBatchDetails = jobType === "queue_monitor_batch";
+                    const hasGroupedEventDetails = groupedEvents.length > 0;
+                    const hasExpandable = hasSectionProgress || hasQueueBatchDetails || hasGroupedEventDetails;
                     const isExpanded = !!expandedRows[key];
                     const progressSections = hasSectionProgress ? ((row as any).progress.sections as Array<any>) : [];
 
@@ -1555,27 +1559,66 @@ function ActivityPanel(props: {
                                   })}
                                 </div>
                               )}
-                              {isExpanded && hasQueueProgress && (
+                              {isExpanded && hasQueueBatchDetails && (
                                 <div className="mt-2 space-y-2">
-                                  {queueItems.map((it: any, qix: number) => (
-                                    <div
-                                      key={`${key}-q-${qix}`}
-                                      className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px]"
-                                    >
-                                      <div className="flex flex-wrap items-baseline justify-between gap-2">
-                                        <span className="font-medium text-slate-200">
-                                          {String(it?.title || "—")}
-                                          {it?.subtitle ? (
-                                            <span className="text-slate-500 font-normal"> · {String(it.subtitle)}</span>
+                                  {queueItems.length === 0 ? (
+                                    <div className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px] text-slate-400">
+                                      No per-title rows in this batch yet (Arr queue may be empty while search runs).
+                                    </div>
+                                  ) : (
+                                    queueItems.map((it: any, qix: number) => (
+                                      <div
+                                        key={`${key}-q-${qix}`}
+                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px]"
+                                      >
+                                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                          <span className="font-medium text-slate-200">
+                                            {String(it?.title || "—")}
+                                            {it?.subtitle ? (
+                                              <span className="text-slate-500 font-normal"> · {String(it.subtitle)}</span>
+                                            ) : null}
+                                          </span>
+                                          {it?.instance ? (
+                                            <span className="text-[9px] font-headline uppercase tracking-wider text-slate-500">{String(it.instance)}</span>
                                           ) : null}
-                                        </span>
-                                        {it?.instance ? (
-                                          <span className="text-[9px] font-headline uppercase tracking-wider text-slate-500">{String(it.instance)}</span>
+                                        </div>
+                                        <div className="text-slate-400 mt-0.5">{String(it?.line || "—")}</div>
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                              )}
+                              {isExpanded && hasGroupedEventDetails && (
+                                <div className="mt-2 space-y-2">
+                                  {groupedEvents.map((ev: any, gix: number) => {
+                                    const evStatus = String(ev?.status || "").toLowerCase();
+                                    const evStatusColor =
+                                      evStatus === "done" || evStatus === "success"
+                                        ? "text-green-400"
+                                        : evStatus === "failed"
+                                          ? "text-red-400"
+                                          : "text-slate-400";
+                                    return (
+                                      <div
+                                        key={`${key}-ge-${gix}`}
+                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px]"
+                                      >
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                          <span className="font-medium text-slate-200">{String(ev?.display_name || "Event")}</span>
+                                          <span className={`text-[10px] font-headline uppercase tracking-wider ${evStatusColor}`}>
+                                            {evStatus || "done"}
+                                          </span>
+                                        </div>
+                                        <div className="mt-0.5 text-slate-400">
+                                          {ev?.details ? String(ev.details) : "—"}
+                                          {ev?.source ? ` • ${String(ev.source)}` : ""}
+                                        </div>
+                                        {ev?.error ? (
+                                          <div className="mt-0.5 text-red-300/70">{String(ev.error)}</div>
                                         ) : null}
                                       </div>
-                                      <div className="text-slate-400 mt-0.5">{String(it?.line || "—")}</div>
-                                    </div>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
                               )}
                             </div>
@@ -1633,8 +1676,18 @@ function ActivityPanel(props: {
                 </thead>
                 <tbody className="divide-y divide-[#424753]/15">
                   {placeholderRows.map((row, idx) => {
-                    const actionColor = row.action === "Created" ? "text-green-400" : "text-orange-400";
-                    const actionBg = row.action === "Created" ? "bg-green-500/20" : "bg-orange-500/20";
+                    const actionColor =
+                      row.action === "Created"
+                        ? "text-green-400"
+                        : row.action === "Deleted"
+                          ? "text-orange-400"
+                          : "text-sky-300";
+                    const actionBg =
+                      row.action === "Created"
+                        ? "bg-green-500/20"
+                        : row.action === "Deleted"
+                          ? "bg-orange-500/20"
+                          : "bg-sky-500/20";
                     const contentDisplay = row.series_title
                       ? `${row.series_title} • ${row.item_title}`
                       : row.item_title;
@@ -2673,7 +2726,7 @@ function CalendarDayCell(props: {
       ? { backgroundColor: alphaColor(accent.hex, lookaheadFillOpacity) }
       : undefined;
   return (
-    <div className={`min-h-[150px] p-3 border-r border-[#424753]/20 last:border-r-0 transition-colors ${
+    <div className={`min-h-[124px] p-2.5 border-r border-[#424753]/20 last:border-r-0 transition-colors ${
       !day.is_current_month ? "opacity-35" : ""
     } ${day.is_today ? "" : "hover:bg-[#1e2430]/50"}`} style={dayCellStyle}>
       {/* Day number */}
@@ -2685,9 +2738,9 @@ function CalendarDayCell(props: {
         </span>
       </div>
       {/* Items */}
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {visibleItems.map(item => {
-          const metaBits = formatCalendarItemMeta(item).slice(0, 2);
+          const metaBits = formatCalendarItemMeta(item);
           // Movies: one fixed teal/green accent for every release type (matches prior "digital" look).
           // TV: fixed orange, independent of app theme — same idea as movies.
           const releaseColor = item.media_type === "movie" ? "border-l-teal-400" : "border-l-orange-400";
@@ -2698,7 +2751,7 @@ function CalendarDayCell(props: {
               key={item.id}
               type="button"
               onClick={(e) => props.onSelectItem(item.id, e)}
-              className={`w-full rounded-md border border-[#424753]/30 border-l-[3px] ${releaseColor} px-2.5 py-2 text-left transition-colors ${
+              className={`w-full rounded-md border border-[#424753]/30 border-l-[3px] ${releaseColor} px-2 py-1.5 text-left transition-colors ${
                 isSelected ? "bg-[#2a3344]" : "bg-[#252c38]/80 hover:bg-[#2a3344]"
               }`}
             >
@@ -2711,9 +2764,11 @@ function CalendarDayCell(props: {
                   {item.media_type === "movie" ? "movie" : "tv"}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-semibold leading-snug text-white" title={item.title}>{item.title}</div>
-                  {item.subtitle ? <div className="mt-0.5 text-[10px] leading-snug text-slate-400">{item.subtitle}</div> : null}
-                  {metaBits.length ? <div className="mt-1 text-[10px] leading-snug text-slate-500">{metaBits.map((bit) => bit.value).join(" • ")}</div> : null}
+                  <div className="text-[11.5px] font-semibold leading-snug text-white" title={item.title}>{item.title}</div>
+                  {item.media_type === "episode" && item.subtitle ? (
+                    <div className="mt-0.5 text-[10px] leading-snug text-slate-400">{item.subtitle}</div>
+                  ) : null}
+                  {metaBits.length ? <div className="mt-0.5 text-[10px] leading-snug text-slate-500">{metaBits.map((bit) => bit.value).join(" • ")}</div> : null}
                 </div>
               </div>
             </button>
@@ -4958,7 +5013,7 @@ function formatCalendarSpotlightMeta(item: CalendarDay["items"][number]): Array<
   if (item.media_type === "movie" && item.release_type_label) {
     bits.push({
       label: "Release",
-      value: item.release_type_label + (item.release_type_preferred ? "" : " fallback"),
+      value: item.release_type_label,
     });
   }
   if (typeof item.days_until === "number") {
@@ -4992,43 +5047,12 @@ function collectEpisodesForCalendarDay(
 }
 
 function formatCalendarItemMeta(item: CalendarDay["items"][number]) {
-  const bits: Array<{ label: string; value: string }> = [
-    { label: "Date", value: formatShortDate(item.release_date) },
-  ];
-
-  if (item.release_type_label) {
-    bits.push({ label: "Release", value: item.release_type_label + (item.release_type_preferred ? "" : " fallback") });
+  const bits: Array<{ label: string; value: string }> = [];
+  // Keep day-cell cards intentionally lean: movie cards show only release type.
+  if (item.media_type === "movie" && item.release_type_label) {
+    bits.push({ label: "Release", value: item.release_type_label });
   }
-  if (typeof item.days_until === "number") {
-    const relative = item.days_until === 0
-      ? "Today"
-      : item.days_until === 1
-        ? "1 day"
-        : `${item.days_until} days`;
-    bits.push({ label: "Countdown", value: relative });
-  }
-  if (item.reason) {
-    bits.push({ label: "Reason", value: item.reason });
-  }
-  if (item.status) {
-    bits.push({ label: "Status", value: item.status });
-  }
-
   return bits;
-}
-
-function formatShortDate(iso: string) {
-  // Handle date-only strings (YYYY-MM-DD) as local dates to avoid timezone shifts
-  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-    const [y, m, d] = iso.split("-").map(Number);
-    const date = new Date(y, m - 1, d);
-    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  }
-
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 async function loadStats(stopped: boolean, setStats: (s: StatsResponse) => void) {

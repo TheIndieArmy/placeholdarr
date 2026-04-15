@@ -53,13 +53,23 @@ export interface ActivityRow {
       line?: string;
       arr_percent?: number | null;
     }>;
+    /** Grouped event rows (collapsed summary expands to per-event lines). */
+    grouped_events?: Array<{
+      id?: number | string;
+      display_name?: string;
+      status?: string;
+      source?: string | null;
+      details?: string | null;
+      error?: string | null;
+      time?: string | null;
+    }>;
   };
 }
 
 export interface PlaceholderActivityRow {
   id: number;
   type: "placeholder";
-  action: "Created" | "Deleted";
+  action: "Created" | "Deleted" | "Status";
   item_type: "movie" | "episode";
   item_title: string;
   series_title?: string | null;

@@ -326,6 +326,36 @@ def jellyfin_search_items(params: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
+def jellyfin_get_item_fields(item_id: str, fields: str = "ProviderIds,Name,ProductionYear") -> dict[str, Any] | None:
+    """Fetch one Jellyfin item payload by id for identity validation."""
+    if not getattr(settings, "jellyfin_enabled", False):
+        return None
+    target = str(item_id or "").strip()
+    if not target:
+        return None
+    sess = _session()
+    try:
+        uid = _jellyfin_user_id(sess)
+        endpoint = _build_url(f"Users/{uid}/Items/{target}" if uid else f"Items/{target}")
+        resp = sess.get(endpoint, params={"Fields": fields}, timeout=15)
+        if uid and resp.status_code in (401, 403, 404):
+            _invalidate_jellyfin_user_id_cache()
+            uid = _jellyfin_user_id(sess)
+            if uid:
+                resp = sess.get(_build_url(f"Users/{uid}/Items/{target}"), params={"Fields": fields}, timeout=15)
+        if resp.status_code == 200:
+            body = resp.json() or {}
+            return body if isinstance(body, dict) else None
+        # fallback to global route
+        resp2 = sess.get(_build_url(f"Items/{target}"), params={"Fields": fields}, timeout=15)
+        if resp2.status_code == 200:
+            body = resp2.json() or {}
+            return body if isinstance(body, dict) else None
+    except Exception as ex:
+        logger.debug(f"Jellyfin get item failed item_id={target}: {ex}", extra={"emoji_type": "debug"})
+    return None
+
+
 def _jellyfin_user_id(sess: requests.Session) -> str | None:
     global _JELLYFIN_USER_ID_CACHE
     if _JELLYFIN_USER_ID_CACHE:
@@ -387,16 +417,38 @@ def update_jellyfin_item_text(item_id: str, *, title: str, overview: str) -> boo
             return False
         full["Name"] = str(title or "")
         full["Overview"] = str(overview or "")
-        post = sess.post(_build_url(f"Items/{target}"), json=full, timeout=20)
-        if post.status_code not in (200, 204):
-            minimal = {"Id": target, "Name": full["Name"], "Overview": full["Overview"]}
-            post2 = sess.post(_build_url(f"Items/{target}"), json=minimal, timeout=20)
-            if post2.status_code not in (200, 204):
-                logger.warning(
-                    f"Jellyfin direct update failed item_id={target} status={post.status_code}/{post2.status_code}",
-                    extra={"emoji_type": "warning"},
-                )
+        endpoint = _build_url(f"Items/{target}")
+        minimal = {"Id": target, "Name": full["Name"], "Overview": full["Overview"]}
+
+        attempts: list[tuple[str, int, str]] = []
+
+        def _try(method: str, payload: dict[str, Any]) -> bool:
+            try:
+                if method == "PUT":
+                    resp = sess.put(endpoint, json=payload, timeout=20)
+                else:
+                    resp = sess.post(endpoint, json=payload, timeout=20)
+                body = (resp.text or "").replace("\n", " ")[:240]
+                attempts.append((method, int(resp.status_code), body))
+                return resp.status_code in (200, 204)
+            except Exception as ex:
+                attempts.append((method, -1, str(ex)[:240]))
                 return False
+
+        # Match historical test script behavior order with robust fallbacks.
+        ok = (
+            _try("PUT", full)
+            or _try("POST", full)
+            or _try("PUT", minimal)
+            or _try("POST", minimal)
+        )
+        if not ok:
+            compact = " | ".join(f"{m}:{c}:{b!r}" for m, c, b in attempts)
+            logger.warning(
+                f"Jellyfin direct update failed item_id={target} attempts={compact}",
+                extra={"emoji_type": "warning"},
+            )
+            return False
         verify_endpoint = _build_url(f"Users/{uid}/Items/{target}" if uid else f"Items/{target}")
         verify = sess.get(verify_endpoint, params={"Fields": "Overview,Name"}, timeout=15)
         if uid and verify.status_code in (401, 403, 404):
@@ -404,6 +456,10 @@ def update_jellyfin_item_text(item_id: str, *, title: str, overview: str) -> boo
         if verify.status_code == 200:
             latest = verify.json() or {}
             return str(latest.get("Name") or "") == full["Name"] and str(latest.get("Overview") or "") == full["Overview"]
+        logger.info(
+            f"Jellyfin direct update accepted item_id={target} verify_status={verify.status_code}",
+            extra={"emoji_type": "info"},
+        )
         return True
     except Exception as ex:
         logger.warning(f"Jellyfin direct update failed item_id={target}: {ex}", extra={"emoji_type": "warning"})

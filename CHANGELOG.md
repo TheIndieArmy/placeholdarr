@@ -8,6 +8,29 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-04-15
+
+### Added
+- **Internal activity markers**: Added `services/activity_markers.py` to persist authoritative startup and calendar sync timestamps into `EventLog` (`internal_dashboard_startup_source_of_truth`, `internal_dashboard_calendar_date_refresh`) so activity timing survives restarts without fragile log parsing anchors.
+- **Placeholder status history rows**: Added `placeholder_status_changed` event logging from status orchestration and surfaced those transitions in `/api/activity/placeholders` with user-facing status text.
+- **Grouped activity expansion**: Grouped webhook activity rows now carry expandable `grouped_events` details in API payloads and UI rendering.
+- **Queue monitor timeout setting in UI**: Exposed `QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS` in Advanced settings metadata.
+
+### Changed
+- **Jellyfin movie ID resolution (reliability)**: Replaced legacy provider-id query assumptions with documented Jellyfin `GetItems` filters (`SearchTerm`, `IncludeItemTypes`, `Years`, `Fields=ProviderIds,...`) plus exact client-side `ProviderIds` matching, and removed permissive/fuzzy movie fallback paths that could target unrelated items.
+- **Jellyfin cache validation**: Movie/series cached Jellyfin IDs are validated before reuse; mismatches trigger re-resolution instead of persistent wrong-item updates.
+- **Direct player projection logging**: Added per-player outcome lines plus a batch summary (`ProjectionBatchSummary`) so projection behavior is diagnosable per run without requiring deep trace logs.
+- **Queue monitor semantics**: Empty Arr queue no longer clears activity snapshot; UI row now reflects ongoing search monitoring and timeout-driven terminal handling.
+- **Queue monitor terminal behavior**: Searches that never enter queue now timeout to `NOT_FOUND` with user-facing reason `NO QUALIFYING RELEASE FOUND`, and stop active queue-refresh nudging once terminal.
+- **Status naming alignment**: Canonicalized `NOT_FOUND` handling across orchestration, projection, and dashboard humanization to display `NO QUALIFYING RELEASE FOUND`.
+- **Activity history persistence**: Dashboard activity now includes historical internal sync/calendar marker rows (one row per `EventLog` marker) while preserving rich details for the latest startup sync row.
+- **Calendar card density/UI**: Reduced card sizing/padding and removed redundant date/year/countdown metadata; movie cards now emphasize release type and TV cards emphasize episode identity.
+
+### Fixed
+- **Post-restart activity timestamps**: Fixed stale "hours ago" startup/calendar times by preferring DB-backed marker timestamps and hardening log-file fallback selection.
+- **Lite sync details regression**: Restored rich lite/full sync stats on the latest run while still showing historical rows.
+- **Jellyfin/Emby direct update method handling**: Hardened direct item text update attempts with method/payload fallback order and clearer failure diagnostics.
+
 ## [0.9.0] - 2026-04-14
 
 ### Added

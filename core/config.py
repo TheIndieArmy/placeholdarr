@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     # Job queue / batching
     ENABLE_QUEUE_MONITOR: bool = os.getenv("ENABLE_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"
     QUEUE_MONITOR_RETRY_GRACE_SECONDS: int = int(os.getenv("QUEUE_MONITOR_RETRY_GRACE_SECONDS", "300").split('#')[0].strip())
+    # Max seconds in SEARCHING with no Arr /queue row before NOT_FOUND (stops ARR refresh nudges).
+    QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS: int = int(
+        os.getenv("QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS", "120").split("#")[0].strip()
+    )
     ENABLE_IMPORT_GRACE_ACCELERATED: bool = os.getenv("ENABLE_IMPORT_GRACE_ACCELERATED", "true").split('#')[0].strip().lower() == "true"
     IMPORT_GRACE_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_STEP_SECONDS", "60").split('#')[0].strip())
     IMPORT_GRACE_ACCELERATED_STEP_SECONDS: int = int(os.getenv("IMPORT_GRACE_ACCELERATED_STEP_SECONDS", "5").split('#')[0].strip())

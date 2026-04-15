@@ -22,7 +22,12 @@ from services.placeholders import (
 )
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
-from services.source_of_truth.determiner import DETERMINATION_NEEDS, DETERMINATION_OBSOLETE
+from services.source_of_truth.determiner import (
+    DETERMINATION_EXISTS,
+    DETERMINATION_NEEDS,
+    DETERMINATION_NOT_NEEDED,
+    DETERMINATION_OBSOLETE,
+)
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
@@ -355,7 +360,15 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             if placeholder_row:
                 _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
-            
+
+            # Persist canonical determination so the next materialization pass does not
+            # re-select this row while determination==needs_placeholder (already fixed in DB).
+            if bool(getattr(movie, "has_file", False)) or bool(getattr(movie, "is_deleted", False)):
+                movie.determination = DETERMINATION_NOT_NEEDED
+            else:
+                movie.determination = DETERMINATION_EXISTS
+            movie.determination_updated_at = func.now()
+
             session.add(movie)
             if owns_session:
                 session.commit()
@@ -465,7 +478,13 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             if placeholder_row:
                 _apply_initial_status_for_placeholder(session, placeholder_id=placeholder_row.id, event_type="creation")
             placeholder_id = int(placeholder_row.id) if placeholder_row and getattr(placeholder_row, "id", None) else None
-            
+
+            if bool(getattr(episode, "has_file", False)) or bool(getattr(episode, "is_deleted", False)):
+                episode.determination = DETERMINATION_NOT_NEEDED
+            else:
+                episode.determination = DETERMINATION_EXISTS
+            episode.determination_updated_at = func.now()
+
             session.add(episode)
             if owns_session:
                 session.commit()

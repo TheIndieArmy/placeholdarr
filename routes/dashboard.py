@@ -18,6 +18,7 @@ from sqlalchemy import and_, case, func, or_, text
 from core.config import settings
 from core.logger import logger
 from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
+from services.activity_markers import EVENT_CALENDAR_DATE_REFRESH, EVENT_STARTUP_SOURCE_OF_TRUTH
 from services.activity_snapshot import get_queue_download_activity_row
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
@@ -628,6 +629,7 @@ def _humanize_placeholder_status(status: str | None) -> str:
         "pending_observation": "Awaiting Confirmation",
         "resolved": "Resolved",
         "unresolved": "Unresolved",
+        "not_found": "NO QUALIFYING RELEASE FOUND",
     }
     normalized = str(status or "").strip().lower()
     if not normalized:
@@ -656,6 +658,9 @@ def _humanize_placeholder_reason(reason: str | None, *, action: str | None = Non
 
 def _is_user_relevant_event(event_type: str) -> bool:
     """Return True if event is user-relevant; hide noisy internal events."""
+    et = str(event_type or "").strip().lower()
+    if et.startswith("internal_dashboard_"):
+        return False
     hidden_types = {
         "queue_monitor",
         "api_connectivity",
@@ -669,8 +674,9 @@ def _is_user_relevant_event(event_type: str) -> bool:
         "unknown",
         "playback_start",
         "playback_stop",
+        "placeholder_status_changed",
     }
-    return str(event_type or "").strip().lower() not in hidden_types
+    return et not in hidden_types
 
 
 def _is_user_relevant_job(job_type: str, status: str | None = None) -> bool:
@@ -1053,12 +1059,183 @@ def _build_sync_placeholder_rows(session, sync_job: dict[str, Any]) -> list[dict
     return result
 
 
+_LOG_TS_HEAD = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?P<ms>,\d{1,6})?",
+)
+
+
 def _extract_log_timestamp(line: str) -> datetime | None:
-    token = str(line or "")[:23]
+    """Parse leading logging ``asctime`` (with optional millisecond comma group)."""
+    raw = str(line or "").lstrip("\ufeff")
+    m = _LOG_TS_HEAD.match(raw)
+    if not m:
+        return None
+    base = m.group("ts")
+    ms = m.group("ms")
+    if ms:
+        frac = ms[1:].ljust(6, "0")[:6]
+        try:
+            return datetime.strptime(f"{base},{frac}", "%Y-%m-%d %H:%M:%S,%f").replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
     try:
-        return datetime.strptime(token, "%Y-%m-%d %H:%M:%S,%f").replace(tzinfo=timezone.utc)
+        return datetime.strptime(base, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _fetch_latest_startup_activity_payload(session) -> dict[str, Any] | None:
+    row = (
+        session.query(EventLog.payload)
+        .filter(EventLog.event_type == EVENT_STARTUP_SOURCE_OF_TRUTH)
+        .order_by(EventLog.id.desc())
+        .limit(1)
+        .first()
+    )
+    if not row or not isinstance(row[0], dict):
+        return None
+    return row[0]
+
+
+def _fetch_latest_calendar_activity_payload(session) -> dict[str, Any] | None:
+    row = (
+        session.query(EventLog.payload)
+        .filter(EventLog.event_type == EVENT_CALENDAR_DATE_REFRESH)
+        .order_by(EventLog.id.desc())
+        .limit(1)
+        .first()
+    )
+    if not row or not isinstance(row[0], dict):
+        return None
+    return row[0]
+
+
+def _build_internal_sync_marker_rows(session, *, per_type_limit: int = 10) -> list[dict[str, Any]]:
+    """Build historical activity rows from internal marker events (one row per EventLog id)."""
+    marker_rows: list[dict[str, Any]] = []
+
+    startup_events = (
+        session.query(EventLog.id, EventLog.payload, EventLog.created_at)
+        .filter(EventLog.event_type == EVENT_STARTUP_SOURCE_OF_TRUTH)
+        .order_by(EventLog.id.desc())
+        .limit(max(1, int(per_type_limit)))
+        .all()
+    )
+    for ev in startup_events:
+        payload = ev.payload if isinstance(ev.payload, dict) else {}
+        mode = str(payload.get("mode") or "").strip().lower()
+        started_at = _parse_iso_datetime(payload.get("started_at"))
+        completed_at = _parse_iso_datetime(payload.get("completed_at"))
+        is_lite = mode == "lite"
+        marker_rows.append(
+            {
+                "id": f"marker-startup-{ev.id}",
+                "type": "job",
+                "job_type": "lite_sync_progress" if is_lite else "full_sync_progress",
+                "display_name": "Lite Sync Progress" if is_lite else "Full Sync Progress",
+                "status": "DONE",
+                "details": f"Startup source-of-truth run • Mode {mode or 'auto'}",
+                "time": (
+                    started_at.isoformat()
+                    if started_at
+                    else (ev.created_at.isoformat() if ev.created_at else None)
+                ),
+                "progress": {
+                    "running": False,
+                    "sections": [
+                        {
+                            "name": "Run",
+                            "status": "done",
+                            "metrics": [
+                                {"label": "Mode", "value": mode or "--"},
+                                {"label": "Started", "value": started_at.isoformat() if started_at else "--"},
+                                {"label": "Completed", "value": completed_at.isoformat() if completed_at else "--"},
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+    calendar_events = (
+        session.query(EventLog.id, EventLog.payload, EventLog.created_at)
+        .filter(EventLog.event_type == EVENT_CALENDAR_DATE_REFRESH)
+        .order_by(EventLog.id.desc())
+        .limit(max(1, int(per_type_limit)))
+        .all()
+    )
+    for ev in calendar_events:
+        payload = ev.payload if isinstance(ev.payload, dict) else {}
+        started_at = _parse_iso_datetime(payload.get("started_at"))
+        completed_at = _parse_iso_datetime(payload.get("completed_at"))
+        errors = int(payload.get("errors", 0) or 0)
+        status = "FAILED" if errors > 0 else "DONE"
+        marker_rows.append(
+            {
+                "id": f"marker-calendar-{ev.id}",
+                "type": "job",
+                "job_type": "calendar_sync_progress",
+                "display_name": "Calendar Sync",
+                "status": status,
+                "details": (
+                    f"Window {payload.get('start_date', '--')} to {payload.get('end_date', '--')} • "
+                    f"Movies updated {int(payload.get('movie_rows_updated', 0) or 0)} • "
+                    f"Episodes updated {int(payload.get('episode_rows_updated', 0) or 0)}"
+                ),
+                "time": (
+                    started_at.isoformat()
+                    if started_at
+                    else (ev.created_at.isoformat() if ev.created_at else None)
+                ),
+                "progress": {
+                    "running": False,
+                    "sections": [
+                        {
+                            "name": "Calendar Window",
+                            "status": "done" if status != "FAILED" else "failed",
+                            "metrics": [
+                                {"label": "Lookahead start", "value": str(payload.get("start_date") or "--")},
+                                {"label": "Lookahead end", "value": str(payload.get("end_date") or "--")},
+                                {"label": "Completed", "value": completed_at.isoformat() if completed_at else "--"},
+                            ],
+                        },
+                        {
+                            "name": "Date Refresh Stats",
+                            "status": "done" if status != "FAILED" else "failed",
+                            "metrics": [
+                                {"label": "Movie rows seen", "value": int(payload.get("movie_rows_seen", 0) or 0)},
+                                {"label": "Movie rows updated", "value": int(payload.get("movie_rows_updated", 0) or 0)},
+                                {"label": "Episode rows seen", "value": int(payload.get("episode_rows_seen", 0) or 0)},
+                                {"label": "Episode rows updated", "value": int(payload.get("episode_rows_updated", 0) or 0)},
+                                {"label": "Errors", "value": errors},
+                            ],
+                        },
+                    ],
+                },
+            }
+        )
+
+    return marker_rows
+
+
+def _find_last_startup_mode_line_index(lines: list[str], mode: str) -> int | None:
+    token = f"Startup sync mode selected: {str(mode or '').strip().lower()}"
+    for idx in range(len(lines) - 1, -1, -1):
+        if token in str(lines[idx] or "").lower():
+            return idx
+    return None
 
 
 def _runtime_log_dir() -> str:
@@ -1073,6 +1250,12 @@ def _runtime_log_dir() -> str:
 
 
 def _latest_runtime_log_file() -> str | None:
+    """Newest ``placeholdarr-*.log`` by modification time that has any content.
+
+    Do not require a minimum size: right after restart the active log is often small
+    while older rotated files are large; skipping the new file made lite/calendar
+    activity rows parse stale lines and show incorrect \"hours ago\" times.
+    """
     pattern = os.path.join(_runtime_log_dir(), "placeholdarr-*.log")
     log_files = _glob.glob(pattern)
     if not log_files:
@@ -1080,9 +1263,9 @@ def _latest_runtime_log_file() -> str | None:
     by_mtime = sorted(log_files, key=lambda p: os.path.getmtime(p), reverse=True)
     for path in by_mtime:
         try:
-            if os.path.getsize(path) >= 2048:
+            if os.path.getsize(path) > 0:
                 return path
-        except Exception:
+        except OSError:
             continue
     return by_mtime[0]
 
@@ -1110,7 +1293,15 @@ def _latest_startup_sync_anchor(lines: list[str]) -> tuple[int | None, str]:
     return mode_idx, mode
 
 
-def _build_startup_sync_progress_row() -> dict[str, Any] | None:
+def _build_startup_sync_progress_row(session) -> dict[str, Any] | None:
+    """Build startup / lite sync activity row.
+
+    **When** time prefers, in order:
+    1. Latest ``internal_dashboard_startup_source_of_truth`` EventLog ``payload.started_at`` (DB).
+    2. Timestamp on the ``Startup sync mode selected:`` line (legacy log fallback).
+
+    Section metrics are still parsed from log lines after the resolved scope anchor.
+    """
     log_file = _latest_runtime_log_file()
     if not log_file:
         return None
@@ -1124,9 +1315,18 @@ def _build_startup_sync_progress_row() -> dict[str, Any] | None:
     if not lines:
         return None
 
-    anchor_idx, startup_mode = _latest_startup_sync_anchor(lines)
-    if anchor_idx is None:
-        return None
+    marker = _fetch_latest_startup_activity_payload(session)
+    display_time: datetime | None = _parse_iso_datetime(marker.get("started_at")) if marker else None
+
+    if marker:
+        startup_mode = str(marker.get("mode") or "unknown").strip().lower() or "unknown"
+        anchor_idx = _find_last_startup_mode_line_index(lines, startup_mode)
+        if anchor_idx is None:
+            anchor_idx = max(0, len(lines) - 8000)
+    else:
+        anchor_idx, startup_mode = _latest_startup_sync_anchor(lines)
+        if anchor_idx is None:
+            return None
     scoped_lines = lines[anchor_idx:]
 
     series_total = 0
@@ -1379,14 +1579,14 @@ def _build_startup_sync_progress_row() -> dict[str, Any] | None:
     row_id_prefix = "lite-sync-progress" if startup_mode == "lite" else "full-sync-progress"
     row_id = f"{row_id_prefix}-{run_timestamp}" if run_timestamp else row_id_prefix
 
-    log_mtime_dt: datetime | None = None
-    try:
-        log_mtime_dt = datetime.fromtimestamp(os.path.getmtime(log_file), tz=timezone.utc)
-    except Exception:
-        log_mtime_dt = None
-
-    display_times = [t for t in (last_time, log_mtime_dt) if isinstance(t, datetime)]
-    display_time = max(display_times) if display_times else log_mtime_dt
+    if display_time is None and anchor_idx is not None and anchor_idx < len(lines):
+        display_time = _extract_log_timestamp(lines[anchor_idx])
+    if display_time is None and anchor_idx is not None:
+        for scan_idx in range(anchor_idx, min(len(lines), anchor_idx + 400)):
+            t = _extract_log_timestamp(lines[scan_idx])
+            if t is not None:
+                display_time = t
+                break
 
     return {
         "id": row_id,
@@ -1404,35 +1604,55 @@ def _build_startup_sync_progress_row() -> dict[str, Any] | None:
     }
 
 
-def _build_calendar_sync_row() -> dict[str, Any] | None:
-    log_file = _latest_runtime_log_file()
-    if not log_file:
-        return None
-    try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.readlines()
-    except Exception:
-        return None
-
-    pattern = re.compile(r"Calendar date refresh complete:\s*(\{.*\})")
+def _build_calendar_sync_row(session) -> dict[str, Any] | None:
+    """Calendar sync row; **When** prefers DB marker ``started_at``, else log pairing (started/complete)."""
+    marker = _fetch_latest_calendar_activity_payload(session)
     latest: dict[str, Any] | None = None
-    latest_ts: datetime | None = None
-    for raw in lines:
-        line = str(raw or "")
-        match = pattern.search(line)
-        if not match:
-            continue
-        parsed = _parse_metrics_dict(match.group(1))
-        if not parsed:
-            continue
-        latest = parsed
-        latest_ts = _extract_log_timestamp(line)
+    row_ts: datetime | None = None
+    if marker:
+        candidate = {k: v for k, v in marker.items() if k not in {"started_at", "completed_at"}}
+        if candidate.get("start_date"):
+            latest = candidate
+            row_ts = _parse_iso_datetime(marker.get("started_at")) or _parse_iso_datetime(marker.get("completed_at"))
+
+    log_file = _latest_runtime_log_file()
+    lines: list[str] = []
+    if log_file:
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+        except Exception:
+            lines = []
+
+    re_started = re.compile(r"Calendar date refresh started:\s*start_date=(\S+)\s+end_date=(\S+)", re.IGNORECASE)
+    re_complete = re.compile(r"Calendar date refresh complete:\s*(\{.*\})")
+    triggered_at: datetime | None = None
+    complete_at: datetime | None = None
+    last_started_at: datetime | None = None
+    if latest is None:
+        for raw in lines:
+            line = str(raw or "")
+            ts = _extract_log_timestamp(line)
+            if re_started.search(line) and ts is not None:
+                last_started_at = ts
+            match = re_complete.search(line)
+            if not match:
+                continue
+            parsed = _parse_metrics_dict(match.group(1))
+            if not parsed:
+                continue
+            latest = parsed
+            complete_at = ts
+            triggered_at = last_started_at or complete_at
     if not latest:
         return None
 
+    if row_ts is None:
+        row_ts = triggered_at or complete_at
+
     status = "FAILED" if int(latest.get("errors", 0) or 0) > 0 else "DONE"
     return {
-        "id": f"calendar-sync-{latest_ts.isoformat() if latest_ts else 'latest'}",
+        "id": f"calendar-sync-{row_ts.isoformat() if row_ts else 'latest'}",
         "type": "job",
         "job_type": "calendar_sync_progress",
         "display_name": "Calendar Sync",
@@ -1442,7 +1662,7 @@ def _build_calendar_sync_row() -> dict[str, Any] | None:
             f"Movies updated {int(latest.get('movie_rows_updated', 0) or 0)} • "
             f"Episodes updated {int(latest.get('episode_rows_updated', 0) or 0)}"
         ),
-        "time": latest_ts.isoformat() if latest_ts else None,
+        "time": row_ts.isoformat() if row_ts else None,
         "progress": {
             "running": False,
             "sections": [
@@ -1466,7 +1686,7 @@ def _build_calendar_sync_row() -> dict[str, Any] | None:
                     ],
                 },
             ],
-            "log_file": os.path.basename(log_file),
+            "log_file": os.path.basename(log_file) if log_file else None,
         },
     }
 
@@ -1514,6 +1734,20 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
                 latest = entry.get("latest")
                 if e.created_at and (not latest or e.created_at > latest):
                     entry["latest"] = e.created_at
+                grouped_items = entry.setdefault("items", [])
+                if isinstance(grouped_items, list) and len(grouped_items) < 25:
+                    payload_dict = e.payload if isinstance(e.payload, dict) else {}
+                    grouped_items.append(
+                        {
+                            "id": e.id,
+                            "display_name": _humanize_event_type(e.event_type),
+                            "status": str(e.status or "DONE"),
+                            "source": e.source,
+                            "error": e.error_message,
+                            "details": _activity_details_for_event(e.event_type, payload_dict),
+                            "time": e.created_at.isoformat() if e.created_at else None,
+                        }
+                    )
                 continue
             row_data = {
                 "id": e.id,
@@ -1554,17 +1788,8 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
             display_name = _humanize_event_type(event_type)
             if failed > 0:
                 display_name = f"[Failed] {display_name}"
-            sample_payload = None
-            for e in events:
-                if str(e.event_type or "").strip().lower() != event_type:
-                    continue
-                if isinstance(e.payload, dict):
-                    sample_payload = e.payload
-                    break
-            grouped_detail = _activity_details_for_event(event_type, sample_payload) if sample_payload else None
             group_details = f"Grouped {count} similar events • Failures {failed}"
-            if grouped_detail:
-                group_details = f"{grouped_detail} • {group_details}"
+            grouped_items = info.get("items") if isinstance(info, dict) else []
             event_list.append(
                 {
                     "id": f"group:{event_type}",
@@ -1574,6 +1799,9 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
                     "status": "FAILED" if failed > 0 else "DONE",
                     "details": group_details,
                     "time": latest.isoformat() if latest else None,
+                    "progress": {
+                        "grouped_events": grouped_items if isinstance(grouped_items, list) else [],
+                    },
                 }
             )
 
@@ -1685,10 +1913,24 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
                 )
             )
 
-        sync_progress_row = _build_startup_sync_progress_row()
-        calendar_sync_row = _build_calendar_sync_row()
+        marker_rows = _build_internal_sync_marker_rows(session, per_type_limit=min(20, max(5, limit)))
+        # Keep the rich "latest run" cards (with prior detailed sections),
+        # and use marker rows for historical runs beneath them.
+        sync_progress_row = _build_startup_sync_progress_row(session)
+        calendar_sync_row = _build_calendar_sync_row(session)
+
+        if sync_progress_row is not None:
+            for idx, row in enumerate(marker_rows):
+                if str(row.get("job_type") or "") in {"lite_sync_progress", "full_sync_progress"}:
+                    marker_rows.pop(idx)
+                    break
+        if calendar_sync_row is not None:
+            for idx, row in enumerate(marker_rows):
+                if str(row.get("job_type") or "") == "calendar_sync_progress":
+                    marker_rows.pop(idx)
+                    break
         queue_activity_row = get_queue_download_activity_row()
-        extra_rows = [r for r in (sync_progress_row, calendar_sync_row, queue_activity_row) if r]
+        extra_rows = marker_rows + [r for r in (sync_progress_row, calendar_sync_row, queue_activity_row) if r]
 
         # Merge and sort by time descending: show recent + high-priority (failures)
         combined = sorted(event_list + job_list + extra_rows, key=lambda x: x.get("time") or "", reverse=True)
@@ -1735,7 +1977,7 @@ async def activity(limit: int = Query(50, ge=1, le=200)):
 
 @router.get("/api/activity/placeholders")
 async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
-    """Return placeholder timeline (created/deleted) with humanized context."""
+    """Return placeholder timeline (created/deleted/status) with humanized context."""
     session = get_session()
     try:
         # Pull a larger window, then derive up to two timeline events per row.
@@ -1745,6 +1987,7 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
          .all()
 
         activity_list = []
+        placeholder_rows_by_id: dict[int, Placeholder] = {int(ph.id): ph for ph in placeholders if getattr(ph, "id", None) is not None}
         for ph in placeholders:
             # Resolve title context once for both create/delete events.
             movie = session.query(Movie).filter(Movie.id == ph.movie_id).first() if ph.movie_id else None
@@ -1819,6 +2062,72 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
                     "status": _humanize_placeholder_status(ph.lifecycle_status),
                     "time": updated_at.isoformat(),
                 })
+
+        # Status transition trail from orchestrator-applied intents.
+        status_events = (
+            session.query(
+                EventLog.id,
+                EventLog.payload,
+                EventLog.source,
+                EventLog.created_at,
+            )
+            .filter(EventLog.event_type == "placeholder_status_changed")
+            .order_by(EventLog.created_at.desc())
+            .limit(limit * 6)
+            .all()
+        )
+        for ev in status_events:
+            payload = ev.payload if isinstance(ev.payload, dict) else {}
+            try:
+                ph_id = int(payload.get("placeholder_id"))
+            except Exception:
+                continue
+
+            ph = placeholder_rows_by_id.get(ph_id)
+            movie = session.query(Movie).filter(Movie.id == ph.movie_id).first() if ph and ph.movie_id else None
+            episode = session.query(Episode).filter(Episode.id == ph.episode_id).first() if ph and ph.episode_id else None
+            series = session.query(Series).filter(Series.id == ph.series_id).first() if ph and ph.series_id else None
+            if episode and not series and hasattr(episode, "series_id") and episode.series_id:
+                series = session.query(Series).filter(Series.id == episode.series_id).first()
+
+            item_type = "movie" if (ph and ph.movie_id) else "episode"
+            if item_type == "movie":
+                item_title = movie.title if movie else "Unknown Movie"
+                series_title = None
+            else:
+                if episode:
+                    season_num = getattr(episode, "season_number", 0) or 0
+                    ep_num = getattr(episode, "episode_number", 0) or 0
+                    ep_title = getattr(episode, "title", "Unknown") or "Unknown"
+                    item_title = f"S{season_num:02d}E{ep_num:02d} - {ep_title}"
+                else:
+                    item_title = "Unknown Episode"
+                series_title = series.title if series else None
+
+            new_status = str(payload.get("new_status") or "").strip()
+            old_status = str(payload.get("old_status") or "").strip()
+            reason = str(payload.get("reason") or "").strip()
+            source = str(ev.source or "").strip()
+            detail = f"{old_status or '--'} → {new_status or '--'}"
+            if reason:
+                detail = f"{detail} • {reason}"
+            if source:
+                detail = f"{detail} • {source}"
+
+            activity_list.append(
+                {
+                    "id": ph_id,
+                    "type": "placeholder",
+                    "action": "Status",
+                    "item_type": item_type,
+                    "item_title": item_title,
+                    "series_title": series_title,
+                    "path": getattr(ph, "path", None) if ph is not None else None,
+                    "reason": detail,
+                    "status": _humanize_placeholder_status(new_status or (ph.display_status if ph is not None else None)),
+                    "time": ev.created_at.isoformat() if ev.created_at else None,
+                }
+            )
 
         # If a single-row lifecycle never changed, avoid duplicate created/deleted timestamps.
         deduped = []
@@ -2504,37 +2813,9 @@ async def logs(
     level: str = Query("all"),
 ):
     """Tail the current log file. Optionally filter by level threshold (all/debug/info/warn/error/critical)."""
-    from core.config import settings
-
-    # Resolve log directory the same way logger.py does
-    explicit_file = str(getattr(settings, "LOG_FILE", "") or "").strip()
-    if explicit_file:
-        log_dir = os.path.dirname(explicit_file) or "."
-    else:
-        explicit_dir = str(getattr(settings, "LOG_DIR", "") or "").strip()
-        if explicit_dir:
-            log_dir = explicit_dir
-        else:
-            appdata = str(getattr(settings, "APPDATA_PATH", "/config") or "/config").strip() or "/config"
-            log_dir = os.path.join(appdata, "logs")
-
-    # Find the latest non-trivial log file.
-    # Filename sort can pick the wrong file when multiple runs exist, and
-    # very small run files can be from short utility imports.
-    pattern = os.path.join(log_dir, "placeholdarr-*.log")
-    log_files = _glob.glob(pattern)
-    if not log_files:
+    log_file = _latest_runtime_log_file()
+    if not log_file:
         return {"lines": [], "file": None}
-
-    by_mtime = sorted(log_files, key=lambda p: os.path.getmtime(p), reverse=True)
-    log_file = by_mtime[0]
-    for candidate in by_mtime:
-        try:
-            if os.path.getsize(candidate) >= 2048:
-                log_file = candidate
-                break
-        except Exception:
-            continue
 
     # Read last N lines efficiently
     try:

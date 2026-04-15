@@ -505,6 +505,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS",
+            {
+                "section": "Advanced",
+                "label": "Queue monitor search timeout (seconds)",
+                "description": (
+                    "While a placeholder is SEARCHING but never appears in Radarr/Sonarr /queue, wait at most "
+                    "this long before setting status NOT_FOUND and stopping queue-monitor ARR refresh for that item. "
+                    "Default 120 (2 minutes)."
+                ),
+                "type": "int",
+                "min": 60,
+                "restart_required": True,
+            },
+        ),
+        (
             "WORKER_COUNT",
             {
                 "section": "Advanced",

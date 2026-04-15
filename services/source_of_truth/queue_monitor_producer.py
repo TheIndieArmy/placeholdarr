@@ -9,6 +9,8 @@ import requests
 
 from core.config import settings
 from core.logger import logger
+from sqlalchemy.orm.attributes import flag_modified
+
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
@@ -25,7 +27,7 @@ ACTIVE_QUEUE_STATUSES = {
     DisplayStatus.DOWNLOADING.value,
     DisplayStatus.IMPORT_IN_PROGRESS.value,
     "RETRYING",
-    "ERROR",
+    # NOT_FOUND is terminal for queue-monitor purposes; do not keep polling/nudging ARR.
 }
 
 
@@ -46,6 +48,15 @@ def _from_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _should_emit_wait_log(qm: dict[str, Any], key: str, now: datetime, *, period_seconds: int = 60) -> bool:
+    """Rate-limit wait-state logs by storing last-emitted timestamp in placeholder.extra."""
+    last = _from_iso(qm.get(key))
+    if last is None or (now - last).total_seconds() >= float(max(1, period_seconds)):
+        qm[key] = _to_iso(now)
+        return True
+    return False
 
 
 def _collect_queue_monitor_poll_context(session):
@@ -268,6 +279,10 @@ class QueueMonitorProducer:
             poll_override if poll_override > 0 else int(getattr(settings, "CHECK_INTERVAL", 10) or 10),
         )
         self._retry_grace_seconds = max(30, int(getattr(settings, "QUEUE_MONITOR_RETRY_GRACE_SECONDS", 300) or 300))
+        self._search_timeout_seconds = max(
+            60,
+            int(getattr(settings, "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS", 120) or 120),
+        )
         self._arr_refresh_interval = max(
             0,
             int(getattr(settings, "QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS", 0) or 0),
@@ -291,7 +306,8 @@ class QueueMonitorProducer:
         logger.info(
             f"Queue monitor producer started poll_interval={self._poll_interval}s "
             f"(CHECK_INTERVAL={getattr(settings, 'CHECK_INTERVAL', 10)}) "
-            f"retry_grace={self._retry_grace_seconds}s{refresh_note}",
+            f"retry_grace={self._retry_grace_seconds}s "
+            f"search_timeout={self._search_timeout_seconds}s{refresh_note}",
             extra={"emoji_type": "gear"},
         )
 
@@ -479,6 +495,9 @@ class QueueMonitorProducer:
             tracked_state = str(queue_item.get("trackedDownloadState", "") or "").strip().lower()
             qm["seen_queue_once"] = True
             qm["left_queue_at"] = None
+            qm["empty_queue_search_started_at"] = None
+            qm["search_wait_last_log_at"] = None
+            qm["left_queue_wait_last_log_at"] = None
             qm["last_seen_in_queue_at"] = _to_iso(now)
             qm["last_queue_status"] = queue_status
             qm["last_tracked_state"] = tracked_state
@@ -530,17 +549,60 @@ class QueueMonitorProducer:
                     target_status = "RETRYING"
                     target_reason = "Retrying; waiting for another qualifying release"
                     target_progress = None
+                    if _should_emit_wait_log(qm, "left_queue_wait_last_log_at", now, period_seconds=60):
+                        remaining = max(0, int(self._retry_grace_seconds - elapsed))
+                        logger.info(
+                            "Queue monitor waiting after queue exit: "
+                            f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                            f"elapsed={int(elapsed)}s remaining={remaining}s status={target_status}",
+                            extra={"emoji_type": "info"},
+                        )
                 else:
-                    target_status = "ERROR"
-                    target_reason = "Error, qualifying release not found"
+                    target_status = DisplayStatus.NOT_FOUND.value
+                    target_reason = "NO QUALIFYING RELEASE FOUND"
                     target_progress = None
+                    qm["left_queue_wait_last_log_at"] = None
+                    logger.info(
+                        "Queue monitor terminal status reached after queue exit grace: "
+                        f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                        f"elapsed={int(elapsed)}s grace={self._retry_grace_seconds}s "
+                        f"status={target_status} reason={target_reason}",
+                        extra={"emoji_type": "warning"},
+                    )
             else:
-                target_status = DisplayStatus.SEARCHING.value
-                target_reason = "Searching for release"
-                target_progress = None
+                search_start = _from_iso(qm.get("empty_queue_search_started_at"))
+                if not search_start:
+                    search_start = now
+                    qm["empty_queue_search_started_at"] = _to_iso(search_start)
+                elapsed_search = (now - search_start).total_seconds() if search_start else 0.0
+                if elapsed_search >= float(self._search_timeout_seconds):
+                    target_status = DisplayStatus.NOT_FOUND.value
+                    target_reason = "NO QUALIFYING RELEASE FOUND"
+                    qm["empty_queue_search_started_at"] = None
+                    qm["search_wait_last_log_at"] = None
+                    logger.info(
+                        "Queue monitor search timeout reached before queue entry: "
+                        f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                        f"elapsed={int(elapsed_search)}s timeout={self._search_timeout_seconds}s "
+                        f"status={target_status} reason={target_reason}",
+                        extra={"emoji_type": "warning"},
+                    )
+                else:
+                    target_status = DisplayStatus.SEARCHING.value
+                    target_reason = "Searching for release"
+                    target_progress = None
+                    if _should_emit_wait_log(qm, "search_wait_last_log_at", now, period_seconds=60):
+                        remaining = max(0, int(float(self._search_timeout_seconds) - elapsed_search))
+                        logger.info(
+                            "Queue monitor searching with no queue entry yet: "
+                            f"placeholder_id={int(getattr(placeholder, 'id', 0) or 0)} "
+                            f"elapsed={int(elapsed_search)}s remaining={remaining}s status={target_status}",
+                            extra={"emoji_type": "info"},
+                        )
 
         extra["queue_monitor"] = qm
         placeholder.extra = extra
+        flag_modified(placeholder, "extra")
 
         status_changed = target_status != current_status
         reason_changed = target_reason != str(getattr(placeholder, "display_reason", "") or "")

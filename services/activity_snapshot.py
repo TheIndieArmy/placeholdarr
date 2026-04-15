@@ -11,12 +11,24 @@ _snapshot: dict[str, Any] | None = None
 
 
 def set_queue_download_snapshot(items: list[dict[str, Any]]) -> None:
-    """Replace the live download-queue snapshot (one batched activity row in the UI)."""
+    """Replace the live queue-monitor snapshot (one batched activity row in the UI).
+
+    An empty ``items`` list is kept so the row does not disappear while Radarr/Sonarr
+    still have no /queue rows during an active search.
+    """
     global _snapshot
+    now = datetime.now(timezone.utc).isoformat()
+    new_items = list(items or [])
     with _snapshot_lock:
+        prev = _snapshot
+        prev_started: str | None = None
+        if isinstance(prev, dict):
+            prev_started = str(prev.get("started_at") or "").strip() or None
+        started_at = prev_started or now
         _snapshot = {
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "items": list(items),
+            "updated_at": now,
+            "started_at": started_at,
+            "items": new_items,
         }
 
 
@@ -31,18 +43,26 @@ def get_queue_download_activity_row() -> dict[str, Any] | None:
     with _snapshot_lock:
         if not _snapshot:
             return None
-        items = _snapshot.get("items") or []
-        if not isinstance(items, list) or not items:
-            return None
-        updated = str(_snapshot.get("updated_at") or "")
+        raw_items = _snapshot.get("items")
+        items = raw_items if isinstance(raw_items, list) else []
+        started = str(_snapshot.get("started_at") or _snapshot.get("updated_at") or "")
         n = len(items)
+        if n == 0:
+            details = (
+                "Monitoring Radarr/Sonarr — queue is empty; indexer search may still be running "
+                "or nothing matched yet"
+            )
+        else:
+            details = (
+                f"{n} title(s) — monitoring search, queue, and import until the real file is in the library"
+            )
         return {
             "id": "queue-monitor-active",
             "type": "job",
             "job_type": "queue_monitor_batch",
-            "display_name": "Active downloads",
+            "display_name": "Active searches",
             "status": "WORKING",
-            "details": f"{n} title(s) — watching Radarr/Sonarr until the real file is imported",
-            "time": updated,
+            "details": details,
+            "time": started,
             "progress": {"running": True, "queue_items": items},
         }

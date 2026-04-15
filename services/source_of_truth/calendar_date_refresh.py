@@ -65,6 +65,12 @@ def run_calendar_date_refresh() -> dict:
         "errors": 0,
     }
 
+    run_started_at = datetime.now(timezone.utc)
+    logger.info(
+        f"Calendar date refresh started: start_date={start_date.isoformat()} end_date={end_date.isoformat()}",
+        extra={"emoji_type": "info"},
+    )
+
     session = get_session()
     try:
         for content_type, base_url, api_key, instance_key, instance_id in _iter_calendar_endpoints():
@@ -131,6 +137,20 @@ def run_calendar_date_refresh() -> dict:
 
         session.commit()
         logger.info(f"Calendar date refresh complete: {stats}", extra={"emoji_type": "success"})
+        try:
+            from services.activity_markers import record_calendar_date_refresh_activity
+
+            record_calendar_date_refresh_activity(
+                started_at=run_started_at,
+                stats=dict(stats),
+                completed_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.debug(
+                "Calendar date refresh activity marker persistence skipped",
+                extra={"emoji_type": "debug"},
+                exc_info=True,
+            )
         return stats
     except Exception as exc:
         session.rollback()

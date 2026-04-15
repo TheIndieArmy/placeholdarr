@@ -41,6 +41,8 @@ class DisplayStatus(Enum):
     SEARCHING = "SEARCHING"                       # Queue monitor: actively searching for media
     DOWNLOADING = "DOWNLOADING"                   # Queue monitor: download in progress
     IMPORT_IN_PROGRESS = "IMPORT_IN_PROGRESS"    # ImportHandler: file being imported to media server
+    # Queue monitor: nothing that Arr would queue appeared in time (same user-facing story as "no match")
+    NOT_FOUND = "NOT_FOUND"
     
     # Resolved states
     AVAILABLE = "AVAILABLE"                       # File exists in media server

@@ -264,6 +264,7 @@ def run_startup_source_of_truth() -> dict:
             f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
             extra={'emoji_type': 'info'},
         )
+        started_at = datetime.now(timezone.utc)
 
         if selected_mode == 'full':
             startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
@@ -291,7 +292,7 @@ def run_startup_source_of_truth() -> dict:
         calendar_stats = run_calendar_phase()
         status_reconcile_stats = {"skipped": True, "reason": "deprecated"}
 
-        return {
+        result = {
             'ran': True,
             'startup_sync_mode': selected_mode,
             'fullsync_ran': selected_mode == 'full' and bool(run_ids),
@@ -309,5 +310,20 @@ def run_startup_source_of_truth() -> dict:
             'calendar': calendar_stats,
             'status_reconcile': status_reconcile_stats,
         }
+        try:
+            from services.activity_markers import record_startup_source_of_truth_activity
+
+            record_startup_source_of_truth_activity(
+                mode=selected_mode,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.debug(
+                "Startup activity marker persistence skipped",
+                extra={'emoji_type': 'debug'},
+                exc_info=True,
+            )
+        return result
     finally:
         settings.REFRESH_TRIGGER_SUPPRESSED = False

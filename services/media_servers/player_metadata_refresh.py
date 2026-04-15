@@ -12,7 +12,11 @@ from typing import Any
 from core.config import settings
 from core.logger import logger
 from services.media_servers.emby import emby_search_items, update_emby_item_text
-from services.media_servers.jellyfin import jellyfin_search_items, update_jellyfin_item_text
+from services.media_servers.jellyfin import (
+    jellyfin_get_item_fields,
+    jellyfin_search_items,
+    update_jellyfin_item_text,
+)
 from services.media_servers.plex import PlexMetadataRefreshResult, update_plex_item_text
 from services.media_servers.refresh import refresh_selected_sections
 from services.media_servers.plex_identity import (
@@ -48,29 +52,125 @@ def _first_item_id(items: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _norm_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _provider_values(item: dict[str, Any], *keys: str) -> set[str]:
+    provider_ids = item.get("ProviderIds") if isinstance(item, dict) else None
+    if not isinstance(provider_ids, dict):
+        return set()
+    out: set[str] = set()
+    for key in keys:
+        val = str(provider_ids.get(key) or "").strip().lower()
+        if val:
+            out.add(val)
+    return out
+
+
+def _movie_provider_match(item: dict[str, Any], movie: Movie) -> bool:
+    want_tmdb = str(int(getattr(movie, "tmdbid", 0) or 0)).strip().lower()
+    want_imdb = str(getattr(movie, "imdbid", "") or "").strip().lower()
+    tmdb_vals = _provider_values(item, "Tmdb", "TmdbId", "MovieDb")
+    imdb_vals = _provider_values(item, "Imdb", "ImdbId")
+    return bool((want_tmdb and want_tmdb in tmdb_vals) or (want_imdb and want_imdb in imdb_vals))
+
+
+def _series_provider_match(item: dict[str, Any], series: Series) -> bool:
+    want_tvdb = str(int(getattr(series, "tvdbid", 0) or 0)).strip().lower()
+    if not want_tvdb:
+        return False
+    tvdb_vals = _provider_values(item, "Tvdb", "TvdbId")
+    return want_tvdb in tvdb_vals
+
+
+def _pick_jellyfin_movie_item_id(movie: Movie, items: list[dict[str, Any]]) -> str | None:
+    """Prefer exact provider-id match only (fail-safe)."""
+    if not isinstance(items, list) or not items:
+        return None
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if _movie_provider_match(it, movie):
+            iid = str(it.get("Id") or "").strip()
+            if iid:
+                return iid
+    return None
+
+
+def _pick_jellyfin_series_item_id(series: Series, items: list[dict[str, Any]]) -> str | None:
+    if not isinstance(items, list) or not items:
+        return None
+    want_tvdb = str(int(getattr(series, "tvdbid", 0) or 0)).strip().lower()
+    if want_tvdb:
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            tvdb_vals = _provider_values(it, "Tvdb", "TvdbId")
+            if want_tvdb in tvdb_vals:
+                iid = str(it.get("Id") or "").strip()
+                if iid:
+                    return iid
+    want_title = _norm_text(getattr(series, "title", None))
+    candidates = [it for it in items if _norm_text((it or {}).get("Name")) == want_title]
+    chosen = candidates[0] if candidates else None
+    if chosen:
+        iid = str(chosen.get("Id") or "").strip()
+        if iid:
+            return iid
+    return _first_item_id(items)
+
+
 def _find_jellyfin_movie_item_id(movie: Movie) -> str | None:
     cached = str(getattr(movie, "jellyfin_id", "") or "").strip()
     if cached:
-        return cached
-    tmdb = int(getattr(movie, "tmdbid", 0) or 0)
-    if not tmdb:
-        return None
-    for key in (
-        f"Tmdb-{tmdb}",
-        f"MovieDb-{tmdb}",
-        f"Tmdb.{tmdb}",
-        f"tmdb.{tmdb}",
-        f"MovieDb.{tmdb}",
-    ):
-        items = jellyfin_search_items(
-            {
-                "Recursive": "true",
-                "IncludeItemTypes": "Movie",
-                "AnyProviderIdEquals": key,
-                "Limit": 5,
-            }
+        cached_item = jellyfin_get_item_fields(cached, fields="ProviderIds,Name,ProductionYear")
+        if isinstance(cached_item, dict) and _movie_provider_match(cached_item, movie):
+            return cached
+        logger.debug(
+            f"Jellyfin cached movie id mismatch movie_id={getattr(movie, 'id', None)} cached_item_id={cached}; re-resolving",
+            extra={"emoji_type": "debug"},
         )
-        hit = _first_item_id(items)
+    tmdb = int(getattr(movie, "tmdbid", 0) or 0)
+    imdb = str(getattr(movie, "imdbid", "") or "").strip().lower()
+    title = str(getattr(movie, "title", "") or "").strip()
+    year = int(getattr(movie, "year", 0) or 0)
+    if not tmdb and not imdb:
+        return None
+    # Jellyfin does not reliably support provider-id equality filters at query time.
+    # Use documented GetItems filters, then perform exact ProviderIds match client-side.
+    search_terms: list[str] = []
+    if title:
+        search_terms.append(title)
+        if ":" in title:
+            search_terms.append(title.split(":", 1)[0].strip())
+    search_terms.append("")
+
+    seen_ids: set[str] = set()
+    for term in search_terms:
+        query: dict[str, Any] = {
+            "Recursive": "true",
+            "IncludeItemTypes": "Movie",
+            "Fields": "ProviderIds,Name,ProductionYear,Path",
+            "Limit": 100,
+            "HasTmdbId": "true",
+        }
+        if year:
+            query["Years"] = str(year)
+        if term:
+            query["SearchTerm"] = term
+        items = jellyfin_search_items(query)
+        deduped: list[dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            iid = str(it.get("Id") or "").strip()
+            if iid and iid in seen_ids:
+                continue
+            if iid:
+                seen_ids.add(iid)
+            deduped.append(it)
+        hit = _pick_jellyfin_movie_item_id(movie, deduped)
         if hit:
             return hit
     return None
@@ -107,7 +207,13 @@ def _find_emby_movie_item_id(movie: Movie, placeholder: Placeholder) -> str | No
 def _find_jellyfin_series_item_id(series: Series) -> str | None:
     cached = str(getattr(series, "jellyfin_id", "") or "").strip()
     if cached:
-        return cached
+        cached_item = jellyfin_get_item_fields(cached, fields="ProviderIds,Name")
+        if isinstance(cached_item, dict) and _series_provider_match(cached_item, series):
+            return cached
+        logger.warning(
+            f"Jellyfin cached series id mismatch series_id={getattr(series, 'id', None)} cached_item_id={cached}; re-resolving",
+            extra={"emoji_type": "warning"},
+        )
     tvdb = int(getattr(series, "tvdbid", 0) or 0)
     if not tvdb:
         return None
@@ -117,10 +223,11 @@ def _find_jellyfin_series_item_id(series: Series) -> str | None:
                 "Recursive": "true",
                 "IncludeItemTypes": "Series",
                 "AnyProviderIdEquals": key,
+                "Fields": "ProviderIds,Name",
                 "Limit": 5,
             }
         )
-        hit = _first_item_id(items)
+        hit = _pick_jellyfin_series_item_id(series, items)
         if hit:
             return hit
     return None
@@ -231,6 +338,9 @@ def _projected_display_status(placeholder: Placeholder) -> str:
         return reason
     if status == "SEARCHING" and reason and reason.lower() == "queued":
         return reason
+    if status == "NOT_FOUND":
+        # User-facing projection should read as outcome text, not enum token.
+        return reason or "NO QUALIFYING RELEASE FOUND"
     return status or "REQUEST"
 
 
@@ -260,6 +370,34 @@ class ProjectionFallbackAccumulator:
         )
 
 
+@dataclass
+class ProjectionBatchSummary:
+    plex_ok: int = 0
+    plex_failed: int = 0
+    plex_disabled: int = 0
+    jellyfin_ok: int = 0
+    jellyfin_failed: int = 0
+    jellyfin_disabled: int = 0
+    emby_ok: int = 0
+    emby_failed: int = 0
+    emby_disabled: int = 0
+
+
+def _summary_mark(summary: ProjectionBatchSummary, server: str, ok: bool) -> None:
+    if server == "plex":
+        summary.plex_ok += 1 if ok else 0
+        summary.plex_failed += 0 if ok else 1
+        return
+    if server == "jellyfin":
+        summary.jellyfin_ok += 1 if ok else 0
+        summary.jellyfin_failed += 0 if ok else 1
+        return
+    if server == "emby":
+        summary.emby_ok += 1 if ok else 0
+        summary.emby_failed += 0 if ok else 1
+        return
+
+
 def _mark_fallback(acc: ProjectionFallbackAccumulator, server: str, media_type: str) -> None:
     if server == "plex":
         if media_type == "movie":
@@ -280,7 +418,13 @@ def _mark_fallback(acc: ProjectionFallbackAccumulator, server: str, media_type: 
             acc.emby_episode = True
 
 
-def _push_movie(session, movie: Movie, placeholder: Placeholder, fallback: ProjectionFallbackAccumulator) -> None:
+def _push_movie(
+    session,
+    movie: Movie,
+    placeholder: Placeholder,
+    fallback: ProjectionFallbackAccumulator,
+    summary: ProjectionBatchSummary,
+) -> None:
     status = _projected_display_status(placeholder)
     projected_title, projected_summary = _project_text(
         getattr(movie, "title", None),
@@ -291,7 +435,19 @@ def _push_movie(session, movie: Movie, placeholder: Placeholder, fallback: Proje
     if getattr(settings, "jellyfin_enabled", False):
         jf = _find_jellyfin_movie_item_id(movie)
         if jf:
-            if not update_jellyfin_item_text(jf, title=projected_title, overview=projected_summary):
+            if str(getattr(movie, "jellyfin_id", "") or "").strip() != str(jf):
+                movie.jellyfin_id = str(jf)
+                session.add(movie)
+                session.flush()
+            jf_ok = update_jellyfin_item_text(jf, title=projected_title, overview=projected_summary)
+            _summary_mark(summary, "jellyfin", jf_ok)
+            logger.info(
+                "Jellyfin direct projection movie outcome="
+                f"{'ok' if jf_ok else 'failed'} item_id={jf} movie_id={int(getattr(movie, 'id', 0) or 0)} "
+                f"status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            if not jf_ok:
                 logger.debug(
                     f"Jellyfin direct projection failed item_id={jf}",
                     extra={"emoji_type": "debug"},
@@ -302,12 +458,23 @@ def _push_movie(session, movie: Movie, placeholder: Placeholder, fallback: Proje
                 f"Jellyfin movie item not resolved for tmdbid={getattr(movie, 'tmdbid', None)}",
                 extra={"emoji_type": "debug"},
             )
+            _summary_mark(summary, "jellyfin", False)
             _mark_fallback(fallback, "jellyfin", "movie")
+    else:
+        summary.jellyfin_disabled += 1
 
     if getattr(settings, "emby_enabled", False):
         em = _find_emby_movie_item_id(movie, placeholder)
         if em:
-            if not update_emby_item_text(em, title=projected_title, overview=projected_summary):
+            em_ok = update_emby_item_text(em, title=projected_title, overview=projected_summary)
+            _summary_mark(summary, "emby", em_ok)
+            logger.info(
+                "Emby direct projection movie outcome="
+                f"{'ok' if em_ok else 'failed'} item_id={em} movie_id={int(getattr(movie, 'id', 0) or 0)} "
+                f"status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            if not em_ok:
                 logger.debug(
                     f"Emby direct projection failed item_id={em}",
                     extra={"emoji_type": "debug"},
@@ -318,7 +485,10 @@ def _push_movie(session, movie: Movie, placeholder: Placeholder, fallback: Proje
                 f"Emby movie item not resolved for tmdbid={getattr(movie, 'tmdbid', None)}",
                 extra={"emoji_type": "debug"},
             )
+            _summary_mark(summary, "emby", False)
             _mark_fallback(fallback, "emby", "movie")
+    else:
+        summary.emby_disabled += 1
 
     if getattr(settings, "plex_enabled", False):
         plex_key = _plex_coalesce_cached_rating_key(movie)
@@ -328,6 +498,13 @@ def _push_movie(session, movie: Movie, placeholder: Placeholder, fallback: Proje
                 title=projected_title,
                 summary=projected_summary,
             )
+            logger.info(
+                "Plex direct projection movie cached-key outcome="
+                f"{outcome} rating_key={plex_key} movie_id={int(getattr(movie, 'id', 0) or 0)} "
+                f"status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            _summary_mark(summary, "plex", outcome == "ok")
             # Drop cached keys on 404 or failures so the next block re-resolves by TMDB.
             if outcome in ("not_found", "failed"):
                 movie.plex_id = None
@@ -346,17 +523,29 @@ def _push_movie(session, movie: Movie, placeholder: Placeholder, fallback: Proje
             if plex_movie is not None and getattr(plex_movie, "ratingKey", None) is not None:
                 persist_movie_plex_identity(session, movie, plex_movie)
                 session.flush()
-                update_plex_item_text(
+                outcome = update_plex_item_text(
                     plex_movie.ratingKey,
                     title=projected_title,
                     summary=projected_summary,
                 )
+                logger.info(
+                    "Plex direct projection movie resolved-key outcome="
+                    f"{outcome} rating_key={plex_movie.ratingKey} movie_id={int(getattr(movie, 'id', 0) or 0)} "
+                    f"status={status!r}",
+                    extra={"emoji_type": "info"},
+                )
+                _summary_mark(summary, "plex", outcome == "ok")
+                if outcome != "ok":
+                    _mark_fallback(fallback, "plex", "movie")
             else:
                 logger.debug(
                     f"Plex movie not resolved for tmdbid={getattr(movie, 'tmdbid', None)}",
                     extra={"emoji_type": "debug"},
                 )
+                _summary_mark(summary, "plex", False)
                 _mark_fallback(fallback, "plex", "movie")
+    else:
+        summary.plex_disabled += 1
 
 
 def _push_episode(
@@ -364,6 +553,7 @@ def _push_episode(
     placeholder: Placeholder,
     episode: Episode,
     fallback: ProjectionFallbackAccumulator,
+    summary: ProjectionBatchSummary,
 ) -> None:
     season = session.query(Season).get(episode.season_id) if episode.season_id else None
     series = session.query(Series).get(season.series_id) if season and season.series_id else None
@@ -386,10 +576,34 @@ def _push_episode(
         jf_ep = _find_jellyfin_episode_item_id(series, season, episode)
         jf_series = _find_jellyfin_series_item_id(series)
         if jf_series:
-            if not update_jellyfin_item_text(jf_series, title=projected_series_title, overview=projected_series_summary):
+            if str(getattr(series, "jellyfin_id", "") or "").strip() != str(jf_series):
+                series.jellyfin_id = str(jf_series)
+                session.add(series)
+                session.flush()
+            jf_series_ok = update_jellyfin_item_text(jf_series, title=projected_series_title, overview=projected_series_summary)
+            _summary_mark(summary, "jellyfin", jf_series_ok)
+            logger.info(
+                "Jellyfin direct projection series outcome="
+                f"{'ok' if jf_series_ok else 'failed'} item_id={jf_series} "
+                f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            if not jf_series_ok:
                 _mark_fallback(fallback, "jellyfin", "episode")
         if jf_ep:
-            if not update_jellyfin_item_text(jf_ep, title=projected_ep_title, overview=projected_ep_summary):
+            if str(getattr(episode, "jellyfin_id", "") or "").strip() != str(jf_ep):
+                episode.jellyfin_id = str(jf_ep)
+                session.add(episode)
+                session.flush()
+            jf_ep_ok = update_jellyfin_item_text(jf_ep, title=projected_ep_title, overview=projected_ep_summary)
+            _summary_mark(summary, "jellyfin", jf_ep_ok)
+            logger.info(
+                "Jellyfin direct projection episode outcome="
+                f"{'ok' if jf_ep_ok else 'failed'} item_id={jf_ep} "
+                f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            if not jf_ep_ok:
                 _mark_fallback(fallback, "jellyfin", "episode")
         if not jf_ep and not jf_series:
             logger.debug(
@@ -398,16 +612,35 @@ def _push_episode(
                 f"S{season.season_number}E{episode.episode_number}",
                 extra={"emoji_type": "debug"},
             )
+            _summary_mark(summary, "jellyfin", False)
             _mark_fallback(fallback, "jellyfin", "episode")
+    else:
+        summary.jellyfin_disabled += 1
 
     if getattr(settings, "emby_enabled", False):
         em_ep = _find_emby_episode_item_id(series, season, episode, placeholder)
         em_series = _find_emby_series_item_id(series)
         if em_series:
-            if not update_emby_item_text(em_series, title=projected_series_title, overview=projected_series_summary):
+            em_series_ok = update_emby_item_text(em_series, title=projected_series_title, overview=projected_series_summary)
+            _summary_mark(summary, "emby", em_series_ok)
+            logger.info(
+                "Emby direct projection series outcome="
+                f"{'ok' if em_series_ok else 'failed'} item_id={em_series} "
+                f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            if not em_series_ok:
                 _mark_fallback(fallback, "emby", "episode")
         if em_ep:
-            if not update_emby_item_text(em_ep, title=projected_ep_title, overview=projected_ep_summary):
+            em_ep_ok = update_emby_item_text(em_ep, title=projected_ep_title, overview=projected_ep_summary)
+            _summary_mark(summary, "emby", em_ep_ok)
+            logger.info(
+                "Emby direct projection episode outcome="
+                f"{'ok' if em_ep_ok else 'failed'} item_id={em_ep} "
+                f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            if not em_ep_ok:
                 _mark_fallback(fallback, "emby", "episode")
         if not em_ep and not em_series:
             logger.debug(
@@ -416,12 +649,22 @@ def _push_episode(
                 f"S{season.season_number}E{episode.episode_number}",
                 extra={"emoji_type": "debug"},
             )
+            _summary_mark(summary, "emby", False)
             _mark_fallback(fallback, "emby", "episode")
+    else:
+        summary.emby_disabled += 1
 
     if getattr(settings, "plex_enabled", False):
         ep_key = _plex_coalesce_cached_rating_key(episode)
         if ep_key:
             ep_out = update_plex_item_text(ep_key, title=projected_ep_title, summary=projected_ep_summary)
+            logger.info(
+                "Plex direct projection episode cached-key outcome="
+                f"{ep_out} rating_key={ep_key} episode_id={int(getattr(episode, 'id', 0) or 0)} "
+                f"status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            _summary_mark(summary, "plex", ep_out == "ok")
             if ep_out in ("not_found", "failed"):
                 episode.plex_id = None
                 episode.plex_dummy_id = None
@@ -436,12 +679,22 @@ def _push_episode(
                 if plex_ep is not None and getattr(plex_ep, "ratingKey", None) is not None:
                     persist_episode_hierarchy_plex_identity(session, series, season, episode, plex_ep)
                     session.flush()
-                    update_plex_item_text(
+                    retry_out = update_plex_item_text(
                         plex_ep.ratingKey,
                         title=projected_ep_title,
                         summary=projected_ep_summary,
                     )
+                    logger.info(
+                        "Plex direct projection episode resolved-key outcome="
+                        f"{retry_out} rating_key={plex_ep.ratingKey} "
+                        f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
+                        extra={"emoji_type": "info"},
+                    )
+                    _summary_mark(summary, "plex", retry_out == "ok")
+                    if retry_out != "ok":
+                        _mark_fallback(fallback, "plex", "episode")
                 else:
+                    _summary_mark(summary, "plex", False)
                     _mark_fallback(fallback, "plex", "episode")
         if not _plex_coalesce_cached_rating_key(episode):
             plex_ep = find_episode_by_series_tvdb(
@@ -453,11 +706,20 @@ def _push_episode(
             if plex_ep is not None and getattr(plex_ep, "ratingKey", None) is not None:
                 persist_episode_hierarchy_plex_identity(session, series, season, episode, plex_ep)
                 session.flush()
-                update_plex_item_text(
+                outcome = update_plex_item_text(
                     plex_ep.ratingKey,
                     title=projected_ep_title,
                     summary=projected_ep_summary,
                 )
+                logger.info(
+                    "Plex direct projection episode lookup-only outcome="
+                    f"{outcome} rating_key={plex_ep.ratingKey} "
+                    f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
+                    extra={"emoji_type": "info"},
+                )
+                _summary_mark(summary, "plex", outcome == "ok")
+                if outcome != "ok":
+                    _mark_fallback(fallback, "plex", "episode")
             else:
                 logger.debug(
                     "Plex episode not resolved "
@@ -465,6 +727,7 @@ def _push_episode(
                     f"S{season.season_number}E{episode.episode_number}",
                     extra={"emoji_type": "debug"},
                 )
+                _summary_mark(summary, "plex", False)
                 _mark_fallback(fallback, "plex", "episode")
 
         ser_key = _plex_coalesce_cached_rating_key(series)
@@ -474,6 +737,13 @@ def _push_episode(
                 title=projected_series_title,
                 summary=projected_series_summary,
             )
+            logger.info(
+                "Plex direct projection series cached-key outcome="
+                f"{ser_out} rating_key={ser_key} series_id={int(getattr(series, 'id', 0) or 0)} "
+                f"status={status!r}",
+                extra={"emoji_type": "info"},
+            )
+            _summary_mark(summary, "plex", ser_out == "ok")
             if ser_out in ("not_found", "failed"):
                 series.plex_id = None
                 series.plex_dummy_id = None
@@ -483,25 +753,47 @@ def _push_episode(
                 if show is not None and getattr(show, "ratingKey", None) is not None:
                     persist_series_plex_identity(session, series, show)
                     session.flush()
-                    update_plex_item_text(
+                    retry_out = update_plex_item_text(
                         show.ratingKey,
                         title=projected_series_title,
                         summary=projected_series_summary,
                     )
+                    logger.info(
+                        "Plex direct projection series resolved-key outcome="
+                        f"{retry_out} rating_key={show.ratingKey} "
+                        f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
+                        extra={"emoji_type": "info"},
+                    )
+                    _summary_mark(summary, "plex", retry_out == "ok")
+                    if retry_out != "ok":
+                        _mark_fallback(fallback, "plex", "episode")
                 else:
+                    _summary_mark(summary, "plex", False)
                     _mark_fallback(fallback, "plex", "episode")
         else:
             show = find_show_by_id(getattr(series, "tvdbid", None), title=getattr(series, "title", None))
             if show is not None and getattr(show, "ratingKey", None) is not None:
                 persist_series_plex_identity(session, series, show)
                 session.flush()
-                update_plex_item_text(
+                outcome = update_plex_item_text(
                     show.ratingKey,
                     title=projected_series_title,
                     summary=projected_series_summary,
                 )
+                logger.info(
+                    "Plex direct projection series lookup-only outcome="
+                    f"{outcome} rating_key={show.ratingKey} "
+                    f"series_id={int(getattr(series, 'id', 0) or 0)} status={status!r}",
+                    extra={"emoji_type": "info"},
+                )
+                _summary_mark(summary, "plex", outcome == "ok")
+                if outcome != "ok":
+                    _mark_fallback(fallback, "plex", "episode")
             else:
+                _summary_mark(summary, "plex", False)
                 _mark_fallback(fallback, "plex", "episode")
+    else:
+        summary.plex_disabled += 1
 
 
 def _run_projection_fallback_refreshes(fallback: ProjectionFallbackAccumulator) -> None:
@@ -556,9 +848,11 @@ def push_placeholder_player_metadata(
     placeholder: Placeholder,
     *,
     fallback: ProjectionFallbackAccumulator | None = None,
+    summary: ProjectionBatchSummary | None = None,
 ) -> ProjectionFallbackAccumulator:
     """Best-effort direct status projection to player title/summary fields."""
     acc = fallback or ProjectionFallbackAccumulator()
+    run_summary = summary or ProjectionBatchSummary()
     if getattr(settings, "REFRESH_TRIGGER_SUPPRESSED", False):
         logger.debug(
             "Skipping player metadata refresh (REFRESH_TRIGGER_SUPPRESSED)",
@@ -570,15 +864,23 @@ def push_placeholder_player_metadata(
     episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
 
     if movie:
-        _push_movie(session, movie, placeholder, acc)
+        _push_movie(session, movie, placeholder, acc, run_summary)
     elif episode:
-        _push_episode(session, placeholder, episode, acc)
+        _push_episode(session, placeholder, episode, acc, run_summary)
     return acc
 
 
 def push_placeholder_batch_player_metadata(session, placeholders: list[Placeholder]) -> None:
     """Project status directly for a placeholder batch and fallback-refresh once."""
     fallback = ProjectionFallbackAccumulator()
+    summary = ProjectionBatchSummary()
     for placeholder in placeholders:
-        push_placeholder_player_metadata(session, placeholder, fallback=fallback)
+        push_placeholder_player_metadata(session, placeholder, fallback=fallback, summary=summary)
+    logger.info(
+        "Direct projection summary: "
+        f"plex(ok={summary.plex_ok},failed={summary.plex_failed},disabled={summary.plex_disabled}) "
+        f"jellyfin(ok={summary.jellyfin_ok},failed={summary.jellyfin_failed},disabled={summary.jellyfin_disabled}) "
+        f"emby(ok={summary.emby_ok},failed={summary.emby_failed},disabled={summary.emby_disabled})",
+        extra={"emoji_type": "info"},
+    )
     _run_projection_fallback_refreshes(fallback)

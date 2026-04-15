@@ -217,8 +217,16 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         if plex is None:
             return "failed"
         item = plex.fetchItem(f"/library/metadata/{key}")
-        item.editTitle(str(title or ""))
-        item.editSummary(str(summary or ""))
+        # Avoid locking title/summary fields so later NFO/library refreshes can still
+        # overwrite metadata if direct projection fails or drifts.
+        try:
+            item.editTitle(str(title or ""), locked=False)
+        except TypeError:
+            item.editTitle(str(title or ""))
+        try:
+            item.editSummary(str(summary or ""), locked=False)
+        except TypeError:
+            item.editSummary(str(summary or ""))
         item.reload()
         title_ok = str(getattr(item, "title", "") or "") == str(title or "")
         summary_ok = str(getattr(item, "summary", "") or "") == str(summary or "")
