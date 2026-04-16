@@ -136,17 +136,27 @@ def cleanup_episode_placeholder_files(
 		nfo_deleted_any = remove_nfo_sidecar(path) or nfo_deleted_any
 
 	season_folders = {os.path.dirname(path) for path in paths if path}
+	candidate_series_folders = {
+		os.path.dirname(folder)
+		for folder in season_folders
+		if folder and os.path.dirname(folder)
+	}
 	series_folder = _derive_series_folder(series, season, paths)
+	if series_folder:
+		candidate_series_folders.add(series_folder)
 	series_has_placeholders = _series_has_active_episode_placeholders(session, series_id=int(series.id))
 
 	if not series_has_placeholders:
-		series_nfo_deleted = _remove_series_nfo(series_folder) or series_nfo_deleted
-		directories_deleted += _prune_empty_tree(series_folder)
-		refresh_path = _nearest_existing_dir(series_folder)
-		if refresh_path:
-			refresh_paths.add(refresh_path)
+		for folder in sorted(candidate_series_folders):
+			series_nfo_deleted = _remove_series_nfo(folder) or series_nfo_deleted
+			directories_deleted += _prune_empty_tree(folder)
+			refresh_path = _nearest_existing_dir(folder)
+			if refresh_path:
+				refresh_paths.add(refresh_path)
 	else:
 		for season_folder in season_folders:
+			if _remove_dir_if_empty(season_folder):
+				directories_deleted += 1
 			refresh_path = _nearest_existing_dir(season_folder)
 			if refresh_path:
 				refresh_paths.add(refresh_path)

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -6,8 +7,13 @@ from datetime import datetime, timezone
 from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
-from services.postgres.models import ArrState
-from services.source_of_truth.arr_api import fetch_radarr_history, fetch_sonarr_history
+from services.postgres.models import ArrState, Movie, Series
+from services.source_of_truth.arr_api import (
+    fetch_radarr_history,
+    fetch_radarr_movies,
+    fetch_sonarr_history,
+    fetch_sonarr_series,
+)
 from services.source_of_truth.calendar_phase import run_calendar_phase
 from services.source_of_truth.calendar_date_refresh import run_calendar_date_refresh
 from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
@@ -19,6 +25,87 @@ from services.source_of_truth.sync_runner import run_full_sync, sync_radarr_movi
 @dataclass
 class FullSyncRunRef:
     run_id: str
+
+
+def _normalize_path(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return os.path.normpath(text)
+
+
+def _radarr_path_drift_movie_ids(session, *, instance_key: str, base_url: str, api_key: str) -> set[int]:
+    """Detect Radarr items whose current API path differs from stored DB path."""
+    rows = (
+        session.query(Movie.radarrid, Movie.radarrpath)
+        .filter(Movie.instance_key == instance_key, Movie.radarrid.isnot(None), Movie.is_deleted == False)  # noqa: E712
+        .all()
+    )
+    if not rows:
+        return set()
+
+    api_movies = fetch_radarr_movies(base_url, api_key) or []
+    api_path_by_id: dict[int, str | None] = {}
+    for item in api_movies:
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        try:
+            mid_int = int(mid)
+        except Exception:
+            continue
+        api_path_by_id[mid_int] = _normalize_path(
+            item.get("path") or item.get("folderPath") or item.get("rootFolderPath")
+        )
+
+    changed: set[int] = set()
+    for row_id, row_path in rows:
+        try:
+            movie_id = int(row_id)
+        except Exception:
+            continue
+        if movie_id not in api_path_by_id:
+            continue
+        if _normalize_path(row_path) != api_path_by_id[movie_id]:
+            changed.add(movie_id)
+    return changed
+
+
+def _sonarr_path_drift_series_ids(session, *, instance_key: str, base_url: str, api_key: str) -> set[int]:
+    """Detect Sonarr series whose current API path differs from stored DB path."""
+    rows = (
+        session.query(Series.sonarrid, Series.sonarrpath)
+        .filter(Series.instance_key == instance_key, Series.sonarrid.isnot(None), Series.is_deleted == False)  # noqa: E712
+        .all()
+    )
+    if not rows:
+        return set()
+
+    api_series = fetch_sonarr_series(base_url, api_key) or []
+    api_path_by_id: dict[int, str | None] = {}
+    for item in api_series:
+        if not isinstance(item, dict):
+            continue
+        sid = item.get("id")
+        try:
+            sid_int = int(sid)
+        except Exception:
+            continue
+        api_path_by_id[sid_int] = _normalize_path(item.get("path") or item.get("folderPath") or item.get("rootFolderPath"))
+
+    changed: set[int] = set()
+    for row_id, row_path in rows:
+        try:
+            series_id = int(row_id)
+        except Exception:
+            continue
+        if series_id not in api_path_by_id:
+            continue
+        if _normalize_path(row_path) != api_path_by_id[series_id]:
+            changed.add(series_id)
+    return changed
 
 
 def _create_run(content_type: str, is_secondary: bool = False, run_note: str | None = None, instance_key: str | None = None) -> FullSyncRunRef:
@@ -160,6 +247,7 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
         'events_seen': 0,
         'events_with_ids': 0,
         'targeted_sync_runs': 0,
+        'path_drift_ids': 0,
     }
     if not instances:
         return stats
@@ -176,6 +264,14 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                 if instance['arr_type'] == 'radarr':
                     events = fetch_radarr_history(start_id=start_id, url=instance['base_url'], api_key=instance['api_key'])
                     target_ids = _extract_radarr_movie_ids(events)
+                    drift_ids = _radarr_path_drift_movie_ids(
+                        session,
+                        instance_key=instance_key,
+                        base_url=instance['base_url'],
+                        api_key=instance['api_key'],
+                    )
+                    target_ids = set(target_ids) | set(drift_ids)
+                    stats['path_drift_ids'] += len(drift_ids)
                     if target_ids:
                         sync_stats = sync_radarr_movies_by_ids(
                             target_ids,
@@ -191,6 +287,14 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                 else:
                     events = fetch_sonarr_history(start_id=start_id, url=instance['base_url'], api_key=instance['api_key'])
                     target_ids = _extract_sonarr_series_ids(events)
+                    drift_ids = _sonarr_path_drift_series_ids(
+                        session,
+                        instance_key=instance_key,
+                        base_url=instance['base_url'],
+                        api_key=instance['api_key'],
+                    )
+                    target_ids = set(target_ids) | set(drift_ids)
+                    stats['path_drift_ids'] += len(drift_ids)
                     if target_ids:
                         sync_stats = sync_sonarr_series_by_ids(
                             target_ids,

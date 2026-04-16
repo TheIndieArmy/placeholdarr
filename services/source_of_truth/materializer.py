@@ -27,6 +27,7 @@ from services.source_of_truth.determiner import (
     DETERMINATION_NEEDS,
     DETERMINATION_NOT_NEEDED,
     DETERMINATION_OBSOLETE,
+    run_determination_for_entities_in_session,
 )
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
@@ -726,7 +727,21 @@ def _run_materialization_for_ids(
         overlap_state["movie_processed"] = 0
         overlap_state["episode_processed"] = 0
 
-    for movie_id in movie_ids:
+    def _split_movie_ids_by_determination(session, ids: list[int]) -> tuple[list[int], list[int]]:
+        if not ids:
+            return [], []
+        rows = session.query(Movie.id, Movie.determination).filter(Movie.id.in_(ids)).all()
+        obsolete_ids: list[int] = []
+        needs_ids: list[int] = []
+        for mid, det in rows:
+            if det == DETERMINATION_OBSOLETE:
+                obsolete_ids.append(int(mid))
+            elif det == DETERMINATION_NEEDS:
+                needs_ids.append(int(mid))
+        return obsolete_ids, needs_ids
+
+    def _process_single_movie_materialization(movie_id: int) -> None:
+        nonlocal stats, changed_paths, delete_refresh_paths, movie_phase_start_mono, last_movie_periodic_refresh_mono
         result = apply_movie_materialization(movie_id, session=session, activity_reason=activity_reason)
         if not result.get("ok"):
             stats["errors"] += 1
@@ -734,7 +749,7 @@ def _run_materialization_for_ids(
                 f"Movie materialization failed movie_id={movie_id}: {result.get('reason')}",
                 extra={"emoji_type": "error"},
             )
-            continue
+            return
 
         action = result.get("action")
         if action == "created_or_exists":
@@ -786,8 +801,10 @@ def _run_materialization_for_ids(
             if movie_phase_start_mono is None:
                 movie_phase_start_mono = now
                 last_movie_periodic_refresh_mono = now
+
                 def _initial_movie_refresh():
                     refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
+
                 threading.Timer(5.0, _initial_movie_refresh).start()
                 stats["movie_refresh_triggered"] = True
                 logger.info("Full sync movie phase started; scheduled initial library refresh in 5 seconds.", extra={"emoji_type": "info"})
@@ -810,13 +827,44 @@ def _run_materialization_for_ids(
             if should_trigger:
                 _emit_overlap_checkpoint(f"movie_{trigger_kind}")
 
+    movie_obsolete_ids, _movie_needs_seed = _split_movie_ids_by_determination(session, movie_ids)
+    for movie_id in movie_obsolete_ids:
+        _process_single_movie_materialization(movie_id)
+    if movie_obsolete_ids:
+        run_determination_for_entities_in_session(session, movie_ids=list(movie_obsolete_ids), episode_ids=[])
+    if movie_ids:
+        pending_movie_needs = [
+            int(r[0])
+            for r in session.query(Movie.id)
+            .filter(Movie.id.in_(movie_ids), Movie.determination == DETERMINATION_NEEDS)
+            .all()
+        ]
+    else:
+        pending_movie_needs = []
+    for movie_id in pending_movie_needs:
+        _process_single_movie_materialization(movie_id)
+
     if is_full_sync and movie_phase_start_mono is not None:
         def _final_movie_refresh():
             refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
         threading.Timer(5.0, _final_movie_refresh).start()
         logger.info("Full sync movie phase complete; scheduled final library refresh in 5 seconds.", extra={"emoji_type": "info"})
 
-    for episode_id in episode_ids:
+    def _split_episode_ids_by_determination(session, ids: list[int]) -> tuple[list[int], list[int]]:
+        if not ids:
+            return [], []
+        rows = session.query(Episode.id, Episode.determination).filter(Episode.id.in_(ids)).all()
+        obsolete_ids: list[int] = []
+        needs_ids: list[int] = []
+        for eid, det in rows:
+            if det == DETERMINATION_OBSOLETE:
+                obsolete_ids.append(int(eid))
+            elif det == DETERMINATION_NEEDS:
+                needs_ids.append(int(eid))
+        return obsolete_ids, needs_ids
+
+    def _process_single_episode_materialization(episode_id: int) -> None:
+        nonlocal stats, changed_paths, delete_refresh_paths, episode_phase_start_mono, last_episode_periodic_refresh_mono
         result = apply_episode_materialization(episode_id, session=session, activity_reason=activity_reason)
         if not result.get("ok"):
             stats["errors"] += 1
@@ -824,7 +872,7 @@ def _run_materialization_for_ids(
                 f"Episode materialization failed episode_id={episode_id}: {result.get('reason')}",
                 extra={"emoji_type": "error"},
             )
-            continue
+            return
 
         action = result.get("action")
         if action == "created_or_exists":
@@ -878,8 +926,10 @@ def _run_materialization_for_ids(
             if episode_phase_start_mono is None:
                 episode_phase_start_mono = now
                 last_episode_periodic_refresh_mono = now
+
                 def _initial_episode_refresh():
                     refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
+
                 threading.Timer(5.0, _initial_episode_refresh).start()
                 stats["tv_refresh_triggered"] = True
                 logger.info("Full sync episode phase started; scheduled initial library refresh in 5 seconds.", extra={"emoji_type": "info"})
@@ -901,6 +951,23 @@ def _run_materialization_for_ids(
             )
             if should_trigger:
                 _emit_overlap_checkpoint(f"episode_{trigger_kind}")
+
+    episode_obsolete_ids, _episode_needs_seed = _split_episode_ids_by_determination(session, episode_ids)
+    for episode_id in episode_obsolete_ids:
+        _process_single_episode_materialization(episode_id)
+    if episode_obsolete_ids:
+        run_determination_for_entities_in_session(session, movie_ids=[], episode_ids=list(episode_obsolete_ids))
+    if episode_ids:
+        pending_episode_needs = [
+            int(r[0])
+            for r in session.query(Episode.id)
+            .filter(Episode.id.in_(episode_ids), Episode.determination == DETERMINATION_NEEDS)
+            .all()
+        ]
+    else:
+        pending_episode_needs = []
+    for episode_id in pending_episode_needs:
+        _process_single_episode_materialization(episode_id)
 
     if is_full_sync and episode_phase_start_mono is not None:
         def _final_episode_refresh():

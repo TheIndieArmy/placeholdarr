@@ -7,8 +7,9 @@ from sqlalchemy import func
 
 from core.config import settings
 from core.logger import logger
+from services.placeholders import episode_placeholder_path, movie_placeholder_path
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Movie, Placeholder, Season
+from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.source_of_truth.filesystem import configured_roots
 
 
@@ -16,6 +17,91 @@ DETERMINATION_OBSOLETE = 'obsolete_placeholder'
 DETERMINATION_NOT_NEEDED = 'not_needed'
 DETERMINATION_EXISTS = 'placeholder_exists'
 DETERMINATION_NEEDS = 'needs_placeholder'
+
+
+def _normalize_placeholder_path(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return os.path.normpath(text)
+
+
+def _movie_placeholder_path_drifts(movie: Movie) -> bool:
+    """True when DB says we have a placeholder file but stored path != canonical path."""
+    if getattr(movie, 'has_file', False) or getattr(movie, 'is_deleted', False):
+        return False
+    stored = getattr(movie, 'placeholder_filepath', None)
+    if not isinstance(stored, str) or not stored.strip():
+        return False
+    expected = movie_placeholder_path(movie)
+    exp = _normalize_placeholder_path(expected)
+    cur = _normalize_placeholder_path(stored)
+    return bool(exp and cur and exp != cur)
+
+
+def _episode_placeholder_path_drifts(session, episode: Episode) -> bool:
+    if getattr(episode, 'has_file', False) or getattr(episode, 'is_deleted', False):
+        return False
+    stored = getattr(episode, 'placeholder_filepath', None)
+    if not isinstance(stored, str) or not stored.strip():
+        return False
+    season = session.query(Season).filter(Season.id == episode.season_id).first()
+    if not season:
+        return False
+    series = session.query(Series).filter(Series.id == season.series_id).first()
+    if not series:
+        return False
+    expected = episode_placeholder_path(episode, season, series)
+    exp = _normalize_placeholder_path(expected)
+    cur = _normalize_placeholder_path(stored)
+    return bool(exp and cur and exp != cur)
+
+
+def _resolve_movie_determination(
+    movie: Movie,
+    *,
+    placeholders_enabled: bool,
+    lookahead_days: int,
+    now_date: date,
+) -> tuple[str, bool]:
+    """Return (determination_value, path_drift_detected)."""
+    base = _compute_determination(
+        bool(getattr(movie, 'has_placeholder', False)),
+        bool(getattr(movie, 'has_file', False)),
+        bool(getattr(movie, 'is_deleted', False)),
+        target_date=_preferred_movie_release_date(movie),
+        release_status=getattr(movie, 'radarr_release_status', None),
+        lookahead_days=lookahead_days,
+        placeholders_enabled=placeholders_enabled,
+        now_date=now_date,
+    )
+    if _movie_placeholder_path_drifts(movie):
+        return DETERMINATION_OBSOLETE, True
+    return base, False
+
+
+def _resolve_episode_determination(
+    session,
+    episode: Episode,
+    *,
+    placeholders_enabled: bool,
+    lookahead_days: int,
+    now_date: date,
+) -> tuple[str, bool]:
+    base = _compute_determination(
+        bool(getattr(episode, 'has_placeholder', False)),
+        bool(getattr(episode, 'has_file', False)),
+        bool(getattr(episode, 'is_deleted', False)),
+        target_date=getattr(episode, 'air_date', None),
+        lookahead_days=lookahead_days,
+        placeholders_enabled=placeholders_enabled,
+        now_date=now_date,
+    )
+    if _episode_placeholder_path_drifts(session, episode):
+        return DETERMINATION_OBSOLETE, True
+    return base, False
 
 
 def _preferred_movie_release_date(movie: Movie) -> date | None:
@@ -287,6 +373,8 @@ def run_determination_pass() -> dict:
         'not_needed': 0,
         'placeholder_exists': 0,
         'needs_placeholder': 0,
+        'path_drift_movies': 0,
+        'path_drift_episodes': 0,
     }
 
     try:
@@ -297,16 +385,19 @@ def run_determination_pass() -> dict:
         movies = session.query(Movie).all()
         stats['movies_total'] = len(movies)
         for movie in movies:
-            value = _compute_determination(
-                bool(getattr(movie, 'has_placeholder', False)),
-                bool(getattr(movie, 'has_file', False)),
-                bool(getattr(movie, 'is_deleted', False)),
-                target_date=_preferred_movie_release_date(movie),
-                release_status=getattr(movie, 'radarr_release_status', None),
-                lookahead_days=lookahead_days,
+            value, path_drift = _resolve_movie_determination(
+                movie,
                 placeholders_enabled=placeholders_enabled,
+                lookahead_days=lookahead_days,
                 now_date=now_date,
             )
+            if path_drift:
+                stats['path_drift_movies'] += 1
+                logger.debug(
+                    f'Placeholder path drift movie_id={movie.id} tmdbid={getattr(movie, "tmdbid", None)} '
+                    f'expected={movie_placeholder_path(movie)!r} stored={getattr(movie, "placeholder_filepath", None)!r}',
+                    extra={'emoji_type': 'debug'},
+                )
             stats[value] += 1
             if getattr(movie, 'determination', None) != value:
                 movie.determination = value
@@ -318,9 +409,9 @@ def run_determination_pass() -> dict:
         episodes = session.query(Episode).all()
         stats['episodes_total'] = len(episodes)
         for episode in episodes:
+            season = session.query(Season).filter(Season.id == episode.season_id).first()
             # Treat season 0 episodes as not_needed when specials are disabled
             if not include_specials:
-                season = session.query(Season).filter(Season.id == episode.season_id).first()
                 if season and int(getattr(season, 'season_number', -1)) == 0:
                     value = DETERMINATION_NOT_NEEDED
                     stats[value] += 1
@@ -330,15 +421,31 @@ def run_determination_pass() -> dict:
                         session.add(episode)
                         stats['episodes_changed'] += 1
                     continue
-            value = _compute_determination(
-                bool(getattr(episode, 'has_placeholder', False)),
-                bool(getattr(episode, 'has_file', False)),
-                bool(getattr(episode, 'is_deleted', False)),
-                target_date=getattr(episode, 'air_date', None),
-                lookahead_days=lookahead_days,
+            value, path_drift = _resolve_episode_determination(
+                session,
+                episode,
                 placeholders_enabled=placeholders_enabled,
+                lookahead_days=lookahead_days,
                 now_date=now_date,
             )
+            if path_drift:
+                stats['path_drift_episodes'] += 1
+                season = session.query(Season).filter(Season.id == episode.season_id).first()
+                series = (
+                    session.query(Series).filter(Series.id == season.series_id).first()
+                    if season
+                    else None
+                )
+                exp_repr = (
+                    episode_placeholder_path(episode, season, series)
+                    if season and series
+                    else None
+                )
+                logger.debug(
+                    f'Placeholder path drift episode_id={episode.id} stored={getattr(episode, "placeholder_filepath", None)!r} '
+                    f'expected={exp_repr!r}',
+                    extra={'emoji_type': 'debug'},
+                )
             stats[value] += 1
             if getattr(episode, 'determination', None) != value:
                 episode.determination = value
@@ -404,6 +511,8 @@ def run_determination_for_entities_in_session(
         'not_needed': 0,
         'placeholder_exists': 0,
         'needs_placeholder': 0,
+        'path_drift_movies': 0,
+        'path_drift_episodes': 0,
     }
 
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
@@ -419,16 +528,14 @@ def run_determination_for_entities_in_session(
     stats['movies_total'] = len(movies)
 
     for movie in movies:
-        value = _compute_determination(
-            bool(getattr(movie, 'has_placeholder', False)),
-            bool(getattr(movie, 'has_file', False)),
-            bool(getattr(movie, 'is_deleted', False)),
-            target_date=_preferred_movie_release_date(movie),
-            release_status=getattr(movie, 'radarr_release_status', None),
-            lookahead_days=lookahead_days,
+        value, path_drift = _resolve_movie_determination(
+            movie,
             placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
             now_date=now_date,
         )
+        if path_drift:
+            stats['path_drift_movies'] += 1
         stats[value] += 1
         if getattr(movie, 'determination', None) != value:
             movie.determination = value
@@ -458,15 +565,15 @@ def run_determination_for_entities_in_session(
                     stats['episodes_changed'] += 1
                 continue
 
-        value = _compute_determination(
-            bool(getattr(episode, 'has_placeholder', False)),
-            bool(getattr(episode, 'has_file', False)),
-            bool(getattr(episode, 'is_deleted', False)),
-            target_date=getattr(episode, 'air_date', None),
-            lookahead_days=lookahead_days,
+        value, path_drift = _resolve_episode_determination(
+            session,
+            episode,
             placeholders_enabled=placeholders_enabled,
+            lookahead_days=lookahead_days,
             now_date=now_date,
         )
+        if path_drift:
+            stats['path_drift_episodes'] += 1
         stats[value] += 1
         if getattr(episode, 'determination', None) != value:
             episode.determination = value

@@ -8,6 +8,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-04-16
+
+### Changed
+- **Placeholder path drift reconciliation (movies + TV)**:
+  - Lite sync includes ARR path-drift ID discovery (Radarr/Sonarr API path vs stored DB path), then runs targeted ID refresh for drifted content even when history does not carry a usable rename signal.
+  - Determination classifies path-drifted placeholders as `obsolete_placeholder`, and materialization applies obsolete-first then needs so relocation completes within one lifecycle pass.
+  - Drift evaluation includes rows with stored placeholder paths even when `has_placeholder` is transiently false.
+  - TV relocation cleanup prunes empty old season/series directories from deleted candidate paths so obsolete trees are removed after migration.
+
 ## [0.9.1] - 2026-04-15
 
 ### Added
