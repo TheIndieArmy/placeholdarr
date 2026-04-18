@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 
 from core.config import settings
 from core.logger import logger
@@ -763,6 +763,7 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
         )
         targets.extend(season_targets)
 
+        max_in_season = None
         if episode_number is not None:
             max_in_season = (
                 session.query(Episode)
@@ -787,6 +788,22 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
                 )
                 targets.extend(next_targets)
                 metadata['season_boundary_next_included'] = True
+
+        # Match Episode-mode behavior: when the user reaches the end of the highest season Placeholdarr
+        # stores, mark the whole series monitored in Sonarr so newly-added future seasons/episodes are picked up.
+        max_season_q = session.query(func.max(Season.season_number)).filter(Season.series_id == series_row.id)
+        if not include_specials:
+            max_season_q = max_season_q.filter(Season.season_number > 0)
+        max_season_num = max_season_q.scalar()
+        if (
+            episode_number is not None
+            and max_in_season is not None
+            and max_season_num is not None
+            and int(season_number) == int(max_season_num)
+            and int(episode_number) >= int(max_in_season.episode_number or 0)
+        ):
+            metadata['reached_end'] = True
+
         metadata['scope'] = 'season'
         return targets, metadata
 
