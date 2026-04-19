@@ -75,6 +75,15 @@ def _normalize_download_event(instance: str | None) -> NormalizedEventType:
 def normalize_event_type(raw_event_type: str | None, instance: str | None = None) -> NormalizedEventType:
     raw = str(raw_event_type or "unknown").strip().lower()
 
+    # Sonarr/Radarr "Test" webhook from Settings → Webhooks → Test; not a content lifecycle event.
+    if raw in ("test", "ping", "webhooktest"):
+        return NormalizedEventType(
+            raw_event_type=raw,
+            canonical_event_type="webhook_test",
+            matched_alias=raw,
+            is_known=True,
+        )
+
     if raw == "download":
         return _normalize_download_event(instance)
 
@@ -112,6 +121,8 @@ def legacy_dispatch_event_type(canonical_event_type: str, raw_event_type: str | 
         return raw if raw in {"movieadd", "movieadded"} else "movieadd"
     if canonical == "playback_start":
         return raw if raw in {"playback.start", "playbackstart"} else "playbackstart"
+    if canonical == "webhook_test":
+        return "test"
 
     # Unknown/unsupported canonical events keep their raw value for observability.
     return raw or canonical or "unknown"

@@ -3,6 +3,14 @@ import os
 import signal
 import subprocess
 import time
+
+# Pydantic → pydantic_core loads typing_extensions' @deprecated, which imports
+# asyncio.coroutines → contextvars. On slow roots (e.g. NFS), that nested first
+# import can stall long enough that Ctrl+C looks like a crash. Preload here so
+# stat/import work happens before FastAPI/Pydantic.
+import contextvars  # noqa: F401
+import asyncio.coroutines  # noqa: F401
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from core.logger import logger
@@ -422,25 +430,35 @@ app.include_router(dashboard_router)
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         payload = await request.json()
-        instance = request.query_params.get("instance", "").strip() or None
+        instance_raw = request.query_params.get("instance", "").strip() or None
+        instance_id_raw = request.query_params.get("instance_id", "").strip() or None
 
         # During onboarding, accept webhook calls but intentionally ignore them.
         # Post-onboarding startup full sync is the source of truth and avoids
         # processing transient events while settings are still being configured.
         if not _onboarding_is_complete():
             logger.info(
-                f"Webhook accepted but ignored because onboarding is incomplete instance={instance or 'unknown'}",
+                f"Webhook accepted but ignored because onboarding is incomplete "
+                f"instance={instance_raw or 'unknown'} instance_id={instance_id_raw or 'none'}",
                 extra={'emoji_type': 'info'},
             )
             return {"status": "accepted", "ignored": True, "reason": "onboarding_incomplete"}
 
         try:
-            from services.handlers import handle_webhook as new_handle, validate_webhook_payload
+            from services.handlers import (
+                handle_webhook as new_handle,
+                resolve_canonical_webhook_instance,
+                validate_webhook_payload,
+            )
         except Exception:
             logger.info('Webhook received but no handler available in services.handlers; ignoring payload', extra={'emoji_type': 'info'})
             return {"status": "accepted"}
 
-        ok, reason, event_type, _event_meta = validate_webhook_payload(payload, instance)
+        canonical_instance, route_err = resolve_canonical_webhook_instance(instance_raw, instance_id_raw)
+        if route_err:
+            raise HTTPException(status_code=400, detail=route_err)
+
+        ok, reason, event_type, _event_meta = validate_webhook_payload(payload, canonical_instance)
         if not ok:
             logger.warning(
                 f"Webhook rejected before enqueue event_type={event_type} reason={reason}",
@@ -448,7 +466,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             )
             raise HTTPException(status_code=400, detail=reason)
 
-        background_tasks.add_task(new_handle, payload, instance)
+        background_tasks.add_task(new_handle, payload, canonical_instance)
         return {"status": "accepted"}
     except HTTPException:
         raise
@@ -468,12 +486,11 @@ if __name__ == '__main__':
     logger.info(f"Using host {host} and port {port}", extra={'emoji_type': 'info'})
 
     if not check_port(port):
-        logger.info(f"Attempting to clear port {port}", extra={'emoji_type': 'info'})
-        if clear_port(port):
-            logger.info(f"Successfully cleared port {port}", extra={'emoji_type': 'info'})
-        else:
-            logger.error(f"Failed to clear port {port}. Please use a different port.", extra={'emoji_type': 'error'})
-            sys.exit(1)
+        logger.error(
+            f"Port {port} is unavailable. Set PLACEHOLDARR_PORT to an unused port and restart.",
+            extra={'emoji_type': 'error'},
+        )
+        sys.exit(1)
 
     # uvicorn expects standard log levels; map custom values (e.g. VERBOSE) to a safe default
     raw_level = getattr(settings, 'LOG_LEVEL', 'info')

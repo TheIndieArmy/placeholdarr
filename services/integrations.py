@@ -177,9 +177,64 @@ def test_emby_connection(url: str, token: str) -> dict[str, Any]:
 
 
 def test_arr_connection(url: str, api_key: str, arr_type: str) -> dict[str, Any]:
+    """Ping *arr system/status and verify the server matches the expected app (Radarr vs Sonarr)."""
+    expected = str(arr_type or '').strip().lower()
+    if expected not in {'radarr', 'sonarr'}:
+        return {'ok': False, 'message': 'Invalid ARR type', 'service': expected}
+
     endpoint = _build_endpoint(_normalize_url(url), 'system/status')
-    ok, message = _test_get(endpoint, params={'apikey': str(api_key or '').strip()})
-    return {'ok': ok, 'message': message, 'service': arr_type}
+    safe_url = _safe_url(endpoint)
+    try:
+        response = requests.get(
+            endpoint,
+            params={'apikey': str(api_key or '').strip()},
+            headers={'Accept': 'application/json'},
+            timeout=5,
+        )
+        if response.status_code >= 400:
+            return {'ok': False, 'message': f'HTTP {response.status_code} from {safe_url}', 'service': expected}
+        data = response.json()
+    except ValueError:
+        return {
+            'ok': False,
+            'message': f'Response was not valid JSON from {safe_url}; check the URL points to Radarr or Sonarr (API v3).',
+            'service': expected,
+        }
+    except Exception as exc:
+        return {'ok': False, 'message': f'{type(exc).__name__} while connecting to {safe_url}', 'service': expected}
+
+    if not isinstance(data, dict):
+        return {'ok': False, 'message': 'Unexpected response from server.', 'service': expected}
+
+    fingerprint = ' '.join(
+        str(data.get(key) or '')
+        for key in ('appName', 'instanceName', 'version', 'packageVersion', 'osName', 'runtimeVersion')
+    ).lower()
+
+    if expected == 'radarr' and 'radarr' in fingerprint:
+        return {'ok': True, 'message': 'Connected to Radarr', 'service': expected}
+    if expected == 'sonarr' and 'sonarr' in fingerprint:
+        return {'ok': True, 'message': 'Connected to Sonarr', 'service': expected}
+
+    other = 'sonarr' if expected == 'radarr' else 'radarr'
+    if other in fingerprint:
+        return {
+            'ok': False,
+            'message': (
+                f'This server identifies as {other.title()}, but this slot is for {expected.title()}. '
+                f'Use the {other.title()} column or change the URL.'
+            ),
+            'service': expected,
+        }
+
+    return {
+        'ok': False,
+        'message': (
+            f'Could not confirm this host is {expected.title()} (expected “{expected}” in system status). '
+            'Check the base URL reaches that app’s root (not another service on the same host).'
+        ),
+        'service': expected,
+    }
 
 
 def test_integration_connection(service: str, url: str, token_or_key: str) -> dict[str, Any]:

@@ -29,9 +29,13 @@ def get_configured_webhook_instances() -> dict[str, bool]:
     configured: dict[str, bool] = {}
     for item in (getattr(settings, 'configured_arr_instances', []) or []):
         key = str(item.get('instance_key') or '').strip().lower()
-        if not key:
-            continue
-        configured[key] = bool(str(item.get('url') or '').strip() and str(item.get('api_key') or '').strip())
+        ok = bool(str(item.get('url') or '').strip() and str(item.get('api_key') or '').strip())
+        if key:
+            configured[key] = ok
+        for a in item.get('instance_key_aliases') or []:
+            av = str(a or '').strip().lower()
+            if av:
+                configured[av] = ok
 
     configured.update(
         {
@@ -45,6 +49,61 @@ def get_configured_webhook_instances() -> dict[str, bool]:
 
 def _allowed_instance_list() -> str:
     return ', '.join(_allowed_webhook_instances())
+
+
+def resolve_canonical_webhook_instance(
+    instance: str | None,
+    instance_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Map webhook query params to the canonical instance token stored on EventLog.source.
+
+    - ``?instance_id=`` resolves to the row's current ``instance_key`` (stable id in URL).
+    - ``?instance=`` accepts playback keys, current ARR ``instance_key``, or any saved alias.
+    Returns (canonical_token, error_reason).
+    """
+    inst = str(instance or '').strip().lower() or None
+    iid = str(instance_id or '').strip().lower() or None
+    if inst and iid:
+        return None, 'Provide only one of instance or instance_id query parameter.'
+    if iid:
+        for item in (getattr(settings, 'configured_arr_instances', []) or []):
+            row_id = str(item.get('instance_id') or '').strip().lower()
+            if row_id != iid:
+                continue
+            key = str(item.get('instance_key') or '').strip().lower()
+            if not key:
+                return None, f'instance_id {iid} is missing instance_key in configuration.'
+            ok = bool(str(item.get('url') or '').strip() and str(item.get('api_key') or '').strip())
+            if not ok:
+                return None, f'instance_id {iid} is recognized but not fully configured (url/api key).'
+            return key, None
+        return None, f'Unknown instance_id: {iid}. Allowed values include configured ARR instance ids.'
+    if inst:
+        playback = set(getattr(settings, 'playback_source_instance_keys', ()) or ())
+        if inst in playback:
+            configured = get_configured_webhook_instances()
+            if configured.get(inst):
+                return inst, None
+            return None, f'Webhook instance parameter is recognized but not enabled: {inst}.'
+        for item in (getattr(settings, 'configured_arr_instances', []) or []):
+            key = str(item.get('instance_key') or '').strip().lower()
+            aliases = item.get('instance_key_aliases') if isinstance(item.get('instance_key_aliases'), list) else []
+            alias_set = {str(a or '').strip().lower() for a in aliases if str(a or '').strip()}
+            if inst == key or inst in alias_set:
+                ok = bool(str(item.get('url') or '').strip() and str(item.get('api_key') or '').strip())
+                if not ok:
+                    return None, f'Instance {inst} maps to an incomplete ARR configuration.'
+                return key, None
+        return (
+            None,
+            f'Invalid webhook instance query parameter: {inst}. '
+            f'Check the webhook URL query parameters. '
+            f'Allowed values: {_allowed_instance_list()}.',
+        )
+    return None, (
+        'Missing required webhook routing query parameter. '
+        'Provide either instance=<key> or instance_id=<stable-id> (see dashboard webhook setup).'
+    )
 
 
 def validate_webhook_instance(instance: str | None) -> str | None:

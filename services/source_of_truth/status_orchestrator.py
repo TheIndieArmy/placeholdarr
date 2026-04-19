@@ -31,6 +31,24 @@ from services.postgres.db import get_session
 logger = logging.getLogger(__name__)
 
 
+def _is_coming_soon_status(value: str | None) -> bool:
+    text = str(value or "").strip().upper()
+    return text.startswith("COMING_SOON")
+
+
+def _should_persist_status_history_event(*, source: str, old_status: str, new_status: str) -> bool:
+    """Decide whether a status transition is user-meaningful for history UX."""
+    if old_status == new_status:
+        return False
+
+    src = str(source or "").strip().lower()
+    # Suppress calendar countdown churn; keep only release-day milestone.
+    if src == StatusSource.CALENDAR_RELEASE_WINDOW.value:
+        return _is_coming_soon_status(old_status) and new_status == DisplayStatus.REQUEST.value
+
+    return True
+
+
 class StatusOrchestrator:
     """Orchestrates computation and application of status changes across all sources."""
     
@@ -491,26 +509,36 @@ class StatusOrchestrator:
                 ph.display_progress = None
             ph.updated_at = datetime.now(timezone.utc)
 
-            # Persist a durable status-transition event for timeline UX and troubleshooting.
-            # Kept lightweight: placeholder id + transition metadata; entity/title lookup is
-            # resolved later by activity APIs from current DB state.
-            session.add(
-                EventLog(
-                    event_type="placeholder_status_changed",
-                    source=str(intent.source.value),
-                    payload={
-                        "placeholder_id": int(ph.id),
-                        "old_status": str(old_status or ""),
-                        "new_status": str(intent.new_status or ""),
-                        "reason": str(intent.reason or ""),
-                    },
-                    status="DONE",
-                    attempts=0,
-                    max_attempts=0,
-                    updated_at=ph.updated_at,
-                    processed_at=ph.updated_at,
+            old_status_text = str(old_status or "")
+            new_status_text = str(intent.new_status or "")
+            source_text = str(intent.source.value)
+
+            # Persist only user-meaningful transitions in placeholder history.
+            if _should_persist_status_history_event(
+                source=source_text,
+                old_status=old_status_text,
+                new_status=new_status_text,
+            ):
+                history_reason = str(intent.reason or "")
+                if source_text == StatusSource.CALENDAR_RELEASE_WINDOW.value:
+                    history_reason = "Reached release day"
+                session.add(
+                    EventLog(
+                        event_type="placeholder_status_changed",
+                        source=source_text,
+                        payload={
+                            "placeholder_id": int(ph.id),
+                            "old_status": old_status_text,
+                            "new_status": new_status_text,
+                            "reason": history_reason,
+                        },
+                        status="DONE",
+                        attempts=0,
+                        max_attempts=0,
+                        updated_at=ph.updated_at,
+                        processed_at=ph.updated_at,
+                    )
                 )
-            )
             
             session.commit()
             

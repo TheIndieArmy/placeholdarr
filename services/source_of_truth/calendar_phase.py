@@ -227,7 +227,6 @@ def _calendar_variant_settings_fingerprint() -> str:
         str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas"),
         str(getattr(settings, "DUMMY_FILE_PATH", "") or ""),
         str(getattr(settings, "COMING_SOON_DUMMY_FILE_PATH", "") or ""),
-        str(getattr(settings, "CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon") or "coming_soon"),
     ]
     payload = "|".join(parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]

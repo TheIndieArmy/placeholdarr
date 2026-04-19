@@ -64,6 +64,40 @@ def _is_path_under_roots(path: str, roots: list[str]) -> bool:
     return False
 
 
+def is_path_under_configured_roots(path: str | None) -> bool:
+    """True when ``path`` lies under any configured movie/TV library root."""
+    if not path:
+        return False
+    roots = [os.path.abspath(r) for r in configured_roots() if r]
+    return _is_path_under_roots(path, roots)
+
+
+def is_path_under_tv_library_roots(path: str | None) -> bool:
+    """True when ``path`` lies under configured TV library folder(s)."""
+    if not path:
+        return False
+    roots: list[str] = []
+    for key in ("TV_LIBRARY_FOLDER", "TV_LIBRARY_4K_FOLDER"):
+        raw = getattr(settings, key, None)
+        if raw:
+            roots.append(os.path.abspath(str(raw)))
+    roots = list(dict.fromkeys(roots))
+    return _is_path_under_roots(path, roots)
+
+
+def is_path_under_movie_library_roots(path: str | None) -> bool:
+    """True when ``path`` lies under configured movie library folder(s)."""
+    if not path:
+        return False
+    roots: list[str] = []
+    for key in ("MOVIE_LIBRARY_FOLDER", "MOVIE_LIBRARY_4K_FOLDER"):
+        raw = getattr(settings, key, None)
+        if raw:
+            roots.append(os.path.abspath(str(raw)))
+    roots = list(dict.fromkeys(roots))
+    return _is_path_under_roots(path, roots)
+
+
 def _disconnect_placeholder_row(row: Placeholder) -> bool:
     """Clear media-server linkage so re-materialization performs a fresh observe pass."""
     changed = False

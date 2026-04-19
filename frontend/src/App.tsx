@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getActivity,
@@ -16,6 +17,16 @@ import {
   saveSettings,
   testIntegrationConnection,
 } from "./api/dashboard";
+import embyIcon from "./assets/services/emby.svg";
+import jellyfinIcon from "./assets/services/jellyfin.svg";
+import plexIcon from "./assets/services/plex.svg";
+import radarrIcon from "./assets/services/radarr.svg";
+import sonarrIcon from "./assets/services/sonarr.svg";
+import { LOGO_CURLY_LEFT_D, LOGO_CURLY_RIGHT_D, LOGO_PLAY_ROUNDED_D } from "./assets/logoMarkPaths";
+import simularrBrandMark from "./assets/Placeholdarr1.svg";
+import type { Brand, ThemeMode } from "./brandTypes";
+import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
+import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
   CalendarDay,
@@ -33,8 +44,72 @@ import type {
 
 const REFRESH_MS = 5000;
 const LOG_TAIL_LINES = 2000;
-const SETTINGS_SECTION_ORDER = ["Media Integrations", "ARR Integrations", "Paths", "Library sync", "Calendar", "Playback", "Advanced"];
-const BEHAVIOR_WIZARD_SECTIONS = ["ARR Integrations", "Library sync", "Calendar", "Playback", "Advanced"] as const;
+const SETTINGS_SECTION_ORDER = [
+  "Media Integrations",
+  "ARR Integrations",
+  "Paths",
+  "Library sync",
+  "Calendar",
+  "Lookahead",
+  "Status Updates",
+  "Advanced",
+];
+const BEHAVIOR_WIZARD_SECTIONS = [
+  "ARR Integrations",
+  "Library sync",
+  "Calendar",
+  "Lookahead",
+  "Status Updates",
+  "Advanced",
+] as const;
+
+/** Shared onboarding section heading (behavior wizard, paths, webhooks). */
+const ONBOARDING_SECTION_TITLE_CLASS =
+  "mb-3 pb-2 border-b border-[#424753]/40 text-base font-headline font-bold uppercase tracking-wide text-white";
+
+/** Onboarding grouped panel (intro + fields, or paths / library sync blocks). */
+const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS =
+  "mb-4 rounded-lg border border-[#424753]/30 bg-[#0f1419]/60 px-4 py-4 sm:px-5";
+
+/**
+ * Behavior onboarding only: cycles section frames so you can compare styles on one screen.
+ * Set to false after you pick a winner, then replace {@link WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}
+ * (and webhook/path surfaces if desired) with that variant’s `className`.
+ */
+const ONBOARDING_BEHAVIOR_SURFACE_PREVIEW = true;
+
+const ONBOARDING_BEHAVIOR_SURFACE_VARIANTS = [
+  {
+    label: "A · Baseline (current default)",
+    className:
+      "mb-4 rounded-lg border border-[#424753]/30 bg-[#0f1419]/60 px-4 py-4 sm:px-5 shadow-none",
+  },
+  {
+    label: "B · Raised slate panel",
+    className:
+      "mb-4 rounded-lg border border-[#424753]/55 bg-[#1a2436]/95 px-4 py-4 sm:px-5 shadow-lg shadow-black/30",
+  },
+  {
+    label: "C · Cool rim + inset highlight",
+    className:
+      "mb-4 rounded-lg border border-white/[0.12] bg-[#111824]/92 px-4 py-4 sm:px-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]",
+  },
+  {
+    label: "D · Left accent rail",
+    className:
+      "mb-4 rounded-lg border border-[#424753]/45 border-l-2 border-l-sky-400/55 bg-[#0e1520]/92 px-4 py-4 sm:px-5",
+  },
+  {
+    label: "E · Vertical sheet gradient",
+    className:
+      "mb-4 rounded-xl border border-[#424753]/50 bg-gradient-to-b from-[#1c2636]/98 via-[#131b28]/96 to-[#0a0f16]/98 px-4 py-4 sm:px-5 shadow-inner shadow-black/40",
+  },
+] as const;
+
+function behaviorWizardSurface(sectionIndex: number): (typeof ONBOARDING_BEHAVIOR_SURFACE_VARIANTS)[number] {
+  return ONBOARDING_BEHAVIOR_SURFACE_VARIANTS[sectionIndex % ONBOARDING_BEHAVIOR_SURFACE_VARIANTS.length];
+}
+
 const WIZARD_STEPS = [
   { key: "paths", name: "Paths" },
   { key: "media", name: "Media Servers" },
@@ -81,34 +156,6 @@ function partitionLibraryPathFields(fields: SettingsField[]) {
   return { root, profiles, overrides, rest };
 }
 
-const WIZARD_STEP_GUIDANCE: Record<(typeof WIZARD_STEPS)[number]["key"], { title: string; detail: string }> = {
-  paths: {
-    title: "Start with Library Root",
-    detail:
-      "Set one base path. Placeholdarr will create and use `movies` and `tv` folders under that path for placeholders.",
-  },
-  media: {
-    title: "Media server targets",
-    detail:
-      "Enable at least one media server you actually run. You can use Plex, Jellyfin, Emby, or a combination. Disabled services can stay blank.",
-  },
-  arr: {
-    title: "ARR connections",
-    detail:
-      "Add up to 2 Radarr and 2 Sonarr instances, give each a label, and test connectivity.",
-  },
-  webhooks: {
-    title: "Connect webhooks",
-    detail:
-      "Use the exact webhook URLs below for each ARR/media service. Instance keys are derived from your current labels.",
-  },
-  behavior: {
-    title: "Sync, calendar, and playback",
-    detail:
-      "Tune refresh cadence, lookahead windows, and playback behavior. Keep dummy files under /config and choose which dummy path Coming Soon placeholders use.",
-  },
-};
-
 const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
   PLEX_URL: { service: "plex", credentialKey: "PLEX_TOKEN" },
   JELLYFIN_URL: { service: "jellyfin", credentialKey: "JELLYFIN_TOKEN" },
@@ -123,9 +170,6 @@ type CalendarFilters = {
   mediaTypes: Record<string, boolean>;
   releaseTypes: Record<string, boolean>;
 };
-
-type Brand = "placeholdarr" | "placeholdarr-neon" | "spectarr" | "phantarr" | "mirarr" | "elfhosted";
-type ThemeMode = "light" | "dark";
 
 type BrandAccent = {
   label: string;
@@ -142,6 +186,9 @@ const BRAND_OPTIONS: Array<{ value: Brand; label: string }> = [
   { value: "phantarr", label: "Phantarr" },
   { value: "mirarr", label: "Mirarr" },
   { value: "elfhosted", label: "ElfHosted" },
+  { value: "simularr", label: "Simularr" },
+  { value: "trigger", label: "Trigger" },
+  { value: "linkarr", label: "Linkarr" },
 ];
 
 const THEME_MODE_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
@@ -163,6 +210,9 @@ const BRAND_META: Record<Brand, { label: string; tagline: string }> = {
   phantarr: { label: "Phantarr", tagline: "Phantom media, on demand. Real when you need it." },
   mirarr: { label: "Mirarr", tagline: "Your library, reflected in full - even what's not there yet." },
   elfhosted: { label: "Placeholdarr", tagline: "Your library, complete. No docker, no suffering." },
+  simularr: { label: "Simularr", tagline: "High fidelity simulation — your library as a living spec sheet." },
+  trigger: { label: "Trigger", tagline: "Industrial-grade control — pulse-tuned for high-visibility ops." },
+  linkarr: { label: "Linkarr", tagline: "The missing link in media automation — signal-clean orchestration." },
 };
 
 const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
@@ -255,7 +305,65 @@ const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
     icon: "#6a9c3e",
     hoverHex: "#3d5a22",
   },
+  // Simularr — slate / void / cyber yellow
+  "simularr-light": {
+    label: "Simularr",
+    hex: "#ca8a04",
+    text: "#0f172a",
+    icon: "#475569",
+    hoverHex: "#a16207",
+  },
+  "simularr-dark": {
+    label: "Simularr",
+    hex: "#FBBF24",
+    text: "#E2E8F0",
+    icon: "#CBD5E1",
+    hoverHex: "#d97706",
+  },
+  // Trigger (Vanguard) — pulse orange / zinc / warning yellow
+  "trigger-light": {
+    label: "Trigger",
+    hex: "#FF6B35",
+    text: "#212121",
+    icon: "#744F10",
+    hoverHex: "#e85a2a",
+  },
+  "trigger-dark": {
+    label: "Trigger",
+    hex: "#FF6B35",
+    text: "#FCEEE3",
+    icon: "#FFCC33",
+    hoverHex: "#ff8555",
+  },
+  // Linkarr — signal blue / core slate / accent sky
+  "linkarr-light": {
+    label: "Linkarr",
+    hex: "#2563EB",
+    text: "#1E293B",
+    icon: "#60A5FA",
+    hoverHex: "#1d4ed8",
+  },
+  "linkarr-dark": {
+    label: "Linkarr",
+    hex: "#2563EB",
+    text: "#E2E8F0",
+    icon: "#60A5FA",
+    hoverHex: "#1d4ed8",
+  },
 };
+
+function getStudioDarkBackdrop(brand: Brand, accent: BrandAccent, semantic: BrandSemanticTokens): string {
+  switch (brand) {
+    case "simularr":
+      return `radial-gradient(1000px 540px at 6% -14%, ${alphaColor(semantic.accent, 0.28)}, transparent 58%), radial-gradient(860px 480px at 96% 108%, ${alphaColor(semantic.accentIce, 0.22)}, transparent 54%), radial-gradient(720px 420px at 44% 96%, ${alphaColor(semantic.accent3, 0.14)}, transparent 56%), linear-gradient(172deg, ${semantic.chromeSidebar} 0%, ${semantic.surfaceMuted} 46%, ${semantic.surfacePanel} 100%)`;
+    case "trigger":
+      return `radial-gradient(1100px 580px at 10% -18%, ${alphaColor(semantic.accent, 0.42)}, transparent 56%), radial-gradient(780px 440px at 88% 108%, ${alphaColor(semantic.accent2, 0.22)}, transparent 50%), radial-gradient(640px 420px at 48% 42%, ${alphaColor(semantic.accent3, 0.14)}, transparent 72%), ${semantic.chromePage}`;
+    case "linkarr":
+      return `radial-gradient(1040px 560px at 8% -16%, ${alphaColor(semantic.accent2, 0.32)}, transparent 56%), radial-gradient(920px 520px at 92% 112%, ${alphaColor(semantic.accent, 0.36)}, transparent 54%), radial-gradient(700px 400px at 22% 72%, ${alphaColor(semantic.accentIce, 0.1)}, transparent 58%), linear-gradient(158deg, ${semantic.surfacePanel} 0%, ${semantic.surfaceMuted} 50%, ${semantic.chromeSidebar} 100%)`;
+    default:
+      return `radial-gradient(1200px 600px at 10% -20%, ${alphaColor(accent.hex, 0.22)}, transparent 60%), radial-gradient(900px 500px at 85% 120%, ${alphaColor(accent.hex, 0.12)}, transparent 55%), linear-gradient(160deg, #0b1320, #0a101a 55%, #0b1528)`;
+  }
+}
 
 function alphaColor(hex: string, alpha: number) {
   const normalized = hex.replace("#", "");
@@ -291,12 +399,41 @@ function getBrandAccent(brand: Brand, theme: ThemeMode) {
 
 function BrandLogo(props: { brand: Brand; accentHex: string; className?: string }) {
   const stroke = "#ffffff";
-  if (props.brand === "placeholdarr" || props.brand === "placeholdarr-neon" || props.brand === "elfhosted") {
+  if (props.brand === "placeholdarr" || props.brand === "placeholdarr-neon" || props.brand === "elfhosted" || props.brand === "linkarr") {
     return (
       <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
         <rect width="72" height="72" rx="16" fill={props.accentHex} />
-        <polyline points="28,18 19,18 19,54 28,54" stroke={stroke} strokeWidth="5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-        <polyline points="44,18 53,18 53,54 44,54" stroke={stroke} strokeWidth="5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        <g fill="none" stroke={stroke} strokeWidth="5" strokeLinecap="round" strokeLinejoin="round">
+          <path d={LOGO_CURLY_LEFT_D} />
+          <path d={LOGO_CURLY_RIGHT_D} />
+        </g>
+        <path d={LOGO_PLAY_ROUNDED_D} fill={stroke} />
+      </svg>
+    );
+  }
+  if (props.brand === "simularr") {
+    return (
+      <img
+        src={simularrBrandMark}
+        alt=""
+        className={`block object-contain object-left select-none ${props.className ?? ""}`}
+        draggable={false}
+        aria-hidden
+      />
+    );
+  }
+  if (props.brand === "trigger") {
+    return (
+      <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+        <rect width="72" height="72" rx="16" fill={props.accentHex} />
+        <circle cx="36" cy="36" r="19" fill="none" stroke="#212121" strokeWidth="3.2" opacity="0.35" />
+        <path
+          d="M38 14 L26 34 H33 L28 58 L46 32 H38 Z"
+          fill="#FFCC33"
+          stroke="#212121"
+          strokeWidth="1.2"
+          strokeLinejoin="round"
+        />
       </svg>
     );
   }
@@ -396,10 +533,14 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const currentTab = getTabFromPath(location.pathname);
-  const defaultLandingPath = setupStatus?.setup_complete === false ? "/settings" : "/activity";
+  const defaultLandingPath = setupStatus?.setup_complete === false ? "/setup" : "/activity";
   const brandAccent = getBrandAccent(brand, themeMode);
+  const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
   const brandMeta = BRAND_META[brand];
-  const hasUnsavedChanges = useMemo(() => !deepEqualValues(fieldValues, baselineValues), [fieldValues, baselineValues]);
+  const hasUnsavedChanges = useMemo(
+    () => settingsValuesDirty(fieldValues, baselineValues, settingsPayload),
+    [fieldValues, baselineValues, settingsPayload],
+  );
   const hasUnsavedChangesRef = useRef(false);
   const selectedCalendarItem = useMemo(
     () => findCalendarItem(calendar, calendarSelectedId),
@@ -634,10 +775,24 @@ export function App() {
 
   useEffect(() => {
     if (setupStatus?.setup_complete !== false) return;
-    if (location.pathname === "/" || location.pathname.startsWith("/activity")) {
-      navigate("/settings", { replace: true });
-    }
-  }, [location.pathname, navigate, setupStatus]);
+    if (settingsPayload) return;
+
+    let stopped = false;
+    loadSettings(stopped).catch(() => {
+      // Keep the current page visible; periodic refresh will retry loading settings.
+    });
+
+    return () => {
+      stopped = true;
+    };
+  }, [settingsPayload, setupStatus?.setup_complete]);
+
+  useEffect(() => {
+    if (loading || !setupStatus) return;
+    if (setupStatus.setup_complete) return;
+    if (location.pathname === "/setup" || location.pathname.startsWith("/setup/")) return;
+    navigate("/setup", { replace: true });
+  }, [loading, setupStatus, location.pathname, navigate]);
 
   const filteredLibrary = useMemo(() => {
     return library
@@ -937,34 +1092,125 @@ export function App() {
     document.body.className = themeMode === "light" ? "theme-studio-light" : "theme-glassmorphism";
   }, [themeMode]);
 
+  const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
+  if (setupRouteActive) {
+    if (loading || !setupStatus) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[#070b12] text-slate-300 text-sm font-headline tracking-wide">
+          Loading setup…
+        </div>
+      );
+    }
+    if (setupStatus.setup_complete) {
+      return <Navigate to="/activity" replace />;
+    }
+    if (!settingsPayload) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[#070b12] text-slate-300 text-sm font-headline tracking-wide">
+          Loading setup…
+        </div>
+      );
+    }
+    return (
+      <OnboardingWizard
+        payload={settingsPayload}
+        stepIndex={onboardingStepIndex}
+        values={fieldValues}
+        hasUnsavedChanges={hasUnsavedChanges}
+        brand="placeholdarr"
+        themeMode={themeMode}
+        onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
+        onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
+        onPartialSave={handlePartialSave}
+        onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+        onTestConnection={async ({ service, urlKey, credentialKey }) => {
+          const url = String(fieldValues[urlKey] || "").trim();
+          const credential = String(fieldValues[credentialKey] || "").trim();
+          return testIntegrationConnection({ service, url, credential });
+        }}
+        onSave={async () => {
+          setSettingsFeedback("Saving...");
+          setSettingsFeedbackKind("");
+          const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
+          if (!result.ok) {
+            const first = Object.entries(result.errors || {})[0];
+            setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
+            setSettingsFeedbackKind("error");
+            return;
+          }
+          setBaselineValues(fieldValues);
+          setSettingsFeedback("Saved and applied.");
+          setSettingsFeedbackKind("success");
+          const payload = await getSettingsCurrent();
+          setSettingsPayload(payload);
+          setSetupStatus(payload.status);
+          setOnboardingVisible(!payload.status.setup_complete);
+        }}
+      />
+    );
+  }
+
   // Studio Shell — Tailwind JSX matching the design mockups exactly
   if (theme === "studio-dark") {
     const isActive = (path: string) =>
       location.pathname === path || location.pathname.startsWith(`${path}/`);
     const isStudioGlass = themeMode !== "light";
+    const studioLightChrome = {
+      page: brandSemantic.chromePage,
+      sidebar: brandSemantic.chromeSidebar,
+      header: brandSemantic.chromeHeader,
+      main: brandSemantic.chromeMain,
+      border: brandSemantic.border,
+    };
+    const brandVarStyle = semanticTokensToCssVars(brandSemantic) as CSSProperties;
+    const isSimularr = brand === "simularr";
+    const topBarDivider = isSimularr
+      ? alphaColor("#0f172a", isStudioGlass ? 0.22 : 0.14)
+      : alphaColor(brandSemantic.border, isStudioGlass ? 0.55 : 0.4);
+    /** Matches Studio top-bar `<select>` fields (Simularr search/dropdown strip). */
+    const simularrTopBarBlue = "#1e2430";
+    const simularrHeaderBackground = isSimularr
+      ? isStudioGlass
+        ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${simularrTopBarBlue} 80%, ${simularrTopBarBlue} 100%)`
+        : `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${brandSemantic.surfaceElevated} 80%, ${brandSemantic.surfaceElevated} 100%)`
+      : null;
 
     return (
       <div
-        className={`theme-${themeMode} flex h-screen overflow-hidden font-body ${isStudioGlass ? "text-slate-100" : "bg-[#e3e3e5] text-slate-900"}`}
-        style={isStudioGlass ? {
-          backgroundImage: `radial-gradient(1200px 600px at 10% -20%, ${alphaColor(brandAccent.hex, 0.22)}, transparent 60%), radial-gradient(900px 500px at 85% 120%, ${alphaColor(brandAccent.hex, 0.12)}, transparent 55%), linear-gradient(160deg, #0b1320, #0a101a 55%, #0b1528)`,
-        } : undefined}
+        className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
+        style={{
+          ...brandVarStyle,
+          ...(isStudioGlass ? {
+            backgroundImage: getStudioDarkBackdrop(brand, brandAccent, brandSemantic),
+          } : { backgroundColor: studioLightChrome.page }),
+        }}
       >
         {/* Sidebar */}
-        <aside className={`hidden md:flex flex-col h-full py-6 w-64 z-20 flex-shrink-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r border-white/10 shadow-[20px_0_45px_rgba(8,14,30,0.45)]" : "bg-[#e6e6e8] border-r border-[#b8bdc4] shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}>
-          {/* Brand */}
-          <div className="px-6 mb-10">
-            <div className="flex items-center gap-3">
-              <BrandLogo brand={brand} accentHex={brandAccent.hex} className="w-10 h-10 rounded-lg shadow-lg flex-shrink-0" />
-              <div>
-                <h1 className={`text-lg font-black font-headline leading-none ${isStudioGlass ? "text-white" : "text-slate-900"}`}>{brandMeta.label}</h1>
-                <p className={`text-[10px] tracking-wide font-headline mt-1 ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>{brandMeta.tagline}</p>
+        <aside
+          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 ${isSimularr ? "pb-6 pt-0" : "py-6"} ${isStudioGlass ? `bg-white/8 backdrop-blur-2xl border-r ${isSimularr ? "" : "shadow-[20px_0_45px_rgba(8,14,30,0.45)]"}` : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
+          style={isStudioGlass ? { borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: brandSemantic.glassBorder } : { backgroundColor: studioLightChrome.sidebar, borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: studioLightChrome.border }}
+        >
+          {isSimularr ? (
+            <div
+              className="flex h-16 w-full shrink-0 items-center justify-center border-b px-3"
+              style={{ backgroundColor: brandSemantic.topBarBand, borderBottomColor: topBarDivider }}
+            >
+              <BrandLogo brand={brand} accentHex={brandAccent.hex} className="max-h-[52px] w-full max-w-[13.5rem] object-contain object-center" />
+            </div>
+          ) : (
+            <div className="px-6 mb-10">
+              <div className="flex items-center gap-3">
+                <BrandLogo brand={brand} accentHex={brandAccent.hex} className="h-10 w-10 flex-shrink-0 rounded-lg shadow-lg" />
+                <div className="min-w-0">
+                  <h1 className={`text-lg font-black font-brand-head leading-none ${isStudioGlass ? "text-white" : "text-slate-900"}`}>{brandMeta.label}</h1>
+                  <p className={`text-[10px] tracking-wide font-brand-label mt-1 ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>{brandMeta.tagline}</p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {/* Nav */}
-          <nav className="flex-1 space-y-1">
+          <nav className={`flex-1 space-y-1 font-brand-label ${isSimularr ? "pt-4" : ""}`}>
             {[
               { icon: "analytics", label: "Activity", path: "/activity" },
               { icon: "movie_filter", label: "Library", path: "/library" },
@@ -975,14 +1221,20 @@ export function App() {
             ].map(({ icon, label, path }) =>
               isActive(path) ? (
                 <button key={path} type="button" onClick={() => tryNavigate(path)}
-                  className={`flex items-center w-full px-6 py-3 gap-4 font-headline text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`}
-                  style={{ backgroundColor: alphaColor(brandAccent.hex, isStudioGlass ? 0.2 : 0.14), color: isStudioGlass ? brandAccent.text : "#0f172a", borderLeftColor: brandAccent.hex }}>
+                  className={`flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`}
+                  style={{
+                    backgroundColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.22 : 0.16),
+                    color: isStudioGlass ? brandSemantic.fg : brandSemantic.fgOnAccent,
+                    borderLeftColor: brandSemantic.accent,
+                  }}
+                >
                   <span className="material-symbols-outlined">{icon}</span>
                   <span>{label}</span>
                 </button>
               ) : (
                 <button key={path} type="button" onClick={() => tryNavigate(path)}
-                  className={`flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-headline text-sm uppercase tracking-widest group ${isStudioGlass ? "text-slate-400 hover:text-slate-100 hover:bg-white/5" : "text-slate-600 hover:text-slate-900 hover:bg-[#e4edf8]"}`}>
+                  className={`flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group ${isStudioGlass ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]" : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]"}`}
+                >
                   <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
                   <span>{label}</span>
                 </button>
@@ -995,8 +1247,16 @@ export function App() {
         {/* Main area */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Topbar */}
-          <header className={`flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b ${isStudioGlass ? "bg-white/6 backdrop-blur-xl" : "bg-[#ececee] border-[#b8bdc4]"}`}
-            style={{ borderColor: isStudioGlass ? alphaColor(brandAccent.hex, 0.2) : "#b8bdc4" }}>
+          <header
+            className={`flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b ${isSimularr || !isStudioGlass ? "" : "bg-white/6 backdrop-blur-xl"}`}
+            style={
+              isSimularr && simularrHeaderBackground
+                ? { backgroundImage: simularrHeaderBackground, borderBottomColor: topBarDivider }
+                : isStudioGlass
+                  ? { borderColor: alphaColor(brandSemantic.accent, 0.28) }
+                  : { backgroundColor: studioLightChrome.header, borderColor: studioLightChrome.border }
+            }
+          >
             <div className="flex items-center flex-1 max-w-xl">
               <div
                 className="relative w-full max-w-lg"
@@ -1004,7 +1264,7 @@ export function App() {
                   window.setTimeout(() => setTitleSearchOpen(false), 120);
                 }}
               >
-                <span className={`material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-lg pointer-events-none ${isStudioGlass ? "text-slate-500" : "text-slate-400"}`}>search</span>
+                <span className={`material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-lg pointer-events-none ${isStudioGlass ? (isSimularr ? "text-slate-400" : "text-slate-500") : "text-slate-400"}`}>search</span>
                 <input
                   value={titleSearch}
                   onChange={(e) => {
@@ -1036,7 +1296,7 @@ export function App() {
                       setTitleSearchOpen(false);
                     }
                   }}
-                  className={`w-full rounded-lg py-2 pl-10 pr-4 text-sm border focus:outline-none placeholder-slate-500 ${isStudioGlass ? `bg-white/10 text-slate-100 border-white/20 ${getBrandFocusClass(brand, themeMode)}` : `bg-white text-slate-900 border-[#cddbeb] ${getBrandFocusClass(brand, themeMode)}`}`}
+                  className={`w-full rounded-lg py-2 pl-10 pr-4 text-sm border focus:outline-none placeholder-slate-500 ${isStudioGlass ? (isSimularr ? `border-[#2a3444] bg-[#1e2430] text-slate-100 ${getBrandFocusClass(brand, themeMode)}` : `bg-white/10 text-slate-100 border-white/20 ${getBrandFocusClass(brand, themeMode)}`) : `bg-white text-slate-900 border-[#cddbeb] ${getBrandFocusClass(brand, themeMode)}`}`}
                   placeholder="Search titles, series, and movies..."
                 />
                 {titleSearchOpen && titleSearch.trim() ? (
@@ -1122,13 +1382,23 @@ export function App() {
           {/* Setup banner */}
           {!setupStatus?.setup_complete ? (
             <div className="border-b border-l-4 px-6 py-3 text-sm"
-              style={{ backgroundColor: alphaColor(brandAccent.hex, isStudioGlass ? 0.15 : 0.12), borderColor: alphaColor(brandAccent.hex, isStudioGlass ? 0.35 : 0.3), borderLeftColor: brandAccent.hex, color: isStudioGlass ? brandAccent.text : "#374151" }}>
+              style={{
+                backgroundColor: alphaColor(brandSemantic.accent2, isStudioGlass ? 0.14 : 0.1),
+                borderColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.38 : 0.28),
+                borderLeftColor: brandSemantic.accent,
+                color: isStudioGlass ? brandSemantic.fg : brandSemantic.fgMuted,
+              }}
+            >
               Onboarding required. Complete the setup wizard to unlock the full dashboard flow.
             </div>
           ) : null}
 
           {/* Content */}
-          <main ref={(el) => { contentScrollRef.current = el; }} className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : "bg-[#eef3f8]"}`}>
+          <main
+            ref={(el) => { contentScrollRef.current = el; }}
+            className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : ""}`}
+            style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
+          >
             {renderTabBody()}
           </main>
 
@@ -1136,44 +1406,6 @@ export function App() {
             <div className="mx-6 mb-4 p-3 rounded-lg bg-red-900/30 border border-red-500/40 text-red-300 text-sm">{errorMessage}</div>
           ) : null}
         </div>
-
-        {/* Onboarding wizard */}
-        {onboardingVisible && settingsPayload ? (
-          <OnboardingWizard
-            payload={settingsPayload}
-            stepIndex={onboardingStepIndex}
-            values={fieldValues}
-            hasUnsavedChanges={hasUnsavedChanges}
-            brand={brand}
-            themeMode={themeMode}
-            onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
-            onPartialSave={handlePartialSave}
-            onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
-            onTestConnection={async ({ service, urlKey, credentialKey }) => {
-              const url = String(fieldValues[urlKey] || "").trim();
-              const credential = String(fieldValues[credentialKey] || "").trim();
-              return testIntegrationConnection({ service, url, credential });
-            }}
-            onSave={async () => {
-              setSettingsFeedback("Saving...");
-              setSettingsFeedbackKind("");
-              const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
-              if (!result.ok) {
-                const first = Object.entries(result.errors || {})[0];
-                setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
-                setSettingsFeedbackKind("error");
-                return;
-              }
-              setBaselineValues(fieldValues);
-              setSettingsFeedback("Saved and applied.");
-              setSettingsFeedbackKind("success");
-              const payload = await getSettingsCurrent();
-              setSettingsPayload(payload);
-              setSetupStatus(payload.status);
-              setOnboardingVisible(!payload.status.setup_complete);
-            }}
-          />
-        ) : null}
 
         <Routes>
           <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
@@ -1185,7 +1417,10 @@ export function App() {
 
   // Main UI block with injected wrapper classes
   return (
-    <div className={`app-shell theme-${theme} layout-${brand}-${themeMode} theme-${themeMode}`}>
+    <div
+      className={`brand-theme-scope app-shell theme-${theme} layout-${brand}-${themeMode} theme-${themeMode} font-brand-body`}
+      style={{ ...(semanticTokensToCssVars(brandSemantic) as CSSProperties) }}
+    >
       <header className="topbar">
         <div className="topbar-content">
           <h1>{brandMeta.label} Dashboard</h1>
@@ -1241,43 +1476,6 @@ export function App() {
 
       <main ref={(el) => { contentScrollRef.current = el; }} className="panel">{renderTabBody()}</main>
       {errorMessage ? <div className="error-box" style={{ marginTop: 12 }}>{errorMessage}</div> : null}
-
-      {onboardingVisible && settingsPayload ? (
-        <OnboardingWizard
-          payload={settingsPayload}
-          stepIndex={onboardingStepIndex}
-          values={fieldValues}
-          hasUnsavedChanges={hasUnsavedChanges}
-          brand={brand}
-          themeMode={themeMode}
-          onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
-            onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
-            onPartialSave={handlePartialSave}
-          onTestConnection={async ({ service, urlKey, credentialKey }) => {
-            const url = String(fieldValues[urlKey] || "").trim();
-            const credential = String(fieldValues[credentialKey] || "").trim();
-            return testIntegrationConnection({ service, url, credential });
-          }}
-          onSave={async () => {
-            setSettingsFeedback("Saving...");
-            setSettingsFeedbackKind("");
-            const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
-            if (!result.ok) {
-              const first = Object.entries(result.errors || {})[0];
-              setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
-              setSettingsFeedbackKind("error");
-              return;
-            }
-            setBaselineValues(fieldValues);
-            setSettingsFeedback("Saved and applied.");
-            setSettingsFeedbackKind("success");
-            const payload = await getSettingsCurrent();
-            setSettingsPayload(payload);
-            setSetupStatus(payload.status);
-            setOnboardingVisible(!payload.status.setup_complete);
-          }}
-        />
-      ) : null}
 
       <Routes>
         <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
@@ -1522,7 +1720,7 @@ function ActivityPanel(props: {
                         <td className="px-5 py-4 text-sm text-slate-400 whitespace-nowrap">{timeAgo(row.time || null)}</td>
                         <td className="px-5 py-4 text-sm text-slate-300">
                           <span className="font-medium">{displayName}</span>
-                          {detailLine && <div className="text-xs text-slate-500 mt-0.5">{detailLine}</div>}
+                          {detailLine && <div className="ui-field-description-compact mt-0.5">{detailLine}</div>}
                           {errorMessage && <span className="text-xs text-red-300/70">{errorMessage}</span>}
                           {hasExpandable && (
                             <div className="mt-2">
@@ -2194,7 +2392,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                         <span className="flex-none w-10 text-xs text-slate-500 font-mono pt-0.5">E{String(ep.episode_number).padStart(2, "0")}</span>
                         <div className="flex-1 min-w-0">
                           <div className="text-sm text-white font-medium">{ep.title || `Episode ${ep.episode_number}`}</div>
-                          <div className="text-xs text-slate-500 mt-0.5">{ep.air_date || "No air date"}</div>
+                          <div className="ui-field-description-compact mt-0.5">{ep.air_date || "No air date"}</div>
                         </div>
                         <div className="flex-none">
                           {ep.has_placeholder
@@ -2474,7 +2672,7 @@ function CalendarPanel(props: {
             <span><span className="text-white font-semibold">{activeMediaFilters}</span> media filters active</span>
             <span><span className="text-white font-semibold">{activeReleaseFilters}</span> release filters active</span>
           </div>
-          <div className="mt-1 text-xs text-slate-500">{payload.lookahead.label}</div>
+          <div className="ui-field-description mt-1">{payload.lookahead.label}</div>
         </div>
       </div>
 
@@ -3020,6 +3218,7 @@ type ArrInstanceDraft = {
   label: string;
   arr_type: "radarr" | "sonarr";
   instance_key: string;
+  instance_key_aliases?: string[];
   url: string;
   api_key: string;
   role: "primary" | "secondary" | "additional";
@@ -3087,12 +3286,17 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
             const role = normalizeInstanceRole(obj.role, rank);
             const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
             const instanceId = String(obj.instance_id || obj.id || `${arrType}:${instanceKey}`).trim().toLowerCase();
+            const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
+            const instance_key_aliases = aliasRaw
+              .map((a) => normalizeInstanceKey(String(a)))
+              .filter((a) => a && a !== instanceKey);
             return {
               id: instanceId || `json-${arrType}-${index}`,
               instance_id: instanceId || `json-${arrType}-${index}`,
               label,
               arr_type: arrType,
               instance_key: instanceKey,
+              instance_key_aliases,
               url: String(obj.url || ""),
               api_key: String(obj.api_key || obj.apikey || ""),
               role,
@@ -3120,7 +3324,10 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
       rankByType[row.arr_type] = rank + 1;
       const role = normalizeInstanceRole(row.role, rank);
       const instanceId = String(row.instance_id || makeInstanceId(row.arr_type)).trim().toLowerCase();
-      return {
+      const aliasList = (row.instance_key_aliases || [])
+        .map((a) => normalizeInstanceKey(String(a)))
+        .filter((a) => a && a !== inferredKey);
+      const out: Record<string, unknown> = {
         instance_id: instanceId,
         arr_type: row.arr_type,
         instance_key: inferredKey,
@@ -3131,9 +3338,54 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
         priority: rank,
         is_4k: deriveIs4kFromRole(role),
       };
+      if (aliasList.length) {
+        out.instance_key_aliases = aliasList;
+      }
+      return out;
     })
     .filter((row) => row.instance_key && row.url && row.api_key);
   return JSON.stringify(clean);
+}
+
+/** Normalize URL for duplicate detection across Radarr/Sonarr instances (host, port, path). */
+function normalizeArrInstanceUrlForDedupe(url: string): string {
+  const t = url.trim();
+  if (!t) return "";
+  const href = t.includes("://") ? t : `http://${t}`;
+  try {
+    const u = new URL(href);
+    const host = u.hostname.toLowerCase();
+    const port = u.port || (u.protocol === "https:" ? "443" : u.protocol === "http:" ? "80" : "");
+    const path = u.pathname.replace(/\/+$/, "") || "";
+    return `${host}:${port}${path}`;
+  } catch {
+    return t.toLowerCase().replace(/\/+$/, "");
+  }
+}
+
+/** If candidateUrl matches another row's URL, return that row (excluding self by draft id). */
+function findDuplicateArrInstanceUrl(
+  instances: ArrInstanceDraft[],
+  selfId: string,
+  candidateUrl: string,
+): ArrInstanceDraft | null {
+  const n = normalizeArrInstanceUrlForDedupe(candidateUrl);
+  if (!n) return null;
+  for (const row of instances) {
+    if (row.id === selfId) continue;
+    const other = normalizeArrInstanceUrlForDedupe(String(row.url || ""));
+    if (!other) continue;
+    if (other === n) return row;
+  }
+  return null;
+}
+
+/** Primary row has URL + API key in persisted settings (e.g. after refresh or step save). */
+function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
+  const instances = parseArrInstancesFromValues(values);
+  const first = instances.find((row) => row.arr_type === arrType);
+  if (!first) return false;
+  return String(first.url || "").trim().length > 0 && String(first.api_key || "").trim().length > 0;
 }
 
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
@@ -3177,6 +3429,13 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
     cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = false;
   }
 
+  if ("PLACEHOLDER_STATUS_PROJECTION_MODE" in cleaned) {
+    const pm = String(cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary").trim().toLowerCase();
+    if (pm === "off" || !["summary", "title", "both"].includes(pm)) {
+      cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE = "summary";
+    }
+  }
+
   return cleaned;
 }
 
@@ -3186,9 +3445,21 @@ function ArrInstancesEditor(props: {
   accent: BrandAccent;
   onPrimaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
   onSecondaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
+  /** "slots" = Overseerr-style dashed placeholders + slide-over editor (onboarding). */
+  layout?: "cards" | "slots";
 }) {
+  const layout = props.layout ?? "cards";
   const [instances, setInstances] = useState<ArrInstanceDraft[]>(() => parseArrInstancesFromValues(props.values));
   const [testState, setTestState] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [instanceKeyConflict, setInstanceKeyConflict] = useState<string | null>(null);
+  const [labelChangeNotice, setLabelChangeNotice] = useState<{
+    arrType: "radarr" | "sonarr";
+    slotIndex: 0 | 1;
+    instance_key: string;
+    instance_id: string;
+    newLabel: string;
+  } | null>(null);
+  const labelAtFocusRef = useRef<Record<string, string>>({});
   const [primaryCache, setPrimaryCache] = useState<{ radarr: ArrInstanceDraft | null; sonarr: ArrInstanceDraft | null }>(() => {
     const parsed = parseArrInstancesFromValues(props.values);
     return {
@@ -3221,6 +3492,29 @@ function ArrInstancesEditor(props: {
     radarr: false,
     sonarr: false,
   });
+  const primaryGateOk = useMemo(
+    () => ({
+      radarr: primaryConnectionOk.radarr || arrPrimaryPersistedWithCredentials(props.values, "radarr"),
+      sonarr: primaryConnectionOk.sonarr || arrPrimaryPersistedWithCredentials(props.values, "sonarr"),
+    }),
+    [primaryConnectionOk.radarr, primaryConnectionOk.sonarr, props.values],
+  );
+  const [slotPanel, setSlotPanel] = useState<{ arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean } | null>(null);
+  const [disconnectDialog, setDisconnectDialog] = useState<{
+    arrType: "radarr" | "sonarr";
+    slotIndex: 0 | 1;
+    label: string;
+  } | null>(null);
+  const [webhookSetupDialog, setWebhookSetupDialog] = useState<{
+    arrType: "radarr" | "sonarr";
+    instance_key: string;
+    instance_id: string;
+    label: string;
+  } | null>(null);
+  const slotPanelSnapshotRef = useRef<string | null>(null);
+  const slotPanelCaptureKeyRef = useRef<string>("");
+  const [slotFooterTestBusy, setSlotFooterTestBusy] = useState(false);
+  const [slotPanelTestPassed, setSlotPanelTestPassed] = useState(false);
 
   useEffect(() => {
     props.onValueChange("WIZARD_RADARR_SECONDARY_ENABLED", secondaryEnabled.radarr);
@@ -3232,6 +3526,21 @@ function ArrInstancesEditor(props: {
     const radarr = next.filter((item) => item.arr_type === "radarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
     const sonarr = next.filter((item) => item.arr_type === "sonarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
     const trimmed = [...radarr, ...sonarr];
+
+    const keysOf = (rows: ArrInstanceDraft[]) =>
+      rows.map((r) => normalizeInstanceKey(String(r.instance_key || inferDefaultKey(r.label, r.arr_type))));
+    const radKeys = keysOf(radarr);
+    const sonKeys = keysOf(sonarr);
+    if (radarr.length > 1 && new Set(radKeys).size !== radKeys.length) {
+      setInstanceKeyConflict("Two Radarr rows cannot share the same instance key (derived from the name/key). Give each instance a distinct name.");
+      return;
+    }
+    if (sonarr.length > 1 && new Set(sonKeys).size !== sonKeys.length) {
+      setInstanceKeyConflict("Two Sonarr rows cannot share the same instance key (derived from the name/key). Give each instance a distinct name.");
+      return;
+    }
+    setInstanceKeyConflict(null);
+
     setInstances(trimmed);
     props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(trimmed));
   }
@@ -3300,7 +3609,7 @@ function ArrInstancesEditor(props: {
   }
 
   function setSecondary(arrType: "radarr" | "sonarr", enabled: boolean) {
-    if (enabled && (!primaryEnabled[arrType] || !primaryConnectionOk[arrType])) return;
+    if (enabled && (!primaryEnabled[arrType] || !primaryGateOk[arrType])) return;
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     if (!enabled) {
@@ -3333,6 +3642,7 @@ function ArrInstancesEditor(props: {
     if (slotIndex === 1 && secondaryEnabled[arrType]) {
       props.onSecondaryTestStatusChange?.(arrType, Boolean(result.ok));
     }
+    return result;
   }
 
   const byType = {
@@ -3342,6 +3652,84 @@ function ArrInstancesEditor(props: {
 
   function slotFor(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
     return byType[arrType][slotIndex] || defaultSlot(arrType, slotIndex);
+  }
+
+  function openSlotPanel(next: { arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean }) {
+    setSlotPanelTestPassed(false);
+    setSlotFooterTestBusy(false);
+    setSlotPanel({ ...next, isNew: Boolean(next.isNew) });
+  }
+
+  function instanceWebhookUrls(instance_id: string, instance_key: string) {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const uuidLike = (instance_id.match(/-/g) || []).length >= 4;
+    const byId = `${origin}/webhook?instance_id=${encodeURIComponent(instance_id)}`;
+    const byKey = `${origin}/webhook?instance=${encodeURIComponent(instance_key)}`;
+    return { primary: uuidLike ? byId : byKey, byId, byKey, uuidLike };
+  }
+
+  function onSlotPanelSaveClick() {
+    if (!slotPanel) return;
+    const wasNew = Boolean(slotPanel.isNew);
+    const snap = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    handleSlotPanelSave();
+    if (wasNew && snap && String(snap.url || "").trim() && String(snap.api_key || "").trim()) {
+      setWebhookSetupDialog({
+        arrType: snap.arr_type,
+        instance_key: normalizeInstanceKey(String(snap.instance_key || "")),
+        instance_id: String(snap.instance_id || ""),
+        label: String(snap.label || ""),
+      });
+    }
+  }
+
+  function confirmDisconnectInstance() {
+    if (!disconnectDialog) return;
+    const { arrType, slotIndex } = disconnectDialog;
+    if (slotIndex === 0) {
+      setPrimary(arrType, false);
+    } else {
+      setSecondary(arrType, false);
+    }
+    setSlotPanel((p) => {
+      if (p?.arrType === arrType && p.slotIndex === slotIndex) {
+        slotPanelSnapshotRef.current = null;
+        slotPanelCaptureKeyRef.current = "";
+        setSlotFooterTestBusy(false);
+        return null;
+      }
+      return p;
+    });
+    setDisconnectDialog(null);
+  }
+
+  function restoreSlotPanelSnapshot() {
+    const raw = slotPanelSnapshotRef.current;
+    slotPanelSnapshotRef.current = null;
+    if (raw == null) return;
+    try {
+      const parsed = JSON.parse(raw) as ArrInstanceDraft[];
+      if (!Array.isArray(parsed)) return;
+      setInstanceKeyConflict(null);
+      setInstances(parsed);
+      props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(parsed));
+    } catch {
+      // ignore corrupt snapshot
+    }
+  }
+
+  function handleSlotPanelCancel() {
+    restoreSlotPanelSnapshot();
+    slotPanelCaptureKeyRef.current = "";
+    setSlotFooterTestBusy(false);
+    setSlotPanel(null);
+  }
+
+  function handleSlotPanelSave() {
+    slotPanelSnapshotRef.current = null;
+    slotPanelCaptureKeyRef.current = "";
+    setSlotFooterTestBusy(false);
+    setSlotPanel(null);
   }
 
   function card(
@@ -3361,6 +3749,7 @@ function ArrInstancesEditor(props: {
     const status = testState[item.id];
     const isEnabled = opts?.enabled ?? true;
     const isDisabled = !isEnabled;
+    const dupPeer = findDuplicateArrInstanceUrl(instances, item.id, String(item.url || ""));
     return (
       <div key={item.id} className={`rounded-xl border border-[#424753]/40 bg-[#0f1419] overflow-hidden ${isDisabled ? "opacity-60" : ""}`}>
         <div className="p-4 space-y-3">
@@ -3369,9 +3758,26 @@ function ArrInstancesEditor(props: {
               <input
                 className="bg-transparent text-sm font-semibold text-white font-headline outline-none w-full"
                 value={item.label}
+                onFocus={() => {
+                  labelAtFocusRef.current[`${arrType}-${slotIndex}`] = String(item.label || "");
+                }}
                 onChange={(e) => {
                   const value = e.target.value;
                   upsertSlot(arrType, slotIndex, { label: value });
+                }}
+                onBlur={() => {
+                  const slotKey = `${arrType}-${slotIndex}`;
+                  const before = labelAtFocusRef.current[slotKey] ?? "";
+                  const after = String(item.label || "").trim();
+                  if (before.trim() === after) return;
+                  if (!String(item.url || "").trim() || !String(item.api_key || "").trim()) return;
+                  setLabelChangeNotice({
+                    arrType,
+                    slotIndex,
+                    instance_key: normalizeInstanceKey(String(item.instance_key || "")),
+                    instance_id: String(item.instance_id || ""),
+                    newLabel: after,
+                  });
                 }}
                 placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
                 disabled={isDisabled}
@@ -3379,7 +3785,7 @@ function ArrInstancesEditor(props: {
               <div className="text-[11px] text-slate-400 mt-1">
                 {item.arr_type.toUpperCase()} {required ? "• Primary" : "• Secondary"}
               </div>
-              {opts?.statusHint ? <div className="text-[11px] text-slate-500 mt-1">{opts.statusHint}</div> : null}
+              {opts?.statusHint ? <div className="ui-field-description-compact mt-1">{opts.statusHint}</div> : null}
             </div>
             {opts?.showToggle ? (
               <label className={`flex items-center gap-2 select-none shrink-0 ${opts.toggleDisabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
@@ -3397,14 +3803,22 @@ function ArrInstancesEditor(props: {
               </label>
             ) : null}
           </div>
-          {opts?.toggleHint && opts.toggleDisabled ? <div className="text-[11px] text-slate-500">{opts.toggleHint}</div> : null}
-          <input
-            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
-            value={item.url}
-            onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
-            placeholder="http://arr-host:port"
-            disabled={isDisabled}
-          />
+          {opts?.toggleHint && opts.toggleDisabled ? <div className="ui-field-description-compact">{opts.toggleHint}</div> : null}
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-400 mb-1">URL &amp; port</label>
+            <input
+              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
+              value={item.url}
+              onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
+              placeholder="https://host:7878"
+              disabled={isDisabled}
+            />
+            {dupPeer && !isDisabled ? (
+              <p className="mt-1.5 text-xs text-red-400">
+                Same address as &quot;{dupPeer.label}&quot; ({dupPeer.arr_type}). Use a distinct URL for each instance.
+              </p>
+            ) : null}
+          </div>
           <input
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
             value={item.api_key}
@@ -3413,13 +3827,12 @@ function ArrInstancesEditor(props: {
             type="password"
             disabled={isDisabled}
           />
-          <div className="text-[11px] text-slate-400">Instance key (webhook): <span className="text-slate-200">{normalizeInstanceKey(String(item.instance_key || ""))}</span></div>
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => runTest(item, arrType, slotIndex)}
+              onClick={() => void runTest(item, arrType, slotIndex)}
               className="px-3 py-1.5 rounded-md text-xs bg-[#252e3a] border border-[#424753]/40 text-slate-300"
-              disabled={isDisabled}
+              disabled={isDisabled || Boolean(dupPeer)}
             >
               Test
             </button>
@@ -3432,36 +3845,531 @@ function ArrInstancesEditor(props: {
     );
   }
 
+  const slotPanelDupPeer = useMemo(() => {
+    if (!slotPanel) return null;
+    const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    return findDuplicateArrInstanceUrl(instances, it.id, String(it.url || ""));
+  }, [instances, slotPanel]);
+
+  const slotPanelItemForEffect = slotPanel ? slotFor(slotPanel.arrType, slotPanel.slotIndex) : null;
+  const slotPanelConnectionKey = slotPanelItemForEffect
+    ? `${slotPanelItemForEffect.id}:${String(slotPanelItemForEffect.url)}:${String(slotPanelItemForEffect.api_key)}`
+    : "";
+
+  useEffect(() => {
+    if (!slotPanel) return;
+    setSlotPanelTestPassed(false);
+  }, [slotPanel?.arrType, slotPanel?.slotIndex, slotPanelConnectionKey]);
+
+  useEffect(() => {
+    if (!slotPanel) {
+      setSlotFooterTestBusy(false);
+      setSlotPanelTestPassed(false);
+      slotPanelCaptureKeyRef.current = "";
+    }
+  }, [slotPanel]);
+
+  useLayoutEffect(() => {
+    if (!slotPanel) {
+      return;
+    }
+    const key = `${slotPanel.arrType}-${slotPanel.slotIndex}`;
+    if (slotPanelCaptureKeyRef.current === key) return;
+    slotPanelCaptureKeyRef.current = key;
+    slotPanelSnapshotRef.current = JSON.stringify(instances);
+  }, [slotPanel, instances]);
+
+  const webhookOrigin = typeof window !== "undefined" ? window.location.origin : "";
+
   return (
     <div className="space-y-5">
-      {(["radarr", "sonarr"] as const).map((arrType) => (
-        <div key={arrType}>
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-white font-headline">{arrType === "radarr" ? "Radarr Settings" : "Sonarr Settings"}</h3>
-
+      {instanceKeyConflict ? (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{instanceKeyConflict}</div>
+      ) : null}
+      {labelChangeNotice ? (
+        <div className="fixed inset-0 z-[60] bg-[#0f1419]/80 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl p-6 space-y-4">
+            <h3 className="text-lg font-headline font-bold text-white">Instance display name changed</h3>
+            <p className="text-sm text-slate-300">
+              You updated the label for this {labelChangeNotice.arrType === "radarr" ? "Radarr" : "Sonarr"} instance.{" "}
+              <span className="text-slate-200">Radarr/Sonarr webhooks use the instance key (and optional stable id), not this label.</span>{" "}
+              Update your Radarr or Sonarr webhook URLs only if you also change the instance key or switch servers.
+            </p>
+            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3 space-y-2 text-xs text-slate-400">
+              <div>
+                <span className="text-slate-500">Webhook URL:</span>{" "}
+                <span className="font-mono text-slate-200 break-all">
+                  {labelChangeNotice.instance_id && labelChangeNotice.instance_id.includes("-")
+                    ? `${webhookOrigin}/webhook?instance_id=${encodeURIComponent(labelChangeNotice.instance_id)}`
+                    : `${webhookOrigin}/webhook?instance=${encodeURIComponent(labelChangeNotice.instance_key)}`}
+                </span>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
+                onClick={() => setLabelChangeNotice(null)}
+              >
+                Dismiss
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+                style={{ backgroundColor: props.accent.hex }}
+                onClick={() => {
+                  void (async () => {
+                    const byId = `${webhookOrigin}/webhook?instance_id=${encodeURIComponent(labelChangeNotice.instance_id)}`;
+                    const byKey = `${webhookOrigin}/webhook?instance=${encodeURIComponent(labelChangeNotice.instance_key)}`;
+                    const payload =
+                      labelChangeNotice.instance_id && labelChangeNotice.instance_id.includes("-") ? byId : byKey;
+                    await copyTextToClipboard(payload);
+                    setLabelChangeNotice(null);
+                  })();
+                }}
+              >
+                Copy primary webhook URL
+              </button>
+            </div>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {card(slotFor(arrType, 0), arrType, 0, true, {
-              showToggle: true,
-              enabled: primaryEnabled[arrType],
-              onToggle: (enabled) => setPrimary(arrType, enabled),
-              statusHint: primaryConnectionOk[arrType]
-                ? "Connection test confirmed."
-                : "Run a successful primary connection test to unlock the secondary instance toggle.",
-            })}
-            {card(slotFor(arrType, 1), arrType, 1, false, {
-              showToggle: true,
-              enabled: secondaryEnabled[arrType],
-              onToggle: (enabled) => setSecondary(arrType, enabled),
-              toggleDisabled: !primaryEnabled[arrType] || !primaryConnectionOk[arrType],
-              toggleHint: !primaryEnabled[arrType]
-                ? "Enable and configure the primary instance first."
-                : (!primaryConnectionOk[arrType] ? "Run a successful primary connection test first." : undefined),
-            })}
-          </div>
-
         </div>
-      ))}
+      ) : null}
+      {disconnectDialog ? (
+        <div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#0f1419]/80 backdrop-blur-sm p-6">
+          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+            <h3 className="text-lg font-headline font-bold text-white">Disconnect this instance?</h3>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              This removes &quot;{disconnectDialog.label}&quot; from Placeholdarr. When you save settings, movies or
+              shows that were tracked only on this instance will be marked removed and their placeholders cleaned up.
+              If another configured {disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists
+              the same title (same TMDB or TVDB id), shared on-disk placeholders are left in place.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
+                onClick={() => setDisconnectDialog(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80"
+                onClick={confirmDisconnectInstance}
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {webhookSetupDialog ? (() => {
+        const wh = webhookSetupDialog;
+        const service = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === wh.arrType);
+        const urls = instanceWebhookUrls(wh.instance_id, wh.instance_key);
+        const webhookUrl = urls.primary;
+        const serviceLabel = service?.name || (wh.arrType === "radarr" ? "Radarr" : "Sonarr");
+        return (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+              <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {serviceLabel}</h3>
+              <p className="text-sm text-slate-300">
+                {serviceLabel} must call Placeholdarr using this URL so imports, deletes, and searches stay in sync
+                {wh.label ? ` (${wh.label})` : ""}.
+              </p>
+              <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
+                <li>Go to Settings → Webhooks → Add (+)</li>
+                <li>
+                  <span className="text-slate-200">Webhook URL</span>
+                  <div className="mt-1 flex items-start gap-2 pl-0">
+                    <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                    <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${serviceLabel} webhook URL`} className="mt-0.5 shrink-0" />
+                  </div>
+                </li>
+                <li>Enable these events (required):</li>
+              </ol>
+              <div className="ml-4 space-y-1">
+                {(service?.triggers || [])
+                  .filter((t) => t.required)
+                  .map((trigger) => (
+                    <div key={`wh-${wh.instance_id}-${trigger.event}`} className="text-xs text-slate-300">
+                      {trigger.displayName}
+                    </div>
+                  ))}
+              </div>
+              {urls.uuidLike ? (
+                <p className="text-xs text-slate-500">
+                  Legacy URL with instance key only:{" "}
+                  <span className="font-mono text-slate-400 break-all">{urls.byKey}</span>
+                </p>
+              ) : null}
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+                  style={{ backgroundColor: props.accent.hex }}
+                  onClick={() => setWebhookSetupDialog(null)}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
+      {layout === "slots" ? (
+        <div className="space-y-5">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:items-stretch sm:gap-5">
+          {(["radarr", "sonarr"] as const).map((arrType) => {
+            const primaryItem = slotFor(arrType, 0);
+            const secondaryItem = slotFor(arrType, 1);
+            const secondaryAddLocked = !primaryEnabled[arrType] || !primaryGateOk[arrType];
+            const av = ONBOARDING_ARR_VISUAL[arrType];
+            const serviceName = arrType === "radarr" ? "Radarr" : "Sonarr";
+            return (
+              <div
+                key={arrType}
+                className="min-w-0 rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.06] to-white/[0.02] p-5 shadow-[0_1px_0_rgba(255,255,255,0.05)_inset] backdrop-blur-md transition hover:border-white/[0.12]"
+              >
+                <div className="mb-5 flex flex-col items-center gap-3 text-center">
+                  <div
+                    className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+                    style={av.well}
+                    aria-hidden
+                  >
+                    <img src={av.iconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
+                  </div>
+                  <h3 className="text-lg font-bold tracking-tight text-white font-headline">{serviceName}</h3>
+                </div>
+                <div className="flex min-h-0 flex-col gap-3">
+                  <div className="flex min-h-0 flex-col">
+                    <div className="mb-2 text-[10px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 1 · Primary</div>
+                    {!primaryEnabled[arrType] ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPrimary(arrType, true);
+                          openSlotPanel({ arrType, slotIndex: 0, isNew: true });
+                        }}
+                        className="flex min-h-[132px] flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-4 text-center text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 28 }}>add</span>
+                        <span className="text-sm font-headline tracking-wide">Connect {serviceName}</span>
+                      </button>
+                    ) : (
+                      <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-white font-headline truncate">{primaryItem.label}</div>
+                          <div className="truncate font-mono text-[11px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
+                          {primaryConnectionOk[arrType] ? (
+                            <div className="mt-1 text-[11px] text-emerald-400/90">Primary test OK</div>
+                          ) : primaryGateOk[arrType] ? (
+                            <div className="mt-1 text-[11px] text-emerald-400/90">Primary saved</div>
+                          ) : (
+                            <div className="mt-1 text-[11px] text-slate-500">Open editor and run Test.</div>
+                          )}
+                          {testState[primaryItem.id] ? (
+                            <div className={`mt-1 text-xs ${testState[primaryItem.id].ok ? "text-emerald-400" : "text-red-400"}`}>{testState[primaryItem.id].message}</div>
+                          ) : null}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openSlotPanel({ arrType, slotIndex: 0, isNew: false })}
+                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                            >
+                              Configure
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setWebhookSetupDialog({
+                                  arrType,
+                                  instance_key: normalizeInstanceKey(String(primaryItem.instance_key || "")),
+                                  instance_id: String(primaryItem.instance_id || ""),
+                                  label: String(primaryItem.label || ""),
+                                });
+                              }}
+                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                            >
+                              Webhook URL
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDisconnectDialog({
+                                arrType,
+                                slotIndex: 0,
+                                label: String(primaryItem.label || arrType),
+                              })
+                            }
+                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-medium text-red-400 transition hover:text-red-300"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex min-h-0 flex-col">
+                    <div className="mb-2 text-[10px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 2 · Secondary</div>
+                    {!secondaryEnabled[arrType] ? (
+                      <div
+                        className={`flex min-h-[132px] flex-1 flex-col items-center justify-center rounded-xl border border-dashed px-3 py-4 text-center transition-colors ${
+                          secondaryAddLocked
+                            ? "border-white/[0.07] bg-black/20 text-slate-600"
+                            : "border-white/15 bg-black/25 text-slate-300 hover:border-white/30 hover:bg-white/[0.04]"
+                        }`}
+                      >
+                        {secondaryAddLocked ? (
+                          <>
+                            <span className="material-symbols-outlined opacity-35" style={{ fontSize: 24 }}>
+                              lock
+                            </span>
+                            <p className="ui-field-description-compact mt-2 text-center">
+                              {!primaryEnabled[arrType]
+                                ? "Connect primary first."
+                                : "Pass a primary connection test to unlock this slot."}
+                            </p>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSecondary(arrType, true);
+                              openSlotPanel({ arrType, slotIndex: 1, isNew: true });
+                            }}
+                            className="flex w-full flex-col items-center justify-center gap-2 py-2"
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: 26 }}>add</span>
+                            <span className="text-sm font-headline tracking-wide">Secondary instance</span>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
+                          <div className="truncate font-mono text-[11px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
+                          {testState[secondaryItem.id] ? (
+                            <div className={`mt-1 text-xs ${testState[secondaryItem.id].ok ? "text-emerald-400" : "text-red-400"}`}>{testState[secondaryItem.id].message}</div>
+                          ) : null}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openSlotPanel({ arrType, slotIndex: 1, isNew: false })}
+                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                            >
+                              Configure
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setWebhookSetupDialog({
+                                  arrType,
+                                  instance_key: normalizeInstanceKey(String(secondaryItem.instance_key || "")),
+                                  instance_id: String(secondaryItem.instance_id || ""),
+                                  label: String(secondaryItem.label || ""),
+                                });
+                              }}
+                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                            >
+                              Webhook URL
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDisconnectDialog({
+                                arrType,
+                                slotIndex: 1,
+                                label: String(secondaryItem.label || arrType),
+                              })
+                            }
+                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-medium text-red-400 transition hover:text-red-300"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          </div>
+          {slotPanel ? (() => {
+            const { arrType, slotIndex } = slotPanel;
+            const item = slotFor(arrType, slotIndex);
+            const status = testState[item.id];
+            const roleLabel = slotIndex === 0 ? "Primary" : "Secondary";
+            const serviceLabel = arrType === "radarr" ? "Radarr" : "Sonarr";
+            const detailsComplete =
+              String(item.url || "").trim().length > 0 && String(item.api_key || "").trim().length > 0;
+            const dupBlocks = Boolean(slotPanelDupPeer);
+            const testDisabled = !detailsComplete || dupBlocks || slotFooterTestBusy;
+            const saveDisabled = !slotPanelTestPassed || dupBlocks || slotFooterTestBusy;
+            return (
+              <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6">
+                <button
+                  type="button"
+                  aria-label="Close panel"
+                  className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+                  onClick={handleSlotPanelCancel}
+                />
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={`${serviceLabel} ${roleLabel} server`}
+                  className="relative z-10 my-auto flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/50 bg-[#171c22] shadow-2xl"
+                >
+                  <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
+                    <div>
+                      <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500">ARR server</div>
+                      <h2 className="text-lg font-headline font-bold text-white mt-0.5" style={{ color: props.accent.text }}>
+                        {serviceLabel} · {roleLabel}
+                      </h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSlotPanelCancel}
+                      className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-[#252e3a]/80"
+                      aria-label="Close"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 22 }}>close</span>
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Server name</label>
+                      <input
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-violet-500/40"
+                        value={item.label}
+                        onFocus={() => {
+                          labelAtFocusRef.current[`${arrType}-${slotIndex}`] = String(item.label || "");
+                        }}
+                        onChange={(e) => upsertSlot(arrType, slotIndex, { label: e.target.value })}
+                        onBlur={() => {
+                          const slotKey = `${arrType}-${slotIndex}`;
+                          const before = labelAtFocusRef.current[slotKey] ?? "";
+                          const after = String(item.label || "").trim();
+                          if (before.trim() === after) return;
+                          if (!String(item.url || "").trim() || !String(item.api_key || "").trim()) return;
+                          setLabelChangeNotice({
+                            arrType,
+                            slotIndex,
+                            instance_key: normalizeInstanceKey(String(item.instance_key || "")),
+                            instance_id: String(item.instance_id || ""),
+                            newLabel: after,
+                          });
+                        }}
+                        placeholder="Instance name (e.g. Radarr 4K)"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">URL &amp; port</label>
+                      <input
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-violet-500/40"
+                        value={item.url}
+                        onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
+                        placeholder="https://host:7878"
+                      />
+                      {slotPanelDupPeer ? (
+                        <p className="mt-2 text-xs text-red-400">
+                          Same address as &quot;{slotPanelDupPeer.label}&quot; ({slotPanelDupPeer.arr_type}). Each instance must use a distinct URL and port.
+                        </p>
+                      ) : null}
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">API key</label>
+                      <input
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-violet-500/40"
+                        value={item.api_key}
+                        onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
+                        placeholder="API key"
+                        type="password"
+                      />
+                    </div>
+                    {status ? (
+                      <div className={`text-sm ${status.ok ? "text-green-400" : "text-red-400"}`}>{status.message}</div>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-wrap items-stretch justify-between gap-2 p-4 border-t border-[#424753]/40 shrink-0 bg-[#141a24]">
+                    <button
+                      type="button"
+                      onClick={handleSlotPanelCancel}
+                      className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={testDisabled}
+                      onClick={() => {
+                        void (async () => {
+                          setSlotFooterTestBusy(true);
+                          const r = await runTest(item, arrType, slotIndex);
+                          setSlotPanelTestPassed(Boolean(r?.ok));
+                          setSlotFooterTestBusy(false);
+                        })();
+                      }}
+                      className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-amber-500 text-slate-900 hover:bg-amber-400 border border-amber-400/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
+                    >
+                      {slotFooterTestBusy ? "Testing..." : "Test"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={saveDisabled}
+                      onClick={onSlotPanelSaveClick}
+                      className="min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-blue-600 text-white hover:bg-blue-500 border border-blue-500/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })() : null}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+        {(["radarr", "sonarr"] as const).map((arrType) => (
+          <div key={arrType} className="min-w-0">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-white font-headline">{arrType === "radarr" ? "Radarr Settings" : "Sonarr Settings"}</h3>
+
+            </div>
+            <div className="flex flex-col gap-3">
+              {card(slotFor(arrType, 0), arrType, 0, true, {
+                showToggle: true,
+                enabled: primaryEnabled[arrType],
+                onToggle: (enabled) => setPrimary(arrType, enabled),
+                statusHint: primaryConnectionOk[arrType]
+                  ? "Connection test confirmed."
+                  : primaryGateOk[arrType]
+                    ? "Primary is saved with URL and API key. Run Test again if you change either."
+                    : "Run a successful primary connection test to unlock the secondary instance toggle.",
+              })}
+              {card(slotFor(arrType, 1), arrType, 1, false, {
+                showToggle: true,
+                enabled: secondaryEnabled[arrType],
+                onToggle: (enabled) => setSecondary(arrType, enabled),
+                toggleDisabled: !primaryEnabled[arrType] || !primaryGateOk[arrType],
+                toggleHint: !primaryEnabled[arrType]
+                  ? "Enable and configure the primary instance first."
+                  : (!primaryGateOk[arrType] ? "Run a successful primary connection test first." : undefined),
+              })}
+            </div>
+
+          </div>
+        ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -3545,8 +4453,8 @@ function LibraryPathsForm(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
-            {field.description && <p className="text-xs text-slate-500 mt-1">{field.description}</p>}
-            {getPlexLibraryIdNote(field.key) ? <p className="text-xs text-slate-500 mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
+            {field.description && <p className="ui-field-description mt-1">{field.description}</p>}
+            {getPlexLibraryIdNote(field.key) ? <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
           </div>
         </div>
         {field.type === "bool" ? (
@@ -3589,25 +4497,22 @@ function LibraryPathsForm(props: {
     );
   }
 
+  const rootCardClass = "rounded-xl border px-4 py-4";
+  const rootCardStyle =
+    props.layout === "wizard"
+      ? undefined
+      : {
+          borderColor: alphaColor(props.accent.hex, 0.4),
+          backgroundColor: alphaColor(props.accent.hex, 0.07),
+        };
+
   const rootBlock = root ? (
     <div
-      className="rounded-xl border px-4 py-4"
-      style={{
-        borderColor: alphaColor(props.accent.hex, 0.4),
-        backgroundColor: alphaColor(props.accent.hex, 0.07),
-      }}
+      className={props.layout === "wizard" ? undefined : rootCardClass}
+      style={props.layout === "wizard" ? undefined : rootCardStyle}
     >
-      <div className="flex flex-wrap items-center gap-2 mb-1">
-        <span className="text-sm font-semibold text-white font-headline">{root.label}</span>
-        <span className="px-2 py-0.5 rounded text-[9px] font-bold font-headline uppercase tracking-wide bg-emerald-500/15 text-emerald-300/95 border border-emerald-500/25">
-          Suggested setup
-        </span>
-      </div>
-      <p className="text-xs text-slate-400 mb-3 leading-relaxed">
-        Placeholdarr creates placeholder folders under this root using a simple structure:
-        <span className="block mt-1">`movies` and `tv`</span>
-      </p>
-      {root.description && <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">{root.description}</p>}
+      <label className="block text-sm font-semibold text-white font-headline mb-1">{root.label}</label>
+      {root.description && <p className="ui-field-description mb-3 leading-relaxed">{root.description}</p>}
       {root.type === "bool" ? renderBool(root) : renderTextInput(root)}
     </div>
   ) : null;
@@ -3622,7 +4527,7 @@ function LibraryPathsForm(props: {
             {field.key === "ENABLE_STANDARD_PROFILE" ? (
               <span className="text-xs text-emerald-300">Always enabled</span>
             ) : renderBool(field, true)}
-            {field.description ? <p className="text-[11px] text-slate-600 mt-2">{field.description}</p> : null}
+            {field.description ? <p className="ui-field-description-compact mt-2">{field.description}</p> : null}
           </div>
         ))}
       </div>
@@ -3639,7 +4544,7 @@ function LibraryPathsForm(props: {
         <div className="min-w-0">
           <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-0.5">Optional overrides</div>
           <div className="text-sm font-medium text-slate-400 font-headline">Custom folder per library</div>
-          <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+          <p className="ui-field-description mt-1">
             Use when a library path is not under Library Root (or you use no root and set each path manually).
           </p>
         </div>
@@ -3655,7 +4560,7 @@ function LibraryPathsForm(props: {
           {overrides.map((field) => (
             <div key={field.key}>
               <label className="block text-xs font-medium text-slate-400 font-headline mb-1">{field.label}</label>
-              {field.description && <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">{field.description}</p>}
+              {field.description && <p className="ui-field-description-compact mb-2">{field.description}</p>}
               {field.type === "bool" ? renderBool(field, true) : field.type === "choice" ? renderChoice(field, { compact: true, muted: true }) : renderTextInput(field, { compact: true, muted: true })}
             </div>
           ))}
@@ -3666,17 +4571,22 @@ function LibraryPathsForm(props: {
 
   if (props.layout === "wizard") {
     return (
-      <div className="space-y-5">
-        {rootBlock}
-        {profileBlock}
-        {overridesBlock}
-        {rest.map((field) => (
-          <div key={field.key}>
-            <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
-            {field.description && <p className="text-xs text-slate-500 mb-2">{field.description}</p>}
-            {field.type === "bool" ? renderBool(field) : field.type === "choice" ? renderChoice(field) : renderTextInput(field)}
+      <div className="space-y-6">
+        <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Library paths</h2>
+        <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+          <div className="space-y-5">
+            {rootBlock}
+            {profileBlock}
+            {overridesBlock}
+            {rest.map((field) => (
+              <div key={field.key}>
+                <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
+                {field.description && <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>}
+                {field.type === "bool" ? renderBool(field) : field.type === "choice" ? renderChoice(field) : renderTextInput(field)}
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
       </div>
     );
   }
@@ -3690,6 +4600,111 @@ function LibraryPathsForm(props: {
       {overrides.length ? <div className="px-6 py-5">{overridesBlock}</div> : null}
       {rest.map((field) => renderSettingsRestField(field))}
     </>
+  );
+}
+
+type LookaheadIntroVariant = "settings" | "onboarding";
+
+function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded?: boolean }) {
+  const wrapClass =
+    props.variant === "settings"
+      ? "px-6 py-5 border-b border-[#424753]/20"
+      : props.embedded
+        ? "space-y-3"
+        : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+  return (
+    <div className={wrapClass}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Lookahead keeps your storage usage low by only monitoring and searching for episodes in Sonarr as you progress
+        watching a series.
+      </p>
+      <p className="ui-field-description mt-3 text-slate-300 leading-relaxed">
+        When an episode plays, Placeholdarr identifies what was watched, checks Sonarr for what&apos;s already on disk,
+        monitors the appropriate content, and triggers a search when needed.
+      </p>
+      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
+        <span className="font-medium text-slate-200">Search Mode</span> determines the scope of what gets monitored and
+        searched each time you play something:
+      </p>
+      <ul className="mt-3 list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed">
+        <li>
+          <span className="font-medium text-slate-200">Series</span>
+          {" — "}The entire series is monitored and searched. This mirrors default Sonarr behavior.
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Season</span>
+          {" — "}Only the played episode&apos;s season is monitored and searched. When you finish a season, Placeholdarr
+          automatically monitors and searches the next one.
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Episode</span>
+          {" — "}Only the played episode and the next few episodes, up to your configured{" "}
+          <span className="font-medium text-slate-200">Lookahead Range</span>, are monitored and searched.
+        </li>
+      </ul>
+      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
+        Regardless of which mode you choose, Placeholdarr will monitor the full series once you&apos;re approaching the
+        end of available content, ensuring Sonarr can pick up new episodes as they air.
+      </p>
+      <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
+        <span className="font-medium text-slate-200">Lookahead Range</span> sets how many episodes ahead of the one you
+        just watched Placeholdarr will monitor and search in Episode mode.
+      </p>
+    </div>
+  );
+}
+
+type StatusUpdatesIntroVariant = "settings" | "onboarding";
+
+function StatusUpdatesSectionIntro(props: { variant: StatusUpdatesIntroVariant; embedded?: boolean }) {
+  const wrapClass =
+    props.variant === "settings"
+      ? "px-6 py-5 border-b border-[#424753]/20"
+      : props.embedded
+        ? "space-y-3"
+        : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+  return (
+    <div className={wrapClass}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Use these settings to adjust how Placeholdarr updates content so users can track request progress right from
+        media players. Plex typically updates automatically while Emby and Jellyfin typically require page refreshes.
+      </p>
+    </div>
+  );
+}
+
+/** Keep sentences in sync with `STARTUP_SYNC_MODE` description in `services/app_config.py`. */
+function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <div className={`${top} space-y-3`}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Controls how Placeholdarr refreshes from Radarr and Sonarr during startup.
+      </p>
+      <ul className="list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed">
+        <li>
+          <span className="font-medium text-slate-200">Full sync</span>
+          {" "}
+          will scan arrs services and Placeholdarr root folder before proceeding to add/delete placeholder files as needed.
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Lite sync</span>
+          {" "}
+          will use arrs recent history and Placeholdarr root folder to make necessary changes for any recent events.
+        </li>
+        <li>
+          <span className="font-medium text-slate-200">Auto</span>
+          {" "}
+          will run full at startup when needed (for example, after adding a new arr instance), and a lite sync at other times.
+        </li>
+      </ul>
+      <p className="ui-field-description text-slate-400 leading-relaxed">
+        Placeholdarr operations are relatively quick. However, media player libraries still need to scan and update, which can take some time for large library changes.
+      </p>
+      <p className="ui-field-description text-slate-400 leading-relaxed">
+        A full sync will automatically start in the background at the completion of this setup.
+      </p>
+    </div>
   );
 }
 
@@ -3711,23 +4726,11 @@ function SettingsPanel(props: {
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const accent = getBrandAccent(props.brand, props.themeMode);
 
-  if (!props.payload) return (
-    <div className="flex items-center justify-center h-64">
-      <div className="flex items-center gap-3 text-slate-400">
-        <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-        <span className="text-sm font-headline uppercase tracking-widest">Loading settings...</span>
-      </div>
-    </div>
-  );
-
-  const sectionNames = SETTINGS_SECTION_ORDER.filter((name) => props.payload!.sections.some((s) => s.name === name));
-  const active = props.payload.sections.find((s) => s.name === props.activeSection) || props.payload.sections[0];
   const arrInstances = parseArrInstancesFromValues(props.values);
   const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
   const hasSonarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
   const canUseRadarrSecondaryBehavior = hasRadarrSecondaryConfigured && arrSecondaryTestStatus.radarr;
   const canUseSonarrSecondaryBehavior = hasSonarrSecondaryConfigured && arrSecondaryTestStatus.sonarr;
-  const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const unlockedSettingsSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
     canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
@@ -3737,10 +4740,26 @@ function SettingsPanel(props: {
   const fallbackUnnecessaryBecauseAllBoth = unlockedSettingsSearchBehavior.length > 0 && unlockedSettingsSearchBehavior.every((value) => value === "both");
 
   useEffect(() => {
+    if (!props.payload) return;
     if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
       props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", false);
     }
-  }, [fallbackUnnecessaryBecauseAllBoth, props, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH]);
+  }, [fallbackUnnecessaryBecauseAllBoth, props.payload, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH, props.onValueChange]);
+
+  if (!props.payload) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="flex items-center gap-3 text-slate-400">
+          <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
+          <span className="text-sm font-headline uppercase tracking-widest">Loading settings...</span>
+        </div>
+      </div>
+    );
+  }
+
+  const sectionNames = SETTINGS_SECTION_ORDER.filter((name) => props.payload.sections.some((s) => s.name === name));
+  const active = props.payload.sections.find((s) => s.name === props.activeSection) || props.payload.sections[0];
+  const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
 
   const SECTION_ICONS: Record<string, string> = {
     "Media Integrations": "hub",
@@ -3748,7 +4767,8 @@ function SettingsPanel(props: {
     "Paths":        "folder",
     "Library sync": "sync",
     "Calendar":     "calendar_month",
-    "Playback":     "play_circle",
+    "Lookahead":    "fast_forward",
+    "Status Updates": "edit_notifications",
     "Advanced":     "tune",
   };
 
@@ -3771,9 +4791,14 @@ function SettingsPanel(props: {
     const value = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
+    const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
+    const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
+    const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
+    const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
 
     return (
-      <div key={field.key} className="px-6 py-5">
+      <div key={field.key} className={`px-6 py-5 ${rowMuted ? "opacity-50" : ""}`}>
         <div className="flex items-start gap-3 mb-2">
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
@@ -3782,7 +4807,13 @@ function SettingsPanel(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
-            {field.description && <p className="text-xs text-slate-500 mt-1">{field.description}</p>}
+            {field.description && !(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") ? (
+              field.key === "STARTUP_SYNC_MODE" ? (
+                <StartupSyncModeDescription spacing="settings" />
+              ) : (
+                <p className="ui-field-description mt-1">{field.description}</p>
+              )
+            ) : null}
           </div>
         </div>
 
@@ -3797,8 +4828,13 @@ function SettingsPanel(props: {
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-            value={String(value ?? field.options[0]?.value ?? "")}
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
+            disabled={projectionFieldLocked}
+            value={(() => {
+              const raw = String(value ?? field.options[0]?.value ?? "");
+              if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
+              return raw;
+            })()}
             onChange={(e) => props.onValueChange(field.key, e.target.value)}
           >
             {field.options.map((opt) => (
@@ -3808,8 +4844,9 @@ function SettingsPanel(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              disabled={lookaheadRangeLocked}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
               onChange={e => props.onValueChange(field.key, e.target.value)}
@@ -3923,9 +4960,10 @@ function SettingsPanel(props: {
                   <div className="px-6 py-5">
                     <div className="mb-3">
                       <h3 className="text-base font-bold text-white font-headline">ARR Instances</h3>
-                      <p className="text-xs text-slate-500 mt-1">Configure up to 2 Radarr and 2 Sonarr instances. These entries power webhook labels and instance-aware routing.</p>
+                      <p className="ui-field-description mt-1">Configure up to 2 Radarr and 2 Sonarr instances. These entries power webhook labels and instance-aware routing.</p>
                     </div>
                     <ArrInstancesEditor
+                      layout="slots"
                       values={props.values}
                       onValueChange={props.onValueChange}
                       accent={accent}
@@ -3938,15 +4976,15 @@ function SettingsPanel(props: {
                   {/* Placeholder search mode dropdowns */}
                   <div className="px-6 pb-5">
                     <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                      <div>
+                      <div className="text-center">
                         <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                        <p className="text-xs text-slate-400">When a placeholder plays, Placeholdarr triggers a search in the corresponding ARR app. Choose which instance to search.</p>
+                        <p className="ui-field-description mx-auto max-w-2xl">When a placeholder plays, Placeholdarr triggers a search in the corresponding ARR app. Choose which instance to search.</p>
                       </div>
-                      <div className="space-y-4">
-                        <div>
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+                        <div className="min-w-0">
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
                             onChange={(e) => props.onValueChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                             disabled={!canUseRadarrSecondaryBehavior}
@@ -3961,17 +4999,16 @@ function SettingsPanel(props: {
                               <option value="na">Not applicable, no second instance set up.</option>
                             )}
                           </select>
-                          <p className="text-[11px] text-slate-500 mt-1.5">
+                          <p className="ui-field-description-compact mt-1.5">
                             {canUseRadarrSecondaryBehavior
                               ? (({ primary: "Searches your primary (standard) Radarr instance.", secondary: "Searches your secondary (4K) Radarr instance.", both: "Searches both Radarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Radarr instances.")
                               : "Not applicable, no second instance set up."}
                           </p>
                         </div>
-                        <div className="border-t border-[#424753]/20" />
-                        <div>
+                        <div className="min-w-0">
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
                             onChange={(e) => props.onValueChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                             disabled={!canUseSonarrSecondaryBehavior}
@@ -3986,7 +5023,7 @@ function SettingsPanel(props: {
                               <option value="na">Not applicable, no second instance set up.</option>
                             )}
                           </select>
-                          <p className="text-[11px] text-slate-500 mt-1.5">
+                          <p className="ui-field-description-compact mt-1.5">
                             {canUseSonarrSecondaryBehavior
                               ? (({ primary: "Searches your primary (standard) Sonarr instance.", secondary: "Searches your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances — ensures full coverage." } as Record<string, string>)[String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both")] ?? "Searches both Sonarr instances.")
                               : "Not applicable, no second instance set up."}
@@ -3995,15 +5032,15 @@ function SettingsPanel(props: {
                       </div>
                     </div>
                     <div className="mt-3 rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                      <div>
+                      <div className="text-center">
                         <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                        <p className="text-xs text-slate-400">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
+                        <p className="ui-field-description mx-auto max-w-2xl">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
                       </div>
-                      <div className="space-y-4">
-                        <div>
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+                        <div className="min-w-0">
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                             onChange={(e) => props.onValueChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
                             disabled={!canUseRadarrSecondaryBehavior}
@@ -4019,17 +5056,16 @@ function SettingsPanel(props: {
                               <option value="na">Not applicable, no second instance set up.</option>
                             )}
                           </select>
-                          <p className="text-[11px] text-slate-500 mt-1.5">
+                          <p className="ui-field-description-compact mt-1.5">
                             {canUseRadarrSecondaryBehavior
                               ? (({ match: "Uses the movie file path to determine which Radarr instance should be searched.", primary: "Always searches your primary (standard) Radarr instance.", secondary: "Always searches your secondary (4K) Radarr instance.", both: "Searches both Radarr instances." } as Record<string, string>)[String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the movie file path to determine which Radarr instance should be searched.")
                               : "Not applicable, no second instance set up."}
                           </p>
                         </div>
-                        <div className="border-t border-[#424753]/20" />
-                        <div>
+                        <div className="min-w-0">
                           <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                           <select
-                            className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                             onChange={(e) => props.onValueChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
                             disabled={!canUseSonarrSecondaryBehavior}
@@ -4045,25 +5081,36 @@ function SettingsPanel(props: {
                               <option value="na">Not applicable, no second instance set up.</option>
                             )}
                           </select>
-                          <p className="text-[11px] text-slate-500 mt-1.5">
+                          <p className="ui-field-description-compact mt-1.5">
                             {canUseSonarrSecondaryBehavior
                               ? (({ match: "Uses the TV file path to determine which Sonarr instance should be searched.", primary: "Always searches your primary (standard) Sonarr instance.", secondary: "Always searches your secondary (4K) Sonarr instance.", both: "Searches both Sonarr instances." } as Record<string, string>)[String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match")] ?? "Uses the TV file path to determine which Sonarr instance should be searched.")
                               : "Not applicable, no second instance set up."}
                           </p>
                         </div>
-                        <div className="border-t border-[#424753]/20" />
-                        <div className="flex items-center justify-between gap-3">
+                      </div>
+                      <div className="border-t border-[#424753]/20 pt-4">
+                        <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
                           <div>
                             <div className="text-xs font-semibold text-slate-300">Fallback search</div>
-                            <div className="text-xs text-slate-500">
-                              {fallbackUnnecessaryBecauseAllBoth
-                                ? "Fallback is not needed because every unlocked search behavior already searches both instances."
-                                : canUseAnySecondaryBehavior
-                                ? "If the selected ARR instance has the item but the search does not resolve, Placeholdarr waits the timeout and then searches the other enabled instance. If the item is not in ARR at all (missing/deleted rows), fallback is immediate."
-                                : "Not applicable, no second instance set up."}
+                            <div className="ui-field-description mt-1">
+                              {fallbackUnnecessaryBecauseAllBoth ? (
+                                "Fallback is not needed because every unlocked search behavior already searches both instances."
+                              ) : canUseAnySecondaryBehavior ? (
+                                <div className="mx-auto w-full max-w-md text-left">
+                                  <p>When enabled, the other instance is searched automatically if:</p>
+                                  <ul className="mt-2 list-disc space-y-1.5 pl-4">
+                                    <li>The selected instance doesn&apos;t have the content added (immediate fallback search), or</li>
+                                    <li>
+                                      The content isn&apos;t imported before the fallback timeout (e.g. content not found, index/download errors, etc.)
+                                    </li>
+                                  </ul>
+                                </div>
+                              ) : (
+                                "Not applicable, no second instance set up."
+                              )}
                             </div>
                           </div>
-                          <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
+                          <label className="flex cursor-pointer select-none items-center justify-center gap-3">
                             <div
                               className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
                               style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
@@ -4079,46 +5126,68 @@ function SettingsPanel(props: {
                                 : "Not applicable, no second instance set up."}
                             </span>
                           </label>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                          {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
-                            <input
-                              className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                              type="number"
-                              min={1}
-                              value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "")}
-                              onChange={(e) => props.onValueChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
-                            />
-                          ) : fallbackUnnecessaryBecauseAllBoth ? (
-                            <input
-                              className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
-                              type="text"
-                              value="Not needed because all unlocked behaviors already search both instances."
-                              disabled
-                            />
-                          ) : canUseAnySecondaryBehavior ? (
-                            <input
-                              className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
-                              type="text"
-                              value="Enable fallback search to set timeout."
-                              disabled
-                            />
-                          ) : (
-                            <input
-                              className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
-                              type="text"
-                              value="Not applicable, no second instance set up."
-                              disabled
-                            />
-                          )}
+                          <div className="text-center">
+                            <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                            {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
+                              <input
+                                className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-sm tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                                type="text"
+                                inputMode="numeric"
+                                maxLength={3}
+                                autoComplete="off"
+                                value={(() => {
+                                  const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
+                                  const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
+                                  if (digits.length > 0) return digits;
+                                  return raw === undefined || raw === null || String(raw).trim() === "" ? "30" : "";
+                                })()}
+                                onChange={(e) => {
+                                  const d = e.target.value.replace(/\D/g, "").slice(0, 3);
+                                  props.onValueChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
+                                }}
+                              />
+                            ) : fallbackUnnecessaryBecauseAllBoth ? (
+                              <input
+                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                                type="text"
+                                value="Not needed because all unlocked behaviors already search both instances."
+                                disabled
+                              />
+                            ) : canUseAnySecondaryBehavior ? (
+                              <input
+                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                                type="text"
+                                value="Enable fallback search to set timeout."
+                                disabled
+                              />
+                            ) : (
+                              <input
+                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                                type="text"
+                                value="Not applicable, no second instance set up."
+                                disabled
+                              />
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
                   </div>
                 </>
-              ) : active.name === "Playback" ? (
-                <>{active.fields.map((field) => renderStandardField(field))}</>
+              ) : active.name === "Lookahead" ? (
+                <>
+                  <LookaheadSectionIntro variant="settings" />
+                  {active.fields.map((field) => renderStandardField(field))}
+                </>
+              ) : active.name === "Status Updates" ? (
+                <>
+                  <StatusUpdatesSectionIntro variant="settings" />
+                  {active.fields.map((field) => renderStandardField(field))}
+                </>
+              ) : active.name === "Library sync" ? (
+                <div className="mx-6 my-5 rounded-lg border border-[#424753]/30 bg-[#0f1419]/60 overflow-hidden divide-y divide-[#424753]/20">
+                  {active.fields.map((field) => renderStandardField(field))}
+                </div>
               ) : (
                 active.fields.map((field) => renderStandardField(field))
               )}
@@ -4130,6 +5199,141 @@ function SettingsPanel(props: {
   );
 }
 
+const ONBOARDING_MEDIA_CARDS = [
+  {
+    id: "plex" as const,
+    title: "Plex",
+    enabledKey: "ENABLE_PLEX",
+    note: "Tautulli is required for Plex playback webhooks and playback-aware routing.",
+    keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
+  },
+  {
+    id: "jellyfin" as const,
+    title: "Jellyfin",
+    enabledKey: "ENABLE_JELLYFIN",
+    keys: ["JELLYFIN_URL", "JELLYFIN_TOKEN", "JELLYFIN_INSTANCE_KEY"],
+  },
+  {
+    id: "emby" as const,
+    title: "Emby",
+    enabledKey: "ENABLE_EMBY",
+    keys: ["EMBY_URL", "EMBY_TOKEN", "EMBY_INSTANCE_KEY"],
+  },
+];
+
+const ONBOARDING_MEDIA_VISUAL: Record<
+  (typeof ONBOARDING_MEDIA_CARDS)[number]["id"],
+  { iconSrc: string; well: CSSProperties }
+> = {
+  /** Icon well set D — frosted neutral fill + saturated brand ring. */
+  plex: {
+    iconSrc: plexIcon,
+    well: {
+      backgroundColor: "rgba(255,255,255,0.07)",
+      border: "2px solid rgba(251, 191, 36, 0.75)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+    },
+  },
+  jellyfin: {
+    iconSrc: jellyfinIcon,
+    well: {
+      backgroundColor: "rgba(255,255,255,0.06)",
+      border: "2px solid rgba(34, 211, 238, 0.8)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+    },
+  },
+  emby: {
+    iconSrc: embyIcon,
+    well: {
+      backgroundColor: "rgba(255,255,255,0.06)",
+      border: "2px solid rgba(74, 222, 128, 0.78)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+    },
+  },
+};
+
+const ONBOARDING_MEDIA_TAGLINE: Record<(typeof ONBOARDING_MEDIA_CARDS)[number]["id"], string> = {
+  plex: "Libraries, API token, and Tautulli for playback signals.",
+  jellyfin: "Connect with URL and API key. Webhooks come later.",
+  emby: "Connect with URL and API key. Webhooks come later.",
+};
+
+const ONBOARDING_ARR_VISUAL: Record<"radarr" | "sonarr", { iconSrc: string; well: CSSProperties }> = {
+  radarr: {
+    iconSrc: radarrIcon,
+    well: {
+      backgroundColor: "rgba(255,255,255,0.07)",
+      border: "2px solid rgba(250, 204, 21, 0.78)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+    },
+  },
+  sonarr: {
+    iconSrc: sonarrIcon,
+    well: {
+      backgroundColor: "rgba(255,255,255,0.06)",
+      border: "2px solid rgba(56, 189, 248, 0.8)",
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+    },
+  },
+};
+
+/** Plex × Tautulli on the media step card: smaller wells + `h-8` marks so the row fits the panel with side padding. */
+const MEDIA_PLEX_PAIR_WELL_FRAME = "flex items-center justify-center rounded-2xl";
+const MEDIA_PLEX_PAIR_LOGO_INSET = "p-[calc((4rem-2rem)/2)]";
+
+function mediaCardConnectionKeys(card: (typeof ONBOARDING_MEDIA_CARDS)[number]): { urlKey: string; credentialKey: string } | null {
+  const urlKey = card.keys.find((k) => Boolean(URL_TEST_TARGET[k]));
+  if (!urlKey) return null;
+  const target = URL_TEST_TARGET[urlKey];
+  if (!target) return null;
+  return { urlKey, credentialKey: target.credentialKey };
+}
+
+function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant?: "inline" | "header"; className?: string }) {
+  const variant = props.variant ?? "inline";
+  const iconSize = variant === "header" ? 16 : 14;
+  const [copyHint, setCopyHint] = useState<"idle" | "ok" | "err">("idle");
+  const title =
+    copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed — select URL text or use HTTPS" : "Copy to clipboard";
+  return (
+    <button
+      type="button"
+      aria-label={props.ariaLabel}
+      title={title}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void (async () => {
+          const ok = await copyTextToClipboard(props.text);
+          setCopyHint(ok ? "ok" : "err");
+          window.setTimeout(() => setCopyHint("idle"), 2200);
+        })();
+      }}
+      className={`inline-flex shrink-0 items-center justify-center rounded border border-[#424753]/50 bg-[#252e3a]/80 text-slate-300 transition hover:border-[#424753]/80 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${
+        variant === "header" ? "h-7 w-7" : "h-6 w-6"
+      } ${props.className ?? ""}`}
+    >
+      <span className="material-symbols-outlined" style={{ fontSize: iconSize }} aria-hidden>
+        content_copy
+      </span>
+    </button>
+  );
+}
+
+function mediaCardConnectionDetailsComplete(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  values: FieldValueMap,
+  fieldsByKey?: Map<string, SettingsField>,
+): boolean {
+  const keys = mediaCardConnectionKeys(card);
+  if (!keys) return false;
+  if (String(values[keys.urlKey] ?? "").trim().length === 0) return false;
+  const cred = String(values[keys.credentialKey] ?? "").trim();
+  if (cred.length > 0) return true;
+  const credField = fieldsByKey?.get(keys.credentialKey);
+  return Boolean(credField?.secret && credField.has_saved_value);
+}
+
 function OnboardingWizard(props: {
   payload: SettingsPayload;
   stepIndex: number;
@@ -4137,6 +5341,7 @@ function OnboardingWizard(props: {
   hasUnsavedChanges: boolean;
   brand: Brand;
   themeMode: ThemeMode;
+  onBack: () => void;
   onNext: () => void;
   onChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
@@ -4146,8 +5351,8 @@ function OnboardingWizard(props: {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrPrimaryTestStatus, setArrPrimaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
+  const stepContentRef = useRef<HTMLDivElement | null>(null);
   const step = WIZARD_STEPS[props.stepIndex];
-  const guidance = WIZARD_STEP_GUIDANCE[step.key];
   const accent = getBrandAccent(props.brand, props.themeMode);
   const arrInstances = parseArrInstancesFromValues(props.values);
   const hasArrInstances = arrInstances.length > 0;
@@ -4159,17 +5364,35 @@ function OnboardingWizard(props: {
   const canUseSonarrSecondaryBehavior = uiHasSonarrSecondary && arrSecondaryTestStatus.sonarr;
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
-  const enabledMediaServices = [
-    { enabled: Boolean(props.values.ENABLE_PLEX), urlKey: "PLEX_URL" },
-    { enabled: Boolean(props.values.ENABLE_JELLYFIN), urlKey: "JELLYFIN_URL" },
-    { enabled: Boolean(props.values.ENABLE_EMBY), urlKey: "EMBY_URL" },
-  ];
-  const hasConfirmedMediaConnection = enabledMediaServices.some((item) => item.enabled && Boolean(testResults[item.urlKey]?.ok));
-  const hasConfirmedArrConnection = arrPrimaryTestStatus.radarr || arrPrimaryTestStatus.sonarr;
+  const allSettingsFieldsByKey = useMemo(() => {
+    const m = new Map<string, SettingsField>();
+    for (const section of props.payload.sections) {
+      for (const f of section.fields) {
+        m.set(f.key, f);
+      }
+    }
+    return m;
+  }, [props.payload]);
+  const hasConfirmedMediaConnection = ONBOARDING_MEDIA_CARDS.some((card) => {
+    if (!Boolean(props.values[card.enabledKey])) return false;
+    const conn = mediaCardConnectionKeys(card);
+    if (!conn) return false;
+    return Boolean(testResults[conn.urlKey]?.ok) || mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
+  });
+  const hasConfirmedArrConnection =
+    arrPrimaryTestStatus.radarr ||
+    arrPrimaryTestStatus.sonarr ||
+    arrPrimaryPersistedWithCredentials(props.values, "radarr") ||
+    arrPrimaryPersistedWithCredentials(props.values, "sonarr");
   const keys = fieldsForWizardStep(step.key, props.payload.sections);
   const fields = props.payload.sections.flatMap((section) => section.fields).filter((f) => keys.includes(f.key));
   const [stepSaving, setStepSaving] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
+  const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
+  const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
+  const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
+  const mediaPanelOpenedViaAddRef = useRef(false);
+  const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
 
   const hasUnlockedSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
@@ -4193,12 +5416,25 @@ function OnboardingWizard(props: {
   }, [fallbackUnnecessaryBecauseAllBoth, props, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH]);
 
   useEffect(() => {
-    setTestResults({});
+    if (step.key !== "media") {
+      setMediaPanel(null);
+      setMediaPanelTestPassed(false);
+    }
+  }, [step.key]);
+
+  useEffect(() => {
+    const container = stepContentRef.current;
+    if (container) {
+      container.scrollTop = 0;
+    }
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
   }, [props.stepIndex]);
 
-  async function runTest(field: SettingsField) {
+  async function runTest(field: SettingsField): Promise<{ ok: boolean; message: string } | null> {
     const target = URL_TEST_TARGET[field.key];
-    if (!target) return;
+    if (!target) return null;
     setTestResults((prev) => ({ ...prev, [field.key]: { ok: true, message: "Testing..." } }));
     const result = await props.onTestConnection({
       service: target.service,
@@ -4206,6 +5442,48 @@ function OnboardingWizard(props: {
       credentialKey: target.credentialKey,
     });
     setTestResults((prev) => ({ ...prev, [field.key]: result }));
+    return result;
+  }
+
+  function handleMediaPanelFieldChange(key: string, value: unknown) {
+    setMediaPanelTestPassed(false);
+    if (mediaPanel) {
+      const c = ONBOARDING_MEDIA_CARDS.find((x) => x.id === mediaPanel);
+      const conn = c ? mediaCardConnectionKeys(c) : null;
+      if (conn && (key === conn.urlKey || key === conn.credentialKey)) {
+        setTestResults((prev) => {
+          const next = { ...prev };
+          delete next[conn.urlKey];
+          return next;
+        });
+      }
+    }
+    props.onChange(key, value);
+  }
+
+  function handleMediaPanelCancel() {
+    if (!mediaPanel) {
+      setMediaPanel(null);
+      return;
+    }
+    const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
+    if (!card) {
+      setMediaPanel(null);
+      return;
+    }
+    if (mediaPanelOpenedViaAddRef.current) {
+      props.onChange(card.enabledKey, false);
+      for (const k of card.keys) {
+        props.onChange(k, "");
+      }
+    } else {
+      const snap = mediaPanelSnapshotRef.current;
+      for (const [k, v] of Object.entries(snap)) {
+        props.onChange(k, v);
+      }
+    }
+    setMediaPanelTestPassed(false);
+    setMediaPanel(null);
   }
 
   function buildStepPartialValues(stepKeys: string[]) {
@@ -4239,10 +5517,21 @@ function OnboardingWizard(props: {
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const focus = getBrandFocusClass(props.brand, props.themeMode);
+    const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
+    const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
+    const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
+    const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
     return (
-      <div key={field.key}>
+      <div key={field.key} className={rowMuted ? "opacity-50" : undefined}>
         <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
-        {field.description && <p className="text-xs text-slate-500 mb-2">{field.description}</p>}
+        {field.description && !(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") ? (
+          field.key === "STARTUP_SYNC_MODE" ? (
+            <StartupSyncModeDescription spacing="wizard" />
+          ) : (
+            <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
+          )
+        ) : null}
         {field.type === "bool" ? (
           <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
             <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"}`}
@@ -4254,8 +5543,13 @@ function OnboardingWizard(props: {
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
-            value={String(props.values[field.key] ?? field.options[0]?.value ?? "")}
+            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
+            disabled={projectionFieldLocked}
+            value={(() => {
+              const raw = String(props.values[field.key] ?? field.options[0]?.value ?? "");
+              if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
+              return raw;
+            })()}
             onChange={(e) => props.onChange(field.key, e.target.value)}
           >
             {field.options.map((opt) => (
@@ -4265,8 +5559,9 @@ function OnboardingWizard(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              disabled={lookaheadRangeLocked}
               value={String(props.values[field.key] ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
               onChange={(e) => props.onChange(field.key, e.target.value)}
@@ -4292,18 +5587,21 @@ function OnboardingWizard(props: {
 
   const failedConnectionTests = Object.entries(testResults).filter(([, result]) => result && !result.ok);
 
-  return (
-    <div className="fixed inset-0 z-50 bg-[#0f1419]/80 backdrop-blur-sm flex items-center justify-center p-6">
-      <div className="w-full max-w-2xl bg-[#171c22] border border-[#424753]/40 rounded-2xl shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="px-8 pt-8 pb-6 border-b border-[#424753]/30">
-          <div className="text-[10px] font-headline uppercase tracking-widest mb-1" style={{ color: accent.icon }}>Initial Configuration</div>
-          <h2 className="text-2xl font-black text-white font-headline tracking-tight">Integration Setup Wizard</h2>
-          <p className="text-sm text-slate-400 mt-1">Complete setup to unlock full dashboard access.</p>
-        </div>
+  const brandLabel = BRAND_OPTIONS.find((b) => b.value === props.brand)?.label ?? "Placeholdarr";
 
-        {/* Stepper */}
-        <div className="px-8 py-5 border-b border-[#424753]/30">
+  return (
+    <>
+      <div className="min-h-screen flex flex-col bg-[#070b12] text-slate-200 relative overflow-x-hidden">
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-indigo-950/45 via-[#070b12] to-black" />
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-18%,rgba(120,80,200,0.2),transparent)]" />
+        <div className="relative z-10 flex flex-1 min-h-0 flex-col items-center px-3 py-5 sm:py-8">
+          <div className="mb-5 sm:mb-6 text-center px-2 max-w-lg">
+            <div className="text-[10px] font-headline uppercase tracking-[0.2em] text-slate-500">{brandLabel}</div>
+            <h1 className="text-2xl sm:text-3xl font-black text-white font-headline tracking-tight mt-1">Setup</h1>
+            <p className="text-sm text-slate-400 mt-1">Configure integrations — the dashboard opens when you finish.</p>
+          </div>
+          <div className="w-full max-w-3xl flex-1 min-h-0 flex flex-col rounded-2xl border border-white/10 bg-[#121722]/93 backdrop-blur-md shadow-2xl overflow-hidden max-h-[min(900px,calc(100vh-7rem))]">
+        <div className="px-6 sm:px-8 py-4 sm:py-5 border-b border-[#424753]/30 shrink-0">
           <div className="flex items-center gap-0">
             {WIZARD_STEPS.map((s, i) => {
               const done = i < props.stepIndex;
@@ -4327,17 +5625,13 @@ function OnboardingWizard(props: {
         </div>
 
         {/* Fields */}
-        <div className="px-8 py-6 overflow-y-auto max-h-[50vh]">
-          {step.key !== "media" && step.key !== "webhooks" ? (
-            <div className="mb-5 rounded-xl border border-[#424753]/40 bg-[#0f1419] px-4 py-3">
-              <div className="text-[11px] font-headline uppercase tracking-widest" style={{ color: accent.icon }}>{guidance.title}</div>
-              <p className="mt-1 text-xs text-slate-400">{guidance.detail}</p>
-            </div>
-          ) : null}
+        <div ref={stepContentRef} className="px-6 sm:px-8 py-6 overflow-y-auto flex-1 min-h-0">
           {failedConnectionTests.length ? (
             <div className="mb-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
-              <div className="text-[11px] font-headline uppercase tracking-widest text-red-300">Connection Warning</div>
-              <p className="mt-1 text-xs text-red-200/90">One or more configured services could not be reached. Review the failed test results in this step and correct the URL or API key.</p>
+              <div className="text-[11px] font-headline uppercase tracking-widest text-red-300">Connection warning</div>
+              <p className="mt-1 text-xs leading-relaxed text-red-200/90">
+                One or more configured services could not be reached. Review the failed test results in this step and correct the URL or API key.
+              </p>
             </div>
           ) : null}
           {step.key === "paths" ? (
@@ -4351,121 +5645,146 @@ function OnboardingWizard(props: {
               onValueChange={props.onChange}
             />
           ) : step.key === "media" ? (() => {
-            const focus = getBrandFocusClass(props.brand, props.themeMode);
-            const mediaCards = [
-              {
-                id: "plex",
-                title: "Plex",
-                enabledKey: "ENABLE_PLEX",
-                note: "Tautulli is required for Plex playback webhooks and playback-aware routing.",
-                keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
-              },
-              {
-                id: "jellyfin",
-                title: "Jellyfin",
-                enabledKey: "ENABLE_JELLYFIN",
-                note: "Optional playback webhook support can be configured in the Webhook step.",
-                keys: ["JELLYFIN_URL", "JELLYFIN_TOKEN", "JELLYFIN_INSTANCE_KEY"],
-              },
-              {
-                id: "emby",
-                title: "Emby",
-                enabledKey: "ENABLE_EMBY",
-                note: "Optional playback webhook support can be configured in the Webhook step.",
-                keys: ["EMBY_URL", "EMBY_TOKEN", "EMBY_INSTANCE_KEY"],
-              },
-            ] as const;
             const fieldByKey = new Map(fields.map((f) => [f.key, f]));
 
             return (
-              <div className="space-y-4">
-                {mediaCards.map((card) => {
-                  const enabled = Boolean(props.values[card.enabledKey]);
-                  const availableFields = card.keys
-                    .map((key) => fieldByKey.get(key))
-                    .filter(Boolean) as SettingsField[];
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  {ONBOARDING_MEDIA_CARDS.map((card) => {
+                    const enabled = Boolean(props.values[card.enabledKey]);
+                    const availableFields = card.keys
+                      .map((key) => fieldByKey.get(key))
+                      .filter(Boolean) as SettingsField[];
+                    const urlField = availableFields.find((f) => URL_TEST_TARGET[f.key]);
+                    const urlTest = urlField ? testResults[urlField.key] : undefined;
+                    const vis = ONBOARDING_MEDIA_VISUAL[card.id];
+                    const address = urlField ? String(props.values[urlField.key] ?? "").trim() : "";
+                    const movieLib = card.id === "plex" ? String(props.values.PLEX_MOVIE_SECTION_ID ?? "").trim() : "";
+                    const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
 
-                  return (
-                    <div key={card.id} className={`rounded-xl border border-[#424753]/40 bg-[#0f1419] p-4 transition-opacity ${enabled ? "" : "opacity-55"}`}>
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <h3 className="text-sm font-semibold text-white font-headline">{card.title}</h3>
-                          <p className="mt-1 text-xs text-slate-400">{card.note}</p>
-                        </div>
-                        <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
-                          <div
-                            className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${enabled ? "" : "bg-[#252e3a]"}`}
-                            style={enabled ? { backgroundColor: accent.hex } : undefined}
-                            onClick={() => props.onChange(card.enabledKey, !enabled)}
-                          >
-                            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-5" : "translate-x-0"}`} />
-                          </div>
-                          <span className="text-sm text-slate-300">{enabled ? "Enabled" : "Disabled"}</span>
-                        </label>
-                      </div>
-                      <div className="mt-4 space-y-3">
-                        {availableFields.map((field) => {
-                          if (field.key === card.enabledKey) return null;
-                          if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
-                          const value = props.values[field.key];
-                          const test = testResults[field.key];
-                          const testTarget = URL_TEST_TARGET[field.key];
-                          return (
-                            <div key={field.key}>
-                              <label className="block text-xs font-semibold text-slate-300 mb-1">{field.label}</label>
-                              {getPlexLibraryIdNote(field.key) ? <p className="text-[11px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
-                              {field.type === "bool" ? (
-                                <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-                                  <div
-                                    className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
-                                    style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-                                    onClick={() => enabled && props.onChange(field.key, !Boolean(value))}
-                                  >
-                                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
-                                  </div>
-                                  <span className="text-xs text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
-                                </label>
-                              ) : (
-                                <div className="flex gap-2">
-                                  <input
-                                    className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
-                                    type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-                                    value={String(value ?? "")}
-                                    placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-                                    onChange={(e) => props.onChange(field.key, e.target.value)}
-                                    disabled={!enabled}
-                                  />
-                                  {testTarget ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => runTest(field)}
-                                      disabled={!enabled}
-                                      className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
-                                      Test
-                                    </button>
-                                  ) : null}
-                                </div>
-                              )}
-                              {test ? (
-                                <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
-                                  <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
-                                  <span>{test.message}</span>
-                                </div>
-                              ) : null}
+                    return (
+                      <div
+                        key={card.id}
+                        className="group relative flex min-h-[260px] flex-col rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.07] to-white/[0.02] p-6 shadow-[0_1px_0_rgba(255,255,255,0.06)_inset] backdrop-blur-md transition duration-200 hover:border-white/[0.14] hover:from-white/[0.09] hover:shadow-[0_0_40px_-12px_rgba(99,102,241,0.35)]"
+                      >
+                        <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
+                          {card.id === "plex" ? (
+                            <div className="flex max-w-full items-center justify-center gap-2 px-2 sm:px-3">
+                              <div
+                                className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-fit shrink-0 ${MEDIA_PLEX_PAIR_LOGO_INSET}`}
+                                style={vis.well}
+                              >
+                                <img src={plexIcon} alt="" decoding="async" className="h-8 w-auto max-h-8 shrink-0 object-contain" aria-hidden />
+                              </div>
+                              <span className="select-none text-xl font-extralight leading-none text-white/85" aria-hidden>
+                                ×
+                              </span>
+                              <div
+                                className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-16 shrink-0`}
+                                style={vis.well}
+                              >
+                                <img src={tautulliIcon} alt="" decoding="async" className="h-8 w-8 shrink-0 object-contain" aria-hidden />
+                              </div>
                             </div>
-                          );
-                        })}
+                          ) : (
+                            <div
+                              className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl"
+                              style={vis.well}
+                            >
+                              <img src={vis.iconSrc} alt="" decoding="async" className="h-10 w-10 object-contain" aria-hidden />
+                            </div>
+                          )}
+                        </div>
+                        <h4 className="mt-5 w-full text-center text-lg font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                        <p className="ui-field-description mt-1.5 text-center">{ONBOARDING_MEDIA_TAGLINE[card.id]}</p>
+
+                        {!enabled ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              mediaPanelOpenedViaAddRef.current = true;
+                              props.onChange(card.enabledKey, true);
+                              setMediaPanelTestPassed(false);
+                              setMediaPanel(card.id);
+                            }}
+                            className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-sm font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09] active:scale-[0.99]"
+                          >
+                            Connect {card.title}
+                          </button>
+                        ) : (
+                          <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
+                            {card.id === "plex" && "note" in card && card.note ? (
+                              <p className="ui-field-description-compact mb-2">{card.note}</p>
+                            ) : null}
+                            <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-snug">
+                              <div className="flex min-w-0 gap-2">
+                                <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
+                                <dd className="truncate font-mono text-slate-200" title={address || undefined}>
+                                  {address || "—"}
+                                </dd>
+                              </div>
+                              {card.id === "plex" ? (
+                                <>
+                                  <div className="flex min-w-0 gap-2">
+                                    <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Movie lib.</dt>
+                                    <dd className="truncate font-mono text-slate-200" title={movieLib || undefined}>
+                                      {movieLib || "—"}
+                                    </dd>
+                                  </div>
+                                  <div className="flex min-w-0 gap-2">
+                                    <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">TV lib.</dt>
+                                    <dd className="truncate font-mono text-slate-200" title={tvLib || undefined}>
+                                      {tvLib || "—"}
+                                    </dd>
+                                  </div>
+                                </>
+                              ) : null}
+                            </dl>
+                            {urlTest ? (
+                              <p className={`mt-2 text-xs ${urlTest.ok ? "text-emerald-400/95" : "text-red-400"}`}>{urlTest.message}</p>
+                            ) : (
+                              <p className="ui-field-description mt-2">Configure to test the connection.</p>
+                            )}
+                            <div className="mt-auto flex flex-col gap-2 pt-4">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  mediaPanelOpenedViaAddRef.current = false;
+                                  const snap: Record<string, unknown> = {};
+                                  for (const k of card.keys) {
+                                    snap[k] = props.values[k];
+                                  }
+                                  mediaPanelSnapshotRef.current = snap;
+                                  const uk = mediaCardConnectionKeys(card)?.urlKey;
+                                  const ready = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
+                                  setMediaPanelTestPassed(Boolean(ready && uk && testResults[uk]?.ok));
+                                  setMediaPanel(card.id);
+                                }}
+                                className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2 text-xs font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
+                              >
+                                Configure
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  props.onChange(card.enabledKey, false);
+                                  setMediaPanel((p) => (p === card.id ? null : p));
+                                }}
+                                className="text-center text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
+                              >
+                                Remove connection
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
               </div>
             );
           })() : step.key === "arr" ? (
-            <div className="space-y-4">
+            <div className="space-y-6">
               <ArrInstancesEditor
+                layout="slots"
                 values={props.values}
                 onValueChange={props.onChange}
                 accent={accent}
@@ -4477,15 +5796,15 @@ function OnboardingWizard(props: {
                 }}
               />
               <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                <div>
+                <div className="text-center">
                   <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                  <p className="text-xs text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
+                  <p className="mx-auto max-w-2xl text-xs text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
                 </div>
-                <div className="space-y-4">
-                  <div>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+                  <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                     <select
-                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
                       onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                       disabled={!canUseRadarrSecondaryBehavior}
@@ -4501,11 +5820,10 @@ function OnboardingWizard(props: {
                       )}
                     </select>
                   </div>
-                  <div className="border-t border-[#424753]/20" />
-                  <div>
+                  <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                     <select
-                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
                       onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                       disabled={!canUseSonarrSecondaryBehavior}
@@ -4524,15 +5842,15 @@ function OnboardingWizard(props: {
                 </div>
               </div>
               <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
-                <div>
+                <div className="text-center">
                   <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                  <p className="text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
+                  <p className="mx-auto max-w-2xl text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
                 </div>
-                <div className="space-y-4">
-                  <div>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+                  <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                     <select
-                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                       onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
                       disabled={!canUseRadarrSecondaryBehavior}
@@ -4549,11 +5867,10 @@ function OnboardingWizard(props: {
                       )}
                     </select>
                   </div>
-                  <div className="border-t border-[#424753]/20" />
-                  <div>
+                  <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                     <select
-                      className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                       onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
                       disabled={!canUseSonarrSecondaryBehavior}
@@ -4570,19 +5887,30 @@ function OnboardingWizard(props: {
                       )}
                     </select>
                   </div>
-                  <div className="border-t border-[#424753]/20" />
-                  <div className="flex items-center justify-between gap-3">
+                </div>
+                <div className="border-t border-[#424753]/20 pt-4">
+                  <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
                     <div>
                       <div className="text-xs font-semibold text-slate-300">Fallback search</div>
-                      <div className="text-xs text-slate-500">
-                        {fallbackUnnecessaryBecauseAllBoth
-                          ? "Fallback is not needed because every unlocked search behavior already searches both instances."
-                          : canUseAnySecondaryBehavior
-                          ? "If the selected ARR instance has the item but the search does not resolve, Placeholdarr waits the timeout and then searches the other enabled instance. If the item is not in ARR at all (missing/deleted rows), fallback is immediate."
-                          : "Not applicable, no second instance set up."}
+                      <div className="ui-field-description mt-1">
+                        {fallbackUnnecessaryBecauseAllBoth ? (
+                          "Fallback is not needed because every unlocked search behavior already searches both instances."
+                        ) : canUseAnySecondaryBehavior ? (
+                          <div className="mx-auto w-full max-w-md text-left">
+                            <p>When enabled, the other source is searched automatically if:</p>
+                            <ul className="mt-2 list-disc space-y-1.5 pl-4">
+                              <li>The selected source doesn&apos;t have the content added (immediate fallback search), or</li>
+                              <li>
+                                The content isn&apos;t imported before the fallback timeout (e.g. content not found, index/download errors, etc.)
+                              </li>
+                            </ul>
+                          </div>
+                        ) : (
+                          "Not applicable, no second instance set up."
+                        )}
                       </div>
                     </div>
-                    <label className="flex items-center gap-3 cursor-pointer select-none w-fit shrink-0">
+                    <label className="flex cursor-pointer select-none items-center justify-center gap-3">
                       <div
                         className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
                         style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
@@ -4598,39 +5926,49 @@ function OnboardingWizard(props: {
                           : "Not applicable, no second instance set up."}
                       </span>
                     </label>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
-                    {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
-                      <input
-                        className={`w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                        type="number"
-                        min={1}
-                        value={String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? 30)}
-                        onChange={(e) => props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", e.target.value)}
-                      />
-                    ) : fallbackUnnecessaryBecauseAllBoth ? (
-                      <input
-                        className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
-                        type="text"
-                        value="Not needed because all unlocked behaviors already search both instances."
-                        disabled
-                      />
-                    ) : canUseAnySecondaryBehavior ? (
-                      <input
-                        className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
-                        type="text"
-                        value="Enable fallback search to set timeout."
-                        disabled
-                      />
-                    ) : (
-                      <input
-                        className="w-full max-w-xs bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
-                        type="text"
-                        value="Not applicable, no second instance set up."
-                        disabled
-                      />
-                    )}
+                    <div className="text-center">
+                      <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                      {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
+                        <input
+                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-sm tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={3}
+                          autoComplete="off"
+                          value={(() => {
+                            const raw = props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES;
+                            const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 3);
+                            if (digits.length > 0) return digits;
+                            return raw === undefined || raw === null ? "30" : "";
+                          })()}
+                          onChange={(e) => {
+                            const d = e.target.value.replace(/\D/g, "").slice(0, 3);
+                            props.onChange("PLAYBACK_FALLBACK_TIMEOUT_MINUTES", d);
+                          }}
+                        />
+                      ) : fallbackUnnecessaryBecauseAllBoth ? (
+                        <input
+                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                          type="text"
+                          value="Not needed because all unlocked behaviors already search both instances."
+                          disabled
+                        />
+                      ) : canUseAnySecondaryBehavior ? (
+                        <input
+                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                          type="text"
+                          value="Enable fallback search to set timeout."
+                          disabled
+                        />
+                      ) : (
+                        <input
+                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                          type="text"
+                          value="Not applicable, no second instance set up."
+                          disabled
+                        />
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -4683,8 +6021,11 @@ function OnboardingWizard(props: {
                     <div className="flex items-start gap-2">
                       <span className="material-symbols-outlined shrink-0 text-yellow-500" style={{ fontSize: 18 }}>warning</span>
                       <div>
-                        <h3 className="text-sm font-semibold text-yellow-200">No ARR instances configured</h3>
-                        <p className="mt-1 text-xs text-yellow-300/80">Configure at least one Radarr or Sonarr instance in ARR Services, then continue to enable webhook setup.</p>
+                        <div className="text-[11px] font-headline uppercase tracking-widest text-yellow-200/95">Setup required</div>
+                        <h3 className="mt-1 text-sm font-semibold text-yellow-100 font-headline">No ARR instances configured</h3>
+                        <p className="mt-1 text-xs leading-relaxed text-yellow-200/85">
+                          Configure at least one Radarr or Sonarr instance in ARR Services, then continue to enable webhook setup.
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -4692,24 +6033,45 @@ function OnboardingWizard(props: {
 
                 {hasArrInstances && (
                   <>
-                    {/* Trigger Setup Instructions */}
-                    <div>
-                      <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Setup Steps for Each Service</h3>
-                      <div className="space-y-4">
+                    <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Webhook setup</h2>
+                    <div className="space-y-4">
                         {instances.map((instance) => {
                           const service = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === instance.arr_type);
                           if (!service) return null;
-                          const liveInstanceKey = normalizeInstanceKey(inferDefaultKey(String(instance.label || ""), instance.arr_type));
-                          const webhookUrl = `${webhookBaseUrl}/webhook?instance=${encodeURIComponent(liveInstanceKey)}`;
+                          const webhookUrlStable = `${webhookBaseUrl}/webhook?instance_id=${encodeURIComponent(String(instance.instance_id || ""))}`;
+                          const arrVis = ONBOARDING_ARR_VISUAL[instance.arr_type];
                           return (
-                            <div key={`steps-${instance.id}`} className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="font-semibold text-sm text-white mb-2 flex items-center gap-2">
-                                <span style={{ color: service.color }}>●</span>
-                                {service.name} {instance.label ? `- ${instance.label}` : ""}
+                            <div key={`steps-${instance.id}`} className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                              <div className="mb-2 flex items-center gap-2">
+                                <div
+                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+                                  style={arrVis.well}
+                                  aria-hidden
+                                >
+                                  <img src={arrVis.iconSrc} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
+                                </div>
+                                <div className="min-w-0 text-sm font-semibold text-white font-headline">
+                                  {service.name}
+                                  {instance.label ? ` — ${instance.label}` : ""}
+                                </div>
                               </div>
-                              <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
+                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
                                 <li>Go to Settings → Webhooks → Create New Webhook</li>
-                                <li>Set URL to <span className="font-mono text-slate-300">{webhookUrl}</span></li>
+                                <li>
+                                  <div className="space-y-1">
+                                    <span className="text-slate-300">Set URL to</span>
+                                    <div className="flex items-start gap-2">
+                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
+                                        {webhookUrlStable}
+                                      </span>
+                                      <WebhookStepCopyButton
+                                        text={webhookUrlStable}
+                                        ariaLabel={`Copy ${service.name} webhook URL`}
+                                        className="mt-0.5"
+                                      />
+                                    </div>
+                                  </div>
+                                </li>
                                 <li>Select required events:</li>
                               </ol>
                               <div className="mt-2 ml-4 space-y-1">
@@ -4723,108 +6085,148 @@ function OnboardingWizard(props: {
                             </div>
                           );
                         })}
-                      </div>
                     </div>
 
                     {/* Playback Webhooks (if applicable) */}
                     {(Boolean(props.values.ENABLE_PLEX) || Boolean(props.values.ENABLE_JELLYFIN) || Boolean(props.values.ENABLE_EMBY)) && (
-                      <div>
-                        <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">Playback Source Webhooks</h3>
-                        <div className="space-y-3">
+                      <div className="border-t border-[#424753]/30 pt-6 space-y-4">
+                          <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Playback webhooks</h2>
+                          <div className="space-y-4">
                           {Boolean(props.values.ENABLE_PLEX) && (
-                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1">
-                                  <div className="text-xs font-semibold text-slate-300">Tautulli</div>
-                                  <div className="mt-1 text-[11px] text-slate-500">Required for Plex playback signals</div>
-                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}</div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`);
-                                    alert("Tautulli webhook URL copied to clipboard!");
-                                  }}
-                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                            <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                              <div className="mb-2 flex items-center gap-2">
+                                <div
+                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+                                  style={ONBOARDING_MEDIA_VISUAL.plex.well}
+                                  aria-hidden
                                 >
-                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
-                                </button>
+                                  <img src={tautulliIcon} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
+                                </div>
+                                <div className="min-w-0 text-sm font-semibold text-white font-headline">Tautulli</div>
                               </div>
-                              <ol className="mt-3 text-[11px] text-slate-400 list-decimal list-inside space-y-1.5">
+                              <p className="ui-field-description-compact -mt-1 mb-2 text-slate-400">Required for Plex playback signals.</p>
+                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
                                 <li>Open Tautulli and go to Settings → Notification Agents.</li>
                                 <li>Create a new Webhook notification agent.</li>
                                 <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+                                <li>
+                                  <div className="space-y-1">
+                                    <span className="text-slate-300">Set Webhook URL to</span>
+                                    <div className="flex items-start gap-2">
+                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
+                                        {`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}
+                                      </span>
+                                      <WebhookStepCopyButton
+                                        text={`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}
+                                        ariaLabel="Copy Tautulli webhook URL"
+                                        className="mt-0.5"
+                                      />
+                                    </div>
+                                  </div>
+                                </li>
                                 <li>Paste the payload template below and save.</li>
                               </ol>
                               <div className="mt-3">
-                                <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON Payload Template</div>
-                                <pre className="mt-1.5 overflow-x-auto rounded bg-[#0a0d11] border border-[#424753]/40 p-3 text-[11px] leading-relaxed text-slate-300 font-mono">
+                                <div className="mb-1.5 flex items-center justify-between gap-2">
+                                  <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
+                                  <WebhookStepCopyButton
+                                    text={tautulliPayloadTemplate}
+                                    ariaLabel="Copy Tautulli JSON payload template"
+                                    variant="header"
+                                  />
+                                </div>
+                                <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
                                   <code>{tautulliPayloadTemplate}</code>
                                 </pre>
                               </div>
                             </div>
                           )}
                           {Boolean(props.values.ENABLE_JELLYFIN) && (
-                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1">
-                                  <div className="text-xs font-semibold text-slate-300">Jellyfin</div>
-                                  <div className="mt-1 text-[11px] text-slate-500">Use the Webhook plugin with a custom JSON payload template.</div>
-                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}</div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`);
-                                    alert("Jellyfin webhook URL copied to clipboard!");
-                                  }}
-                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                            <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                              <div className="mb-2 flex items-center gap-2">
+                                <div
+                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+                                  style={ONBOARDING_MEDIA_VISUAL.jellyfin.well}
+                                  aria-hidden
                                 >
-                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
-                                </button>
+                                  <img src={jellyfinIcon} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
+                                </div>
+                                <div className="min-w-0 text-sm font-semibold text-white font-headline">Jellyfin</div>
                               </div>
-                              <ol className="mt-3 text-[11px] text-slate-400 list-decimal list-inside space-y-1.5">
+                              <p className="ui-field-description-compact -mt-1 mb-2 text-slate-400">Use the Webhook plugin with a custom JSON payload template.</p>
+                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
                                 <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
                                 <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
                                 <li>Set Events to include Playback Start and Content Type to application/json.</li>
+                                <li>
+                                  <div className="space-y-1">
+                                    <span className="text-slate-300">Set Webhook URL to</span>
+                                    <div className="flex items-start gap-2">
+                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
+                                        {`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}
+                                      </span>
+                                      <WebhookStepCopyButton
+                                        text={`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}
+                                        ariaLabel="Copy Jellyfin webhook URL"
+                                        className="mt-0.5"
+                                      />
+                                    </div>
+                                  </div>
+                                </li>
                                 <li>Paste the payload template below, then save the webhook.</li>
                               </ol>
                               <div className="mt-3">
-                                <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON Payload Template</div>
-                                <pre className="mt-1.5 overflow-x-auto rounded bg-[#0a0d11] border border-[#424753]/40 p-3 text-[11px] leading-relaxed text-slate-300 font-mono">
+                                <div className="mb-1.5 flex items-center justify-between gap-2">
+                                  <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
+                                  <WebhookStepCopyButton
+                                    text={jellyfinPayloadTemplate}
+                                    ariaLabel="Copy Jellyfin JSON payload template"
+                                    variant="header"
+                                  />
+                                </div>
+                                <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
                                   <code>{jellyfinPayloadTemplate}</code>
                                 </pre>
                               </div>
                             </div>
                           )}
                           {Boolean(props.values.ENABLE_EMBY) && (
-                            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-4">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="flex-1">
-                                  <div className="text-xs font-semibold text-slate-300">Emby</div>
-                                  <div className="mt-1 text-[11px] text-slate-500">Set a playback-start webhook so Placeholdarr receives media start events.</div>
-                                  <div className="mt-2 text-[11px] text-slate-400 font-mono break-all bg-[#0a0d11] rounded px-2 py-1.5">{`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}</div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`);
-                                    alert("Emby webhook URL copied to clipboard!");
-                                  }}
-                                  className="mt-0.5 shrink-0 px-3 py-1.5 bg-[#252e3a] border border-[#424753]/40 hover:border-[#424753]/80 text-slate-300 hover:text-white rounded text-[10px] font-headline uppercase tracking-wider transition-colors"
+                            <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                              <div className="mb-2 flex items-center gap-2">
+                                <div
+                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+                                  style={ONBOARDING_MEDIA_VISUAL.emby.well}
+                                  aria-hidden
                                 >
-                                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>content_copy</span>
-                                </button>
+                                  <img src={embyIcon} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
+                                </div>
+                                <div className="min-w-0 text-sm font-semibold text-white font-headline">Emby</div>
                               </div>
-                              <ol className="mt-3 text-[11px] text-slate-400 list-decimal list-inside space-y-1.5">
+                              <p className="ui-field-description-compact -mt-1 mb-2 text-slate-400">Playback-start webhook so Placeholdarr receives media start events.</p>
+                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
                                 <li>In Emby, go to Settings → Notifications.</li>
-                                <li>Add or edit a webhook notification and set the URL above.</li>
+                                <li>Add or edit a webhook notification.</li>
+                                <li>
+                                  <div className="space-y-1">
+                                    <span className="text-slate-300">Set Webhook URL to</span>
+                                    <div className="flex items-start gap-2">
+                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
+                                        {`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}
+                                      </span>
+                                      <WebhookStepCopyButton
+                                        text={`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}
+                                        ariaLabel="Copy Emby webhook URL"
+                                        className="mt-0.5"
+                                      />
+                                    </div>
+                                  </div>
+                                </li>
                                 <li>Enable the playback-start event you want Placeholdarr to process.</li>
                                 <li>Save the webhook.</li>
                               </ol>
                             </div>
                           )}
-                        </div>
+                          </div>
                       </div>
                     )}
                   </>
@@ -4835,13 +6237,35 @@ function OnboardingWizard(props: {
             <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
-              {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
+              {BEHAVIOR_WIZARD_SECTIONS.map((sectionName, behaviorSectionIdx) => {
                 const secFields = fields.filter((f) => f.section === sectionName);
                 if (!secFields.length) return null;
+                const fieldsBlock = <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>;
+                const surface = behaviorWizardSurface(behaviorSectionIdx);
+                const surfaceClass = ONBOARDING_BEHAVIOR_SURFACE_PREVIEW
+                  ? surface.className
+                  : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
                 return (
                   <div key={sectionName}>
-                    <h3 className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-3 pb-2 border-b border-[#424753]/30">{sectionName}</h3>
-                    <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>
+                    <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>{sectionName}</h2>
+                    {ONBOARDING_BEHAVIOR_SURFACE_PREVIEW ? (
+                      <p className="mb-2 mt-1 text-[10px] font-headline uppercase tracking-widest text-slate-500">
+                        Section frame preview — {surface.label}
+                      </p>
+                    ) : null}
+                    {sectionName === "Lookahead" ? (
+                      <div className={surfaceClass}>
+                        <LookaheadSectionIntro variant="onboarding" embedded />
+                        <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
+                      </div>
+                    ) : sectionName === "Status Updates" ? (
+                      <div className={surfaceClass}>
+                        <StatusUpdatesSectionIntro variant="onboarding" embedded />
+                        <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
+                      </div>
+                    ) : (
+                      <div className={surfaceClass}>{fieldsBlock}</div>
+                    )}
                   </div>
                 );
               })}
@@ -4852,7 +6276,15 @@ function OnboardingWizard(props: {
         </div>
 
         {/* Actions */}
-        <div className="px-8 py-5 border-t border-[#424753]/30 flex items-center justify-end">
+        <div className="px-8 py-5 border-t border-[#424753]/30 flex items-center justify-between gap-4">
+          <button
+            type="button"
+            disabled={props.stepIndex <= 0}
+            onClick={() => props.onBack()}
+            className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] hover:border-[#424753]/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          >
+            Back
+          </button>
           <div className="flex items-center gap-3">
             {props.hasUnsavedChanges && <span className="text-xs text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
             {props.stepIndex < WIZARD_STEPS.length - 1 ? (
@@ -4895,7 +6327,7 @@ function OnboardingWizard(props: {
                 className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-xs font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ backgroundColor: accent.hex }}
                 >
-                {stepSaving ? "Saving..." : "Save & Continue"}
+                {keys.length ? (stepSaving ? "Saving..." : "Save & Continue") : "Continue"}
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_forward</span>
               </button>
             ) : (
@@ -4910,8 +6342,135 @@ function OnboardingWizard(props: {
         {stepError ? (
           <div className="px-8 pb-4 text-sm text-red-400">{stepError}</div>
         ) : null}
+          </div>
+        </div>
       </div>
-    </div>
+      {step.key === "media" && mediaPanel ? (() => {
+        const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
+        if (!card) return null;
+        const fieldByKey = new Map(fields.map((f) => [f.key, f]));
+        const focus = getBrandFocusClass(props.brand, props.themeMode);
+        const availableFields = card.keys
+          .map((key) => fieldByKey.get(key))
+          .filter(Boolean) as SettingsField[];
+        if (!Boolean(props.values[card.enabledKey])) {
+          return null;
+        }
+        const urlFieldForFooter = availableFields.find((f) => URL_TEST_TARGET[f.key]);
+        const detailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
+        return (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6">
+            <button
+              type="button"
+              aria-label="Close panel"
+              className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+              onClick={handleMediaPanelCancel}
+            />
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={`${card.title} server`}
+              className="relative z-10 my-auto flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/50 bg-[#171c22] shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
+                <div>
+                  <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500">Media server</div>
+                  <h2 className="text-lg font-headline font-bold text-white mt-0.5" style={{ color: accent.text }}>
+                    {card.title}
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleMediaPanelCancel}
+                  className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-[#252e3a]/80"
+                  aria-label="Close"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: 22 }}>close</span>
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                {availableFields.map((field) => {
+                  if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
+                  const value = props.values[field.key];
+                  const test = testResults[field.key];
+                  const testTarget = URL_TEST_TARGET[field.key];
+                  return (
+                    <div key={field.key}>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">{field.label}</label>
+                      {getPlexLibraryIdNote(field.key) ? <p className="text-[11px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
+                      {field.type === "bool" ? (
+                        <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
+                          <div
+                            className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
+                            style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
+                            onClick={() => handleMediaPanelFieldChange(field.key, !Boolean(value))}
+                          >
+                            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
+                          </div>
+                          <span className="text-xs text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+                        </label>
+                      ) : (
+                        <div className="flex gap-2">
+                          <input
+                            className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+                            type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+                            value={String(value ?? "")}
+                            placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
+                            onChange={(e) => handleMediaPanelFieldChange(field.key, e.target.value)}
+                          />
+                        </div>
+                      )}
+                      {test && testTarget ? (
+                        <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+                          <span>{test.message}</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap items-stretch justify-between gap-2 p-4 border-t border-[#424753]/40 shrink-0 bg-[#141a24]">
+                <button
+                  type="button"
+                  onClick={handleMediaPanelCancel}
+                  className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!detailsComplete || !urlFieldForFooter || mediaFooterTestBusy}
+                  onClick={() => {
+                    if (!urlFieldForFooter) return;
+                    void (async () => {
+                      setMediaFooterTestBusy(true);
+                      const result = await runTest(urlFieldForFooter);
+                      setMediaFooterTestBusy(false);
+                      setMediaPanelTestPassed(Boolean(result?.ok));
+                    })();
+                  }}
+                  className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-amber-500 text-slate-900 hover:bg-amber-400 border border-amber-400/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
+                >
+                  {mediaFooterTestBusy ? "Testing..." : "Test"}
+                </button>
+                <button
+                  type="button"
+                  disabled={!mediaPanelTestPassed || mediaFooterTestBusy}
+                  onClick={() => {
+                    setMediaPanel(null);
+                    setMediaPanelTestPassed(false);
+                  }}
+                  className="min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-blue-600 text-white hover:bg-blue-500 border border-blue-500/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
+                >
+                  Add Server
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
+    </>
   );
 }
 function getTabFromPath(pathname: string): DashboardTab {
@@ -4957,6 +6516,22 @@ function isCalendarItemVisible(item: CalendarDay["items"][number], filters: Cale
     return !!filters.releaseTypes[releaseType];
   }
   return true;
+}
+
+/** Compare only keys the server persists — ignores client-only wizard keys (e.g. WIZARD_*). */
+function settingsValuesDirty(fieldValues: FieldValueMap, baselineValues: FieldValueMap, payload: SettingsPayload | null): boolean {
+  if (!payload) {
+    return !deepEqualValues(fieldValues, baselineValues);
+  }
+  const keys = [...new Set(payload.sections.flatMap((section) => section.fields.map((f) => f.key)))];
+  const pick = (src: FieldValueMap): FieldValueMap => {
+    const out: FieldValueMap = {};
+    for (const k of keys) {
+      out[k] = src[k];
+    }
+    return out;
+  };
+  return !deepEqualValues(pick(fieldValues), pick(baselineValues));
 }
 
 function deepEqualValues(a: FieldValueMap, b: FieldValueMap) {
@@ -5079,12 +6654,13 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const paths = map.Paths || [];
   const librarySync = map["Library sync"] || [];
   const calendar = map.Calendar || [];
-  const playback = map.Playback || [];
+  const lookahead = map.Lookahead || [];
+  const statusUpdates = map["Status Updates"] || [];
   const advanced = map.Advanced || [];
   const arrBehaviorFromArrIntegrations = [...arrIntegrations].filter((k) => ARR_BEHAVIOR_KEYS.has(k));
-  const arrBehaviorFromPlayback = playback.filter((k) => ARR_BEHAVIOR_KEYS.has(k));
-  const arrBehavior = arrBehaviorFromArrIntegrations.length ? arrBehaviorFromArrIntegrations : arrBehaviorFromPlayback;
-  const playbackNonArrSearch = playback.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
+  const arrBehaviorFromLookahead = lookahead.filter((k) => ARR_BEHAVIOR_KEYS.has(k));
+  const arrBehavior = arrBehaviorFromArrIntegrations.length ? arrBehaviorFromArrIntegrations : arrBehaviorFromLookahead;
+  const lookaheadNonArr = lookahead.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
   if (stepKey === "paths") return [...paths];
   if (stepKey === "webhooks") return [];
@@ -5097,5 +6673,5 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   if (stepKey === "media") {
     return [...mediaIntegrations];
   }
-  return [...librarySync, ...calendar, ...playbackNonArrSearch, ...advanced];
+  return [...librarySync, ...calendar, ...lookaheadNonArr, ...statusUpdates, ...advanced];
 }

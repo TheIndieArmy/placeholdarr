@@ -11,6 +11,14 @@
   .status-glow-active {
     animation: status-pulse 2s ease-in-out infinite;
   }
+  /** Helper copy under labels (settings, wizard, onboarding) — readable on dark panels */
+  .ui-field-description {
+    @apply text-sm text-slate-400 leading-relaxed;
+  }
+  /** Dense panels (cards, tooltips) where full sm is tight */
+  .ui-field-description-compact {
+    @apply text-[13px] text-slate-400 leading-snug;
+  }
 }
 
 :root {
@@ -1696,5 +1704,153 @@ a { color: inherit; }
   .studio-content {
     padding-bottom: 80px;
   }
+}
+
+/* =============================================================================
+   Brand semantic layer — CSS variables set on `.brand-theme-scope` (React).
+   Remaps common studio Tailwind utilities to tokens so panels inherit palette.
+   ============================================================================= */
+.brand-theme-scope {
+  font-family: var(--brand-font-body), Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.brand-theme-scope .font-headline {
+  font-family: var(--brand-font-headline), "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+
+.brand-theme-scope .font-label,
+.brand-theme-scope .font-brand-label {
+  font-family: var(--brand-font-label), ui-sans-serif, system-ui, sans-serif;
+}
+
+.brand-theme-scope .font-mono,
+.brand-theme-scope .font-brand-mono {
+  font-family: var(--brand-font-mono), ui-monospace, monospace;
+}
+
+.brand-theme-scope .ui-field-description,
+.brand-theme-scope .ui-field-description-compact {
+  color: var(--brand-fg-muted) !important;
+}
+
+.brand-theme-scope .text-slate-100,
+.brand-theme-scope .text-slate-200 {
+  color: var(--brand-fg) !important;
+}
+
+.brand-theme-scope .text-slate-300 {
+  color: color-mix(in srgb, var(--brand-fg) 82%, var(--brand-fg-muted)) !important;
+}
+
+.brand-theme-scope .text-slate-400 {
+  color: var(--brand-fg-muted) !important;
+}
+
+.brand-theme-scope .text-slate-500 {
+  color: var(--brand-fg-subtle) !important;
+}
+
+.brand-theme-scope .text-slate-600 {
+  color: color-mix(in srgb, var(--brand-fg-subtle) 85%, var(--brand-border)) !important;
+}
+
+.brand-theme-scope th,
+.brand-theme-scope .font-headline.uppercase.tracking-widest.text-slate-400,
+.brand-theme-scope .font-headline.uppercase.tracking-widest.text-slate-500 {
+  color: var(--brand-fg-label) !important;
+}
+
+.brand-theme-scope .text-green-400,
+.brand-theme-scope .text-teal-300 {
+  color: var(--brand-success) !important;
+}
+
+.brand-theme-scope .text-red-300,
+.brand-theme-scope .text-red-400 {
+  color: var(--brand-danger) !important;
+}
+
+.brand-theme-scope .text-yellow-400,
+.brand-theme-scope .text-orange-300 {
+  color: var(--brand-accent-2) !important;
+}
+
+.brand-theme-scope .placeholder-slate-500::placeholder,
+.brand-theme-scope .placeholder-slate-400::placeholder {
+  color: var(--brand-fg-subtle) !important;
+  opacity: 0.9;
+}
+
+.brand-theme-scope [class*="bg-[#171c22]"] {
+  background-color: var(--brand-surface-panel) !important;
+}
+
+.brand-theme-scope [class*="bg-[#1e2430]"] {
+  background-color: var(--brand-surface-elevated) !important;
+}
+
+.brand-theme-scope [class*="bg-[#1b2431]"] {
+  background-color: color-mix(in srgb, var(--brand-surface-elevated) 92%, var(--brand-surface-muted)) !important;
+}
+
+.brand-theme-scope [class*="bg-[#252e3a]"] {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.brand-theme-scope [class*="bg-[#0f1419]"] {
+  background-color: color-mix(in srgb, var(--brand-surface-muted) 88%, transparent) !important;
+}
+
+.brand-theme-scope [class*="bg-[#0f1726]"] {
+  background-color: color-mix(in srgb, var(--brand-surface-panel) 90%, transparent) !important;
+}
+
+.brand-theme-scope [class*="hover:bg-[#1e2430]"]:hover {
+  background-color: color-mix(in srgb, var(--brand-surface-elevated) 55%, transparent) !important;
+}
+
+.brand-theme-scope [class*="hover:bg-[#1e2430]/40"]:hover {
+  background-color: color-mix(in srgb, var(--brand-surface-elevated) 45%, transparent) !important;
+}
+
+.brand-theme-scope [class*="border-[#424753]"],
+.brand-theme-scope [class*="divide-[#424753]"] {
+  border-color: color-mix(in srgb, var(--brand-border) 42%, transparent) !important;
+}
+
+.brand-theme-scope [class*="border-[#4a5568]"] {
+  border-color: color-mix(in srgb, var(--brand-border-strong) 38%, transparent) !important;
+}
+
+.brand-theme-scope [class*="border-[#2a3444]"] {
+  border-color: color-mix(in srgb, var(--brand-border) 55%, transparent) !important;
+}
+
+.brand-theme-scope [class*="border-white/"] {
+  border-color: var(--brand-glass-border) !important;
+}
+
+.brand-theme-scope [class*="border-l-sky-400"] {
+  border-left-color: color-mix(in srgb, var(--brand-accent-ice) 55%, transparent) !important;
+}
+
+.brand-theme-scope aside h1.text-white {
+  color: var(--brand-fg) !important;
+}
+
+.brand-theme-scope [class*="hover:bg-white/5"]:hover {
+  background-color: var(--brand-nav-hover) !important;
+}
+
+.brand-theme-scope [class*="bg-white/6"] {
+  background-color: color-mix(in srgb, var(--brand-glass-bg) 55%, transparent) !important;
+}
+
+.brand-theme-scope [class*="bg-white/8"] {
+  background-color: color-mix(in srgb, var(--brand-glass-bg) 70%, transparent) !important;
+}
+
+.brand-theme-scope [class*="bg-white/10"] {
+  background-color: color-mix(in srgb, var(--brand-glass-bg) 85%, transparent) !important;
 }
 

@@ -100,10 +100,18 @@ class Settings(BaseSettings):
     MOVIE_LIBRARY_4K_FOLDER: str = ""
     TV_LIBRARY_4K_FOLDER: str = ""
 
-    # Application
-    CHECK_INTERVAL: int = 10
-    # When >0, overrides CHECK_INTERVAL for the queue-monitor thread only (seconds between /queue polls).
-    # Use 0 to keep using CHECK_INTERVAL (backward compatible).
+    # Queue monitor /queue poll cadence (seconds between Radarr/Sonarr queue API polls).
+    #
+    # Two settings exist for backward compatibility only:
+    # - CHECK_INTERVAL: original single knob (still the default when the override is 0).
+    # - QUEUE_MONITOR_POLL_INTERVAL_SECONDS: when >0, used *instead of* CHECK_INTERVAL for the queue monitor
+    #   only, so installs could tune queue polling without repurposing CHECK_INTERVAL's name for other code.
+    #
+    # In the current codebase only `services/source_of_truth/queue_monitor_producer.py` reads these; there is
+    # no separate "general app" consumer of CHECK_INTERVAL. Prefer setting QUEUE_MONITOR_POLL_INTERVAL_SECONDS
+    # in the environment when you want an explicit queue poll interval; leave it 0 to use CHECK_INTERVAL.
+    # Both are configured via environment / defaults (not the DB settings UI).
+    CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "10").split("#")[0].strip() or "10")
     QUEUE_MONITOR_POLL_INTERVAL_SECONDS: int = int(
         os.getenv("QUEUE_MONITOR_POLL_INTERVAL_SECONDS", "0").split('#')[0].strip() or "0"
     )
@@ -121,9 +129,9 @@ class Settings(BaseSettings):
     DUMMY_FILE_PATH: str = ""
     COMING_SOON_DUMMY_FILE_PATH: str = ""  # Optional
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
-    PLACEHOLDER_CREATE_NFO: bool = True
+    PLACEHOLDER_CREATE_NFO: bool = True  # Always on; retained for env/back-compat only (see validator).
     PLACEHOLDER_STATUS_UPDATES: str = "ALL"
-    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both", "off"] = "summary"
+    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both"] = "summary"
     PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
     ENABLE_PRIMER: bool = False
@@ -149,7 +157,7 @@ class Settings(BaseSettings):
     CALENDAR_SYNC_INTERVAL_HOURS: int = 12
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True
-    # For calendar "coming soon" placeholders: use primary dummy only, or prefer coming-soon dummy when configured.
+    # Deprecated: always treated as "coming_soon" (Coming Soon dummy when set, else standard dummy). Retained for env/back-compat only.
     CALENDAR_LOOKAHEAD_DUMMY_MODE: str = "coming_soon"
 
     # Include specials (season 0) when creating episode subflows
@@ -219,10 +227,23 @@ class Settings(BaseSettings):
             raise ValueError(f"Dummy file exists but is empty: {v}")
         return str(path.absolute())
 
-    @validator('CALENDAR_LOOKAHEAD_DUMMY_MODE')
+    @validator("CALENDAR_LOOKAHEAD_DUMMY_MODE")
     def validate_calendar_lookahead_dummy_mode(cls, v):
-        text = str(v or "coming_soon").strip().lower()
-        return "primary" if text == "primary" else "coming_soon"
+        # UI no longer exposes this; Coming Soon placeholders always prefer the Coming Soon dummy path when configured.
+        return "coming_soon"
+
+    @validator("PLACEHOLDER_CREATE_NFO")
+    def placeholder_create_nfo_always_on(cls, v):
+        # Required for status projection and library building; not user-configurable.
+        return True
+
+    @validator("PLACEHOLDER_STATUS_PROJECTION_MODE", pre=True)
+    def normalize_placeholder_status_projection_mode(cls, v):
+        # "off" was removed from the UI; use Placeholder status updates = Off instead. Legacy values map to summary.
+        raw = str(v or "summary").strip().lower()
+        if raw == "off" or raw not in {"summary", "title", "both"}:
+            return "summary"
+        return raw
 
     @validator('COMING_SOON_DUMMY_FILE_PATH')
     def validate_coming_soon_dummy_file_path(cls, v):
@@ -374,6 +395,15 @@ class Settings(BaseSettings):
                         instance_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
                         if not instance_id:
                             instance_id = f"{arr_type}:{instance_key}"
+                        aliases_raw = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
+                        instance_key_aliases: list[str] = []
+                        for a in aliases_raw:
+                            akey = "".join(
+                                ch if ch.isalnum() or ch in {"_", "-"} else "_"
+                                for ch in str(a or "").strip().lower()
+                            ).strip("_-")
+                            if akey and akey != instance_key and akey not in instance_key_aliases:
+                                instance_key_aliases.append(akey)
                         role_raw = str(item.get("role") or "").strip().lower()
                         role = role_raw if role_raw in {"primary", "secondary", "additional"} else ""
                         try:
@@ -384,6 +414,7 @@ class Settings(BaseSettings):
                             {
                                 "instance_id": instance_id,
                                 "instance_key": instance_key,
+                                "instance_key_aliases": instance_key_aliases,
                                 "arr_type": arr_type,
                                 "url": url,
                                 "api_key": api_key,
@@ -452,12 +483,22 @@ class Settings(BaseSettings):
 
     @property
     def allowed_webhook_instance_keys(self) -> tuple[str, ...]:
-        ordered = [
-            *(str(item.get("instance_key") or "").strip().lower() for item in self.configured_arr_instances),
-            self.TAUTULLI_INSTANCE_KEY,
-            self.JELLYFIN_INSTANCE_KEY,
-            self.EMBY_INSTANCE_KEY,
-        ]
+        ordered: list[str] = []
+        for item in self.configured_arr_instances:
+            key = str(item.get("instance_key") or "").strip().lower()
+            if key:
+                ordered.append(key)
+            for a in item.get("instance_key_aliases") or []:
+                av = str(a or "").strip().lower()
+                if av:
+                    ordered.append(av)
+        ordered.extend(
+            [
+                self.TAUTULLI_INSTANCE_KEY,
+                self.JELLYFIN_INSTANCE_KEY,
+                self.EMBY_INSTANCE_KEY,
+            ]
+        )
         deduped: list[str] = []
         for value in ordered:
             key = str(value or '').strip().lower()
@@ -536,6 +577,10 @@ class Settings(BaseSettings):
             for item in instances:
                 if str(item.get("instance_key") or "").strip().lower() == target:
                     return item
+                aliases = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
+                for a in aliases:
+                    if str(a or "").strip().lower() == target:
+                        return item
 
         if role:
             target_role = str(role).strip().lower()

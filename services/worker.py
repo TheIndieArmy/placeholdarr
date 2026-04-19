@@ -83,7 +83,13 @@ def _process_webhook_event(session, job: Job):
         instance = source_str.split(':', 1)[1].strip() or None
 
     handled = False
-    if dispatch_type == 'seriesadd':
+    if event_type == "webhook_test" or dispatch_type == "test":
+        logger.info(
+            f"Processed webhook connectivity test event_log_id={event.id} instance={instance or 'unknown'}",
+            extra={"emoji_type": "success"},
+        )
+        handled = True
+    elif dispatch_type == 'seriesadd':
         result = process_series_add_event(payload, instance=instance)
         logger.info(
             f"Processed seriesadd event_log_id={event.id} result={result.get('upsert_stats', {})}",

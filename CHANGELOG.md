@@ -8,6 +8,44 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-04-19
+
+### Added
+- **Setup URLs on the server**: `GET /setup` and `GET /setup/{path}` return the same SPA shell as the dashboard so `/setup` bookmarks, refresh, and deep links load the app instead of a blank or wrong page.
+- **First-run routing**: Incomplete setup uses `/setup` as the default landing path; other routes redirect there until you finish; visiting `/setup` after completion sends you to **Activity**.
+- **Onboarding wizard overhaul**: A dedicated, full-screen **Setup** experience with a five-step journey—**Paths**, **Media Servers**, **ARR Services**, **Webhook Setup**, and **Behavior**—including a stepper, scroll-to-top when changing steps, a **connection warning** when any test in the step failed, and **Continue** gates (library root required; at least one enabled media server with a successful **Test** or saved credentials; Radarr/Sonarr **primary** test success or already-saved primary; webhook step requires at least one configured ARR instance before showing instructions).
+- **Paths step (wizard)**: Library root, folder profiles, and optional per-library overrides use a wizard-specific layout—grouped panels and overrides folded behind an expandable **Custom folder per library** section so the first screen stays approachable.
+- **Media servers step (wizard)**: Card-style integration chooser with **slide-over** detail panels, per-field **Test**, and **Cancel** behavior that reverts or clears fields when you opened **Add** and leave without committing.
+- **ARR step (wizard)**: **Slot / slide-over** editor (Overseerr-style) with primary vs secondary toggles (secondary locked until primary **Test** passes), **Disconnect** confirmation, **webhook helper** modal, duplicate-instance-key prevention, stable **`instance_id`** on new slots, and messaging when labels or keys change.
+- **Webhook setup step**: Per-instance Radarr/Sonarr instructions with stable **`instance_id`** webhook URLs, required events listed, and **copy** actions (including a path that works on **plain HTTP** where the Clipboard API is limited). When Plex, Jellyfin, or Emby is enabled, adds **playback webhook** walkthroughs (e.g. Tautulli, Jellyfin Webhook plugin, Emby) with **JSON payload templates** and copy buttons.
+- **Behavior step (wizard)**: Walks **Library sync**, **Calendar**, **Lookahead**, **Status updates**, and related options across subsections; includes **long-form onboarding copy** for lookahead and status projection (separate from the shorter blurbs in **Settings**) and wizard-specific explanations for **startup sync** (lite vs full vs auto, restart vs wizard, media-server scan caveats).
+- **Branding and theme across setup and dashboard**: New and updated fonts, semantic theme tokens, logos and service marks, and scoped **brand** styling so first-run setup and the main app read as one product.
+- **Local development quality-of-life**: The Vite dev server can be opened from another device on your LAN, which makes phone or second-machine testing less painful.
+- **Reconcile after ARR edits**: Removing or reshuffling Radarr/Sonarr instances triggers cleanup of orphaned database rows tied to old instance keys, then a focused reconcile so the library view matches what you actually configured.
+- **Safer cleanup with multiple Radarr/Sonarr instances**: On-disk placeholder removal checks whether another configured instance still “owns” the same movie or series before deleting files, so a second copy on another server does not get wiped by accident.
+- **Orphan placeholder maintenance**: Startup and scheduled passes can remove stray placeholder files and rows that lost their links (scoped to your library roots and basic safety rules) and nudge a library refresh when something real was deleted.
+
+### Changed
+- **Wizard vs settings use the same components**: Library paths and ARR **slot** editing reuse shared building blocks with **`wizard`** vs **`settings`** layouts (and onboarding vs settings intros where it matters) so what you learned during setup matches what you edit later.
+- **Radarr vs Sonarr connection tests**: The “test connection” action reads the remote app’s JSON status so mismatched app types fail with a clear message instead of looking like a mysterious network error.
+- **Saving ARR instances**: Each slot keeps a stable identity for webhooks; renames can carry old keys as aliases so existing URLs and history keep working; saves can return a short summary when background reconcile ran.
+- **Webhook routing**: Instance targeting accepts stable ids, legacy keys, and aliases; invalid combinations fail early with a clear HTTP error instead of misrouting silently.
+- **Advanced settings noise**: Several expert-only knobs (poll intervals, always-on NFO creation, deprecated calendar dummy toggle, and similar) are no longer surfaced in the dashboard settings schema—use environment variables when you truly need them.
+- **Help text in settings**: Clearer explanations for startup sync modes (lite vs full vs auto), preferred Radarr release-date behavior, TV lookahead, and how status text is projected into placeholders.
+- **NFO generation**: Movie and episode NFO sidecars are always written during materialization, matching the enforced “NFOs on” product default.
+- **Coming Soon dummy artwork**: Selection no longer depends on a deprecated primary-vs-coming-soon switch; Coming Soon uses the dedicated dummy when you configured one.
+- **Playback at the end of what we know about a show**: When you finish the last episode of the highest season Placeholdarr has modeled, playback metadata can signal end-of-stored-range so Sonarr whole-series behavior (including future seasons) lines up with Episode-mode expectations (includes `bfd3875`).
+- **Placeholder status history**: Fewer chatty history rows from calendar countdown churn; the flip from Coming Soon to Request on release day stays visible with an explicit reason.
+- **Status projection mode**: Legacy `off` is treated as `summary`; the UI only offers summary, title, or both.
+- **Startup robustness**: Tighter import ordering for clean shutdown in edge cases; if the HTTP port is already taken, the process exits with guidance to set `PLACEHOLDARR_PORT` instead of trying to kill the other process automatically.
+
+### Removed
+- **Dashboard-only exposure of expert env knobs**: Removed several advanced keys from the dashboard settings schema (deprecated calendar lookahead dummy mode, placeholder NFO toggle, generic check interval, queue monitor poll/refresh tuning); configure via environment variables when required.
+
+### Fixed
+- **Webhook test events**: Sonarr/Radarr connectivity tests are recognized end-to-end instead of being treated like unknown webhook traffic.
+- **Materialization hygiene**: Removed a duplicate unreachable return in the materialization path so stats and flow stay honest.
+
 ## [0.9.2] - 2026-04-16
 
 ### Changed

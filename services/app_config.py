@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 import os
@@ -18,6 +19,17 @@ from services.postgres.models import AppConfig
 
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
+
+# Keys removed from SETTINGS_SCHEMA but still accepted on save (no-op) for older clients / partial payloads.
+REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
+    {
+        "PLACEHOLDER_CREATE_NFO",
+        "CHECK_INTERVAL",
+        "QUEUE_MONITOR_POLL_INTERVAL_SECONDS",
+        "QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS",
+        "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS",
+    }
+)
 
 
 SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
@@ -172,12 +184,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Library sync",
                 "label": "Startup ARR sync mode",
+                # Intro copy is also structured in `frontend/src/App.tsx` (`StartupSyncModeDescription`); update both together.
                 "description": (
-                    "Runs when the Placeholdarr process starts, after onboarding is finished—not when you click Save in the wizard. "
-                    "Auto checks each configured ARR instance in the database: if a full library reconcile has never completed for that instance, "
-                    "the next startup runs a full sync once; later startups use a lite history/delta catch-up. "
-                    "Finishing onboarding without restarting does not run this pipeline; restart the app (or recreate the container) "
-                    "so startup sync runs with your saved settings and ArrState."
+                    "Controls how Placeholdarr refreshes from Radarr and Sonarr during startup. Full sync will scan arrs services "
+                    "and Placeholdarr root folder before proceeding to add/delete placeholder files as needed. Lite sync will use "
+                    "arrs recent history and Placeholdarr root folder to make necessary changes for any recent events. Auto will "
+                    "run full at startup when needed (for example, after adding a new arr instance), and a lite sync at other times. "
+                    "Placeholdarr operations are relatively quick. However, media player libraries still need to scan and update, "
+                    "which can take some time for large library changes. "
+                    "A full sync will automatically start in the background at the completion of this setup."
                 ),
                 "type": "choice",
                 "restart_required": True,
@@ -197,6 +212,16 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": "How often to schedule a full ARR/database reconciliation. Set to 0 to disable recurring full sync jobs.",
                 "type": "int",
                 "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "INCLUDE_SPECIALS",
+            {
+                "section": "Library sync",
+                "label": "Include specials (season 0)",
+                "description": "Include specials when creating and reconciling episode placeholder flows.",
+                "type": "bool",
                 "restart_required": True,
             },
         ),
@@ -226,32 +251,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "CALENDAR_LOOKAHEAD_DUMMY_MODE",
-            {
-                "section": "Calendar",
-                "label": "Dummy .mp4 for Coming Soon placeholders",
-                "description": (
-                    "Coming Soon placeholders need a small video file to stand in for a real rip. Under Paths you set full paths—often something like dummy.mp4 (standard) "
-                    "and optionally coming_soon_dummy.mp4 (alternate). Here you choose which Paths entry feeds those placeholders: always the standard file, "
-                    "or the Coming Soon path when you have configured one."
-                ),
-                "type": "choice",
-                "restart_required": False,
-                "options": [
-                    {"value": "primary", "label": "Standard dummy (e.g. dummy.mp4 — Dummy File Path)"},
-                    {"value": "coming_soon", "label": "Coming Soon dummy (e.g. coming_soon_dummy.mp4 — when that path is set)"},
-                ],
-            },
-        ),
-        (
             "PREFERRED_MOVIE_DATE_TYPE",
             {
                 "section": "Calendar",
-                "label": "Movie release type for Coming Soon placeholders",
+                "label": "Preferred Radarr release date for movies",
                 "description": (
-                    "Pick one release-date field from Radarr (theatrical, digital, or physical). Placeholdarr uses only that date for movies: "
-                    "once it falls inside your calendar lookahead window, it can create Coming Soon placeholders; outside the window it stays in Request (or similar) until the date moves in range. "
-                    "Other release types are not used as a fallback—only the type you choose here."
+                    "Choose which Radarr movie date Placeholdarr uses: theatrical (in cinemas), digital, or physical. "
+                    "Only that field is read for each title—there is no fallback to other release types. "
+                    "This date drives movie placeholder timing and status (for example, how titles compare to your calendar lookahead window and when placeholders are needed). "
+                    "If Radarr has no value for the selected field, Placeholdarr treats the release date as unknown for those rules."
                 ),
                 "type": "choice",
                 "restart_required": False,
@@ -273,22 +281,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "EPISODES_LOOKAHEAD",
-            {
-                "section": "Playback",
-                "label": "Playback search episode lookahead",
-                "description": "How many upcoming episodes Placeholdarr may consider when playback triggers an ARR search for a series.",
-                "type": "int",
-                "min": 1,
-                "restart_required": False,
-            },
-        ),
-        (
             "TV_PLAY_MODE",
             {
-                "section": "Playback",
-                "label": "TV playback search granularity",
-                "description": "Choose how TV playback searches are targeted: current episode, current season, or whole series.",
+                "section": "Lookahead",
+                "label": "Search mode",
+                "description": "How wide the Sonarr search is from the episode you played.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
@@ -298,7 +295,47 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ],
             },
         ),
-        
+        (
+            "EPISODES_LOOKAHEAD",
+            {
+                "section": "Lookahead",
+                "label": "Lookahead range",
+                "description": "In Episode mode, how many upcoming episodes without files to include forward from the played episode.",
+                "type": "int",
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLACEHOLDER_STATUS_UPDATES",
+            {
+                "section": "Status Updates",
+                "label": "Placeholder status updates",
+                "description": "Controls how aggressively placeholder statuses are projected (OFF, REQUEST, or ALL).",
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "OFF", "label": "Off"},
+                    {"value": "REQUEST", "label": "Request only"},
+                    {"value": "ALL", "label": "All"},
+                ],
+            },
+        ),
+        (
+            "PLACEHOLDER_STATUS_PROJECTION_MODE",
+            {
+                "section": "Status Updates",
+                "label": "Placeholder status projection mode",
+                "description": "When status updates are on, choose whether bracketed status appears in summary text, title text, or both.",
+                "type": "choice",
+                "restart_required": True,
+                "options": [
+                    {"value": "summary", "label": "Summary"},
+                    {"value": "title", "label": "Title"},
+                    {"value": "both", "label": "Both"},
+                ],
+            },
+        ),
         (
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
@@ -387,7 +424,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Advanced",
                 "label": "Placeholder file strategy",
-                "description": "Use hardlink or copy when creating placeholder media files.",
+                "description": (
+                    "Use hardlink or copy when creating placeholder media files. Copy can be a better fit for some "
+                    "filesystem or path layouts where hardlinks are unreliable or unsupported; if hardlink causes "
+                    "issues, switch to copy."
+                ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -397,122 +438,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
-            "PLACEHOLDER_CREATE_NFO",
-            {
-                "section": "Advanced",
-                "label": "Create placeholder NFO files",
-                "description": "Create companion NFO files for placeholders when supported by the media stack.",
-                "type": "bool",
-                "restart_required": True,
-            },
-        ),
-        (
-            "PLACEHOLDER_STATUS_UPDATES",
-            {
-                "section": "Advanced",
-                "label": "Placeholder status updates",
-                "description": "Controls how aggressively placeholder statuses are projected (OFF, REQUEST, or ALL).",
-                "type": "choice",
-                "restart_required": True,
-                "options": [
-                    {"value": "OFF", "label": "Off"},
-                    {"value": "REQUEST", "label": "Request only"},
-                    {"value": "ALL", "label": "All"},
-                ],
-            },
-        ),
-        (
-            "PLACEHOLDER_STATUS_PROJECTION_MODE",
-            {
-                "section": "Advanced",
-                "label": "Placeholder status projection mode",
-                "description": "Choose whether status appears in summary text, title text, both, or is disabled.",
-                "type": "choice",
-                "restart_required": True,
-                "options": [
-                    {"value": "summary", "label": "Summary"},
-                    {"value": "title", "label": "Title"},
-                    {"value": "both", "label": "Both"},
-                    {"value": "off", "label": "Off"},
-                ],
-            },
-        ),
-        (
-            "INCLUDE_SPECIALS",
-            {
-                "section": "Advanced",
-                "label": "Include specials (season 0)",
-                "description": "Include specials when creating and reconciling episode placeholder flows.",
-                "type": "bool",
-                "restart_required": True,
-            },
-        ),
-        (
-            "CHECK_INTERVAL",
-            {
-                "section": "Advanced",
-                "label": "Queue check interval (seconds)",
-                "description": (
-                    "Default polling cadence for the queue monitor when "
-                    "QUEUE_MONITOR_POLL_INTERVAL_SECONDS is 0. Lower values react faster but increase API traffic."
-                ),
-                "type": "int",
-                "min": 1,
-                "restart_required": True,
-            },
-        ),
-        (
-            "QUEUE_MONITOR_POLL_INTERVAL_SECONDS",
-            {
-                "section": "Advanced",
-                "label": "Queue monitor poll interval override (seconds)",
-                "description": (
-                    "When set to a positive value, the queue monitor polls Radarr/Sonarr /queue on this interval "
-                    "instead of CHECK_INTERVAL. Use 0 to follow CHECK_INTERVAL."
-                ),
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
-            },
-        ),
-        (
-            "QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS",
-            {
-                "section": "Advanced",
-                "label": "ARR Refresh Monitored Downloads interval (seconds)",
-                "description": (
-                    "While queue-like placeholders exist, POST Radarr/Sonarr RefreshMonitoredDownloads on this "
-                    "cadence so their /queue updates faster than the built-in ~minute task. "
-                    "Default 6 seconds (slightly offset from a 5s poll). Set 0 to disable."
-                ),
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
-            },
-        ),
-        (
-            "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS",
-            {
-                "section": "Advanced",
-                "label": "First ARR queue refresh delay (seconds)",
-                "description": (
-                    "Delays the first RefreshMonitoredDownloads after startup so it does not align with the "
-                    "first poll tick when using a separate refresh interval."
-                ),
-                "type": "int",
-                "min": 0,
-                "restart_required": True,
-            },
-        ),
-        (
             "QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS",
             {
                 "section": "Advanced",
                 "label": "Queue monitor search timeout (seconds)",
                 "description": (
-                    "While a placeholder is SEARCHING but never appears in Radarr/Sonarr /queue, wait at most "
-                    "this long before setting status NOT_FOUND and stopping queue-monitor ARR refresh for that item. "
-                    "Default 120 (2 minutes)."
+                    "The amount of time to wait for content to be added to the Radarr/Sonarr queue after it is "
+                    "requested. If content does not reach the queue before this timeout, Placeholdarr assumes no "
+                    "qualifying releases were found. Adjust this setting based on how long typical indexer searches "
+                    "take in your environment. Default 120 seconds (2 minutes)."
                 ),
                 "type": "int",
                 "min": 60,
@@ -575,6 +509,109 @@ def _normalize_instance_key(value: Any) -> str:
     return normalized
 
 
+def _arr_instance_id_has_uuid(instance_id: str) -> bool:
+    """True when instance_id embeds a UUID (stable webhook id), not the legacy ``radarr:slug`` fallback."""
+    text = str(instance_id or "")
+    return text.count("-") >= 4
+
+
+def _normalize_arr_instance_url(value: Any) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: str) -> str:
+    """Assign stable UUID-based instance_id values and carry forward prior instance_key values as webhook aliases."""
+    try:
+        incoming = json.loads(incoming_json)
+        if not isinstance(incoming, list):
+            return incoming_json
+    except Exception:
+        return incoming_json
+    try:
+        previous = json.loads(previous_json) if str(previous_json or "").strip() else []
+        if not isinstance(previous, list):
+            previous = []
+    except Exception:
+        previous = []
+
+    def fp(item: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(item.get("arr_type") or item.get("type") or "").strip().lower(),
+            _normalize_arr_instance_url(item.get("url")),
+            str(item.get("api_key") or item.get("apikey") or "").strip(),
+        )
+
+    old_by_id: dict[str, dict[str, Any]] = {}
+    old_by_fp: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for o in previous:
+        if not isinstance(o, dict):
+            continue
+        oid = str(o.get("instance_id") or "").strip().lower()
+        if oid:
+            old_by_id[oid] = o
+        try:
+            old_by_fp[fp(o)] = o
+        except Exception:
+            continue
+
+    alias_cap = 32
+
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"}:
+            continue
+        new_key = _normalize_instance_key(item.get("instance_key") or item.get("key") or item.get("name") or "")
+        nid = str(item.get("instance_id") or "").strip().lower()
+        matched: dict[str, Any] | None = None
+        if nid and nid in old_by_id:
+            matched = old_by_id[nid]
+        else:
+            try:
+                matched = old_by_fp.get(fp(item))
+            except Exception:
+                matched = None
+
+        aliases: list[str] = []
+        raw_aliases = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
+        for a in raw_aliases:
+            k = _normalize_instance_key(a)
+            if k and k not in aliases:
+                aliases.append(k)
+
+        if matched:
+            old_key = _normalize_instance_key(matched.get("instance_key") or matched.get("key") or matched.get("name") or "")
+            mid = str(matched.get("instance_id") or "").strip().lower()
+            if _arr_instance_id_has_uuid(mid):
+                item["instance_id"] = mid
+            elif _arr_instance_id_has_uuid(nid):
+                item["instance_id"] = nid
+            else:
+                item["instance_id"] = f"{arr_type}:{uuid.uuid4()}"
+            old_aliases = matched.get("instance_key_aliases") if isinstance(matched.get("instance_key_aliases"), list) else []
+            for a in old_aliases:
+                k = _normalize_instance_key(a)
+                if k and k not in aliases:
+                    aliases.append(k)
+            if old_key and old_key != new_key and old_key not in aliases:
+                aliases.insert(0, old_key)
+        else:
+            if not _arr_instance_id_has_uuid(nid):
+                item["instance_id"] = f"{arr_type}:{uuid.uuid4()}"
+
+        aliases = [a for a in aliases if a and a != new_key]
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for a in aliases:
+            if a not in seen:
+                deduped.append(a)
+                seen.add(a)
+        item["instance_key_aliases"] = deduped[:alias_cap]
+
+    return json.dumps(incoming)
+
+
 def _validate_value(key: str, raw_value: Any) -> Any:
     meta = SETTINGS_SCHEMA[key]
     value_type = meta["type"]
@@ -590,6 +627,8 @@ def _validate_value(key: str, raw_value: Any) -> Any:
         value = _coerce_path(raw_value)
     elif value_type == "choice":
         value = str(raw_value or "").strip()
+        if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and value.lower() == "off":
+            value = "summary"
         allowed = [str(o["value"]) for o in meta.get("options", [])]
         if not allowed:
             raise ValueError("choice field missing options")
@@ -608,6 +647,10 @@ def _get_row(session, key: str) -> AppConfig | None:
 
 def _set_runtime_value(key: str, value: Any) -> None:
     try:
+        if key == "PLACEHOLDER_STATUS_PROJECTION_MODE":
+            raw = str(value or "summary").strip().lower()
+            if raw == "off" or raw not in {"summary", "title", "both"}:
+                value = "summary"
         setattr(settings, key, value)
     except Exception:
         pass
@@ -676,6 +719,7 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
             _set_runtime_value(row.key, row.value)
             applied.append(row.key)
         _apply_runtime_library_defaults()
+        _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
         return {"applied": applied, "count": len(applied)}
     finally:
         if owns_session:
@@ -710,8 +754,17 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped.setdefault(meta["section"], [])
             row = _get_row(session, key)
             effective_value = getattr(settings, key, row.value if row else None)
+            if key == "PLACEHOLDER_STATUS_PROJECTION_MODE":
+                ev = str(effective_value or "summary").strip().lower()
+                if ev == "off" or ev not in {"summary", "title", "both"}:
+                    effective_value = "summary"
             if _is_blank(effective_value):
                 pass
+            saved_value_out = None if bool(meta.get("secret", False)) else (row.value if row else None)
+            if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and saved_value_out is not None:
+                sv = str(saved_value_out).strip().lower()
+                if sv == "off" or sv not in {"summary", "title", "both"}:
+                    saved_value_out = "summary"
             entry: dict[str, Any] = {
                 "key": key,
                 "section": meta["section"],
@@ -722,7 +775,7 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 "secret": bool(meta.get("secret", False)),
                 "restart_required": bool(meta.get("restart_required", False)),
                 "value": "" if bool(meta.get("secret", False)) else effective_value,
-                "saved_value": None if bool(meta.get("secret", False)) else (row.value if row else None),
+                "saved_value": saved_value_out,
                 "has_saved_value": bool((row and row.value not in (None, ""))),
             }
             if meta["type"] == "choice":
@@ -747,6 +800,8 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
     try:
         for key, raw_value in values.items():
             if key not in SETTINGS_SCHEMA:
+                if key in REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE:
+                    continue
                 errors[key] = "unknown setting"
                 continue
             try:
@@ -804,6 +859,12 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                 except Exception:
                     errors[section_key] = "must be a positive integer"
 
+        if "ARR_INSTANCES_JSON" in validated:
+            prev_row = _get_row(session, "ARR_INSTANCES_JSON")
+            prev_raw = str(prev_row.value if prev_row and prev_row.value is not None else "") or ""
+            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, str(validated.get("ARR_INSTANCES_JSON") or ""))
+            validated["ARR_INSTANCES_JSON"] = merged
+
         arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
         arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 2) or 2))
         allowed_instance_keys: dict[str, set[str]] = {"radarr": set(), "sonarr": set()}
@@ -815,6 +876,8 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                     raise ValueError("must be a JSON array")
                 counts: dict[str, int] = {"radarr": 0, "sonarr": 0}
                 seen_keys: set[str] = set()
+                seen_instance_ids: set[str] = set()
+                reserved_tokens: set[str] = set()
                 for index, item in enumerate(payload):
                     if not isinstance(item, dict):
                         raise ValueError(f"item {index + 1} must be an object")
@@ -827,6 +890,23 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                     if instance_key in seen_keys:
                         raise ValueError(f"item {index + 1} has duplicate instance_key '{instance_key}'")
                     seen_keys.add(instance_key)
+                    instance_id = str(item.get("instance_id") or "").strip().lower()
+                    if not instance_id:
+                        raise ValueError(f"item {index + 1} requires instance_id (stable webhook identity)")
+                    if instance_id in seen_instance_ids:
+                        raise ValueError(f"item {index + 1} has duplicate instance_id '{instance_id}'")
+                    seen_instance_ids.add(instance_id)
+                    tokens = [instance_key]
+                    for a in item.get("instance_key_aliases") or []:
+                        ak = _normalize_instance_key(a)
+                        if ak:
+                            tokens.append(ak)
+                    for t in tokens:
+                        if t in reserved_tokens:
+                            raise ValueError(
+                                f"item {index + 1} instance_key or alias '{t}' conflicts with another instance row"
+                            )
+                        reserved_tokens.add(t)
                     url = str(item.get("url") or "").strip()
                     api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
                     if not url or not api_key:
@@ -835,6 +915,10 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                     if counts[arr_type] > arr_limit:
                         raise ValueError(f"{arr_type} supports up to {arr_limit} instances per deployment")
                     allowed_instance_keys[arr_type].add(instance_key)
+                    for a in item.get("instance_key_aliases") or []:
+                        ak = _normalize_instance_key(a)
+                        if ak:
+                            allowed_instance_keys[arr_type].add(ak)
             except Exception as exc:
                 errors["ARR_INSTANCES_JSON"] = str(exc)
         else:
@@ -899,6 +983,20 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                 session.add(setup_row)
 
         session.commit()
+        arr_instance_reconcile: dict[str, Any] | None = None
+        if not partial and "ARR_INSTANCES_JSON" in validated:
+            try:
+                from services.source_of_truth.arr_instance_reconcile import reconcile_after_arr_settings_save
+
+                arr_instance_reconcile = reconcile_after_arr_settings_save(
+                    str(validated.get("ARR_INSTANCES_JSON") or "")
+                )
+            except Exception as exc:
+                logger.error(
+                    f"ARR instance reconcile after settings save failed: {exc}",
+                    extra={"emoji_type": "error"},
+                )
+        _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -913,6 +1011,7 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
             "saved_keys": saved_keys,
             "restart_required_keys": restart_required_keys,
             "status": get_onboarding_status(session=session),
+            "arr_instance_reconcile": arr_instance_reconcile,
         }
     except Exception as exc:
         session.rollback()

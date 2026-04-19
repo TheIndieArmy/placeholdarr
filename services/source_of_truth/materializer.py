@@ -29,6 +29,7 @@ from services.source_of_truth.determiner import (
     DETERMINATION_OBSOLETE,
     run_determination_for_entities_in_session,
 )
+from services.source_of_truth.arr_share_guard import filter_movie_disk_cleanup_paths
 from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
@@ -338,9 +339,7 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             target_path = getattr(movie, "placeholder_filepath", None) or movie_placeholder_path(movie)
             _initial_variant = _compute_initial_dummy_variant_for_movie(movie)
             created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
-            nfo_written = False
-            if settings.PLACEHOLDER_CREATE_NFO:
-                nfo_written = ensure_movie_nfo(target_path, movie)
+            nfo_written = ensure_movie_nfo(target_path, movie)
             movie.has_placeholder = True
             movie.placeholder_filepath = target_path
             movie.updated_at = func.now()
@@ -394,7 +393,8 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
             if getattr(movie, "placeholder_filepath", None):
                 candidate_paths.append(movie.placeholder_filepath)
             first_path = next((p for p in candidate_paths if p), None)
-            cleanup_result = cleanup_movie_placeholder_files(candidate_paths=candidate_paths)
+            disk_paths = filter_movie_disk_cleanup_paths(session, movie, candidate_paths)
+            cleanup_result = cleanup_movie_placeholder_files(candidate_paths=disk_paths)
 
             movie.has_placeholder = False
             movie.placeholder_filepath = None
@@ -447,15 +447,11 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
             target_path = getattr(episode, "placeholder_filepath", None) or episode_placeholder_path(episode, season, series)
             _initial_variant = _compute_initial_dummy_variant_for_episode(episode)
             created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
-            nfo_written = False
-            if settings.PLACEHOLDER_CREATE_NFO:
-                nfo_written = ensure_episode_nfo(target_path, episode, season, series)
-                # ensure series-level tvshow.nfo is present as well
-                try:
-                    series_nfo_written = ensure_series_nfo(series, folder=getattr(series, "placeholder_folder", None))
-                except Exception:
-                    series_nfo_written = False
-            else:
+            nfo_written = ensure_episode_nfo(target_path, episode, season, series)
+            # ensure series-level tvshow.nfo is present as well
+            try:
+                series_nfo_written = ensure_series_nfo(series, folder=getattr(series, "placeholder_folder", None))
+            except Exception:
                 series_nfo_written = False
             episode.has_placeholder = True
             episode.placeholder_filepath = target_path
@@ -1006,8 +1002,6 @@ def _run_materialization_for_ids(
 
         threading.Timer(20.0, _trigger_delayed_final_refresh).start()
         logger.info("Media server refreshes were scheduled to run asynchronously in 20 seconds.", extra={"emoji_type": "success"})
-
-    return stats
 
     return stats
 

@@ -12,6 +12,10 @@ export default {
         body: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         label: ['"Space Grotesk"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         mono: ['"JetBrains Mono"', '"Fira Code"', 'ui-monospace', 'monospace'],
+        'brand-head': ['var(--brand-font-headline)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        'brand-body': ['var(--brand-font-body)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        'brand-label': ['var(--brand-font-label)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        'brand-mono': ['var(--brand-font-mono)', 'ui-monospace', 'monospace'],
       },
       colors: {
         // Material You / Studio Dark palette — matches the mockup tokens exactly

@@ -409,6 +409,18 @@ async def dashboard_settings_page():
     return _serve_dashboard_index()
 
 
+@router.get("/setup", response_class=HTMLResponse)
+async def dashboard_setup_page():
+    """Serve SPA for onboarding wizard (client-side /setup route)."""
+    return _serve_dashboard_index()
+
+
+@router.get("/setup/{path:path}", response_class=HTMLResponse)
+async def dashboard_setup_nested(path: str):
+    """Deep links under /setup still load the SPA shell."""
+    return _serve_dashboard_index()
+
+
 @router.get("/dashboard-next", response_class=HTMLResponse)
 async def dashboard_next_page():
     """Back-compat route that now points to root dashboard."""

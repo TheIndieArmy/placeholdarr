@@ -19,6 +19,7 @@ from services.source_of_truth.calendar_date_refresh import run_calendar_date_ref
 from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
 from services.source_of_truth.filesystem import scan_once_if_needed
 from services.source_of_truth.materializer import run_materialization_pass
+from services.source_of_truth.placeholder_cleanup import run_orphan_placeholder_cleanup
 from services.source_of_truth.sync_runner import run_full_sync, sync_radarr_movies_by_ids, sync_sonarr_series_by_ids
 
 
@@ -359,6 +360,26 @@ def run_startup_source_of_truth() -> dict:
     """Execute configured startup fullsyncs, filesystem scan, determine, and materialize."""
     settings.REFRESH_TRIGGER_SUPPRESSED = True
     try:
+        try:
+            from services.source_of_truth.arr_instance_reconcile import tombstone_unconfigured_arr_rows
+
+            detach_stats = tombstone_unconfigured_arr_rows(str(getattr(settings, 'ARR_INSTANCES_JSON', '') or ''))
+            if any(
+                int(detach_stats.get(key) or 0)
+                for key in ('movies_tombstoned', 'series_tombstoned', 'seasons_tombstoned', 'episodes_tombstoned')
+            ):
+                logger.info(
+                    f'Startup: tombstoned DB rows for instance keys not in ARR_INSTANCES_JSON: '
+                    f"movies={detach_stats.get('movies_tombstoned')} series={detach_stats.get('series_tombstoned')} "
+                    f"seasons={detach_stats.get('seasons_tombstoned')} episodes={detach_stats.get('episodes_tombstoned')}",
+                    extra={'emoji_type': 'info'},
+                )
+        except Exception as exc:
+            logger.warning(
+                f'Startup ARR instance-key tombstone pass failed (non-fatal): {exc}',
+                extra={'emoji_type': 'warning'},
+            )
+
         run_ids: list[str] = []
         instances = _configured_arr_instances()
         selected_mode = _resolve_startup_sync_mode(instances)
@@ -394,6 +415,7 @@ def run_startup_source_of_truth() -> dict:
         primer_stats = {"skipped": True, "reason": "deprecated"}
         materialization_stats = run_materialization_pass()
         calendar_stats = run_calendar_phase()
+        orphan_placeholder_stats = run_orphan_placeholder_cleanup()
         status_reconcile_stats = {"skipped": True, "reason": "deprecated"}
 
         result = {
@@ -412,6 +434,7 @@ def run_startup_source_of_truth() -> dict:
             'primer': primer_stats,
             'materialization': materialization_stats,
             'calendar': calendar_stats,
+            'orphan_placeholders': orphan_placeholder_stats,
             'status_reconcile': status_reconcile_stats,
         }
         try:

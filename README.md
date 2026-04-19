@@ -364,6 +364,7 @@ Required Emby webhook URL pattern:
 
 These settings will adjust how Placeholdarr reacts to playback events.
 
+
 | Setting                             | Default | Description                                                                                            |
 | ----------------------------------- | ------- | ------------------------------------------------------------------------------------------------------ |
 | **Movie Placeholder Search Mode**   | `both`  | Which Radarr instance(s) to search when a movie placeholder is played (`primary`, `secondary`, `both`) |

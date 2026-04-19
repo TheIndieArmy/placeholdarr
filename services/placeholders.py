@@ -209,15 +209,11 @@ def _apply_dir_chain_permissions(path: str) -> None:
 def resolve_calendar_variant_dummy_path(variant: str) -> str:
     """Choose dummy media source for calendar-driven placeholder variants.
 
-    ``coming_soon`` status can use either the primary dummy or the optional
-    coming-soon dummy, depending on ``CALENDAR_LOOKAHEAD_DUMMY_MODE``.
+    Coming Soon variants use the Coming Soon dummy file when configured; otherwise the standard dummy.
     """
     primary = _resolve_dummy_path("primary")
     alt = _resolve_dummy_path("coming_soon")
-    mode = str(getattr(settings, "CALENDAR_LOOKAHEAD_DUMMY_MODE", "coming_soon") or "coming_soon").strip().lower()
     if variant != "coming_soon":
-        return primary
-    if mode == "primary":
         return primary
     return alt if alt else primary
 

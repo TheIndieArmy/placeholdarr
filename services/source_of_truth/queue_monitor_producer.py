@@ -268,6 +268,9 @@ class QueueMonitorProducer:
 
     Available transitions remain import-event-driven and are intentionally not
     implemented in this producer.
+
+    Poll interval: ``QUEUE_MONITOR_POLL_INTERVAL_SECONDS`` when >0, else ``CHECK_INTERVAL``
+    (see ``core.config.Settings`` comments — two names kept for backward compatibility).
     """
 
     def __init__(self) -> None:
