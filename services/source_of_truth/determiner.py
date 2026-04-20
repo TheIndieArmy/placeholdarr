@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import date, datetime, timezone
 
 from sqlalchemy import func
@@ -17,6 +18,8 @@ DETERMINATION_OBSOLETE = 'obsolete_placeholder'
 DETERMINATION_NOT_NEEDED = 'not_needed'
 DETERMINATION_EXISTS = 'placeholder_exists'
 DETERMINATION_NEEDS = 'needs_placeholder'
+RECONCILE_PROGRESS_EVERY_ROWS = 5000
+RECONCILE_LINK_PROGRESS_EVERY_ROWS = 5000
 
 
 def _normalize_placeholder_path(value: str | None) -> str | None:
@@ -130,6 +133,7 @@ def run_placeholder_link_reconcile() -> dict:
     - re-link from active Placeholder rows (has_placeholder=True)
     """
     session = get_session()
+    started_mono = time.monotonic()
     stats = {
         'movies_reset': 0,
         'episodes_reset': 0,
@@ -160,6 +164,7 @@ def run_placeholder_link_reconcile() -> dict:
         return changed
 
     try:
+        logger.info("Placeholder reconcile started", extra={'emoji_type': 'info'})
         # Reset derived state first so stale true flags cannot survive crashes.
         stats['movies_reset'] = session.query(Movie).update(
             {
@@ -179,7 +184,7 @@ def run_placeholder_link_reconcile() -> dict:
         # Validate active placeholder rows before relinking.
         roots = [os.path.abspath(root) for root in configured_roots() if root]
         active_rows = session.query(Placeholder).filter(Placeholder.has_placeholder == True).all()  # noqa: E712
-        for row in active_rows:
+        for idx, row in enumerate(active_rows, start=1):
             path = getattr(row, 'path', None)
             if not path:
                 row.has_placeholder = False
@@ -243,6 +248,16 @@ def run_placeholder_link_reconcile() -> dict:
                 if hasattr(row, 'updated_at'):
                     row.updated_at = func.now()
                 session.add(row)
+            if idx % RECONCILE_PROGRESS_EVERY_ROWS == 0:
+                elapsed = time.monotonic() - started_mono
+                logger.info(
+                    "Placeholder reconcile progress (validate): "
+                    f"checked={idx}/{len(active_rows)} "
+                    f"invalid_marked_missing={stats['invalid_placeholders_marked_missing']} "
+                    f"disconnected={stats['invalid_placeholders_disconnected']} "
+                    f"elapsed_s={elapsed:.1f}",
+                    extra={'emoji_type': 'info'},
+                )
 
         # Build canonical path per linked Movie from active Placeholder rows.
         movie_rows = (
@@ -262,11 +277,19 @@ def run_placeholder_link_reconcile() -> dict:
 
         if movie_path_by_id:
             movies = session.query(Movie).filter(Movie.id.in_(list(movie_path_by_id.keys()))).all()
-            for movie in movies:
+            for idx, movie in enumerate(movies, start=1):
                 movie.has_placeholder = True
                 movie.placeholder_filepath = movie_path_by_id.get(movie.id)
                 session.add(movie)
                 stats['movies_linked'] += 1
+                if idx % RECONCILE_LINK_PROGRESS_EVERY_ROWS == 0:
+                    elapsed = time.monotonic() - started_mono
+                    logger.info(
+                        "Placeholder reconcile progress (movies link): "
+                        f"linked={idx}/{len(movies)} "
+                        f"elapsed_s={elapsed:.1f}",
+                        extra={'emoji_type': 'info'},
+                    )
 
         # Build canonical path per linked Episode from active Placeholder rows.
         episode_rows = (
@@ -286,13 +309,26 @@ def run_placeholder_link_reconcile() -> dict:
 
         if episode_path_by_id:
             episodes = session.query(Episode).filter(Episode.id.in_(list(episode_path_by_id.keys()))).all()
-            for episode in episodes:
+            for idx, episode in enumerate(episodes, start=1):
                 episode.has_placeholder = True
                 episode.placeholder_filepath = episode_path_by_id.get(episode.id)
                 session.add(episode)
                 stats['episodes_linked'] += 1
+                if idx % RECONCILE_LINK_PROGRESS_EVERY_ROWS == 0:
+                    elapsed = time.monotonic() - started_mono
+                    logger.info(
+                        "Placeholder reconcile progress (episodes link): "
+                        f"linked={idx}/{len(episodes)} "
+                        f"elapsed_s={elapsed:.1f}",
+                        extra={'emoji_type': 'info'},
+                    )
 
         session.commit()
+        elapsed = time.monotonic() - started_mono
+        logger.info(
+            f"Placeholder reconcile elapsed_s={elapsed:.1f}",
+            extra={'emoji_type': 'info'},
+        )
         logger.info(f"Placeholder reconcile complete: {stats}", extra={'emoji_type': 'success'})
         return stats
     except Exception as e:

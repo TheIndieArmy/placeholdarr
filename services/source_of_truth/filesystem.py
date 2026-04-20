@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Optional
 
 from sqlalchemy import func
@@ -22,6 +23,9 @@ NON_PLACEHOLDER_EXTENSIONS = {
     '.idx',
     '.txt',
 }
+
+FS_SCAN_PROGRESS_EVERY_FILES = 2000
+FS_STALE_PROGRESS_EVERY_ROWS = 5000
 
 def looks_like_placeholder_file(path: str) -> bool:
     """Treat regular media files under configured placeholder roots as placeholders.
@@ -123,9 +127,16 @@ def scan_placeholder_roots(roots: list[str]) -> int:
     upserted = 0
     stale_marked = 0
     disconnected = 0
+    scanned_files = 0
+    scanned_media_candidates = 0
     scanned_roots = [os.path.abspath(root) for root in roots if root]
     observed_paths: set[str] = set()
+    started_mono = time.monotonic()
     try:
+        logger.info(
+            f"FS scan started roots={len(scanned_roots)}",
+            extra={'emoji_type': 'info'},
+        )
         for root in roots:
             if not root:
                 continue
@@ -135,9 +146,11 @@ def scan_placeholder_roots(roots: list[str]) -> int:
 
             for dirpath, _, filenames in os.walk(root):
                 for filename in filenames:
+                    scanned_files += 1
                     path = os.path.join(dirpath, filename)
                     if not looks_like_placeholder_file(path):
                         continue
+                    scanned_media_candidates += 1
                     observed_paths.add(path)
 
                     existing = session.query(Placeholder).filter(Placeholder.path == path).first()
@@ -155,13 +168,24 @@ def scan_placeholder_roots(roots: list[str]) -> int:
                             )
                         )
                         upserted += 1
+                    if scanned_media_candidates % FS_SCAN_PROGRESS_EVERY_FILES == 0:
+                        elapsed = time.monotonic() - started_mono
+                        logger.info(
+                            "FS scan progress: "
+                            f"media_candidates={scanned_media_candidates} "
+                            f"total_files_seen={scanned_files} "
+                            f"upserted={upserted} "
+                            f"elapsed_s={elapsed:.1f}",
+                            extra={'emoji_type': 'info'},
+                        )
 
         # Mark stale placeholder rows as missing whenever they were previously active
         # but were not observed in this scan. This intentionally includes rows whose
         # path drifted outside configured roots to self-heal legacy mismatches.
         active_query = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
 
-        for row in active_query.all():
+        active_rows = active_query.all()
+        for idx, row in enumerate(active_rows, start=1):
             row_path = getattr(row, 'path', None)
             if not row_path:
                 continue
@@ -177,8 +201,27 @@ def scan_placeholder_roots(roots: list[str]) -> int:
                 row.updated_at = func.now()
             session.add(row)
             stale_marked += 1
+            if idx % FS_STALE_PROGRESS_EVERY_ROWS == 0:
+                elapsed = time.monotonic() - started_mono
+                logger.info(
+                    "FS stale-mark progress: "
+                    f"checked={idx}/{len(active_rows)} "
+                    f"stale_marked={stale_marked} "
+                    f"disconnected={disconnected} "
+                    f"elapsed_s={elapsed:.1f}",
+                    extra={'emoji_type': 'info'},
+                )
 
         session.commit()
+        elapsed = time.monotonic() - started_mono
+        logger.info(
+            "FS scan complete: "
+            f"roots={len(scanned_roots)} files_seen={scanned_files} "
+            f"media_candidates={scanned_media_candidates} created={upserted} "
+            f"stale_marked={stale_marked} disconnected={disconnected} "
+            f"elapsed_s={elapsed:.1f}",
+            extra={'emoji_type': 'success'},
+        )
         if stale_marked:
             logger.info(
                 f'FS scan marked stale placeholders missing={stale_marked} (created={upserted}, disconnected={disconnected})',

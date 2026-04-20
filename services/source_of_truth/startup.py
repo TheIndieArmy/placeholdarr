@@ -408,14 +408,44 @@ def run_startup_source_of_truth() -> dict:
         else:
             scan_count, scan_info = scan_result, {'reason': 'ok'}
 
+        phase_started = time.monotonic()
         reconcile_stats = run_placeholder_link_reconcile()
+        logger.info(
+            f"Startup phase complete: placeholder_reconcile elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
+        phase_started = time.monotonic()
         calendar_date_refresh_stats = run_calendar_date_refresh()
+        logger.info(
+            f"Startup phase complete: calendar_date_refresh elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
+        phase_started = time.monotonic()
         determination_stats = run_determination_pass()
+        logger.info(
+            f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
         # Primer phase removed to accelerate startup and simplify sync pipeline.
         primer_stats = {"skipped": True, "reason": "deprecated"}
+        phase_started = time.monotonic()
         materialization_stats = run_materialization_pass()
+        logger.info(
+            f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
+        phase_started = time.monotonic()
         calendar_stats = run_calendar_phase()
+        logger.info(
+            f"Startup phase complete: calendar elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
+        phase_started = time.monotonic()
         orphan_placeholder_stats = run_orphan_placeholder_cleanup()
+        logger.info(
+            f"Startup phase complete: orphan_placeholder_cleanup elapsed_s={time.monotonic() - phase_started:.1f}",
+            extra={'emoji_type': 'info'},
+        )
         status_reconcile_stats = {"skipped": True, "reason": "deprecated"}
 
         result = {
