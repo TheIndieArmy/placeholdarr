@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { copyTextToClipboard } from "./copyToClipboard";
-import { ARR_WEBHOOK_SERVICES } from "./webhookConfig";
+import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getActivity,
   getCalendar,
@@ -22,8 +22,8 @@ import jellyfinIcon from "./assets/services/jellyfin.svg";
 import plexIcon from "./assets/services/plex.svg";
 import radarrIcon from "./assets/services/radarr.svg";
 import sonarrIcon from "./assets/services/sonarr.svg";
-import { LOGO_CURLY_LEFT_D, LOGO_CURLY_RIGHT_D, LOGO_PLAY_ROUNDED_D } from "./assets/logoMarkPaths";
-import simularrBrandMark from "./assets/Placeholdarr1.svg";
+import placeholdarrLogoBlue from "./assets/Placeholdarr_blue.svg";
+import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import tautulliIcon from "./assets/services/tautulli.svg";
@@ -63,66 +63,76 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Advanced",
 ] as const;
 
-/** Shared onboarding section heading (behavior wizard, paths, webhooks). */
+/** Shared onboarding section heading (behavior wizard, paths). */
 const ONBOARDING_SECTION_TITLE_CLASS =
   "mb-3 pb-2 border-b border-[#424753]/40 text-base font-headline font-bold uppercase tracking-wide text-white";
 
-/** Onboarding grouped panel (intro + fields, or paths / library sync blocks). */
-const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS =
-  "mb-4 rounded-lg border border-[#424753]/30 bg-[#0f1419]/60 px-4 py-4 sm:px-5";
+/**
+ * Grouped settings / onboarding section surface: raised slate panel with a brand accent3 rail on all sides.
+ * Requires an ancestor that sets CSS vars (e.g. `semanticTokensToCssVars` on `.brand-theme-scope`).
+ */
+const UI_SECTION_FRAME_CLASS =
+  "rounded-lg border border-[var(--brand-accent-3)] bg-[#1a2436]/95 shadow-lg shadow-black/30";
 
 /**
- * Behavior onboarding only: cycles section frames so you can compare styles on one screen.
- * Set to false after you pick a winner, then replace {@link WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}
- * (and webhook/path surfaces if desired) with that variant’s `className`.
+ * Media / ARR service tiles (wizard + settings grids): same accent rail and slate fill as
+ * {@link UI_SECTION_FRAME_CLASS}, with the taller rounded-2xl silhouette.
  */
-const ONBOARDING_BEHAVIOR_SURFACE_PREVIEW = true;
+const UI_INTEGRATION_CARD_SURFACE_CLASS =
+  "rounded-2xl border border-[var(--brand-accent-3)] bg-[#1a2436]/95 shadow-lg shadow-black/30 backdrop-blur-md transition hover:shadow-[0_0_36px_-14px_color-mix(in_srgb,var(--brand-accent-3)_28%,transparent)]";
 
-const ONBOARDING_BEHAVIOR_SURFACE_VARIANTS = [
-  {
-    label: "A · Baseline (current default)",
-    className:
-      "mb-4 rounded-lg border border-[#424753]/30 bg-[#0f1419]/60 px-4 py-4 sm:px-5 shadow-none",
-  },
-  {
-    label: "B · Raised slate panel",
-    className:
-      "mb-4 rounded-lg border border-[#424753]/55 bg-[#1a2436]/95 px-4 py-4 sm:px-5 shadow-lg shadow-black/30",
-  },
-  {
-    label: "C · Cool rim + inset highlight",
-    className:
-      "mb-4 rounded-lg border border-white/[0.12] bg-[#111824]/92 px-4 py-4 sm:px-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]",
-  },
-  {
-    label: "D · Left accent rail",
-    className:
-      "mb-4 rounded-lg border border-[#424753]/45 border-l-2 border-l-sky-400/55 bg-[#0e1520]/92 px-4 py-4 sm:px-5",
-  },
-  {
-    label: "E · Vertical sheet gradient",
-    className:
-      "mb-4 rounded-xl border border-[#424753]/50 bg-gradient-to-b from-[#1c2636]/98 via-[#131b28]/96 to-[#0a0f16]/98 px-4 py-4 sm:px-5 shadow-inner shadow-black/40",
-  },
-] as const;
-
-function behaviorWizardSurface(sectionIndex: number): (typeof ONBOARDING_BEHAVIOR_SURFACE_VARIANTS)[number] {
-  return ONBOARDING_BEHAVIOR_SURFACE_VARIANTS[sectionIndex % ONBOARDING_BEHAVIOR_SURFACE_VARIANTS.length];
-}
+/** Wizard stacked section bodies (bottom margin between sections). */
+const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
 
 const WIZARD_STEPS = [
   { key: "paths", name: "Paths" },
   { key: "media", name: "Media Servers" },
   { key: "arr", name: "ARR Services" },
-  { key: "webhooks", name: "Webhook Setup" },
   { key: "behavior", name: "Behavior" },
 ] as const;
+
+const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
+
+/** `poster_path` values (TMDB) — onboarding hero only; decorative collage (16 unique slots). */
+const WIZARD_HEADER_POSTER_PATHS: readonly string[] = [
+  "/qJ2tW6WMUDux911r6m7haRef0WH.jpg", // The Dark Knight
+  "/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg", // Fight Club
+  "/ggFHVNu6YYI5L9pCfOacjizRGt.jpg", // Inception
+  "/49WJfeN0moxb9IPfGn8AIqMGskD.jpg", // The Shawshank Redemption
+  "/u3bZgnGQ9T01sWNhyveQz0wH0Hl.jpg", // Breaking Bad (miniseries key art)
+  "/9gk7adHYeDvHkCSEqAvQNLV5Uge.jpg", // Django Unchained
+  "/aKuFiU82s5ISJpGZp7YkIr3kCUd.jpg", // The Lord of the Rings: The Fellowship of the Ring
+  "/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg", // Pulp Fiction
+  "/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg", // Interstellar
+  "/zSqJ1qFq8NXFfi7JeIYMlzyR0dx.jpg", // The Matrix
+  "/vL5LR6WdxWPjLPFRLe133jXWsh5.jpg", // Goodfellas
+  "/63N9uy8nd9j7Eog2axPQ8lbr3Wj.jpg", // Star Wars
+  "/sF1U4EUQS8YHUYjNl3pMGNIQyr0.jpg", // Blade Runner
+  "/hek3koDUyRQk7FIhPXsa6mT2Zc3.jpg", // The Godfather Part II
+  "/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg", // Spider-Man: Into the Spider-Verse
+  "/7WsyChQLEftFiDOVTGkv3hFpyyt.jpg", // Avengers: Infinity War
+];
+
+/** Light / high-key art for the hero center 2×2 when `yellowBlue` — reads better under yellow multiply + slate lockup. */
+const ONBOARDING_HERO_LIGHT_CENTER_POSTERS: readonly [string, string, string, string] = [
+  "/itAKcobTYGpYT8Phwjd8c9hleTo.jpg", // Frozen (2013)
+  "/uDO8zWDhfWwoFdKS4fzkUJt0Rf0.jpg", // La La Land (2016)
+  "/pZn87R7gtmMCGGO8KeaAfZDhXLg.jpg", // Soul (2020)
+  "/iuFNMS8U5cb6xfzi51Dbkovj7vM.jpg", // Barbie (2023)
+];
+/** Center cell indices for `grid-cols-4` / `grid-rows-4` (matches `min-[520px]:` breakpoint below). */
+const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_NARROW = [5, 6, 9, 10] as const;
+/** Center cell indices for `grid-cols-8` / `grid-rows-2`. */
+const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE = [3, 4, 11, 12] as const;
 
 const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
 const PATH_PROFILE_KEYS = [] as const;
 const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 
 const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
+
+/** Shown in API/config but omitted from dashboard UI (onboarding + settings). */
+const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>(["WORKER_COUNT"]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
   "ARR_INSTANCES_JSON",
@@ -214,6 +224,47 @@ const BRAND_META: Record<Brand, { label: string; tagline: string }> = {
   trigger: { label: "Trigger", tagline: "Industrial-grade control — pulse-tuned for high-visibility ops." },
   linkarr: { label: "Linkarr", tagline: "The missing link in media automation — signal-clean orchestration." },
 };
+
+/** Branded first paint for /setup while settings load (Seerr-style splash: motion masks wait). */
+function SetupBootShell(props: {
+  setupShellClass: string;
+  surfaceStyle: CSSProperties;
+  brand: Brand;
+  accentHex: string;
+  appLabel: string;
+  errorMessage?: string | null;
+}) {
+  const err = props.errorMessage?.trim();
+  return (
+    <div className={`${props.setupShellClass} setup-boot-shell`} style={props.surfaceStyle}>
+      <div className="setup-boot-shell__content flex w-full max-w-[min(92vw,22rem)] flex-col items-center gap-7">
+        <div className="flex flex-col items-center gap-3 opacity-90">
+          <BrandLogo brand={props.brand} accentHex={props.accentHex} className="h-14 w-auto max-w-[11rem] object-contain" />
+          <div className="text-center text-[11px] font-headline font-bold uppercase tracking-[0.22em] text-slate-500">
+            {props.appLabel}
+          </div>
+        </div>
+        <div className="w-full space-y-2.5" aria-hidden={Boolean(err)}>
+          <div className="setup-boot-shell__bar setup-boot-shell__bar--lg" />
+          <div className="setup-boot-shell__bar setup-boot-shell__bar--md" />
+          <div className="setup-boot-shell__bar setup-boot-shell__bar--sm" />
+        </div>
+        {err ? (
+          <p className="max-w-full text-center text-xs leading-relaxed text-red-400/95" role="alert">
+            {err}
+          </p>
+        ) : (
+          <div className="flex items-center gap-2 text-[11px] font-headline uppercase tracking-widest text-slate-500">
+            <span className="material-symbols-outlined animate-spin text-slate-500" style={{ fontSize: 16 }}>
+              progress_activity
+            </span>
+            <span className="animate-pulse">Preparing setup…</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
   // Placeholdarr - Ghost Steel
@@ -398,23 +449,21 @@ function getBrandAccent(brand: Brand, theme: ThemeMode) {
 }
 
 function BrandLogo(props: { brand: Brand; accentHex: string; className?: string }) {
-  const stroke = "#ffffff";
   if (props.brand === "placeholdarr" || props.brand === "placeholdarr-neon" || props.brand === "elfhosted" || props.brand === "linkarr") {
     return (
-      <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-        <rect width="72" height="72" rx="16" fill={props.accentHex} />
-        <g fill="none" stroke={stroke} strokeWidth="5" strokeLinecap="round" strokeLinejoin="round">
-          <path d={LOGO_CURLY_LEFT_D} />
-          <path d={LOGO_CURLY_RIGHT_D} />
-        </g>
-        <path d={LOGO_PLAY_ROUNDED_D} fill={stroke} />
-      </svg>
+      <img
+        src={placeholdarrLogoBlue}
+        alt=""
+        className={`block object-contain object-center select-none ${props.className ?? ""}`}
+        draggable={false}
+        aria-hidden
+      />
     );
   }
   if (props.brand === "simularr") {
     return (
       <img
-        src={simularrBrandMark}
+        src={placeholdarrLogoBlue}
         alt=""
         className={`block object-contain object-left select-none ${props.className ?? ""}`}
         draggable={false}
@@ -487,7 +536,7 @@ export function App() {
   const contentScrollRef = useRef<HTMLElement | null>(null);
 
   const [theme, setTheme] = useState<"standard" | "glassmorphism" | "minimalist-dark" | "studio-dark">("studio-dark");
-  const [brand, setBrand] = useState<Brand>("placeholdarr");
+  const [brand, setBrand] = useState<Brand>("simularr");
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
 
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -519,6 +568,10 @@ export function App() {
   const [titleSearchIndex, setTitleSearchIndex] = useState(0);
 
   const [settingsPayload, setSettingsPayload] = useState<SettingsPayload | null>(null);
+  const settingsPayloadRef = useRef<SettingsPayload | null>(null);
+  useEffect(() => {
+    settingsPayloadRef.current = settingsPayload;
+  }, [settingsPayload]);
   const [activeSettingsSection, setActiveSettingsSection] = useState("Media Integrations");
   const [fieldValues, setFieldValues] = useState<FieldValueMap>({});
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
@@ -526,6 +579,10 @@ export function App() {
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
 
   const [setupStatus, setSetupStatus] = useState<{ setup_complete: boolean } | null>(null);
+  const setupCompleteRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    setupCompleteRef.current = setupStatus?.setup_complete;
+  }, [setupStatus]);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -533,10 +590,21 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const currentTab = getTabFromPath(location.pathname);
-  const defaultLandingPath = setupStatus?.setup_complete === false ? "/setup" : "/activity";
+  /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
+  const defaultLandingPath =
+    setupStatus != null && setupStatus.setup_complete ? "/activity" : "/setup";
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
   const brandMeta = BRAND_META[brand];
+  /** Flat shell for setup-route “Loading…” only — avoids multi-layer backdrop paint before the wizard mounts. */
+  const setupLoadingShellStyle = useMemo(
+    () =>
+      ({
+        ...(semanticTokensToCssVars(brandSemantic) as CSSProperties),
+        backgroundColor: brandSemantic.chromePage,
+      }) as CSSProperties,
+    [brandSemantic],
+  );
   const hasUnsavedChanges = useMemo(
     () => settingsValuesDirty(fieldValues, baselineValues, settingsPayload),
     [fieldValues, baselineValues, settingsPayload],
@@ -596,6 +664,47 @@ export function App() {
 
     async function refresh() {
       try {
+        if (currentTab === "setup") {
+          // First visit: one full `getSettingsCurrent` (via loadSettings) so we do not block on status
+          // and then again in a separate effect — that doubled network latency before the wizard appeared.
+          // Later polls: light `getSettingsStatus` only so we never clobber in-progress wizard edits.
+          try {
+            if (!settingsPayloadRef.current) {
+              await loadSettings(stopped);
+            } else {
+              const status = await getSettingsStatus();
+              if (!stopped) {
+                setSetupStatus(status);
+                setOnboardingVisible(!status.setup_complete);
+              }
+            }
+            if (!stopped) {
+              setErrorMessage(null);
+            }
+          } catch (err) {
+            if (!stopped) {
+              setErrorMessage(err instanceof Error ? err.message : "Unable to load setup. Check the API and try again.");
+            }
+          }
+          if (!stopped) {
+            setLoading(false);
+          }
+          return;
+        }
+
+        if (currentTab === "activity" && setupCompleteRef.current === false) {
+          const status = await getSettingsStatus();
+          if (!stopped) {
+            setSetupStatus(status);
+            setOnboardingVisible(!status.setup_complete);
+          }
+          if (!stopped) {
+            setErrorMessage(null);
+            setLoading(false);
+          }
+          return;
+        }
+
         await loadStats(stopped, setStats);
 
         if (currentTab === "activity") {
@@ -656,6 +765,7 @@ export function App() {
 
   useEffect(() => {
     if (library.length > 0) return;
+    if (location.pathname === "/setup" || location.pathname.startsWith("/setup/")) return;
 
     let stopped = false;
     getLibrary(1000)
@@ -671,7 +781,7 @@ export function App() {
     return () => {
       stopped = true;
     };
-  }, [library.length]);
+  }, [library.length, location.pathname]);
 
   useEffect(() => {
     if (currentTab !== "calendar") return;
@@ -776,6 +886,8 @@ export function App() {
   useEffect(() => {
     if (setupStatus?.setup_complete !== false) return;
     if (settingsPayload) return;
+    // `/setup` bootstrap uses `loadSettings` from the tab refresh loop — avoid a duplicate first fetch.
+    if (location.pathname === "/setup" || location.pathname.startsWith("/setup/")) return;
 
     let stopped = false;
     loadSettings(stopped).catch(() => {
@@ -785,7 +897,7 @@ export function App() {
     return () => {
       stopped = true;
     };
-  }, [settingsPayload, setupStatus?.setup_complete]);
+  }, [settingsPayload, setupStatus?.setup_complete, location.pathname]);
 
   useEffect(() => {
     if (loading || !setupStatus) return;
@@ -1043,6 +1155,10 @@ export function App() {
       );
     }
 
+    if (currentTab === "setup") {
+      return <div className="empty">Setup is handled on the /setup route.</div>;
+    }
+
     if (currentTab === "settings") {
       return (
         <SettingsPanel
@@ -1094,21 +1210,20 @@ export function App() {
 
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
-    if (loading || !setupStatus) {
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-[#070b12] text-slate-300 text-sm font-headline tracking-wide">
-          Loading setup…
-        </div>
-      );
-    }
-    if (setupStatus.setup_complete) {
+    const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-sm font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
+    if (setupStatus?.setup_complete) {
       return <Navigate to="/activity" replace />;
     }
-    if (!settingsPayload) {
+    if (loading || !setupStatus || !settingsPayload) {
       return (
-        <div className="min-h-screen flex items-center justify-center bg-[#070b12] text-slate-300 text-sm font-headline tracking-wide">
-          Loading setup…
-        </div>
+        <SetupBootShell
+          setupShellClass={setupShellClass}
+          surfaceStyle={setupLoadingShellStyle}
+          brand={brand}
+          accentHex={brandAccent.hex}
+          appLabel={brandMeta.label}
+          errorMessage={errorMessage}
+        />
       );
     }
     return (
@@ -1117,7 +1232,7 @@ export function App() {
         stepIndex={onboardingStepIndex}
         values={fieldValues}
         hasUnsavedChanges={hasUnsavedChanges}
-        brand="placeholdarr"
+        brand={brand}
         themeMode={themeMode}
         onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
         onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
@@ -2227,10 +2342,10 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
 }
 
 function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeMode: ThemeMode }) {
-  const p = props.payload;
+  const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
-  const heroArtUrl = p.backdrop_url || p.poster_url;
+  const heroArtUrl = payload.backdrop_url || payload.poster_url;
   return (
     <div>
       {/* Hero banner */}
@@ -2249,22 +2364,22 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
         <div className="flex gap-6 md:gap-10 items-end mb-8">
           <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
-            {p.poster_url ? <img src={p.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
+            {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
           </div>
           <div className="flex-1 pb-1 md:pb-2">
-            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{p.title}</h1>
+            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
             <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {p.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{p.year}</span>}
+              {payload.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.year}</span>}
               <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text }}>Movie</span>
-              {p.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{p.instance_label}</span>}
-              {p.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
-              {p.has_file
+              {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
+              {payload.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
+              {payload.has_file
                 ? <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
                 : <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>}
             </div>
-            {p.arr_link && (
+            {payload.arr_link && (
               <div className="mt-4">
-                <a href={p.arr_link} target="_blank" rel="noreferrer"
+                <a href={payload.arr_link} target="_blank" rel="noreferrer"
                   className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   Open in Radarr
@@ -2274,16 +2389,16 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           </div>
         </div>
 
-        {p.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{p.overview}</p>}
+        {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {[
-            { label: "Status", value: p.status },
-            { label: "Determination", value: p.determination },
-            { label: "Quality", value: p.radarr_quality },
-            { label: "Theatrical", value: p.theater_release_date },
-            { label: "Digital", value: p.digital_release_date },
-            { label: "Physical", value: p.physical_release_date },
+            { label: "Status", value: payload.status },
+            { label: "Determination", value: payload.determination },
+            { label: "Quality", value: payload.radarr_quality },
+            { label: "Theatrical", value: payload.theater_release_date },
+            { label: "Digital", value: payload.digital_release_date },
+            { label: "Physical", value: payload.physical_release_date },
           ].filter(m => m.value).map(m => (
             <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
               <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
@@ -2297,13 +2412,13 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
 }
 
 function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; themeMode: ThemeMode; openSeasons: number[]; onToggleSeason: (seasonId: number) => void }) {
-  const p = props.payload;
+  const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
-  const heroArtUrl = p.backdrop_url || p.poster_url;
+  const heroArtUrl = payload.backdrop_url || payload.poster_url;
   const seasonsDesc = useMemo(
-    () => [...(p.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
-    [p.seasons],
+    () => [...(payload.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
+    [payload.seasons],
   );
   return (
     <div>
@@ -2319,25 +2434,25 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
         <div className="flex gap-6 md:gap-10 items-end mb-8">
           <div className="flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 border-[#424753]/40 bg-[#1e2430] shadow-[0_30px_80px_rgba(0,0,0,0.5)]">
-            {p.poster_url ? <img src={p.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
+            {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
           </div>
           <div className="flex-1 pb-1 md:pb-2">
-            <h1 className="text-4xl md:text-6xl lg:text-7xl font-black text-white font-headline tracking-tight leading-[0.95]">{p.title}</h1>
+            <h1 className="text-4xl md:text-6xl lg:text-7xl font-black text-white font-headline tracking-tight leading-[0.95]">{payload.title}</h1>
             <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {p.year && <span className="text-lg text-slate-200">{p.year}</span>}
-              {p.network && <span className="text-lg text-slate-300">{p.network}</span>}
+              {payload.year && <span className="text-lg text-slate-200">{payload.year}</span>}
+              {payload.network && <span className="text-lg text-slate-300">{payload.network}</span>}
               <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
-              {p.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{p.instance_label}</span>}
-              {p.sonarr_monitored != null && (
-                <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${p.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
-                  style={p.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
-                  {p.sonarr_monitored ? "Monitored" : "Unmonitored"}
+              {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
+              {payload.sonarr_monitored != null && (
+                <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${payload.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
+                  style={payload.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
+                  {payload.sonarr_monitored ? "Monitored" : "Unmonitored"}
                 </span>
               )}
             </div>
-            {p.arr_link && (
+            {payload.arr_link && (
               <div className="mt-4">
-                <a href={p.arr_link} target="_blank" rel="noreferrer"
+                <a href={payload.arr_link} target="_blank" rel="noreferrer"
                   className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   Open in Sonarr
@@ -2347,14 +2462,14 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           </div>
         </div>
 
-        {p.overview && <p className="text-lg text-slate-200 leading-relaxed max-w-5xl mb-8">{p.overview}</p>}
+        {payload.overview && <p className="text-lg text-slate-200 leading-relaxed max-w-5xl mb-8">{payload.overview}</p>}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
           {[
-            { label: "Status", value: p.status },
-            { label: "Sonarr Status", value: p.sonarr_status },
-            { label: "First Aired", value: p.first_aired },
-            { label: "Network", value: p.network },
+            { label: "Status", value: payload.status },
+            { label: "Sonarr Status", value: payload.sonarr_status },
+            { label: "First Aired", value: payload.first_aired },
+            { label: "Network", value: payload.network },
           ].filter(m => m.value).map(m => (
             <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
               <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
@@ -3236,18 +3351,38 @@ function normalizeInstanceKey(input: string) {
     .replace(/^[_-]+|[_-]+$/g, "");
 }
 
+/** True when `instance_id` embeds a UUID, matching `services.app_config._arr_instance_id_has_uuid`. */
+function arrInstanceIdEmbedsUuid(instanceId: string): boolean {
+  let hyphens = 0;
+  for (const ch of String(instanceId || "")) {
+    if (ch === "-") hyphens += 1;
+  }
+  return hyphens >= 4;
+}
+
+function slotWebhookRoleFromRowRole(role: string): "primary" | "secondary" {
+  const r = String(role || "").trim().toLowerCase();
+  if (r === "secondary" || r === "additional") return "secondary";
+  return "primary";
+}
+
+function stableArrInstanceId(arrType: "radarr" | "sonarr", slotRole: "primary" | "secondary") {
+  return `${arrType}_${slotRole}`;
+}
+
+function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string) {
+  const id = String(instance_id || "").trim().toLowerCase();
+  const key = normalizeInstanceKey(String(instance_key || ""));
+  const byId = id ? `${origin}/webhook?instance_id=${encodeURIComponent(id)}` : "";
+  const byKey = `${origin}/webhook?instance=${encodeURIComponent(key)}`;
+  const uuidLike = id.length > 0 && arrInstanceIdEmbedsUuid(id);
+  const primary = id ? byId : byKey;
+  return { primary, byId: id ? byId : "", byKey, uuidLike };
+}
+
 function inferDefaultKey(label: string, arrType: "radarr" | "sonarr") {
   const slug = normalizeInstanceKey(label);
   return slug || `${arrType}_instance`;
-}
-
-function makeInstanceId(arrType: "radarr" | "sonarr") {
-  const maybeCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
-  if (maybeCrypto?.randomUUID) {
-    return `${arrType}:${maybeCrypto.randomUUID().toLowerCase()}`;
-  }
-  const entropy = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-  return `${arrType}:${entropy}`;
 }
 
 function normalizeInstanceRole(input: unknown, rank: number): "primary" | "secondary" | "additional" {
@@ -3285,7 +3420,9 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
             rankByType[arrType] = rank + 1;
             const role = normalizeInstanceRole(obj.role, rank);
             const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
-            const instanceId = String(obj.instance_id || obj.id || `${arrType}:${instanceKey}`).trim().toLowerCase();
+            const slotRole = slotWebhookRoleFromRowRole(role);
+            const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
+            const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole);
             const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
             const instance_key_aliases = aliasRaw
               .map((a) => normalizeInstanceKey(String(a)))
@@ -3323,7 +3460,9 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
       const rank = rankByType[row.arr_type];
       rankByType[row.arr_type] = rank + 1;
       const role = normalizeInstanceRole(row.role, rank);
-      const instanceId = String(row.instance_id || makeInstanceId(row.arr_type)).trim().toLowerCase();
+      const slotRole = slotWebhookRoleFromRowRole(role);
+      const instanceId =
+        String(row.instance_id || "").trim().toLowerCase() || stableArrInstanceId(row.arr_type, slotRole);
       const aliasList = (row.instance_key_aliases || [])
         .map((a) => normalizeInstanceKey(String(a)))
         .filter((a) => a && a !== inferredKey);
@@ -3452,14 +3591,6 @@ function ArrInstancesEditor(props: {
   const [instances, setInstances] = useState<ArrInstanceDraft[]>(() => parseArrInstancesFromValues(props.values));
   const [testState, setTestState] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [instanceKeyConflict, setInstanceKeyConflict] = useState<string | null>(null);
-  const [labelChangeNotice, setLabelChangeNotice] = useState<{
-    arrType: "radarr" | "sonarr";
-    slotIndex: 0 | 1;
-    instance_key: string;
-    instance_id: string;
-    newLabel: string;
-  } | null>(null);
-  const labelAtFocusRef = useRef<Record<string, string>>({});
   const [primaryCache, setPrimaryCache] = useState<{ radarr: ArrInstanceDraft | null; sonarr: ArrInstanceDraft | null }>(() => {
     const parsed = parseArrInstancesFromValues(props.values);
     return {
@@ -3553,7 +3684,7 @@ function ArrInstancesEditor(props: {
     const role = slotIndex === 0 ? "primary" : "secondary";
     return {
       id: `slot-${arrType}-${slotIndex}`,
-      instance_id: makeInstanceId(arrType),
+      instance_id: stableArrInstanceId(arrType, role),
       label,
       arr_type: arrType,
       instance_key: instanceKey,
@@ -3576,7 +3707,15 @@ function ArrInstancesEditor(props: {
       typeRows.push(defaultSlot(arrType, typeRows.length === 0 ? 0 : 1));
     }
     const target = typeRows[slotIndex] || defaultSlot(arrType, slotIndex);
-    typeRows[slotIndex] = { ...target, ...patch };
+    const merged = { ...target, ...patch };
+    typeRows[slotIndex] = merged;
+    if (Object.prototype.hasOwnProperty.call(patch, "url") || Object.prototype.hasOwnProperty.call(patch, "api_key")) {
+      setTestState((prev) => {
+        const next = { ...prev };
+        delete next[merged.id];
+        return next;
+      });
+    }
     if (slotIndex === 0 && (Object.prototype.hasOwnProperty.call(patch, "url") || Object.prototype.hasOwnProperty.call(patch, "api_key"))) {
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
       props.onPrimaryTestStatusChange?.(arrType, false);
@@ -3662,18 +3801,33 @@ function ArrInstancesEditor(props: {
 
   function instanceWebhookUrls(instance_id: string, instance_key: string) {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const uuidLike = (instance_id.match(/-/g) || []).length >= 4;
-    const byId = `${origin}/webhook?instance_id=${encodeURIComponent(instance_id)}`;
-    const byKey = `${origin}/webhook?instance=${encodeURIComponent(instance_key)}`;
-    return { primary: uuidLike ? byId : byKey, byId, byKey, uuidLike };
+    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key);
   }
 
   function onSlotPanelSaveClick() {
     if (!slotPanel) return;
-    const wasNew = Boolean(slotPanel.isNew);
     const snap = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    const credsOk = Boolean(String(snap.url || "").trim() && String(snap.api_key || "").trim());
+    const rawSnap = slotPanelSnapshotRef.current;
+    let prevNorm = "";
+    if (rawSnap != null) {
+      try {
+        const parsed = JSON.parse(rawSnap) as ArrInstanceDraft[];
+        if (Array.isArray(parsed)) {
+          const typeRows = parsed.filter((item) => item.arr_type === slotPanel.arrType).slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
+          const prevUrl = String(typeRows[slotPanel.slotIndex]?.url || "").trim();
+          prevNorm = normalizeArrInstanceUrlForDedupe(prevUrl);
+        }
+      } catch {
+        prevNorm = "";
+      }
+    } else if (!slotPanel.isNew) {
+      prevNorm = normalizeArrInstanceUrlForDedupe(String(snap.url || "").trim());
+    }
+    const currNorm = normalizeArrInstanceUrlForDedupe(String(snap.url || "").trim());
+    const urlChanged = prevNorm !== currNorm;
     handleSlotPanelSave();
-    if (wasNew && snap && String(snap.url || "").trim() && String(snap.api_key || "").trim()) {
+    if (credsOk && urlChanged) {
       setWebhookSetupDialog({
         arrType: snap.arr_type,
         instance_key: normalizeInstanceKey(String(snap.instance_key || "")),
@@ -3719,10 +3873,23 @@ function ArrInstancesEditor(props: {
   }
 
   function handleSlotPanelCancel() {
-    restoreSlotPanelSnapshot();
+    const panel = slotPanel;
     slotPanelCaptureKeyRef.current = "";
     setSlotFooterTestBusy(false);
     setSlotPanel(null);
+    // "Connect …" enables primary/secondary and opens the editor with `isNew`. Closing without Save should
+    // return to the dashed Connect card, not a half-added slot shell. Do not run `restoreSlotPanelSnapshot`
+    // here: the captured JSON can still include the empty primary row, which would fight `setPrimary(false)`.
+    if (panel?.isNew) {
+      slotPanelSnapshotRef.current = null;
+      if (panel.slotIndex === 0) {
+        setPrimary(panel.arrType, false);
+      } else {
+        setSecondary(panel.arrType, false);
+      }
+      return;
+    }
+    restoreSlotPanelSnapshot();
   }
 
   function handleSlotPanelSave() {
@@ -3751,33 +3918,19 @@ function ArrInstancesEditor(props: {
     const isDisabled = !isEnabled;
     const dupPeer = findDuplicateArrInstanceUrl(instances, item.id, String(item.url || ""));
     return (
-      <div key={item.id} className={`rounded-xl border border-[#424753]/40 bg-[#0f1419] overflow-hidden ${isDisabled ? "opacity-60" : ""}`}>
+      <div
+        key={item.id}
+        className={`rounded-xl border border-[var(--brand-accent-3)] bg-[#1a2436]/95 shadow-md shadow-black/25 overflow-hidden ${isDisabled ? "opacity-60" : ""}`}
+      >
         <div className="p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex-1">
               <input
                 className="bg-transparent text-sm font-semibold text-white font-headline outline-none w-full"
                 value={item.label}
-                onFocus={() => {
-                  labelAtFocusRef.current[`${arrType}-${slotIndex}`] = String(item.label || "");
-                }}
                 onChange={(e) => {
                   const value = e.target.value;
                   upsertSlot(arrType, slotIndex, { label: value });
-                }}
-                onBlur={() => {
-                  const slotKey = `${arrType}-${slotIndex}`;
-                  const before = labelAtFocusRef.current[slotKey] ?? "";
-                  const after = String(item.label || "").trim();
-                  if (before.trim() === after) return;
-                  if (!String(item.url || "").trim() || !String(item.api_key || "").trim()) return;
-                  setLabelChangeNotice({
-                    arrType,
-                    slotIndex,
-                    instance_key: normalizeInstanceKey(String(item.instance_key || "")),
-                    instance_id: String(item.instance_id || ""),
-                    newLabel: after,
-                  });
                 }}
                 placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
                 disabled={isDisabled}
@@ -3810,7 +3963,7 @@ function ArrInstancesEditor(props: {
               className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
               value={item.url}
               onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
-              placeholder="https://host:7878"
+              placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
               disabled={isDisabled}
             />
             {dupPeer && !isDisabled ? (
@@ -3837,9 +3990,16 @@ function ArrInstancesEditor(props: {
               Test
             </button>
           </div>
-          {status ? (
-            <div className={`text-xs ${status.ok ? "text-green-400" : "text-red-400"}`}>{status.message}</div>
-          ) : null}
+          <div className="min-h-[2.25rem] text-xs" aria-live="polite">
+            {status && status.message !== "Testing..." ? (
+              <div className={`mt-1.5 ${status.ok ? "text-green-400" : "text-red-400"}`}>{status.message}</div>
+            ) : status && status.message === "Testing..." ? (
+              <div className="mt-1.5 flex items-center gap-1.5 text-slate-400">
+                <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                <span>Testing…</span>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
     );
@@ -3877,62 +4037,14 @@ function ArrInstancesEditor(props: {
     if (slotPanelCaptureKeyRef.current === key) return;
     slotPanelCaptureKeyRef.current = key;
     slotPanelSnapshotRef.current = JSON.stringify(instances);
-  }, [slotPanel, instances]);
-
-  const webhookOrigin = typeof window !== "undefined" ? window.location.origin : "";
+    // Intentionally omit `instances` from deps: capture baseline only when the panel opens or switches slots.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slotPanel]);
 
   return (
     <div className="space-y-5">
       {instanceKeyConflict ? (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{instanceKeyConflict}</div>
-      ) : null}
-      {labelChangeNotice ? (
-        <div className="fixed inset-0 z-[60] bg-[#0f1419]/80 backdrop-blur-sm flex items-center justify-center p-6">
-          <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl p-6 space-y-4">
-            <h3 className="text-lg font-headline font-bold text-white">Instance display name changed</h3>
-            <p className="text-sm text-slate-300">
-              You updated the label for this {labelChangeNotice.arrType === "radarr" ? "Radarr" : "Sonarr"} instance.{" "}
-              <span className="text-slate-200">Radarr/Sonarr webhooks use the instance key (and optional stable id), not this label.</span>{" "}
-              Update your Radarr or Sonarr webhook URLs only if you also change the instance key or switch servers.
-            </p>
-            <div className="rounded-lg border border-[#424753]/40 bg-[#0f1419] p-3 space-y-2 text-xs text-slate-400">
-              <div>
-                <span className="text-slate-500">Webhook URL:</span>{" "}
-                <span className="font-mono text-slate-200 break-all">
-                  {labelChangeNotice.instance_id && labelChangeNotice.instance_id.includes("-")
-                    ? `${webhookOrigin}/webhook?instance_id=${encodeURIComponent(labelChangeNotice.instance_id)}`
-                    : `${webhookOrigin}/webhook?instance=${encodeURIComponent(labelChangeNotice.instance_key)}`}
-                </span>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
-                onClick={() => setLabelChangeNotice(null)}
-              >
-                Dismiss
-              </button>
-              <button
-                type="button"
-                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
-                style={{ backgroundColor: props.accent.hex }}
-                onClick={() => {
-                  void (async () => {
-                    const byId = `${webhookOrigin}/webhook?instance_id=${encodeURIComponent(labelChangeNotice.instance_id)}`;
-                    const byKey = `${webhookOrigin}/webhook?instance=${encodeURIComponent(labelChangeNotice.instance_key)}`;
-                    const payload =
-                      labelChangeNotice.instance_id && labelChangeNotice.instance_id.includes("-") ? byId : byKey;
-                    await copyTextToClipboard(payload);
-                    setLabelChangeNotice(null);
-                  })();
-                }}
-              >
-                Copy primary webhook URL
-              </button>
-            </div>
-          </div>
-        </div>
       ) : null}
       {disconnectDialog ? (
         <div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#0f1419]/80 backdrop-blur-sm p-6">
@@ -3997,12 +4109,6 @@ function ArrInstancesEditor(props: {
                     </div>
                   ))}
               </div>
-              {urls.uuidLike ? (
-                <p className="text-xs text-slate-500">
-                  Legacy URL with instance key only:{" "}
-                  <span className="font-mono text-slate-400 break-all">{urls.byKey}</span>
-                </p>
-              ) : null}
               <div className="flex justify-end pt-2">
                 <button
                   type="button"
@@ -4027,10 +4133,7 @@ function ArrInstancesEditor(props: {
             const av = ONBOARDING_ARR_VISUAL[arrType];
             const serviceName = arrType === "radarr" ? "Radarr" : "Sonarr";
             return (
-              <div
-                key={arrType}
-                className="min-w-0 rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.06] to-white/[0.02] p-5 shadow-[0_1px_0_rgba(255,255,255,0.05)_inset] backdrop-blur-md transition hover:border-white/[0.12]"
-              >
+              <div key={arrType} className={`min-w-0 ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-5`}>
                 <div className="mb-5 flex flex-col items-center gap-3 text-center">
                   <div
                     className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
@@ -4061,15 +4164,8 @@ function ArrInstancesEditor(props: {
                         <div className="min-w-0">
                           <div className="text-sm font-semibold text-white font-headline truncate">{primaryItem.label}</div>
                           <div className="truncate font-mono text-[11px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
-                          {primaryConnectionOk[arrType] ? (
-                            <div className="mt-1 text-[11px] text-emerald-400/90">Primary test OK</div>
-                          ) : primaryGateOk[arrType] ? (
-                            <div className="mt-1 text-[11px] text-emerald-400/90">Primary saved</div>
-                          ) : (
-                            <div className="mt-1 text-[11px] text-slate-500">Open editor and run Test.</div>
-                          )}
-                          {testState[primaryItem.id] ? (
-                            <div className={`mt-1 text-xs ${testState[primaryItem.id].ok ? "text-emerald-400" : "text-red-400"}`}>{testState[primaryItem.id].message}</div>
+                          {testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
+                            <div className="mt-1 text-xs text-red-400">{testState[primaryItem.id].message}</div>
                           ) : null}
                         </div>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -4153,8 +4249,8 @@ function ArrInstancesEditor(props: {
                         <div className="min-w-0">
                           <div className="text-sm font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
                           <div className="truncate font-mono text-[11px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
-                          {testState[secondaryItem.id] ? (
-                            <div className={`mt-1 text-xs ${testState[secondaryItem.id].ok ? "text-emerald-400" : "text-red-400"}`}>{testState[secondaryItem.id].message}</div>
+                          {testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
+                            <div className="mt-1 text-xs text-red-400">{testState[secondaryItem.id].message}</div>
                           ) : null}
                         </div>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -4204,11 +4300,12 @@ function ArrInstancesEditor(props: {
           })}
           </div>
           {slotPanel ? (() => {
-            const { arrType, slotIndex } = slotPanel;
+            const { arrType, slotIndex, isNew } = slotPanel;
             const item = slotFor(arrType, slotIndex);
             const status = testState[item.id];
             const roleLabel = slotIndex === 0 ? "Primary" : "Secondary";
             const serviceLabel = arrType === "radarr" ? "Radarr" : "Sonarr";
+            const slotCommitLabel = isNew ? `Add ${serviceLabel}` : `Save ${serviceLabel}`;
             const detailsComplete =
               String(item.url || "").trim().length > 0 && String(item.api_key || "").trim().length > 0;
             const dupBlocks = Boolean(slotPanelDupPeer);
@@ -4248,36 +4345,19 @@ function ArrInstancesEditor(props: {
                     <div>
                       <label className="block text-xs font-semibold text-slate-300 mb-1">Server name</label>
                       <input
-                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-violet-500/40"
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.label}
-                        onFocus={() => {
-                          labelAtFocusRef.current[`${arrType}-${slotIndex}`] = String(item.label || "");
-                        }}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { label: e.target.value })}
-                        onBlur={() => {
-                          const slotKey = `${arrType}-${slotIndex}`;
-                          const before = labelAtFocusRef.current[slotKey] ?? "";
-                          const after = String(item.label || "").trim();
-                          if (before.trim() === after) return;
-                          if (!String(item.url || "").trim() || !String(item.api_key || "").trim()) return;
-                          setLabelChangeNotice({
-                            arrType,
-                            slotIndex,
-                            instance_key: normalizeInstanceKey(String(item.instance_key || "")),
-                            instance_id: String(item.instance_id || ""),
-                            newLabel: after,
-                          });
-                        }}
                         placeholder="Instance name (e.g. Radarr 4K)"
                       />
                     </div>
                     <div>
                       <label className="block text-xs font-semibold text-slate-300 mb-1">URL &amp; port</label>
                       <input
-                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-violet-500/40"
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.url}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
-                        placeholder="https://host:7878"
+                        placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
                       />
                       {slotPanelDupPeer ? (
                         <p className="mt-2 text-xs text-red-400">
@@ -4288,18 +4368,27 @@ function ArrInstancesEditor(props: {
                     <div>
                       <label className="block text-xs font-semibold text-slate-300 mb-1">API key</label>
                       <input
-                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-violet-500/40"
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.api_key}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
                         placeholder="API key"
                         type="password"
                       />
                     </div>
-                    {status ? (
-                      <div className={`text-sm ${status.ok ? "text-green-400" : "text-red-400"}`}>{status.message}</div>
-                    ) : null}
                   </div>
-                  <div className="flex flex-wrap items-stretch justify-between gap-2 p-4 border-t border-[#424753]/40 shrink-0 bg-[#141a24]">
+                  <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
+                    <div
+                      className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-xs text-red-400"
+                      aria-live="polite"
+                    >
+                      {status && !slotFooterTestBusy && status.message !== "Testing..." && !status.ok ? (
+                        <>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>error</span>
+                          <span className="line-clamp-2 leading-snug">{status.message}</span>
+                        </>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-stretch justify-between gap-2 px-4 pb-4 pt-1">
                     <button
                       type="button"
                       onClick={handleSlotPanelCancel}
@@ -4310,6 +4399,11 @@ function ArrInstancesEditor(props: {
                     <button
                       type="button"
                       disabled={testDisabled}
+                      title={
+                        status?.ok && !slotFooterTestBusy && status.message !== "Testing..."
+                          ? status.message
+                          : "Run connection test"
+                      }
                       onClick={() => {
                         void (async () => {
                           setSlotFooterTestBusy(true);
@@ -4318,18 +4412,40 @@ function ArrInstancesEditor(props: {
                           setSlotFooterTestBusy(false);
                         })();
                       }}
-                      className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-amber-500 text-slate-900 hover:bg-amber-400 border border-amber-400/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
+                      className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
+                        status?.ok && !slotFooterTestBusy && status.message !== "Testing..."
+                          ? "border-emerald-500/70 bg-emerald-600/15 text-emerald-300 hover:border-emerald-400/90 hover:bg-emerald-600/25"
+                          : "border-amber-400/80 bg-amber-500 text-slate-900 hover:bg-amber-400 disabled:hover:bg-amber-500"
+                      }`}
                     >
-                      {slotFooterTestBusy ? "Testing..." : "Test"}
+                      {slotFooterTestBusy ? (
+                        <>
+                          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 18 }}>
+                            progress_activity
+                          </span>
+                          <span>Testing…</span>
+                        </>
+                      ) : status?.ok && status.message !== "Testing..." ? (
+                        <span className="material-symbols-outlined shrink-0" style={{ fontSize: 22 }}>
+                          check_circle
+                        </span>
+                      ) : (
+                        <>
+                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>wifi</span>
+                          <span>Test</span>
+                        </>
+                      )}
                     </button>
                     <button
                       type="button"
                       disabled={saveDisabled}
                       onClick={onSlotPanelSaveClick}
-                      className="min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-blue-600 text-white hover:bg-blue-500 border border-blue-500/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
+                      aria-label={slotCommitLabel}
+                      className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      Save
+                      {slotCommitLabel}
                     </button>
+                  </div>
                   </div>
                 </div>
               </div>
@@ -4487,12 +4603,26 @@ function LibraryPathsForm(props: {
             )}
           </div>
         )}
-        {test && (
-          <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
-            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
-            {test.message}
+        {testTarget ? (
+          <div
+            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-xs ${
+              test && test.message !== "Testing..." ? (test.ok ? "text-green-400" : "text-red-400") : "text-slate-400"
+            }`}
+            aria-live="polite"
+          >
+            {test && test.message === "Testing..." ? (
+              <>
+                <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                <span>Testing…</span>
+              </>
+            ) : test ? (
+              <>
+                <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+                <span className="leading-snug">{test.message}</span>
+              </>
+            ) : null}
           </div>
-        )}
+        ) : null}
       </div>
     );
   }
@@ -4518,7 +4648,7 @@ function LibraryPathsForm(props: {
   ) : null;
 
   const profileBlock = profiles.length ? (
-    <div className="rounded-xl border border-[#424753]/40 bg-[#0f1419]/55 px-4 py-4">
+    <div className={`${UI_SECTION_FRAME_CLASS} px-4 py-4`}>
       <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {profiles.map((field) => (
@@ -4535,7 +4665,7 @@ function LibraryPathsForm(props: {
   ) : null;
 
   const overridesBlock = overrides.length ? (
-    <div className={props.layout === "settings" ? "rounded-lg border border-[#424753]/30 bg-[#0f1419]/50 px-4 py-3" : "rounded-lg border border-[#424753]/30 bg-[#0f1419]/50 px-3 py-3"}>
+    <div className={props.layout === "settings" ? `${UI_SECTION_FRAME_CLASS} px-4 py-3` : `${UI_SECTION_FRAME_CLASS} px-3 py-3`}>
       <button
         type="button"
         onClick={() => setOverridesOpen((o) => !o)}
@@ -4673,6 +4803,44 @@ function StatusUpdatesSectionIntro(props: { variant: StatusUpdatesIntroVariant; 
   );
 }
 
+/** Status Updates choice: copy lives here; `PLACEHOLDER_STATUS_UPDATES.description` in app_config is intentionally empty. */
+function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">All</span>
+        {" — "}When a placeholder plays, show search and download progress in the player.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Request only</span>
+        {" — "}Keep player text simple; show &quot;Request&quot; so placeholders are easy to spot.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Off</span>
+        {" — "}Do not show placeholder status in media players.
+      </li>
+    </ul>
+  );
+}
+
+/** Calendar toggle: copy lives here; `ENABLE_COMING_SOON_COUNTDOWN.description` in app_config is intentionally empty. */
+function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">Enabled</span>
+        {" — "}Placeholders show a countdown until release (for example, &quot;Airing in 12 days&quot;).
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Disabled</span>
+        {" — "}Future placeholders always show &quot;Coming soon&quot;.
+      </li>
+    </ul>
+  );
+}
+
 /** Keep sentences in sync with `STARTUP_SYNC_MODE` description in `services/app_config.py`. */
 function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
@@ -4701,7 +4869,7 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
       <p className="ui-field-description text-slate-400 leading-relaxed">
         Placeholdarr operations are relatively quick. However, media player libraries still need to scan and update, which can take some time for large library changes.
       </p>
-      <p className="ui-field-description text-slate-400 leading-relaxed">
+      <p className="ui-field-description ui-field-description-accent3 leading-relaxed">
         A full sync will automatically start in the background at the completion of this setup.
       </p>
     </div>
@@ -4757,8 +4925,9 @@ function SettingsPanel(props: {
     );
   }
 
-  const sectionNames = SETTINGS_SECTION_ORDER.filter((name) => props.payload.sections.some((s) => s.name === name));
-  const active = props.payload.sections.find((s) => s.name === props.activeSection) || props.payload.sections[0];
+  const payload = props.payload;
+  const sectionNames = SETTINGS_SECTION_ORDER.filter((name) => payload.sections.some((s) => s.name === name));
+  const active = payload.sections.find((s) => s.name === props.activeSection) || payload.sections[0];
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
 
   const SECTION_ICONS: Record<string, string> = {
@@ -4784,10 +4953,8 @@ function SettingsPanel(props: {
     setTestResults((prev) => ({ ...prev, [field.key]: result }));
   }
 
-  const failedConnectionTests = Object.entries(testResults).filter(([, result]) => result && !result.ok);
-
   function renderStandardField(field: SettingsField) {
-    if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
+    if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
     const value = props.values[field.key];
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
@@ -4807,12 +4974,20 @@ function SettingsPanel(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
-            {field.description && !(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") ? (
-              field.key === "STARTUP_SYNC_MODE" ? (
+            {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
+              (field.key === "STARTUP_SYNC_MODE" ? (
                 <StartupSyncModeDescription spacing="settings" />
-              ) : (
+              ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
+                <PlaceholderStatusUpdatesDescription spacing="settings" />
+              ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
+                <ComingSoonCountdownDescription spacing="settings" />
+              ) : field.description ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
-              )
+              ) : null)}
+            {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
+              <p className="ui-field-description ui-field-description-accent3 mt-2 leading-relaxed">
+                If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
+              </p>
             ) : null}
           </div>
         </div>
@@ -4861,12 +5036,26 @@ function SettingsPanel(props: {
           </div>
         )}
 
-        {test && (
-          <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
-            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
-            {test.message}
+        {testTarget ? (
+          <div
+            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-xs ${
+              test && test.message !== "Testing..." ? (test.ok ? "text-green-400" : "text-red-400") : "text-slate-400"
+            }`}
+            aria-live="polite"
+          >
+            {test && test.message === "Testing..." ? (
+              <>
+                <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                <span>Testing…</span>
+              </>
+            ) : test ? (
+              <>
+                <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+                <span className="leading-snug">{test.message}</span>
+              </>
+            ) : null}
           </div>
-        )}
+        ) : null}
       </div>
     );
   }
@@ -4924,12 +5113,6 @@ function SettingsPanel(props: {
             <div className="px-6 py-4 border-b border-[#424753]/30">
               <h2 className="text-base font-bold text-white font-headline">{active.name}</h2>
             </div>
-            {failedConnectionTests.length ? (
-              <div className="mx-6 mt-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
-                <div className="text-[11px] font-headline uppercase tracking-widest text-red-300">Connection Warning</div>
-                <p className="mt-1 text-xs text-red-200/90">One or more configured services could not be reached. Review the failed test results below and correct the URL or API key.</p>
-              </div>
-            ) : null}
             <div className="divide-y divide-[#424753]/20">
               {active.name === "Paths" ? (
                 <LibraryPathsForm
@@ -4975,7 +5158,7 @@ function SettingsPanel(props: {
 
                   {/* Placeholder search mode dropdowns */}
                   <div className="px-6 pb-5">
-                    <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
                         <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
                         <p className="ui-field-description mx-auto max-w-2xl">When a placeholder plays, Placeholdarr triggers a search in the corresponding ARR app. Choose which instance to search.</p>
@@ -5031,7 +5214,7 @@ function SettingsPanel(props: {
                         </div>
                       </div>
                     </div>
-                    <div className="mt-3 rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+                    <div className={`mt-3 ${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
                         <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
                         <p className="ui-field-description mx-auto max-w-2xl">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
@@ -5097,11 +5280,11 @@ function SettingsPanel(props: {
                                 "Fallback is not needed because every unlocked search behavior already searches both instances."
                               ) : canUseAnySecondaryBehavior ? (
                                 <div className="mx-auto w-full max-w-md text-left">
-                                  <p>When enabled, the other instance is searched automatically if:</p>
+                                  <p>When enabled, the non-selected instance is searched automatically if:</p>
                                   <ul className="mt-2 list-disc space-y-1.5 pl-4">
                                     <li>The selected instance doesn&apos;t have the content added (immediate fallback search), or</li>
                                     <li>
-                                      The content isn&apos;t imported before the fallback timeout (e.g. content not found, index/download errors, etc.)
+                                      The content isn&apos;t imported before the fallback timeout (e.g. content not found, indexer/download errors, etc.)
                                     </li>
                                   </ul>
                                 </div>
@@ -5157,7 +5340,7 @@ function SettingsPanel(props: {
                               <input
                                 className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
                                 type="text"
-                                value="Enable fallback search to set timeout."
+                                value="Enable fallback search."
                                 disabled
                               />
                             ) : (
@@ -5185,7 +5368,7 @@ function SettingsPanel(props: {
                   {active.fields.map((field) => renderStandardField(field))}
                 </>
               ) : active.name === "Library sync" ? (
-                <div className="mx-6 my-5 rounded-lg border border-[#424753]/30 bg-[#0f1419]/60 overflow-hidden divide-y divide-[#424753]/20">
+                <div className={`mx-6 my-5 ${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
                   {active.fields.map((field) => renderStandardField(field))}
                 </div>
               ) : (
@@ -5252,12 +5435,6 @@ const ONBOARDING_MEDIA_VISUAL: Record<
   },
 };
 
-const ONBOARDING_MEDIA_TAGLINE: Record<(typeof ONBOARDING_MEDIA_CARDS)[number]["id"], string> = {
-  plex: "Libraries, API token, and Tautulli for playback signals.",
-  jellyfin: "Connect with URL and API key. Webhooks come later.",
-  emby: "Connect with URL and API key. Webhooks come later.",
-};
-
 const ONBOARDING_ARR_VISUAL: Record<"radarr" | "sonarr", { iconSrc: string; well: CSSProperties }> = {
   radarr: {
     iconSrc: radarrIcon,
@@ -5276,6 +5453,57 @@ const ONBOARDING_ARR_VISUAL: Record<"radarr" | "sonarr", { iconSrc: string; well
     },
   },
 };
+
+const TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE = `{
+    "event": "playback.start",
+    "media": {
+        "type": "{media_type}",
+        "title": "{title}",
+        "show_name": "{show_name}",
+        "episode_name": "{episode_name}",
+        "season_num": "{season_num}",
+        "episode_num": "{episode_num}",
+        "year": "{year}",
+        "ids": {
+            "plex": "{rating_key}",
+            "tmdb": "{themoviedb_id}",
+            "tvdb": "{thetvdb_id}",
+            "imdb": "{imdb_id}"
+        },
+        "file_info": {
+            "path": "{file}"
+        }
+    }
+}`;
+
+const JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE = `{
+  "event": "playback.start",
+  "ItemId": "{{ItemId}}",
+  "UserId": "{{UserId}}",
+  "Name": "{{Name}}",
+  "ItemType": "{{ItemType}}",
+  "SeriesName": "{{SeriesName}}",
+  "SeasonNumber": "{{SeasonNumber}}",
+  "EpisodeNumber": "{{EpisodeNumber}}",
+  "Provider_tmdb": "{{Provider_tmdb}}",
+  "Provider_tvdb": "{{Provider_tvdb}}",
+  "Provider_imdb": "{{Provider_imdb}}",
+  "Year": "{{Year}}",
+  "NotificationType": "{{NotificationType}}"
+}`;
+
+type PlaybackWebhookServiceId = "tautulli" | "jellyfin" | "emby";
+
+function mediaCardPlaybackWebhookConfig(cardId: (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]): {
+  serviceId: PlaybackWebhookServiceId;
+  instanceKeyField: string;
+  defaultKey: string;
+} | null {
+  if (cardId === "plex") return { serviceId: "tautulli", instanceKeyField: "TAUTULLI_INSTANCE_KEY", defaultKey: "tautulli" };
+  if (cardId === "jellyfin") return { serviceId: "jellyfin", instanceKeyField: "JELLYFIN_INSTANCE_KEY", defaultKey: "jellyfin" };
+  if (cardId === "emby") return { serviceId: "emby", instanceKeyField: "EMBY_INSTANCE_KEY", defaultKey: "emby" };
+  return null;
+}
 
 /** Plex × Tautulli on the media step card: smaller wells + `h-8` marks so the row fits the panel with side padding. */
 const MEDIA_PLEX_PAIR_WELL_FRAME = "flex items-center justify-center rounded-2xl";
@@ -5334,6 +5562,191 @@ function mediaCardConnectionDetailsComplete(
   return Boolean(credField?.secret && credField.has_saved_value);
 }
 
+/**
+ * Simularr **Spectral Data** palette (marketing guide) — recorded for hero + future UI:
+ * - **SLATE** (primary dark) `#0F172A` → token `surfacePanel`
+ * - **CYBER YELLOW** (accent) `#FBBF24` → token `accent`
+ * - **SURFACE** (void base) `#0B1326` → token `chromePage`
+ * - **Spectral cyan** (marketing) → `SIMULARR_SPECTRAL_CYAN_HEX` in `brandSemanticTheme.ts` (`#22D3EE`; UI ice is `accentIce` `#7DD3FC`)
+ *
+ * Variants:
+ * - `blueWhite` — horizontal multiply: **CYBER YELLOW** (`accent`) at L/R edges → **void** (`chromePage`) center; lockup **CYBER YELLOW** (`accent`).
+ * - `yellowBlue` — yellow multiply (`accent`), lockup **SLATE** (`surfacePanel`) — original logo / wordmark blue.
+ */
+const ONBOARDING_HERO_BANNER_VARIANT: "blueWhite" | "yellowBlue" = "blueWhite";
+
+/** Raster logo → Simularr SLATE / `surfacePanel` (`#0F172A`). Outline: thin `sim.accent` ring on wrapper (yellowBlue). */
+const ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE =
+  "object-contain [filter:brightness(0)_saturate(100%)_invert(10%)_sepia(22%)_saturate(4200%)_hue-rotate(191deg)_brightness(0.96)_contrast(1.04)]";
+
+function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
+  const placeholdarrHeaderAccent = getBrandAccent("placeholdarr", "dark");
+  const simAccent = getBrandAccent("simularr", "dark");
+  const sim = getBrandSemanticTokens("simularr", "dark", simAccent);
+  const variant = ONBOARDING_HERO_BANNER_VARIANT;
+  const isYellow = variant === "yellowBlue";
+
+  const [wideHeroGrid, setWideHeroGrid] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(min-width: 520px)").matches : false,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 520px)");
+    const onChange = () => setWideHeroGrid(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  const heroPosterSrc = (index: number) => {
+    const base = WIZARD_HEADER_POSTER_PATHS[index];
+    if (!isYellow) return base;
+    const slots = wideHeroGrid ? ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE : ONBOARDING_HERO_LIGHT_CENTER_SLOTS_NARROW;
+    const slotIndex = slots.findIndex((cell) => cell === index);
+    if (slotIndex === -1) return base;
+    return ONBOARDING_HERO_LIGHT_CENTER_POSTERS[slotIndex];
+  };
+
+  const posterImgClass = isYellow
+    ? "h-full w-full object-cover grayscale contrast-[1.05] brightness-[1.08]"
+    : "h-full w-full object-cover grayscale contrast-[1.06] brightness-[1.04]";
+  const posterGridGapColor = sim.chromePage;
+  const slateLogoBrandYellowOutlineStyle: CSSProperties | undefined = isYellow
+    ? {
+        filter: [
+          `drop-shadow(1.5px 0 0 ${sim.accent})`,
+          `drop-shadow(-1.5px 0 0 ${sim.accent})`,
+          `drop-shadow(0 1.5px 0 ${sim.accent})`,
+          `drop-shadow(0 -1.5px 0 ${sim.accent})`,
+        ].join(' '),
+      }
+    : undefined;
+
+  return (
+    <div
+      className="relative mb-5 flex min-h-[220px] shrink-0 flex-col overflow-x-hidden overflow-y-visible pb-4 pt-3 sm:mb-6 sm:min-h-[240px] sm:pb-5 sm:pt-4"
+      style={{ width: "100vw", marginLeft: "calc(50% - 50vw)" }}
+    >
+      <div className="absolute inset-0" aria-hidden>
+        <div
+          className="absolute inset-0 grid grid-cols-4 grid-rows-4 min-[520px]:grid-cols-8 min-[520px]:grid-rows-2 gap-px"
+          style={{ backgroundColor: posterGridGapColor }}
+        >
+          {WIZARD_HEADER_POSTER_PATHS.map((_path, i) => (
+            <div key={`${i}-${heroPosterSrc(i)}`} className="relative min-h-0 min-w-0 overflow-hidden">
+              <img
+                src={`${TMDB_POSTER_IMG_BASE}${heroPosterSrc(i)}`}
+                alt=""
+                className={posterImgClass}
+                loading="lazy"
+                decoding="async"
+              />
+            </div>
+          ))}
+        </div>
+        {isYellow ? (
+          <div
+            className="pointer-events-none absolute inset-0 mix-blend-multiply opacity-[0.58]"
+            style={{ backgroundColor: sim.accent }}
+            aria-hidden
+          />
+        ) : (
+          <div
+            className="pointer-events-none absolute inset-0 mix-blend-multiply opacity-[0.76]"
+            style={{
+              background: `linear-gradient(90deg,
+                ${alphaColor(sim.accent, 1)} 0%,
+                ${alphaColor(sim.accent, 0.95)} 25%,
+                ${alphaColor(sim.chromePage, 1)} 30%,
+                ${alphaColor(sim.chromePage, 1)} 70%,
+                ${alphaColor(sim.accent, 0.95)} 75%,
+                ${alphaColor(sim.accent, 1)} 100%)`,
+            }}
+            aria-hidden
+          />
+        )}
+      </div>
+      {isYellow ? (
+        <>
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `linear-gradient(to bottom, ${alphaColor(simAccent.hoverHex, 0.42)}, ${alphaColor(sim.accent, 0.14)}, ${alphaColor(sim.chromePage, 0.68)})`,
+            }}
+            aria-hidden
+          />
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `radial-gradient(ellipse 58% 70% at 50% 38%, transparent 0%, transparent 20%, ${alphaColor(simAccent.hoverHex, 0.32)} 52%, ${alphaColor(sim.chromePage, 0.78)} 100%)`,
+            }}
+            aria-hidden
+          />
+        </>
+      ) : (
+        <>
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `linear-gradient(to bottom, ${alphaColor(sim.chromePage, 0.22)}, ${alphaColor(sim.chromePage, 0.06)}, ${alphaColor(sim.chromePage, 0.26)})`,
+            }}
+            aria-hidden
+          />
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `radial-gradient(ellipse 72% 88% at 50% 44%, transparent 0%, transparent 48%, ${alphaColor(sim.chromePage, 0.1)} 78%, ${alphaColor(sim.chromePage, 0.28)} 100%)`,
+            }}
+            aria-hidden
+          />
+        </>
+      )}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-[9] h-[5.25rem] sm:h-28"
+        style={{
+          background: `linear-gradient(to top, ${alphaColor(props.footerBlendHex, 0.97)} 0%, ${alphaColor(props.footerBlendHex, 0.65)} 28%, ${alphaColor(props.footerBlendHex, 0.22)} 62%, transparent 100%)`,
+        }}
+      />
+      <div className="relative z-10 mx-auto flex w-full flex-col items-center justify-center overflow-visible px-4 py-10 sm:py-12">
+        <div className="relative z-10 flex flex-col items-center justify-center gap-2.5 px-4 text-center sm:gap-3.5">
+          <div className="inline-block" style={slateLogoBrandYellowOutlineStyle}>
+            {isYellow ? (
+              <BrandLogo
+                brand="placeholdarr"
+                accentHex={placeholdarrHeaderAccent.hex}
+                className={`h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center sm:h-[5rem] sm:max-w-[15.5rem] ${ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE}`}
+              />
+            ) : (
+              <img
+                src={placeholdarrLogoYellow}
+                alt=""
+                aria-hidden
+                draggable={false}
+                className="block h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center select-none sm:h-[5rem] sm:max-w-[15.5rem]"
+              />
+            )}
+          </div>
+          <span
+            className={`font-headline text-2xl font-black tracking-tight sm:text-3xl [paint-order:stroke_fill] ${
+              isYellow
+                ? "drop-shadow-[0_2px_6px_rgba(0,0,0,0.35)]"
+                : "[-webkit-text-stroke:1.25px_rgba(15,23,42,0.55)] sm:[-webkit-text-stroke:1.5px_rgba(15,23,42,0.58)] drop-shadow-[0_1px_3px_rgba(0,0,0,0.45)]"
+            }`}
+            style={{
+              color: isYellow ? sim.surfacePanel : sim.accent,
+              ...(isYellow
+                ? { WebkitTextStroke: `1.75px ${sim.accent}`, paintOrder: 'stroke fill' as const }
+                : {}),
+            }}
+          >
+            Placeholdarr
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OnboardingWizard(props: {
   payload: SettingsPayload;
   stepIndex: number;
@@ -5353,9 +5766,15 @@ function OnboardingWizard(props: {
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const stepContentRef = useRef<HTMLDivElement | null>(null);
   const step = WIZARD_STEPS[props.stepIndex];
-  const accent = getBrandAccent(props.brand, props.themeMode);
+  /** Setup runs before theme toggle is exposed — keep wizard chrome and tokens on dark. */
+  const wizardUiTheme: ThemeMode = "dark";
+  const accent = getBrandAccent(props.brand, wizardUiTheme);
+  const wizardSemantic = getBrandSemanticTokens(props.brand, wizardUiTheme, accent);
+  const wizardShellStyle = {
+    ...(semanticTokensToCssVars(wizardSemantic) as CSSProperties),
+    backgroundImage: getStudioDarkBackdrop(props.brand, accent, wizardSemantic),
+  } as CSSProperties;
   const arrInstances = parseArrInstancesFromValues(props.values);
-  const hasArrInstances = arrInstances.length > 0;
   const hasRadarrSecondary = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
   const hasSonarrSecondary = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
   const uiHasRadarrSecondary = hasRadarrSecondary || Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED);
@@ -5391,6 +5810,10 @@ function OnboardingWizard(props: {
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
   const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
+    serviceId: PlaybackWebhookServiceId;
+    instanceParam: string;
+  } | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
 
@@ -5405,7 +5828,6 @@ function OnboardingWizard(props: {
     if (step.key === "paths") return hasLibraryRoot;
     if (step.key === "media") return hasConfirmedMediaConnection;
     if (step.key === "arr") return hasConfirmedArrConnection;
-    if (step.key === "webhooks") return hasArrInstances;
     return true;
   })();
 
@@ -5513,10 +5935,10 @@ function OnboardingWizard(props: {
   }
 
   function wizardFieldRow(field: SettingsField) {
-    if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
+    if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
-    const focus = getBrandFocusClass(props.brand, props.themeMode);
+    const focus = getBrandFocusClass(props.brand, wizardUiTheme);
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
@@ -5525,12 +5947,20 @@ function OnboardingWizard(props: {
     return (
       <div key={field.key} className={rowMuted ? "opacity-50" : undefined}>
         <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
-        {field.description && !(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") ? (
-          field.key === "STARTUP_SYNC_MODE" ? (
+        {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
+          (field.key === "STARTUP_SYNC_MODE" ? (
             <StartupSyncModeDescription spacing="wizard" />
-          ) : (
+          ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
+            <PlaceholderStatusUpdatesDescription spacing="wizard" />
+          ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
+            <ComingSoonCountdownDescription spacing="wizard" />
+          ) : field.description ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
-          )
+          ) : null)}
+        {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
+          <p className="ui-field-description ui-field-description-accent3 mb-2 mt-1 leading-relaxed">
+            If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
+          </p>
         ) : null}
         {field.type === "bool" ? (
           <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
@@ -5575,32 +6005,40 @@ function OnboardingWizard(props: {
             )}
           </div>
         )}
-        {test && (
-          <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
-            <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
-            <span>{test.message}</span>
+        {testTarget ? (
+          <div
+            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-xs ${
+              test && test.message !== "Testing..." ? (test.ok ? "text-green-400" : "text-red-400") : "text-slate-400"
+            }`}
+            aria-live="polite"
+          >
+            {test && test.message === "Testing..." ? (
+              <>
+                <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 14 }}>progress_activity</span>
+                <span>Testing…</span>
+              </>
+            ) : test ? (
+              <>
+                <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
+                <span className="leading-snug">{test.message}</span>
+              </>
+            ) : null}
           </div>
-        )}
+        ) : null}
       </div>
     );
   }
 
-  const failedConnectionTests = Object.entries(testResults).filter(([, result]) => result && !result.ok);
-
-  const brandLabel = BRAND_OPTIONS.find((b) => b.value === props.brand)?.label ?? "Placeholdarr";
-
   return (
     <>
-      <div className="min-h-screen flex flex-col bg-[#070b12] text-slate-200 relative overflow-x-hidden">
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-indigo-950/45 via-[#070b12] to-black" />
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-18%,rgba(120,80,200,0.2),transparent)]" />
-        <div className="relative z-10 flex flex-1 min-h-0 flex-col items-center px-3 py-5 sm:py-8">
-          <div className="mb-5 sm:mb-6 text-center px-2 max-w-lg">
-            <div className="text-[10px] font-headline uppercase tracking-[0.2em] text-slate-500">{brandLabel}</div>
-            <h1 className="text-2xl sm:text-3xl font-black text-white font-headline tracking-tight mt-1">Setup</h1>
-            <p className="text-sm text-slate-400 mt-1">Configure integrations — the dashboard opens when you finish.</p>
-          </div>
-          <div className="w-full max-w-3xl flex-1 min-h-0 flex flex-col rounded-2xl border border-white/10 bg-[#121722]/93 backdrop-blur-md shadow-2xl overflow-hidden max-h-[min(900px,calc(100vh-7rem))]">
+      <div
+        className={`brand-theme-scope theme-dark layout-${props.brand}-dark min-h-screen flex flex-col relative overflow-x-hidden font-brand-body text-slate-200`}
+        style={wizardShellStyle}
+      >
+        <div className="relative z-10 flex flex-1 min-h-0 w-full flex-col items-center pb-5 sm:pb-8">
+          <OnboardingWizardHeroBanner footerBlendHex={wizardSemantic.chromePage} />
+          <div className="flex w-full max-w-3xl flex-1 min-h-0 flex-col px-3">
+          <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-white/10 bg-[#121722]/93 backdrop-blur-md shadow-2xl overflow-hidden max-h-[min(900px,calc(100vh-7rem))]">
         <div className="px-6 sm:px-8 py-4 sm:py-5 border-b border-[#424753]/30 shrink-0">
           <div className="flex items-center gap-0">
             {WIZARD_STEPS.map((s, i) => {
@@ -5626,20 +6064,12 @@ function OnboardingWizard(props: {
 
         {/* Fields */}
         <div ref={stepContentRef} className="px-6 sm:px-8 py-6 overflow-y-auto flex-1 min-h-0">
-          {failedConnectionTests.length ? (
-            <div className="mb-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
-              <div className="text-[11px] font-headline uppercase tracking-widest text-red-300">Connection warning</div>
-              <p className="mt-1 text-xs leading-relaxed text-red-200/90">
-                One or more configured services could not be reached. Review the failed test results in this step and correct the URL or API key.
-              </p>
-            </div>
-          ) : null}
           {step.key === "paths" ? (
             <LibraryPathsForm
               fields={fields}
               values={props.values}
               brand={props.brand}
-              themeMode={props.themeMode}
+              themeMode={wizardUiTheme}
               accent={accent}
               layout="wizard"
               onValueChange={props.onChange}
@@ -5660,11 +6090,12 @@ function OnboardingWizard(props: {
                     const address = urlField ? String(props.values[urlField.key] ?? "").trim() : "";
                     const movieLib = card.id === "plex" ? String(props.values.PLEX_MOVIE_SECTION_ID ?? "").trim() : "";
                     const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
+                    const mediaDetailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
 
                     return (
                       <div
                         key={card.id}
-                        className="group relative flex min-h-[260px] flex-col rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.07] to-white/[0.02] p-6 shadow-[0_1px_0_rgba(255,255,255,0.06)_inset] backdrop-blur-md transition duration-200 hover:border-white/[0.14] hover:from-white/[0.09] hover:shadow-[0_0_40px_-12px_rgba(99,102,241,0.35)]"
+                        className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200`}
                       >
                         <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
                           {card.id === "plex" ? (
@@ -5695,20 +6126,25 @@ function OnboardingWizard(props: {
                           )}
                         </div>
                         <h4 className="mt-5 w-full text-center text-lg font-bold tracking-tight text-white font-headline">{card.title}</h4>
-                        <p className="ui-field-description mt-1.5 text-center">{ONBOARDING_MEDIA_TAGLINE[card.id]}</p>
 
                         {!enabled ? (
                           <button
                             type="button"
+                            aria-label={`Connect ${card.title}`}
                             onClick={() => {
                               mediaPanelOpenedViaAddRef.current = true;
+                              const snap: Record<string, unknown> = {};
+                              for (const k of card.keys) {
+                                snap[k] = props.values[k];
+                              }
+                              mediaPanelSnapshotRef.current = snap;
                               props.onChange(card.enabledKey, true);
                               setMediaPanelTestPassed(false);
                               setMediaPanel(card.id);
                             }}
                             className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-sm font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09] active:scale-[0.99]"
                           >
-                            Connect {card.title}
+                            Connect
                           </button>
                         ) : (
                           <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
@@ -5739,11 +6175,13 @@ function OnboardingWizard(props: {
                                 </>
                               ) : null}
                             </dl>
-                            {urlTest ? (
-                              <p className={`mt-2 text-xs ${urlTest.ok ? "text-emerald-400/95" : "text-red-400"}`}>{urlTest.message}</p>
-                            ) : (
-                              <p className="ui-field-description mt-2">Configure to test the connection.</p>
-                            )}
+                            <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-xs">
+                              {urlTest && !urlTest.ok ? (
+                                <p className="text-red-400">{urlTest.message}</p>
+                              ) : !mediaDetailsComplete ? (
+                                <p className="ui-field-description">Add URL and credentials in Configure.</p>
+                              ) : null}
+                            </div>
                             <div className="mt-auto flex flex-col gap-2 pt-4">
                               <button
                                 type="button"
@@ -5759,10 +6197,25 @@ function OnboardingWizard(props: {
                                   setMediaPanelTestPassed(Boolean(ready && uk && testResults[uk]?.ok));
                                   setMediaPanel(card.id);
                                 }}
-                                className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2 text-xs font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
+                                className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
                               >
                                 Configure
                               </button>
+                              {mediaCardPlaybackWebhookConfig(card.id) ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const cfg = mediaCardPlaybackWebhookConfig(card.id);
+                                    if (!cfg) return;
+                                    const instanceParam =
+                                      String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+                                    setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
+                                  }}
+                                  className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                >
+                                  Webhook URL
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
                                 onClick={() => {
@@ -5795,7 +6248,7 @@ function OnboardingWizard(props: {
                   setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                 }}
               />
-              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                 <div className="text-center">
                   <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
                   <p className="mx-auto max-w-2xl text-xs text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
@@ -5804,7 +6257,7 @@ function OnboardingWizard(props: {
                   <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
                       onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                       disabled={!canUseRadarrSecondaryBehavior}
@@ -5823,7 +6276,7 @@ function OnboardingWizard(props: {
                   <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
                       onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                       disabled={!canUseSonarrSecondaryBehavior}
@@ -5841,7 +6294,7 @@ function OnboardingWizard(props: {
                   </div>
                 </div>
               </div>
-              <div className="rounded-lg border border-[#424753]/30 bg-[#0f1419] p-4 space-y-4">
+              <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                 <div className="text-center">
                   <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
                   <p className="mx-auto max-w-2xl text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
@@ -5850,7 +6303,7 @@ function OnboardingWizard(props: {
                   <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                       onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
                       disabled={!canUseRadarrSecondaryBehavior}
@@ -5870,7 +6323,7 @@ function OnboardingWizard(props: {
                   <div className="min-w-0">
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                       onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
                       disabled={!canUseSonarrSecondaryBehavior}
@@ -5897,11 +6350,11 @@ function OnboardingWizard(props: {
                           "Fallback is not needed because every unlocked search behavior already searches both instances."
                         ) : canUseAnySecondaryBehavior ? (
                           <div className="mx-auto w-full max-w-md text-left">
-                            <p>When enabled, the other source is searched automatically if:</p>
+                            <p>When enabled, the non-selected source is searched automatically if:</p>
                             <ul className="mt-2 list-disc space-y-1.5 pl-4">
                               <li>The selected source doesn&apos;t have the content added (immediate fallback search), or</li>
                               <li>
-                                The content isn&apos;t imported before the fallback timeout (e.g. content not found, index/download errors, etc.)
+                                The content isn&apos;t imported before the fallback timeout (e.g. content not found, indexer/download errors, etc.)
                               </li>
                             </ul>
                           </div>
@@ -5930,7 +6383,7 @@ function OnboardingWizard(props: {
                       <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
                       {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
                         <input
-                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-sm tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-sm tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)}`}
                           type="text"
                           inputMode="numeric"
                           maxLength={3}
@@ -5957,7 +6410,7 @@ function OnboardingWizard(props: {
                         <input
                           className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
                           type="text"
-                          value="Enable fallback search to set timeout."
+                          value="Enable fallback search."
                           disabled
                         />
                       ) : (
@@ -5973,286 +6426,18 @@ function OnboardingWizard(props: {
                 </div>
               </div>
             </div>
-          ) : step.key === "webhooks" ? (() => {
-            const instances = arrInstances;
-            const webhookBaseUrl = window.location.origin;
-            const hasArrInstances = instances.length > 0;
-            const tautulliPayloadTemplate = `{
-    "event": "playback.start",
-    "media": {
-        "type": "{media_type}",
-        "title": "{title}",
-        "show_name": "{show_name}",
-        "episode_name": "{episode_name}",
-        "season_num": "{season_num}",
-        "episode_num": "{episode_num}",
-        "year": "{year}",
-        "ids": {
-            "plex": "{rating_key}",
-            "tmdb": "{themoviedb_id}",
-            "tvdb": "{thetvdb_id}",
-            "imdb": "{imdb_id}"
-        },
-        "file_info": {
-            "path": "{file}"
-        }
-    }
-}`;
-            const jellyfinPayloadTemplate = `{
-  "event": "playback.start",
-  "ItemId": "{{ItemId}}",
-  "UserId": "{{UserId}}",
-  "Name": "{{Name}}",
-  "ItemType": "{{ItemType}}",
-  "SeriesName": "{{SeriesName}}",
-  "SeasonNumber": "{{SeasonNumber}}",
-  "EpisodeNumber": "{{EpisodeNumber}}",
-  "Provider_tmdb": "{{Provider_tmdb}}",
-  "Provider_tvdb": "{{Provider_tvdb}}",
-  "Provider_imdb": "{{Provider_imdb}}",
-  "Year": "{{Year}}",
-  "NotificationType": "{{NotificationType}}"
-}`;
-
-            return (
-              <div className="space-y-6">
-                {!hasArrInstances && (
-                  <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-4 py-3">
-                    <div className="flex items-start gap-2">
-                      <span className="material-symbols-outlined shrink-0 text-yellow-500" style={{ fontSize: 18 }}>warning</span>
-                      <div>
-                        <div className="text-[11px] font-headline uppercase tracking-widest text-yellow-200/95">Setup required</div>
-                        <h3 className="mt-1 text-sm font-semibold text-yellow-100 font-headline">No ARR instances configured</h3>
-                        <p className="mt-1 text-xs leading-relaxed text-yellow-200/85">
-                          Configure at least one Radarr or Sonarr instance in ARR Services, then continue to enable webhook setup.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {hasArrInstances && (
-                  <>
-                    <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Webhook setup</h2>
-                    <div className="space-y-4">
-                        {instances.map((instance) => {
-                          const service = ARR_WEBHOOK_SERVICES.services.find((s) => s.id === instance.arr_type);
-                          if (!service) return null;
-                          const webhookUrlStable = `${webhookBaseUrl}/webhook?instance_id=${encodeURIComponent(String(instance.instance_id || ""))}`;
-                          const arrVis = ONBOARDING_ARR_VISUAL[instance.arr_type];
-                          return (
-                            <div key={`steps-${instance.id}`} className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
-                              <div className="mb-2 flex items-center gap-2">
-                                <div
-                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
-                                  style={arrVis.well}
-                                  aria-hidden
-                                >
-                                  <img src={arrVis.iconSrc} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
-                                </div>
-                                <div className="min-w-0 text-sm font-semibold text-white font-headline">
-                                  {service.name}
-                                  {instance.label ? ` — ${instance.label}` : ""}
-                                </div>
-                              </div>
-                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
-                                <li>Go to Settings → Webhooks → Create New Webhook</li>
-                                <li>
-                                  <div className="space-y-1">
-                                    <span className="text-slate-300">Set URL to</span>
-                                    <div className="flex items-start gap-2">
-                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
-                                        {webhookUrlStable}
-                                      </span>
-                                      <WebhookStepCopyButton
-                                        text={webhookUrlStable}
-                                        ariaLabel={`Copy ${service.name} webhook URL`}
-                                        className="mt-0.5"
-                                      />
-                                    </div>
-                                  </div>
-                                </li>
-                                <li>Select required events:</li>
-                              </ol>
-                              <div className="mt-2 ml-4 space-y-1">
-                                {service.triggers.filter((t) => t.required).map((trigger) => (
-                                  <div key={`${instance.id}-${trigger.event}`} className="flex items-center gap-2 text-xs text-slate-300">
-                                    <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check_box_outline_blank</span>
-                                    <span>{trigger.displayName}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-
-                    {/* Playback Webhooks (if applicable) */}
-                    {(Boolean(props.values.ENABLE_PLEX) || Boolean(props.values.ENABLE_JELLYFIN) || Boolean(props.values.ENABLE_EMBY)) && (
-                      <div className="border-t border-[#424753]/30 pt-6 space-y-4">
-                          <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>Playback webhooks</h2>
-                          <div className="space-y-4">
-                          {Boolean(props.values.ENABLE_PLEX) && (
-                            <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
-                              <div className="mb-2 flex items-center gap-2">
-                                <div
-                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
-                                  style={ONBOARDING_MEDIA_VISUAL.plex.well}
-                                  aria-hidden
-                                >
-                                  <img src={tautulliIcon} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
-                                </div>
-                                <div className="min-w-0 text-sm font-semibold text-white font-headline">Tautulli</div>
-                              </div>
-                              <p className="ui-field-description-compact -mt-1 mb-2 text-slate-400">Required for Plex playback signals.</p>
-                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
-                                <li>Open Tautulli and go to Settings → Notification Agents.</li>
-                                <li>Create a new Webhook notification agent.</li>
-                                <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
-                                <li>
-                                  <div className="space-y-1">
-                                    <span className="text-slate-300">Set Webhook URL to</span>
-                                    <div className="flex items-start gap-2">
-                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
-                                        {`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}
-                                      </span>
-                                      <WebhookStepCopyButton
-                                        text={`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.TAUTULLI_INSTANCE_KEY || "tautulli"))}`}
-                                        ariaLabel="Copy Tautulli webhook URL"
-                                        className="mt-0.5"
-                                      />
-                                    </div>
-                                  </div>
-                                </li>
-                                <li>Paste the payload template below and save.</li>
-                              </ol>
-                              <div className="mt-3">
-                                <div className="mb-1.5 flex items-center justify-between gap-2">
-                                  <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
-                                  <WebhookStepCopyButton
-                                    text={tautulliPayloadTemplate}
-                                    ariaLabel="Copy Tautulli JSON payload template"
-                                    variant="header"
-                                  />
-                                </div>
-                                <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
-                                  <code>{tautulliPayloadTemplate}</code>
-                                </pre>
-                              </div>
-                            </div>
-                          )}
-                          {Boolean(props.values.ENABLE_JELLYFIN) && (
-                            <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
-                              <div className="mb-2 flex items-center gap-2">
-                                <div
-                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
-                                  style={ONBOARDING_MEDIA_VISUAL.jellyfin.well}
-                                  aria-hidden
-                                >
-                                  <img src={jellyfinIcon} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
-                                </div>
-                                <div className="min-w-0 text-sm font-semibold text-white font-headline">Jellyfin</div>
-                              </div>
-                              <p className="ui-field-description-compact -mt-1 mb-2 text-slate-400">Use the Webhook plugin with a custom JSON payload template.</p>
-                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
-                                <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
-                                <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
-                                <li>Set Events to include Playback Start and Content Type to application/json.</li>
-                                <li>
-                                  <div className="space-y-1">
-                                    <span className="text-slate-300">Set Webhook URL to</span>
-                                    <div className="flex items-start gap-2">
-                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
-                                        {`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}
-                                      </span>
-                                      <WebhookStepCopyButton
-                                        text={`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.JELLYFIN_INSTANCE_KEY || "jellyfin"))}`}
-                                        ariaLabel="Copy Jellyfin webhook URL"
-                                        className="mt-0.5"
-                                      />
-                                    </div>
-                                  </div>
-                                </li>
-                                <li>Paste the payload template below, then save the webhook.</li>
-                              </ol>
-                              <div className="mt-3">
-                                <div className="mb-1.5 flex items-center justify-between gap-2">
-                                  <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
-                                  <WebhookStepCopyButton
-                                    text={jellyfinPayloadTemplate}
-                                    ariaLabel="Copy Jellyfin JSON payload template"
-                                    variant="header"
-                                  />
-                                </div>
-                                <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
-                                  <code>{jellyfinPayloadTemplate}</code>
-                                </pre>
-                              </div>
-                            </div>
-                          )}
-                          {Boolean(props.values.ENABLE_EMBY) && (
-                            <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
-                              <div className="mb-2 flex items-center gap-2">
-                                <div
-                                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
-                                  style={ONBOARDING_MEDIA_VISUAL.emby.well}
-                                  aria-hidden
-                                >
-                                  <img src={embyIcon} alt="" decoding="async" className="h-5 w-5 object-contain" aria-hidden />
-                                </div>
-                                <div className="min-w-0 text-sm font-semibold text-white font-headline">Emby</div>
-                              </div>
-                              <p className="ui-field-description-compact -mt-1 mb-2 text-slate-400">Playback-start webhook so Placeholdarr receives media start events.</p>
-                              <ol className="ui-field-description space-y-1.5 list-decimal list-inside">
-                                <li>In Emby, go to Settings → Notifications.</li>
-                                <li>Add or edit a webhook notification.</li>
-                                <li>
-                                  <div className="space-y-1">
-                                    <span className="text-slate-300">Set Webhook URL to</span>
-                                    <div className="flex items-start gap-2">
-                                      <span className="min-w-0 flex-1 break-all font-mono text-[13px] leading-snug text-slate-300">
-                                        {`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}
-                                      </span>
-                                      <WebhookStepCopyButton
-                                        text={`${webhookBaseUrl}/webhook?instance=${encodeURIComponent(String(props.values.EMBY_INSTANCE_KEY || "emby"))}`}
-                                        ariaLabel="Copy Emby webhook URL"
-                                        className="mt-0.5"
-                                      />
-                                    </div>
-                                  </div>
-                                </li>
-                                <li>Enable the playback-start event you want Placeholdarr to process.</li>
-                                <li>Save the webhook.</li>
-                              </ol>
-                            </div>
-                          )}
-                          </div>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            );
-          })() : !fields.length ? (
+          ) : !fields.length ? (
             <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
-              {BEHAVIOR_WIZARD_SECTIONS.map((sectionName, behaviorSectionIdx) => {
+              {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
                 const secFields = fields.filter((f) => f.section === sectionName);
                 if (!secFields.length) return null;
                 const fieldsBlock = <div className="space-y-5">{secFields.map((field) => wizardFieldRow(field))}</div>;
-                const surface = behaviorWizardSurface(behaviorSectionIdx);
-                const surfaceClass = ONBOARDING_BEHAVIOR_SURFACE_PREVIEW
-                  ? surface.className
-                  : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+                const surfaceClass = WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
                 return (
                   <div key={sectionName}>
                     <h2 className={ONBOARDING_SECTION_TITLE_CLASS}>{sectionName}</h2>
-                    {ONBOARDING_BEHAVIOR_SURFACE_PREVIEW ? (
-                      <p className="mb-2 mt-1 text-[10px] font-headline uppercase tracking-widest text-slate-500">
-                        Section frame preview — {surface.label}
-                      </p>
-                    ) : null}
                     {sectionName === "Lookahead" ? (
                       <div className={surfaceClass}>
                         <LookaheadSectionIntro variant="onboarding" embedded />
@@ -6345,11 +6530,12 @@ function OnboardingWizard(props: {
           </div>
         </div>
       </div>
+      </div>
       {step.key === "media" && mediaPanel ? (() => {
         const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
         if (!card) return null;
         const fieldByKey = new Map(fields.map((f) => [f.key, f]));
-        const focus = getBrandFocusClass(props.brand, props.themeMode);
+        const focus = getBrandFocusClass(props.brand, wizardUiTheme);
         const availableFields = card.keys
           .map((key) => fieldByKey.get(key))
           .filter(Boolean) as SettingsField[];
@@ -6358,8 +6544,17 @@ function OnboardingWizard(props: {
         }
         const urlFieldForFooter = availableFields.find((f) => URL_TEST_TARGET[f.key]);
         const detailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
+        const addMediaLabel = `Add ${card.title}`;
+        const urlConnTest = urlFieldForFooter ? testResults[urlFieldForFooter.key] : undefined;
+        const urlTestFailed =
+          Boolean(urlConnTest && !mediaFooterTestBusy && urlConnTest.message !== "Testing..." && !urlConnTest.ok);
+        const urlTestSucceeded =
+          Boolean(urlConnTest && !mediaFooterTestBusy && urlConnTest.message !== "Testing..." && urlConnTest.ok);
         return (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6">
+          <div
+            className={`fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6 brand-theme-scope theme-dark layout-${props.brand}-dark`}
+            style={semanticTokensToCssVars(wizardSemantic) as CSSProperties}
+          >
             <button
               type="button"
               aria-label="Close panel"
@@ -6392,8 +6587,6 @@ function OnboardingWizard(props: {
                 {availableFields.map((field) => {
                   if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
                   const value = props.values[field.key];
-                  const test = testResults[field.key];
-                  const testTarget = URL_TEST_TARGET[field.key];
                   return (
                     <div key={field.key}>
                       <label className="block text-xs font-semibold text-slate-300 mb-1">{field.label}</label>
@@ -6420,17 +6613,23 @@ function OnboardingWizard(props: {
                           />
                         </div>
                       )}
-                      {test && testTarget ? (
-                        <div className={`mt-2 flex items-center gap-1.5 text-xs ${test.ok ? "text-green-400" : "text-red-400"}`}>
-                          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 14 }}>{test.ok ? "check_circle" : "error"}</span>
-                          <span>{test.message}</span>
-                        </div>
-                      ) : null}
                     </div>
                   );
                 })}
               </div>
-              <div className="flex flex-wrap items-stretch justify-between gap-2 p-4 border-t border-[#424753]/40 shrink-0 bg-[#141a24]">
+              <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
+                <div
+                  className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-xs text-red-400"
+                  aria-live="polite"
+                >
+                  {urlTestFailed && urlConnTest ? (
+                    <>
+                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>error</span>
+                      <span className="line-clamp-2 leading-snug">{urlConnTest.message}</span>
+                    </>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap items-stretch justify-between gap-2 px-4 pb-4 pt-1">
                 <button
                   type="button"
                   onClick={handleMediaPanelCancel}
@@ -6441,6 +6640,11 @@ function OnboardingWizard(props: {
                 <button
                   type="button"
                   disabled={!detailsComplete || !urlFieldForFooter || mediaFooterTestBusy}
+                  title={
+                    urlTestSucceeded && urlConnTest
+                      ? urlConnTest.message
+                      : "Run connection test"
+                  }
                   onClick={() => {
                     if (!urlFieldForFooter) return;
                     void (async () => {
@@ -6450,20 +6654,157 @@ function OnboardingWizard(props: {
                       setMediaPanelTestPassed(Boolean(result?.ok));
                     })();
                   }}
-                  className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-amber-500 text-slate-900 hover:bg-amber-400 border border-amber-400/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
+                  className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
+                    urlTestSucceeded
+                      ? "border-emerald-500/70 bg-emerald-600/15 text-emerald-300 hover:border-emerald-400/90 hover:bg-emerald-600/25"
+                      : "border-amber-400/80 bg-amber-500 text-slate-900 hover:bg-amber-400 disabled:hover:bg-amber-500"
+                  }`}
                 >
-                  {mediaFooterTestBusy ? "Testing..." : "Test"}
+                  {mediaFooterTestBusy ? (
+                    <>
+                      <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 18 }}>
+                        progress_activity
+                      </span>
+                      <span>Testing…</span>
+                    </>
+                  ) : urlTestSucceeded ? (
+                    <span className="material-symbols-outlined shrink-0" style={{ fontSize: 22 }}>
+                      check_circle
+                    </span>
+                  ) : (
+                    <>
+                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>wifi</span>
+                      <span>Test</span>
+                    </>
+                  )}
                 </button>
                 <button
                   type="button"
                   disabled={!mediaPanelTestPassed || mediaFooterTestBusy}
                   onClick={() => {
+                    const panelId = mediaPanel;
+                    const card = panelId ? ONBOARDING_MEDIA_CARDS.find((c) => c.id === panelId) : undefined;
+                    const conn = card ? mediaCardConnectionKeys(card) : null;
+                    const cfg = panelId ? mediaCardPlaybackWebhookConfig(panelId) : null;
+                    const instanceParam = cfg
+                      ? String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey
+                      : "";
+                    const prevUrl = conn ? String(mediaPanelSnapshotRef.current[conn.urlKey] ?? "").trim() : "";
+                    const newUrl = conn ? String(props.values[conn.urlKey] ?? "").trim() : "";
+                    const urlChanged =
+                      normalizeArrInstanceUrlForDedupe(prevUrl) !== normalizeArrInstanceUrlForDedupe(newUrl);
                     setMediaPanel(null);
                     setMediaPanelTestPassed(false);
+                    if (cfg && urlChanged) {
+                      setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
+                    }
                   }}
-                  className="min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold bg-blue-600 text-white hover:bg-blue-500 border border-blue-500/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
+                  aria-label={addMediaLabel}
+                  className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  Add Server
+                  {addMediaLabel}
+                </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
+      {playbackWebhookDialog ? (() => {
+        const pb = playbackWebhookDialog;
+        const origin = typeof window !== "undefined" ? window.location.origin : "";
+        const webhookUrl = `${origin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
+        const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
+        const name = svcMeta?.name ?? pb.serviceId;
+        return (
+          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+              <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {name}</h3>
+              <p className="text-sm text-slate-300">
+                {pb.serviceId === "tautulli"
+                  ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
+                  : `${name} can send playback events to Placeholdarr using this URL.`}
+              </p>
+              <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
+                {pb.serviceId === "tautulli" ? (
+                  <>
+                    <li>Open Tautulli and go to Settings → Notification Agents.</li>
+                    <li>Create a new Webhook notification agent.</li>
+                    <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+                    <li>
+                      <span className="text-slate-200">Webhook URL</span>
+                      <div className="mt-1 flex items-start gap-2 pl-0">
+                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                      </div>
+                    </li>
+                    <li>Paste the JSON payload template below, then save.</li>
+                  </>
+                ) : pb.serviceId === "jellyfin" ? (
+                  <>
+                    <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
+                    <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
+                    <li>Set Events to include Playback Start and Content Type to application/json.</li>
+                    <li>
+                      <span className="text-slate-200">Webhook URL</span>
+                      <div className="mt-1 flex items-start gap-2 pl-0">
+                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                      </div>
+                    </li>
+                    <li>Paste the JSON payload template below, then save the webhook.</li>
+                  </>
+                ) : (
+                  <>
+                    <li>In Emby, go to Settings → Notifications.</li>
+                    <li>Add or edit a webhook notification.</li>
+                    <li>
+                      <span className="text-slate-200">Webhook URL</span>
+                      <div className="mt-1 flex items-start gap-2 pl-0">
+                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                      </div>
+                    </li>
+                    <li>Enable the playback events you want Placeholdarr to process, then save.</li>
+                  </>
+                )}
+              </ol>
+              {svcMeta && svcMeta.triggers.length ? (
+                <div>
+                  <div className="text-xs font-semibold text-slate-400 mb-1.5">Suggested events</div>
+                  <div className="ml-1 space-y-1">
+                    {svcMeta.triggers.map((t) => (
+                      <div key={t.event} className="text-xs text-slate-300">
+                        {t.displayName}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
+                </div>
+              ) : null}
+              {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
+                    <WebhookStepCopyButton
+                      text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
+                      ariaLabel={`Copy ${name} JSON payload template`}
+                      variant="header"
+                    />
+                  </div>
+                  <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
+                    <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
+                  </pre>
+                </div>
+              ) : null}
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+                  style={{ backgroundColor: accent.hex }}
+                  onClick={() => setPlaybackWebhookDialog(null)}
+                >
+                  Done
                 </button>
               </div>
             </div>
@@ -6474,6 +6815,7 @@ function OnboardingWizard(props: {
   );
 }
 function getTabFromPath(pathname: string): DashboardTab {
+  if (pathname === "/setup" || pathname.startsWith("/setup/")) return "setup";
   if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/calendar")) return "calendar";
   if (pathname.startsWith("/errors")) return "errors";
@@ -6663,7 +7005,6 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const lookaheadNonArr = lookahead.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
   if (stepKey === "paths") return [...paths];
-  if (stepKey === "webhooks") return [];
   if (stepKey === "arr") {
     return [
       ...[...arrIntegrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON"),
@@ -6673,5 +7014,11 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   if (stepKey === "media") {
     return [...mediaIntegrations];
   }
-  return [...librarySync, ...calendar, ...lookaheadNonArr, ...statusUpdates, ...advanced];
+  return [
+    ...librarySync,
+    ...calendar,
+    ...lookaheadNonArr,
+    ...statusUpdates,
+    ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
+  ];
 }

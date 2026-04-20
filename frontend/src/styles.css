@@ -1714,6 +1714,21 @@ a { color: inherit; }
   font-family: var(--brand-font-body), Inter, ui-sans-serif, system-ui, sans-serif;
 }
 
+/* Primary actions that should follow the brand tertiary token (e.g. Simularr #34DAFF). */
+.brand-theme-scope .btn-brand-tertiary {
+  background-color: var(--brand-accent-tertiary);
+  color: var(--brand-fg-on-accent);
+  border-color: color-mix(in srgb, var(--brand-accent-tertiary) 52%, var(--brand-border-strong));
+  transition-property: color, background-color, border-color;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+.brand-theme-scope .btn-brand-tertiary:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--brand-accent-tertiary) 78%, var(--brand-chrome-page));
+  border-color: color-mix(in srgb, var(--brand-accent-tertiary) 40%, var(--brand-chrome-page));
+}
+
 .brand-theme-scope .font-headline {
   font-family: var(--brand-font-headline), "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
 }
@@ -1731,6 +1746,12 @@ a { color: inherit; }
 .brand-theme-scope .ui-field-description,
 .brand-theme-scope .ui-field-description-compact {
   color: var(--brand-fg-muted) !important;
+}
+
+/** Callout line under labels — must win over the muted rule above */
+.brand-theme-scope .ui-field-description.ui-field-description-accent3,
+.brand-theme-scope .ui-field-description-compact.ui-field-description-accent3 {
+  color: var(--brand-accent-3) !important;
 }
 
 .brand-theme-scope .text-slate-100,
@@ -1852,5 +1873,73 @@ a { color: inherit; }
 
 .brand-theme-scope [class*="bg-white/10"] {
   background-color: color-mix(in srgb, var(--brand-glass-bg) 85%, transparent) !important;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Setup route boot shell — shimmer masks perceived latency (cf. Seerr PWA splash). */
+/* -------------------------------------------------------------------------- */
+@keyframes setup-boot-sheen {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.setup-boot-shell__content {
+  animation: setup-boot-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes setup-boot-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.setup-boot-shell__bar {
+  position: relative;
+  overflow: hidden;
+  height: 0.45rem;
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.setup-boot-shell__bar--lg {
+  width: 100%;
+}
+
+.setup-boot-shell__bar--md {
+  width: 72%;
+}
+
+.setup-boot-shell__bar--sm {
+  width: 46%;
+}
+
+.setup-boot-shell__bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.14),
+    transparent
+  );
+  animation: setup-boot-sheen 1.35s ease-in-out infinite;
+}
+
+.setup-boot-shell__bar--md::after {
+  animation-delay: 0.12s;
+}
+
+.setup-boot-shell__bar--sm::after {
+  animation-delay: 0.24s;
 }
 

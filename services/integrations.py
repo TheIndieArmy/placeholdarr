@@ -152,6 +152,86 @@ def _test_get(url: str, headers: dict[str, str] | None = None, params: dict[str,
         return False, f'{type(exc).__name__} while connecting to {safe_url}'
 
 
+def _test_get_json(
+    url: str,
+    headers: dict[str, str] | None = None,
+    params: dict[str, str] | None = None,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """GET JSON object; used for Jellyfin/Emby System/Info style probes."""
+    safe_url = _safe_url(url)
+    try:
+        response = requests.get(url, headers=headers or {}, params=params or {}, timeout=5)
+        if response.status_code >= 400:
+            return False, f'HTTP {response.status_code} from {safe_url}', None
+        try:
+            data = response.json()
+        except ValueError:
+            return False, f'Response was not valid JSON from {safe_url}', None
+        if not isinstance(data, dict):
+            return False, f'Unexpected JSON shape from {safe_url}', None
+        return True, 'Connected', data
+    except Exception as exc:
+        return False, f'{type(exc).__name__} while connecting to {safe_url}', None
+
+
+def _jellyfin_emby_signature_text(data: dict[str, Any]) -> str:
+    """Stable text blob from public-ish System/Info fields (both stacks are Emby-forks)."""
+    keys = ('ProductName', 'ServerName', 'Brand', 'Name', 'Title', 'Version')
+    return ' '.join(str(data.get(k) or '') for k in keys).lower()
+
+
+def _emby_system_info_url(base_url: str) -> str:
+    """Match runtime Emby URL rules: base may already end with ``/emby`` — do not double the segment."""
+    root = _normalize_url(base_url)
+    lower = root.lower()
+    if lower.endswith('/emby'):
+        root = root[:-5].rstrip('/')
+    return f'{root}/emby/System/Info'
+
+
+def _payload_text_suggests_jellyfin(data: dict[str, Any]) -> bool:
+    """Any top-level string mentions Jellyfin (covers custom ProductName on Jellyfin)."""
+    if 'jellyfin' in _jellyfin_emby_signature_text(data):
+        return True
+    for v in data.values():
+        if isinstance(v, str) and 'jellyfin' in v.lower():
+            return True
+    return False
+
+
+def _assert_media_server_matches_payload(data: dict[str, Any], expected: str) -> tuple[bool, str]:
+    """Reject Jellyfin vs Emby mix-ups: both expose /System/Info with X-Emby-Token auth."""
+    want = str(expected or '').strip().lower()
+    sig = _jellyfin_emby_signature_text(data)
+    has_jellyfin = 'jellyfin' in sig
+    has_emby = 'emby' in sig
+    if want == 'jellyfin':
+        if has_jellyfin:
+            return True, 'Connected to Jellyfin'
+        if has_emby:
+            return False, (
+                'This server identifies as Emby. Use the Emby connection (Emby base URL and API key), '
+                'not the Jellyfin fields.'
+            )
+        return False, (
+            'Could not confirm Jellyfin at this URL (response did not look like Jellyfin). '
+            'Check the base URL (for example http://host:8096) and an API key from Jellyfin → Dashboard → API Keys.'
+        )
+    if want == 'emby':
+        if _payload_text_suggests_jellyfin(data):
+            return False, (
+                'This server identifies as Jellyfin. Use the Jellyfin connection (Jellyfin URL and token), '
+                'not the Emby fields.'
+            )
+        if has_emby:
+            return True, 'Connected to Emby'
+        # Many Emby installs return 200 from ``/emby/System/Info`` but use a custom ServerName / localized
+        # ProductName that never contains the substring "emby". If we already authenticated that path,
+        # treat the host as Emby unless the payload clearly says Jellyfin (handled above).
+        return True, 'Connected to Emby'
+    return False, 'Unsupported media server type'
+
+
 def test_plex_connection(url: str, token: str) -> dict[str, Any]:
     endpoint = _normalize_url(url)
     ok, message = _test_get(f'{endpoint}/identity', headers={'X-Plex-Token': str(token or '').strip()})
@@ -160,20 +240,21 @@ def test_plex_connection(url: str, token: str) -> dict[str, Any]:
 
 def test_jellyfin_connection(url: str, token: str) -> dict[str, Any]:
     endpoint = _normalize_url(url)
-    ok, message = _test_get(
-        f'{endpoint}/System/Info',
-        headers={'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'},
-    )
-    return {'ok': ok, 'message': message, 'service': 'jellyfin'}
+    headers = {'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'}
+    ok, message, data = _test_get_json(f'{endpoint}/System/Info', headers=headers)
+    if not ok or data is None:
+        return {'ok': False, 'message': message, 'service': 'jellyfin'}
+    ok2, message2 = _assert_media_server_matches_payload(data, 'jellyfin')
+    return {'ok': ok2, 'message': message2, 'service': 'jellyfin'}
 
 
 def test_emby_connection(url: str, token: str) -> dict[str, Any]:
-    endpoint = _normalize_url(url)
-    ok, message = _test_get(
-        f'{endpoint}/emby/System/Info',
-        headers={'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'},
-    )
-    return {'ok': ok, 'message': message, 'service': 'emby'}
+    headers = {'X-Emby-Token': str(token or '').strip(), 'Accept': 'application/json'}
+    ok, message, data = _test_get_json(_emby_system_info_url(url), headers=headers)
+    if not ok or data is None:
+        return {'ok': False, 'message': message, 'service': 'emby'}
+    ok2, message2 = _assert_media_server_matches_payload(data, 'emby')
+    return {'ok': ok2, 'message': message2, 'service': 'emby'}
 
 
 def test_arr_connection(url: str, api_key: str, arr_type: str) -> dict[str, Any]:

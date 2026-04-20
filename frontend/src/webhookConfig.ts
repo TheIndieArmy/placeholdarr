@@ -1,6 +1,6 @@
 /**
  * Centralized webhook configuration and setup instructions.
- * Used by both onboarding wizard and documentation generation.
+ * Used by the onboarding UI (ARR + playback modals) and documentation generation.
  */
 
 export interface WebhookService {

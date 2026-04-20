@@ -3,7 +3,7 @@ import re
 from datetime import date, datetime, timezone
 from typing import Dict, Iterable, Tuple
 
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 
 from core.config import settings
 from core.logger import logger
@@ -427,9 +427,20 @@ def _episode_fields(series: Series, season: Season, entry: Dict, episode_file: D
 
 
 def _upsert_movie(session, fields: Dict):
+    instance_key = str(fields.get('instance_key') or '').strip().lower()
+    instance_id = str(fields.get('instance_id') or '').strip().lower()
     existing = (
         session.query(Movie)
-        .filter(and_(Movie.tmdbid == fields['tmdbid'], Movie.instance_id == fields['instance_id']))
+        .filter(
+            and_(
+                Movie.tmdbid == fields['tmdbid'],
+                or_(
+                    Movie.instance_key == instance_key,
+                    # Legacy fallback while older rows may still carry instance_id-only identity.
+                    Movie.instance_id == instance_id,
+                ),
+            )
+        )
         .first()
     )
     if existing:
@@ -442,9 +453,20 @@ def _upsert_movie(session, fields: Dict):
 
 
 def _upsert_series(session, fields: Dict):
+    instance_key = str(fields.get('instance_key') or '').strip().lower()
+    instance_id = str(fields.get('instance_id') or '').strip().lower()
     existing = (
         session.query(Series)
-        .filter(and_(Series.tvdbid == fields['tvdbid'], Series.instance_id == fields['instance_id']))
+        .filter(
+            and_(
+                Series.tvdbid == fields['tvdbid'],
+                or_(
+                    Series.instance_key == instance_key,
+                    # Legacy fallback while older rows may still carry instance_id-only identity.
+                    Series.instance_id == instance_id,
+                ),
+            )
+        )
         .first()
     )
     if existing:

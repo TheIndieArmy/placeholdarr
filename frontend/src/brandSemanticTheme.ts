@@ -1,5 +1,11 @@
 import type { Brand, ThemeMode } from "./brandTypes";
 
+/**
+ * Simularr **Spectral Data** marketing headline / rail cyan (style guide art).
+ * Simularr dark UI ice blue is separate: token `accentIce` `#7DD3FC`.
+ */
+export const SIMULARR_SPECTRAL_CYAN_HEX = "#22D3EE";
+
 export type BrandSemanticTokens = {
   fontHeadline: string;
   fontBody: string;
@@ -117,7 +123,7 @@ export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Ac
       fg: "#E2E8F0",
       fgMuted: "#94A3B8",
       fgSubtle: "#64748B",
-      fgLabel: "#BAE6FD",
+      fgLabel: "#7DD3FF",
       fgOnAccent: "#0F172A",
       surfacePanel: "#0F172A",
       surfaceElevated: "#1E293B",
@@ -125,12 +131,12 @@ export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Ac
       surfaceInput: "#0B1326",
       border: "#334155",
       borderStrong: "#475569",
-      borderSubtle: "rgba(56, 189, 248, 0.22)",
+      borderSubtle: "rgba(52, 218, 255, 0.22)",
       glassBg: "rgba(15, 23, 42, 0.55)",
-      glassBorder: "rgba(125, 211, 252, 0.18)",
+      glassBorder: "rgba(52, 218, 255, 0.22)",
       accent: "#FBBF24",
       accent2: "#FDE047",
-      accent3: "#38BDF8",
+      accent3: "#34DAFF",
       accentIce: "#7DD3FC",
       danger: "#FCA5A5",
       success: "#86EFAC",
@@ -138,7 +144,7 @@ export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Ac
       chromeSidebar: "#0F172A",
       chromeHeader: "#0F172A",
       chromeMain: "#0B1326",
-      navHover: "rgba(56, 189, 248, 0.12)",
+      navHover: "rgba(52, 218, 255, 0.12)",
       topBarBand: "#FBBF24",
     };
   }
@@ -161,10 +167,10 @@ export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Ac
       borderStrong: "#64748B",
       borderSubtle: "rgba(148, 163, 184, 0.4)",
       glassBg: "rgba(255,255,255,0.95)",
-      glassBorder: "rgba(14, 165, 233, 0.25)",
+      glassBorder: "rgba(52, 218, 255, 0.28)",
       accent: "#CA8A04",
       accent2: "#0EA5E9",
-      accent3: "#FBBF24",
+      accent3: "#34DAFF",
       accentIce: "#0284C7",
       danger: "#B91C1C",
       success: "#15803D",
@@ -338,6 +344,7 @@ export function semanticTokensToCssVars(t: BrandSemanticTokens): Record<string, 
     "--brand-accent": t.accent,
     "--brand-accent-2": t.accent2,
     "--brand-accent-3": t.accent3,
+    "--brand-accent-tertiary": t.accent3,
     "--brand-accent-ice": t.accentIce,
     "--brand-danger": t.danger,
     "--brand-success": t.success,

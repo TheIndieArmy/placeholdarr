@@ -1,4 +1,4 @@
-export type DashboardTab = "activity" | "library" | "calendar" | "errors" | "logs" | "settings";
+export type DashboardTab = "activity" | "library" | "calendar" | "errors" | "logs" | "settings" | "setup";
 
 export interface StatsResponse {
   movies: {

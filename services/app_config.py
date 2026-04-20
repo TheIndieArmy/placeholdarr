@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 import os
@@ -197,7 +196,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "choice",
                 "restart_required": True,
                 "options": [
-                    {"value": "auto", "label": "Auto — first qualifying startup: full once per ARR, then lite"},
+                    {"value": "auto", "label": "Auto — Full sync when needed; Lite sync all other times"},
                     {"value": "full", "label": "Full — always full ARR sync on every startup"},
                     {"value": "lite", "label": "Lite — history/delta catch-up only"},
                     {"value": "off", "label": "Off — skip ARR startup sync"},
@@ -208,7 +207,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "FULL_SYNC_INTERVAL_HOURS",
             {
                 "section": "Library sync",
-                "label": "Recurring full sync interval (hours)",
+                "label": "Scheduled full sync interval (hours)",
                 "description": "How often to schedule a full ARR/database reconciliation. Set to 0 to disable recurring full sync jobs.",
                 "type": "int",
                 "min": 0,
@@ -254,12 +253,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PREFERRED_MOVIE_DATE_TYPE",
             {
                 "section": "Calendar",
-                "label": "Preferred Radarr release date for movies",
+                "label": "Movie release date type",
                 "description": (
-                    "Choose which Radarr movie date Placeholdarr uses: theatrical (in cinemas), digital, or physical. "
-                    "Only that field is read for each title—there is no fallback to other release types. "
-                    "This date drives movie placeholder timing and status (for example, how titles compare to your calendar lookahead window and when placeholders are needed). "
-                    "If Radarr has no value for the selected field, Placeholdarr treats the release date as unknown for those rules."
+                    "Choose which Radarr release date type will be used to determine when placeholders are created."
                 ),
                 "type": "choice",
                 "restart_required": False,
@@ -275,7 +271,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Calendar",
                 "label": "Enable Coming Soon countdown text",
-                "description": "Show countdown wording in Coming Soon status metadata (for example, \"in 12 days\").",
+                "description": "",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -311,7 +307,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Placeholder status updates",
-                "description": "Controls how aggressively placeholder statuses are projected (OFF, REQUEST, or ALL).",
+                "description": "",
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -515,12 +511,31 @@ def _arr_instance_id_has_uuid(instance_id: str) -> bool:
     return text.count("-") >= 4
 
 
+def _stable_default_instance_id(arr_type: str, item: dict[str, Any]) -> str:
+    """Default webhook row id: ``radarr_primary``, ``sonarr_secondary``, etc.
+
+    One Placeholdarr deployment uses a single origin; two deployments never share a URL, so these
+    predictable ids are safe for local / single-tenant installs. Existing UUID ids are preserved
+    by merge logic when already saved.
+    """
+    r = str(item.get("role") or "").strip().lower()
+    if r not in ("primary", "secondary"):
+        try:
+            r = "primary" if int(item.get("priority", 0) or 0) == 0 else "secondary"
+        except Exception:
+            r = "primary"
+    return f"{arr_type}_{r}"
+
+
 def _normalize_arr_instance_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
 
 
 def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: str) -> str:
-    """Assign stable UUID-based instance_id values and carry forward prior instance_key values as webhook aliases."""
+    """Normalize instance_id values and carry forward prior instance_key values as webhook aliases.
+
+    New rows get deterministic ids (``radarr_primary``, …). Rows that already use UUID-based ids keep them.
+    """
     try:
         incoming = json.loads(incoming_json)
         if not isinstance(incoming, list):
@@ -588,7 +603,7 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             elif _arr_instance_id_has_uuid(nid):
                 item["instance_id"] = nid
             else:
-                item["instance_id"] = f"{arr_type}:{uuid.uuid4()}"
+                item["instance_id"] = _stable_default_instance_id(arr_type, item)
             old_aliases = matched.get("instance_key_aliases") if isinstance(matched.get("instance_key_aliases"), list) else []
             for a in old_aliases:
                 k = _normalize_instance_key(a)
@@ -597,8 +612,12 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             if old_key and old_key != new_key and old_key not in aliases:
                 aliases.insert(0, old_key)
         else:
-            if not _arr_instance_id_has_uuid(nid):
-                item["instance_id"] = f"{arr_type}:{uuid.uuid4()}"
+            if _arr_instance_id_has_uuid(nid):
+                item["instance_id"] = nid
+            elif str(nid or "").strip():
+                item["instance_id"] = str(nid).strip().lower()
+            else:
+                item["instance_id"] = _stable_default_instance_id(arr_type, item)
 
         aliases = [a for a in aliases if a and a != new_key]
         seen: set[str] = set()
