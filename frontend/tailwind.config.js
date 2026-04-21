@@ -18,7 +18,7 @@ export default {
         'brand-mono': ['var(--brand-font-mono)', 'ui-monospace', 'monospace'],
       },
       colors: {
-        // Material You / Studio Dark palette — matches the mockup tokens exactly
+        // Legacy slate hex aliases (Mirarr-era); prefer `var(--brand-*)` in new UI — see `brandSemanticTheme.ts`
         background: '#0f1419',
         'surface': '#171c22',
         'surface-container': '#1e2530',

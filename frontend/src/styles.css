@@ -47,56 +47,28 @@ body {
   color-scheme: light;
 }
 
-.theme-light .bg-\[\#0f1419\],
-.theme-light .bg-\[\#0f1419\]\/60,
-.theme-light .bg-\[\#0f1419\]\/80 {
-  background-color: #ececee !important;
-}
-
-.theme-light .bg-\[\#171c22\] {
-  background-color: #dbdbdc !important;
-}
-
-.theme-light [class*="bg-[#171c22]"] {
-  background-color: #dbdbdc !important;
-}
-
-.theme-light .bg-\[\#1e2430\] {
-  background-color: #e6e6e8 !important;
-}
-
-.theme-light .bg-\[\#252e3a\],
-.theme-light .bg-\[\#30353b\],
-.theme-light .bg-\[\#2a3344\],
-.theme-light .bg-\[\#0a0e14\],
-.theme-light .bg-\[\#252c38\]\/80,
-.theme-light .bg-\[\#252c38\] {
-  background-color: #ececee !important;
-}
-
-.theme-light [class*="bg-[#252e3a]"],
-.theme-light [class*="bg-[#30353b]"],
-.theme-light [class*="bg-[#2a3344]"],
-.theme-light [class*="bg-[#0a0e14]"],
-.theme-light [class*="bg-[#252c38]"] {
-  background-color: #ececee !important;
-}
-
+/* Legacy Mirarr slate outline hexes → brand borders (Placeholdarr / Simularr tokens on .brand-theme-scope) */
 .theme-light .border-\[\#424753\]\/20,
 .theme-light .border-\[\#424753\]\/15,
 .theme-light .border-\[\#424753\]\/30,
-.theme-light .border-\[\#424753\]\/40,
-.theme-light .border-\[\#424753\]\/50,
-.theme-light .border-\[\#424753\]\/60,
-.theme-light .border-\[\#2a3444\],
+.theme-light .border-\[\#424753\]\/35,
 .theme-light .divide-\[\#424753\]\/15,
 .theme-light .divide-\[\#424753\]\/20 {
-  border-color: #b8bdc4 !important;
+  border-color: var(--brand-border-subtle) !important;
+}
+
+.theme-light .border-\[\#424753\]\/40,
+.theme-light .border-\[\#424753\]\/50,
+.theme-light .border-\[\#424753\]\/55,
+.theme-light .border-\[\#424753\]\/60,
+.theme-light .border-\[\#424753\]\/80,
+.theme-light .border-\[\#2a3444\] {
+  border-color: var(--brand-border) !important;
 }
 
 .theme-light .divide-\[\#424753\]\/15 > :not([hidden]) ~ :not([hidden]),
 .theme-light .divide-\[\#424753\]\/20 > :not([hidden]) ~ :not([hidden]) {
-  border-color: #b8bdc4 !important;
+  border-color: var(--brand-border-subtle) !important;
 }
 
 .theme-light .text-white,
@@ -110,15 +82,6 @@ body {
 .theme-light .text-slate-500,
 .theme-light .text-slate-600 {
   color: #475569 !important;
-}
-
-.theme-light .hover\:bg-\[\#1e2430\]:hover,
-.theme-light .hover\:bg-\[\#1e2430\]\/40:hover,
-.theme-light .hover\:bg-\[\#1e2430\]\/50:hover,
-.theme-light .hover\:bg-\[\#30353b\]\/50:hover,
-.theme-light .hover\:bg-\[\#2a3344\]:hover,
-.theme-light .hover\:bg-\[\#2a3344\]\/40:hover {
-  background-color: #f1f1f2 !important;
 }
 
 .theme-light .hover\:text-white:hover,
@@ -157,6 +120,133 @@ body {
 
 .theme-light .shadow-2xl {
   box-shadow: 0 20px 50px rgba(31, 48, 74, 0.16) !important;
+}
+
+/* ── Light mode: legacy dashboard slate (#1e2430 / #171c22 stack) → brand semantic surfaces (Placeholdarr) ── */
+.theme-light .bg-\[\#0f1419\]\/60 {
+  background-color: color-mix(in srgb, var(--brand-chrome-main) 65%, transparent) !important;
+}
+
+.theme-light .bg-\[\#1a2436\],
+.theme-light .bg-\[\#1a2436\]\/95 {
+  background-color: color-mix(in srgb, var(--brand-surface-panel) 92%, var(--brand-accent-3) 8%) !important;
+}
+
+.theme-light .bg-\[\#171c22\] {
+  background-color: var(--brand-surface-panel) !important;
+}
+
+.theme-light .bg-\[\#1e2430\] {
+  background-color: var(--brand-surface-elevated) !important;
+}
+
+.theme-light .bg-\[\#0b111b\] {
+  background-color: var(--brand-surface-input) !important;
+}
+
+.theme-light .bg-\[\#0f1419\],
+.theme-light .bg-\[\#0f1419\]\/80,
+.theme-light .bg-\[\#0f1419\]\/85 {
+  background-color: var(--brand-chrome-main) !important;
+}
+
+.theme-light .bg-\[\#111722\],
+.theme-light .bg-\[\#111722\]\/90 {
+  background-color: color-mix(in srgb, var(--brand-surface-panel) 94%, var(--brand-accent-ice) 6%) !important;
+}
+
+.theme-light .bg-\[\#1b2431\] {
+  background-color: var(--brand-surface-elevated) !important;
+}
+
+.theme-light .bg-\[\#252e3a\] {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.theme-light .bg-\[\#252c38\]\/80 {
+  background-color: color-mix(in srgb, var(--brand-surface-muted) 88%, var(--brand-chrome-main) 12%) !important;
+}
+
+.theme-light .bg-\[\#2a3344\] {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.theme-light .bg-\[\#293346\] {
+  background-color: color-mix(in srgb, var(--brand-surface-muted) 85%, var(--brand-border) 15%) !important;
+}
+
+.theme-light .bg-\[\#0a0e14\] {
+  background-color: var(--brand-chrome-main) !important;
+}
+
+.theme-light .bg-\[\#151b25\] {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.theme-light .bg-\[\#0a0f18\]\/95 {
+  background-color: color-mix(in srgb, var(--brand-surface-panel) 96%, var(--brand-accent-3) 4%) !important;
+}
+
+.theme-light .bg-\[\#141a24\] {
+  background-color: var(--brand-surface-input) !important;
+}
+
+.theme-light .bg-\[\#0f141c\] {
+  background-color: var(--brand-surface-elevated) !important;
+}
+
+.theme-light .hover\:bg-\[\#1e2430\]:hover,
+.theme-light .hover\:bg-\[\#1e2430\]\/40:hover,
+.theme-light .hover\:bg-\[\#1e2430\]\/50:hover,
+.theme-light .hover\:bg-\[\#1e2430\]\/30:hover {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.theme-light .hover\:bg-\[\#252e3a\]\/80:hover,
+.theme-light .hover\:bg-\[\#252e3a\]:hover {
+  background-color: color-mix(in srgb, var(--brand-surface-muted) 88%, var(--brand-border) 12%) !important;
+}
+
+.theme-light .hover\:bg-\[\#2a3342\]:hover {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.theme-light .hover\:bg-\[\#1b2433\]:hover {
+  background-color: var(--brand-surface-muted) !important;
+}
+
+.theme-light .hover\:bg-\[\#30353b\]:hover {
+  background-color: color-mix(in srgb, var(--brand-surface-muted) 90%, var(--brand-border) 10%) !important;
+}
+
+.theme-light .hover\:bg-\[\#30353b\]\/50:hover,
+.theme-light .hover\:bg-\[\#2a3344\]:hover,
+.theme-light .hover\:bg-\[\#2a3344\]\/40:hover {
+  background-color: var(--brand-surface-elevated) !important;
+}
+
+.theme-light .border-\[\#4a5568\]\/40,
+.theme-light .border-\[\#4a5568\]\/60 {
+  border-color: rgba(148, 163, 184, 0.55) !important;
+}
+
+.theme-light .border-white\/\[0\.08\] {
+  border-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+.theme-light .border-white\/20 {
+  border-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+/* Studio light: page chrome behind the React shell */
+:root:has(body.theme-studio-light),
+body.theme-studio-light {
+  color-scheme: light;
+}
+
+body.theme-studio-light {
+  background-color: #e4eef8;
+  color: #0f172a;
 }
 
 a { color: inherit; }
@@ -557,661 +647,6 @@ a { color: inherit; }
 }
 
 /* ==============================================================
-   THEME 1: NEO-BRUTALISM
-   A bold, distinct flat design with sharp borders and primary colors.
-   ============================================================== */
-:root:has(body.theme-neo-brutal), body.theme-neo-brutal {
-  --bg: #f9f9f9;
-  --panel-bg: #ffffff;
-  --text: #1a1a1a;
-  --text-muted: #4a4a4a;
-  --border: #000000;
-  --accent: #ff4757;
-  --danger: #ff6b81;
-  --success: #2ed573;
-  --font-body: 'Space Mono', 'Courier New', monospace;
-  background-color: #ffd32a;
-}
-
-.theme-neo-brutal .app-shell {
-  max-width: 1200px;
-  background: white;
-  border: 4px solid black;
-  box-shadow: 12px 12px 0px 0px rgba(0,0,0,1);
-  margin-top: 40px;
-  padding: 30px;
-  min-height: 90vh;
-}
-
-.theme-neo-brutal .topbar h1 {
-  font-family: var(--font-body);
-  text-transform: uppercase;
-  font-weight: 900;
-  letter-spacing: -1px;
-}
-
-.theme-neo-brutal .stats-grid {
-  gap: 20px;
-}
-
-.theme-neo-brutal .stat-card {
-  background: #7bed9f;
-  color: #000;
-  border: 3px solid #000;
-  border-radius: 0;
-  box-shadow: 6px 6px 0px 0px #000;
-  transition: transform 0.1s ease, box-shadow 0.1s ease;
-}
-.theme-neo-brutal .stat-card:hover {
-  transform: translate(2px, 2px);
-  box-shadow: 4px 4px 0px 0px #000;
-}
-.theme-neo-brutal .stat-title { text-transform: uppercase; font-weight: bold; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 8px; }
-
-.theme-neo-brutal .tabs {
-  border-bottom: 4px solid #000;
-  padding-bottom: 0;
-}
-.theme-neo-brutal .tab {
-  border: 3px solid #000;
-  border-bottom: none;
-  border-radius: 0;
-  background: #f1f2f6;
-  color: #000;
-  margin-right: 5px;
-  text-transform: uppercase;
-  box-shadow: none;
-}
-.theme-neo-brutal .tab.active {
-  background: var(--accent);
-  color: white;
-  transform: translateY(4px);
-  border-bottom: 4px solid var(--accent);
-}
-
-.theme-neo-brutal .panel {
-  border: 4px solid #000;
-  border-radius: 0;
-  box-shadow: 8px 8px 0px 0px #000;
-  background: #fff;
-  padding: 30px;
-}
-
-.theme-neo-brutal .library-card {
-  border: 3px solid #000;
-  border-radius: 0;
-  box-shadow: 6px 6px 0px 0px #000;
-}
-.theme-neo-brutal .library-card:hover {
-  transform: translate(4px, 4px);
-  box-shadow: 2px 2px 0px 0px #000;
-}
-
-.theme-neo-brutal .button, .theme-neo-brutal .input, .theme-neo-brutal .theme-selector {
-  border: 3px solid #000;
-  border-radius: 0;
-  background: #fff;
-  color: #000;
-  box-shadow: 4px 4px 0px 0px #000;
-}
-
-/* ==============================================================
-   THEME 2: GLASSMORPHISM / NEON
-   Blurred translucent panels, floating elements, gradient backgrounds.
-   ============================================================== */
-:root:has(body.theme-glassmorphism), body.theme-glassmorphism {
-  background: radial-gradient(circle at 10% 20%, #1e0b36 0%, #0c0211 40%, #03001e 100%);
-  --bg: transparent;
-  --panel-bg: rgba(255, 255, 255, 0.03);
-  --text: #e0e0e0;
-  --border: rgba(255, 255, 255, 0.1);
-  --accent: #b33771;
-  --font-body: 'Inter', sans-serif;
-}
-
-.theme-glassmorphism .app-shell {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 40px;
-}
-
-.theme-glassmorphism .topbar {
-  background: rgba(30, 11, 54, 0.5);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 20px;
-  padding: 20px 30px;
-  margin-bottom: 40px;
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-}
-
-.theme-glassmorphism .stat-card, .theme-glassmorphism .panel {
-  background: rgba(255, 255, 255, 0.02);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 24px;
-  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
-  transition: all 0.3s ease;
-}
-.theme-glassmorphism .stat-card:hover {
-  background: rgba(255, 255, 255, 0.05);
-  transform: translateY(-5px);
-  box-shadow: 0 10px 40px rgba(179, 55, 113, 0.2);
-  border: 1px solid rgba(179, 55, 113, 0.4);
-}
-
-.theme-glassmorphism .tabs {
-  margin-top: 20px;
-  margin-bottom: 20px;
-  display: flex;
-  gap: 15px;
-  border-bottom: none;
-}
-.theme-glassmorphism .tab {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
-  padding: 10px 20px;
-  color: #aaa;
-}
-.theme-glassmorphism .tab.active {
-  background: linear-gradient(135deg, #b33771 0%, #6d214f 100%);
-  color: white;
-  border: none;
-  box-shadow: 0 4px 15px rgba(179, 55, 113, 0.4);
-}
-
-.theme-glassmorphism .theme-selector {
-  background: rgba(0,0,0,0.4);
-  border: 1px solid rgba(255,255,255,0.2);
-  color: white;
-}
-
-/* ==============================================================
-   THEME 3: APPLE MINIMALIST DARK
-   Very soft shadows, high spacing, hyper clean interfaces, subtle greys.
-   ============================================================== */
-:root:has(body.theme-minimalist-dark), body.theme-minimalist-dark {
-  --bg: #000000;
-  --panel-bg: #1c1c1e;
-  --text: #f5f5f7;
-  --text-muted: #8e8e93;
-  --border: #3a3a3c;
-  --accent: #0a84ff;
-  --danger: #ff453a;
-  --success: #30d158;
-  background-color: #000;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-}
-
-.theme-minimalist-dark .app-shell {
-  max-width: 100%;
-  padding: 0;
-}
-
-.theme-minimalist-dark .topbar {
-  background: rgba(28, 28, 30, 0.8);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  padding: 15px 40px;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-}
-
-.theme-minimalist-dark .stats-grid {
-  padding: 40px;
-  margin: 0;
-  gap: 25px;
-}
-
-.theme-minimalist-dark .stat-card {
-  background: #1c1c1e;
-  border: none;
-  border-radius: 18px;
-  padding: 25px;
-  box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-}
-.theme-minimalist-dark .stat-value {
-  font-size: 2.2rem;
-  font-weight: 600;
-  letter-spacing: -1px;
-}
-
-.theme-minimalist-dark .tabs {
-  padding: 0 40px;
-  border-bottom: 1px solid var(--border);
-}
-.theme-minimalist-dark .tab {
-  background: transparent;
-  color: var(--text-muted);
-  border: none;
-  font-weight: 500;
-  font-size: 1rem;
-  margin-right: 30px;
-  padding: 15px 0;
-  border-radius: 0;
-}
-.theme-minimalist-dark .tab.active {
-  color: var(--accent);
-  box-shadow: inset 0 -3px 0 0 var(--accent);
-}
-
-.theme-minimalist-dark .panel {
-  background: transparent;
-  border: none;
-  padding: 40px;
-}
-
-.theme-minimalist-dark .library-card {
-  border-radius: 12px;
-  overflow: hidden;
-  border: none;
-}
-
-/* ==============================================================
-   LAYOUT 2: SIDEBAR MAIN
-   Moves navigation to the left side and stats directly under.
-   ============================================================== */
-.layout-sidebar {
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  grid-template-rows: auto 1fr;
-  grid-template-areas:
-    "header header"
-    "nav main";
-  gap: 30px;
-  max-width: 1600px;
-  align-items: start;
-  min-height: 95vh;
-}
-
-.layout-sidebar > .topbar {
-  grid-area: header;
-  margin-bottom: 0;
-}
-
-.layout-sidebar > .tabs {
-  grid-area: nav;
-  display: flex !important;
-  flex-direction: column;
-  padding: 0;
-  border-bottom: none;
-  border-right: 1px solid var(--border);
-  height: 100%;
-}
-
-.layout-sidebar > .tabs .tab {
-  margin-right: 0;
-  border-bottom: none;
-  text-align: left;
-}
-
-.layout-sidebar > .stats-grid {
-  display: none; /* Hide basic stats grid in this layout for a cleaner look, or moved */
-}
-
-.layout-sidebar > .panel {
-  grid-area: main;
-}
-
-.layout-sidebar > .setup-banner {
-  grid-column: 1 / -1;
-}
-
-/* ==============================================================
-   LAYOUT 3: BENTO BOX GRID
-   Creates a floating asymmetrical grid structure. Tabs left, stats right.
-   ============================================================== */
-.layout-bento {
-  display: grid;
-  grid-template-columns: 220px 1fr 300px;
-  grid-template-rows: auto 1fr;
-  grid-template-areas:
-    "header header header"
-    "nav main stats";
-  gap: 20px;
-  max-width: 1800px;
-  align-items: stretch;
-  min-height: 90vh;
-}
-
-.layout-bento > .topbar {
-  grid-area: header;
-  margin-bottom: 0;
-}
-
-.layout-bento > .tabs {
-  grid-area: nav;
-  display: flex !important;
-  flex-direction: column;
-  border: none;
-}
-
-.layout-bento > .tabs .tab {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 15px;
-  margin-bottom: 10px;
-  background: var(--panel-bg);
-  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-  text-align: center;
-}
-
-.layout-bento > .panel {
-  grid-area: main;
-  height: 100%;
-  overflow-y: auto;
-}
-
-.layout-bento > .stats-grid {
-  grid-area: stats;
-  display: flex !important;
-  flex-direction: column;
-  gap: 15px;
-  padding: 0;
-}
-
-.layout-bento > .stats-grid .stat-card {
-  width: 100%;
-  flex: none;
-  margin-bottom: 10px;
-}
-
-.layout-bento > .setup-banner {
-  grid-column: 1 / -1;
-}
-
-/* Responsive drop down to single column on small screens */
-@media (max-width: 1000px) {
-  .layout-sidebar, .layout-bento {
-    display: block;
-  }
-}
-
-/* ==============================================================
-   LAYOUT 4: RADARR / SONARR STYLE
-   Left sidebar with brand + vertical icon nav. Content right.
-   Dark navy palette matches the arr-suite aesthetic.
-   ============================================================== */
-
-/* When this layout is active, force the Arr dark palette regardless of theme */
-.layout-arr {
-  --arr-bg:        #1a1d25;
-  --arr-sidebar:   #1d2130;
-  --arr-panel:     #242636;
-  --arr-card:      #2b2e3b;
-  --arr-border:    #363848;
-  --arr-accent:    #00b5cc;
-  --arr-accent2:   #5d86f9;
-  --arr-text:      #d0d1d3;
-  --arr-muted:     #7b7c85;
-  --arr-danger:    #e5534b;
-  --arr-success:   #3fb950;
-
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  grid-template-rows: 60px auto auto 1fr;
-  grid-template-areas:
-    "sidebar header"
-    "sidebar alerts"
-    "sidebar stats"
-    "sidebar main";
-  min-height: 100vh;
-  background: var(--arr-bg);
-  color: var(--arr-text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  padding: 0;
-  max-width: 100%;
-}
-
-/* Sidebar: the .tabs nav element becomes the full left sidebar */
-.layout-arr > .tabs {
-  grid-area: sidebar;
-  display: flex !important;
-  flex-direction: column;
-  background: var(--arr-sidebar);
-  border-right: 1px solid var(--arr-border);
-  border-bottom: none;
-  padding: 0;
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  overflow-y: auto;
-  z-index: 50;
-}
-
-/* App brand logo area at top of sidebar */
-.layout-arr > .tabs::before {
-  content: "▶ Placeholdarr";
-  display: block;
-  padding: 0 20px;
-  height: 60px;
-  line-height: 60px;
-  font-size: 1.1rem;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  color: var(--arr-accent);
-  border-bottom: 1px solid var(--arr-border);
-  background: var(--arr-sidebar);
-  flex-shrink: 0;
-}
-
-/* Sidebar nav tabs */
-.layout-arr > .tabs .tab {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 14px 22px;
-  text-align: left;
-  border-radius: 0;
-  border: none;
-  border-left: 3px solid transparent;
-  background: transparent;
-  color: var(--arr-muted);
-  font-size: 0.92rem;
-  font-weight: 500;
-  margin: 0;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-
-.layout-arr > .tabs .tab:hover {
-  background: rgba(255,255,255,0.04);
-  color: var(--arr-text);
-}
-
-.layout-arr > .tabs .tab.active {
-  color: var(--arr-accent);
-  border-left: 3px solid var(--arr-accent);
-  background: rgba(0, 181, 204, 0.07);
-  font-weight: 600;
-  box-shadow: none;
-}
-
-/* Give sidebar tabs icons via attribute-based ::before */
-.layout-arr > .tabs .tab[children="Activity"]::before,
-.layout-arr > .tabs .tab:nth-child(2)::before { content: "⚡ "; }
-.layout-arr > .tabs .tab:nth-child(3)::before  { content: "🎬 "; }
-.layout-arr > .tabs .tab:nth-child(4)::before  { content: "📅 "; }
-.layout-arr > .tabs .tab:nth-child(5)::before  { content: "⚠️ "; }
-.layout-arr > .tabs .tab:nth-child(6)::before  { content: "📋 "; }
-.layout-arr > .tabs .tab:nth-child(7)::before  { content: "⚙️ "; }
-
-/* Top bar: shrinks to a thin ribbon on the right side only */
-.layout-arr > .topbar {
-  grid-area: header;
-  background: var(--arr-panel);
-  border-bottom: 1px solid var(--arr-border);
-  border-radius: 0;
-  padding: 0 24px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  height: 60px;
-  margin: 0;
-}
-
-.layout-arr > .topbar .topbar-content {
-  display: none; /* hide the big h1/subtitle in arr mode */
-}
-
-.layout-arr > .topbar .topbar-actions {
-  gap: 10px;
-}
-
-.layout-arr > .topbar .topbar-actions .input,
-.layout-arr > .topbar .topbar-actions .layout-selector,
-.layout-arr > .topbar .topbar-actions .theme-selector {
-  background: var(--arr-card);
-  border: 1px solid var(--arr-border);
-  color: var(--arr-text);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 0.85rem;
-}
-
-.layout-arr > .topbar .meta-pill {
-  background: rgba(0, 181, 204, 0.1);
-  color: var(--arr-accent);
-  border: 1px solid rgba(0, 181, 204, 0.3);
-  border-radius: 4px;
-  padding: 4px 12px;
-  font-size: 0.78rem;
-}
-
-/* Alerts / setup banner */
-.layout-arr > .setup-banner {
-  grid-area: alerts;
-  margin: 0;
-  border-radius: 0;
-  background: rgba(229, 83, 75, 0.15);
-  border-left: 4px solid var(--arr-danger);
-  border-bottom: 1px solid var(--arr-border);
-  color: var(--arr-text);
-  padding: 10px 24px;
-}
-
-/* Stats row: mimics Arr's icon-stat row below header */
-.layout-arr > .stats-grid {
-  grid-area: stats;
-  display: flex !important;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 1px;
-  background: var(--arr-border);
-  border-bottom: 1px solid var(--arr-border);
-  padding: 0;
-  margin: 0;
-}
-
-.layout-arr > .stats-grid .stat-card {
-  flex: 1;
-  min-width: 120px;
-  background: var(--arr-panel);
-  border: none;
-  border-radius: 0;
-  padding: 14px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.layout-arr > .stats-grid .stat-value {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--arr-accent);
-}
-
-.layout-arr > .stats-grid .stat-title {
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--arr-muted);
-}
-
-.layout-arr > .stats-grid .stat-sub {
-  font-size: 0.75rem;
-  color: var(--arr-muted);
-}
-
-/* Main content panel */
-.layout-arr > .panel {
-  grid-area: main;
-  background: var(--arr-bg);
-  border: none;
-  border-radius: 0;
-  padding: 24px;
-  min-height: calc(100vh - 60px);
-  box-shadow: none;
-}
-
-/* Override card colours in panels */
-.layout-arr .library-card {
-  background: var(--arr-card);
-  border: 1px solid var(--arr-border);
-  border-radius: 6px;
-}
-
-.layout-arr .library-card:hover {
-  border-color: var(--arr-accent);
-  box-shadow: 0 0 0 1px var(--arr-accent);
-}
-
-.layout-arr .library-filter.active {
-  background: var(--arr-accent);
-  border-color: var(--arr-accent);
-}
-
-.layout-arr .chip.ok        { background: rgba(63, 185, 80, 0.2);  color: var(--arr-success); }
-.layout-arr .chip.missing   { background: rgba(229, 83, 75, 0.2);  color: var(--arr-danger); }
-.layout-arr .chip.future    { background: rgba(93, 134, 249, 0.2); color: var(--arr-accent2); }
-
-.layout-arr .data-table th,
-.layout-arr .data-table td {
-  border-color: var(--arr-border);
-}
-
-.layout-arr .data-table tr:hover td {
-  background: rgba(255,255,255,0.03);
-}
-
-@media (max-width: 900px) {
-  .layout-arr {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "header"
-      "sidebar"
-      "alerts"
-      "stats"
-      "main";
-  }
-  .layout-arr > .tabs {
-    position: static;
-    height: auto;
-    flex-direction: row;
-    flex-wrap: wrap;
-    border-right: none;
-    border-bottom: 1px solid var(--arr-border);
-  }
-  .layout-arr > .tabs .tab {
-    border-left: none;
-    border-bottom: 3px solid transparent;
-    flex: 1;
-    text-align: center;
-    justify-content: center;
-  }
-  .layout-arr > .tabs .tab.active {
-    border-bottom: 3px solid var(--arr-accent);
-    border-left: none;
-  }
-}
-
-/* ==============================================================
    THEME 4: STUDIO DARK (TAILORED)
    Inspired by the provided studio mockups: deep slate surfaces,
    cool blue accents, elevated cards, and strong headline hierarchy.
@@ -1282,10 +717,11 @@ a { color: inherit; }
 /* Light theme overrides for studio (true light surfaces) */
 .theme-studio-light .stat-card,
 .theme-light .stat-card {
-  background: #ffffff;
+  background: linear-gradient(165deg, #ffffff 0%, #f7fbff 55%, #f2f8fd 100%);
   color: #0b1220;
-  border-color: rgba(11,18,32,0.06);
-  box-shadow: 0 6px 18px rgba(11,18,32,0.06);
+  border-color: rgba(2, 132, 199, 0.12);
+  box-shadow: 0 8px 22px rgba(12, 74, 110, 0.07), 0 1px 0 rgba(52, 218, 255, 0.12);
+  border-radius: 12px;
 }
 
 /* Ensure hover uses CSS transition but actual glow is applied inline via React using brand accent */

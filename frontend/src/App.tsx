@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
@@ -44,6 +44,17 @@ import type {
 
 const REFRESH_MS = 5000;
 const LOG_TAIL_LINES = 2000;
+const STUDIO_THEME_MODE_STORAGE_KEY = "placeholdarr:studio-theme-mode";
+
+function readStoredThemeMode(): ThemeMode {
+  try {
+    const v = localStorage.getItem(STUDIO_THEME_MODE_STORAGE_KEY);
+    if (v === "light" || v === "dark") return v;
+  } catch {
+    /* private / blocked storage */
+  }
+  return "dark";
+}
 const SETTINGS_SECTION_ORDER = [
   "Media Integrations",
   "ARR Integrations",
@@ -54,6 +65,26 @@ const SETTINGS_SECTION_ORDER = [
   "Status Updates",
   "Advanced",
 ];
+const SETTINGS_SECTION_ICONS: Record<string, string> = {
+  "Media Integrations": "hub",
+  "ARR Integrations": "dns",
+  "Paths": "folder",
+  "Library sync": "sync",
+  "Calendar": "calendar_month",
+  "Lookahead": "fast_forward",
+  "Status Updates": "edit_notifications",
+  "Advanced": "tune",
+};
+const SETTINGS_SECTION_SLUGS: Record<string, string> = {
+  "Media Integrations": "media-integrations",
+  "ARR Integrations": "arr-integrations",
+  "Paths": "paths",
+  "Library sync": "library-sync",
+  "Calendar": "calendar",
+  "Lookahead": "lookahead",
+  "Status Updates": "status-updates",
+  "Advanced": "advanced",
+};
 const BEHAVIOR_WIZARD_SECTIONS = [
   "ARR Integrations",
   "Library sync",
@@ -72,14 +103,14 @@ const ONBOARDING_SECTION_TITLE_CLASS =
  * Requires an ancestor that sets CSS vars (e.g. `semanticTokensToCssVars` on `.brand-theme-scope`).
  */
 const UI_SECTION_FRAME_CLASS =
-  "rounded-lg border border-[var(--brand-accent-3)] bg-[#1a2436]/95 shadow-lg shadow-black/30";
+  "rounded-lg border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15";
 
 /**
- * Media / ARR service tiles (wizard + settings grids): same accent rail and slate fill as
+ * Media / ARR service tiles (wizard + settings grids): same accent rail and surface fill as
  * {@link UI_SECTION_FRAME_CLASS}, with the taller rounded-2xl silhouette.
  */
 const UI_INTEGRATION_CARD_SURFACE_CLASS =
-  "rounded-2xl border border-[var(--brand-accent-3)] bg-[#1a2436]/95 shadow-lg shadow-black/30 backdrop-blur-md transition hover:shadow-[0_0_36px_-14px_color-mix(in_srgb,var(--brand-accent-3)_28%,transparent)]";
+  "rounded-2xl border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15 backdrop-blur-md transition hover:shadow-[0_0_36px_-14px_color-mix(in_srgb,var(--brand-accent-3)_28%,transparent)]";
 
 /** Wizard stacked section bodies (bottom margin between sections). */
 const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
@@ -189,40 +220,12 @@ type BrandAccent = {
   hoverHex: string;
 };
 
-const BRAND_OPTIONS: Array<{ value: Brand; label: string }> = [
-  { value: "placeholdarr", label: "Placeholdarr" },
-  { value: "placeholdarr-neon", label: "Placeholdarr Neon" },
-  { value: "spectarr", label: "Spectarr" },
-  { value: "phantarr", label: "Phantarr" },
-  { value: "mirarr", label: "Mirarr" },
-  { value: "elfhosted", label: "ElfHosted" },
-  { value: "simularr", label: "Simularr" },
-  { value: "trigger", label: "Trigger" },
-  { value: "linkarr", label: "Linkarr" },
-];
+/** App name is Placeholdarr; `Brand` selects the Simularr visual theme (tokens only). */
+const BRAND: Brand = "simularr";
 
-const THEME_MODE_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
-  { value: "dark", label: "Dark" },
-  { value: "light", label: "Light" },
-];
-
-const THEME_OPTIONS: Array<{ value: "standard" | "glassmorphism" | "minimalist-dark" | "studio-dark"; label: string }> = [
-  { value: "standard", label: "Standard" },
-  { value: "glassmorphism", label: "Glass" },
-  { value: "minimalist-dark", label: "Minimalist" },
-  { value: "studio-dark", label: "Studio" },
-];
-
-const BRAND_META: Record<Brand, { label: string; tagline: string }> = {
-  placeholdarr: { label: "Placeholdarr", tagline: "Your library, complete - even before it's downloaded." },
-  "placeholdarr-neon": { label: "Placeholdarr Neon", tagline: "Your library, complete - with a neon control room edge." },
-  spectarr: { label: "Spectarr", tagline: "A specter in your library - present, but not yet real." },
-  phantarr: { label: "Phantarr", tagline: "Phantom media, on demand. Real when you need it." },
-  mirarr: { label: "Mirarr", tagline: "Your library, reflected in full - even what's not there yet." },
-  elfhosted: { label: "Placeholdarr", tagline: "Your library, complete. No docker, no suffering." },
-  simularr: { label: "Simularr", tagline: "High fidelity simulation — your library as a living spec sheet." },
-  trigger: { label: "Trigger", tagline: "Industrial-grade control — pulse-tuned for high-visibility ops." },
-  linkarr: { label: "Linkarr", tagline: "The missing link in media automation — signal-clean orchestration." },
+const BRAND_META: { label: string; tagline: string } = {
+  label: "Placeholdarr",
+  tagline: "High fidelity simulation — your library as a living spec sheet.",
 };
 
 /** Branded first paint for /setup while settings load (Seerr-style splash: motion masks wait). */
@@ -267,153 +270,26 @@ function SetupBootShell(props: {
 }
 
 const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
-  // Placeholdarr - Ghost Steel
-  "placeholdarr-light": {
-    label: "Placeholdarr",
-    hex: "#7B9FD4",
-    text: "#D8EAF7",
-    icon: "#A8C3E5",
-    hoverHex: "#4D7BB0",
-  },
-  "placeholdarr-dark": {
-    label: "Placeholdarr",
-    hex: "#7B9FD4",
-    text: "#e4eeff",
-    icon: "#cfe0ff",
-    hoverHex: "#6889bb",
-  },
-  "placeholdarr-neon-light": {
-    label: "Placeholdarr Neon",
-    hex: "#b33771",
-    text: "#ffe4f1",
-    icon: "#ffc6e0",
-    hoverHex: "#9b2f62",
-  },
-  "placeholdarr-neon-dark": {
-    label: "Placeholdarr Neon",
-    hex: "#b33771",
-    text: "#ffd7e8",
-    icon: "#ffb6d5",
-    hoverHex: "#9b2f62",
-  },
-  // Spectarr - Slate Lavender
-  "spectarr-light": {
-    label: "Spectarr",
-    hex: "#9B9BB4",
-    text: "#EDEDF5",
-    icon: "#BEBDD4",
-    hoverHex: "#6E6E88",
-  },
-  "spectarr-dark": {
-    label: "Spectarr",
-    hex: "#9B9BB4",
-    text: "#e6e6f0",
-    icon: "#d4d4e8",
-    hoverHex: "#7d7d96",
-  },
-  // Phantarr - Ghost Teal
-  "phantarr-light": {
-    label: "Phantarr",
-    hex: "#5DAFB2",
-    text: "#CBE9EA",
-    icon: "#8FCBCD",
-    hoverHex: "#3A8E91",
-  },
-  "phantarr-dark": {
-    label: "Phantarr",
-    hex: "#5DAFB2",
-    text: "#daf7f7",
-    icon: "#bdeff0",
-    hoverHex: "#4a999d",
-  },
-  // Mirarr - Amber
-  "mirarr-light": {
-    label: "Mirarr",
-    hex: "#C4893D",
-    text: "#F2DFC0",
-    icon: "#D4A96D",
-    hoverHex: "#9A6A2A",
-  },
-  "mirarr-dark": {
-    label: "Mirarr",
-    hex: "#C4893D",
-    text: "#f0ddb0",
-    icon: "#e8c890",
-    hoverHex: "#a87a2f",
-  },
-  // ElfHosted - Forest Green
-  "elfhosted-light": {
-    label: "ElfHosted",
-    hex: "#3d5a22",
-    text: "#e8f5d6",
-    icon: "#50762e",
-    hoverHex: "#2c4418",
-  },
-  "elfhosted-dark": {
-    label: "ElfHosted",
-    hex: "#50762e",
-    text: "#c8e6a0",
-    icon: "#6a9c3e",
-    hoverHex: "#3d5a22",
-  },
-  // Simularr — slate / void / cyber yellow
   "simularr-light": {
-    label: "Simularr",
-    hex: "#ca8a04",
+    label: "Placeholdarr",
+    /** Primary stat / hero yellow (matches Simularr dark + top bar band), not ochre. */
+    hex: "#FBBF24",
     text: "#0f172a",
-    icon: "#475569",
-    hoverHex: "#a16207",
+    /** Cyan rail / secondary chrome on light panels */
+    icon: "#0284C7",
+    hoverHex: "#D97706",
   },
   "simularr-dark": {
-    label: "Simularr",
+    label: "Placeholdarr",
     hex: "#FBBF24",
     text: "#E2E8F0",
     icon: "#CBD5E1",
     hoverHex: "#d97706",
   },
-  // Trigger (Vanguard) — pulse orange / zinc / warning yellow
-  "trigger-light": {
-    label: "Trigger",
-    hex: "#FF6B35",
-    text: "#212121",
-    icon: "#744F10",
-    hoverHex: "#e85a2a",
-  },
-  "trigger-dark": {
-    label: "Trigger",
-    hex: "#FF6B35",
-    text: "#FCEEE3",
-    icon: "#FFCC33",
-    hoverHex: "#ff8555",
-  },
-  // Linkarr — signal blue / core slate / accent sky
-  "linkarr-light": {
-    label: "Linkarr",
-    hex: "#2563EB",
-    text: "#1E293B",
-    icon: "#60A5FA",
-    hoverHex: "#1d4ed8",
-  },
-  "linkarr-dark": {
-    label: "Linkarr",
-    hex: "#2563EB",
-    text: "#E2E8F0",
-    icon: "#60A5FA",
-    hoverHex: "#1d4ed8",
-  },
 };
 
-function getStudioDarkBackdrop(brand: Brand, accent: BrandAccent, semantic: BrandSemanticTokens): string {
-  switch (brand) {
-    case "simularr":
-      return `radial-gradient(1000px 540px at 6% -14%, ${alphaColor(semantic.accent, 0.28)}, transparent 58%), radial-gradient(860px 480px at 96% 108%, ${alphaColor(semantic.accentIce, 0.22)}, transparent 54%), radial-gradient(720px 420px at 44% 96%, ${alphaColor(semantic.accent3, 0.14)}, transparent 56%), linear-gradient(172deg, ${semantic.chromeSidebar} 0%, ${semantic.surfaceMuted} 46%, ${semantic.surfacePanel} 100%)`;
-    case "trigger":
-      return `radial-gradient(1100px 580px at 10% -18%, ${alphaColor(semantic.accent, 0.42)}, transparent 56%), radial-gradient(780px 440px at 88% 108%, ${alphaColor(semantic.accent2, 0.22)}, transparent 50%), radial-gradient(640px 420px at 48% 42%, ${alphaColor(semantic.accent3, 0.14)}, transparent 72%), ${semantic.chromePage}`;
-    case "linkarr":
-      return `radial-gradient(1040px 560px at 8% -16%, ${alphaColor(semantic.accent2, 0.32)}, transparent 56%), radial-gradient(920px 520px at 92% 112%, ${alphaColor(semantic.accent, 0.36)}, transparent 54%), radial-gradient(700px 400px at 22% 72%, ${alphaColor(semantic.accentIce, 0.1)}, transparent 58%), linear-gradient(158deg, ${semantic.surfacePanel} 0%, ${semantic.surfaceMuted} 50%, ${semantic.chromeSidebar} 100%)`;
-    default:
-      return `radial-gradient(1200px 600px at 10% -20%, ${alphaColor(accent.hex, 0.22)}, transparent 60%), radial-gradient(900px 500px at 85% 120%, ${alphaColor(accent.hex, 0.12)}, transparent 55%), linear-gradient(160deg, #0b1320, #0a101a 55%, #0b1528)`;
-  }
+function getStudioDarkBackdrop(_brand: Brand, _accent: BrandAccent, semantic: BrandSemanticTokens): string {
+  return `radial-gradient(1000px 540px at 6% -14%, ${alphaColor(semantic.accent, 0.28)}, transparent 58%), radial-gradient(860px 480px at 96% 108%, ${alphaColor(semantic.accentIce, 0.22)}, transparent 54%), radial-gradient(720px 420px at 44% 96%, ${alphaColor(semantic.accent3, 0.14)}, transparent 56%), linear-gradient(172deg, ${semantic.chromeSidebar} 0%, ${semantic.surfaceMuted} 46%, ${semantic.surfacePanel} 100%)`;
 }
 
 function alphaColor(hex: string, alpha: number) {
@@ -448,73 +324,17 @@ function getBrandAccent(brand: Brand, theme: ThemeMode) {
   return BRAND_ACCENTS[key];
 }
 
-function BrandLogo(props: { brand: Brand; accentHex: string; className?: string }) {
-  if (props.brand === "placeholdarr" || props.brand === "placeholdarr-neon" || props.brand === "elfhosted" || props.brand === "linkarr") {
-    return (
-      <img
-        src={placeholdarrLogoBlue}
-        alt=""
-        className={`block object-contain object-center select-none ${props.className ?? ""}`}
-        draggable={false}
-        aria-hidden
-      />
-    );
-  }
-  if (props.brand === "simularr") {
-    return (
-      <img
-        src={placeholdarrLogoBlue}
-        alt=""
-        className={`block object-contain object-left select-none ${props.className ?? ""}`}
-        draggable={false}
-        aria-hidden
-      />
-    );
-  }
-  if (props.brand === "trigger") {
-    return (
-      <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-        <rect width="72" height="72" rx="16" fill={props.accentHex} />
-        <circle cx="36" cy="36" r="19" fill="none" stroke="#212121" strokeWidth="3.2" opacity="0.35" />
-        <path
-          d="M38 14 L26 34 H33 L28 58 L46 32 H38 Z"
-          fill="#FFCC33"
-          stroke="#212121"
-          strokeWidth="1.2"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-  if (props.brand === "spectarr") {
-    return (
-      <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-        <rect width="72" height="72" rx="16" fill={props.accentHex} />
-        <path d="M36 15 A21 21 0 0 0 36 57 Z" fill="#fff" />
-        <path d="M36 15 A21 21 0 0 1 36 57" stroke="#fff" strokeWidth="4" fill="none" strokeDasharray="4 5" strokeLinecap="round" />
-        <circle cx="36" cy="36" r="4.5" fill={props.accentHex} />
-        <circle cx="36" cy="36" r="2.5" fill="#fff" />
-      </svg>
-    );
-  }
-  if (props.brand === "phantarr") {
-    return (
-      <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-        <rect width="72" height="72" rx="16" fill={props.accentHex} />
-        <polygon points="23,17 55,36 23,55" stroke="#fff" strokeWidth="4.5" fill="none" strokeLinejoin="round" strokeLinecap="round" />
-        <line x1="23" y1="17" x2="55" y2="36" stroke="#fff" strokeWidth="4.5" strokeLinecap="round" />
-        <line x1="23" y1="55" x2="55" y2="36" stroke="#fff" strokeWidth="4.5" strokeLinecap="round" />
-        <line x1="23" y1="17" x2="23" y2="55" stroke="#fff" strokeWidth="4.5" strokeLinecap="round" strokeDasharray="5 5" />
-      </svg>
-    );
-  }
+function BrandLogo(props: { brand: Brand; accentHex: string; className?: string; variant?: "blue" | "yellow" }) {
+  void props.accentHex;
+  const src = props.variant === "yellow" ? placeholdarrLogoYellow : placeholdarrLogoBlue;
   return (
-    <svg className={props.className} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-      <rect width="72" height="72" rx="16" fill={props.accentHex} />
-      <polygon points="36,13 57,36 36,36 15,36" fill="#fff" />
-      <polyline points="15,36 36,59 57,36" stroke="#fff" strokeWidth="4" fill="none" strokeDasharray="5 4.5" strokeLinecap="round" strokeLinejoin="round" />
-      <line x1="13" y1="36" x2="59" y2="36" stroke={props.accentHex} strokeWidth="1.5" />
-    </svg>
+    <img
+      src={src}
+      alt=""
+      className={`block object-contain object-left select-none ${props.className ?? ""}`}
+      draggable={false}
+      aria-hidden
+    />
   );
 }
 
@@ -535,9 +355,8 @@ export function App() {
   const navigate = useNavigate();
   const contentScrollRef = useRef<HTMLElement | null>(null);
 
-  const [theme, setTheme] = useState<"standard" | "glassmorphism" | "minimalist-dark" | "studio-dark">("studio-dark");
-  const [brand, setBrand] = useState<Brand>("simularr");
-  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
+  const brand = BRAND;
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
 
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
@@ -590,12 +409,21 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const currentTab = getTabFromPath(location.pathname);
+  const settingsSectionNames = useMemo(
+    () =>
+      settingsPayload
+        ? SETTINGS_SECTION_ORDER.filter((name) => settingsPayload.sections.some((s) => s.name === name))
+        : [],
+    [settingsPayload],
+  );
+  const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
+  const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
   /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
   const defaultLandingPath =
     setupStatus != null && setupStatus.setup_complete ? "/activity" : "/setup";
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
-  const brandMeta = BRAND_META[brand];
+  const brandMeta = BRAND_META;
   /** Flat shell for setup-route “Loading…” only — avoids multi-layer backdrop paint before the wizard mounts. */
   const setupLoadingShellStyle = useMemo(
     () =>
@@ -906,6 +734,24 @@ export function App() {
     navigate("/setup", { replace: true });
   }, [loading, setupStatus, location.pathname, navigate]);
 
+  useEffect(() => {
+    if (currentTab !== "settings") return;
+    if (!settingsPayload) return;
+    if (location.pathname === "/settings" || location.pathname === "/settings/") {
+      navigate(firstSettingsPath, { replace: true });
+      return;
+    }
+    const slug = location.pathname.split("/")[2] || "";
+    const matched = settingsSectionNames.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
+    if (!matched) {
+      navigate(firstSettingsPath, { replace: true });
+      return;
+    }
+    if (matched !== activeSettingsSection) {
+      setActiveSettingsSection(matched);
+    }
+  }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload, settingsSectionNames]);
+
   const filteredLibrary = useMemo(() => {
     return library
       .filter((item) => {
@@ -967,7 +813,9 @@ export function App() {
 
     const sections = SETTINGS_SECTION_ORDER.filter((name) => payload.sections.some((s) => s.name === name));
     if (sections.length > 0 && !sections.includes(activeSettingsSection)) {
-      setActiveSettingsSection(sections[0]);
+      const slug = location.pathname.split("/")[2] || "";
+      const matched = sections.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
+      setActiveSettingsSection(matched || sections[0]);
     }
   }
 
@@ -990,7 +838,8 @@ export function App() {
   }
 
   function tryNavigate(path: string) {
-    if (!hasUnsavedChanges || currentTab !== "settings") {
+    const stayingWithinSettings = currentTab === "settings" && path.startsWith("/settings");
+    if (!hasUnsavedChanges || currentTab !== "settings" || stayingWithinSettings) {
       navigate(path);
       return;
     }
@@ -1170,7 +1019,6 @@ export function App() {
           feedbackKind={settingsFeedbackKind}
           brand={brand}
           themeMode={themeMode}
-          onSectionChange={setActiveSettingsSection}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
           onSave={async () => {
             setSettingsFeedback("Saving...");
@@ -1203,9 +1051,17 @@ export function App() {
     return <div className="empty">Unknown route.</div>;
   }
 
-  // Dynamically set body class based on theme mode
+  // Body class for global studio chrome (Placeholdarr UI: Simularr theme, light/dark)
   useEffect(() => {
-    document.body.className = themeMode === "light" ? "theme-studio-light" : "theme-glassmorphism";
+    document.body.className = themeMode === "light" ? "theme-studio-light" : "theme-studio-dark";
+  }, [themeMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STUDIO_THEME_MODE_STORAGE_KEY, themeMode);
+    } catch {
+      /* ignore */
+    }
   }, [themeMode]);
 
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
@@ -1265,32 +1121,28 @@ export function App() {
     );
   }
 
-  // Studio Shell — Tailwind JSX matching the design mockups exactly
-  if (theme === "studio-dark") {
-    const isActive = (path: string) =>
-      location.pathname === path || location.pathname.startsWith(`${path}/`);
-    const isStudioGlass = themeMode !== "light";
-    const studioLightChrome = {
-      page: brandSemantic.chromePage,
-      sidebar: brandSemantic.chromeSidebar,
-      header: brandSemantic.chromeHeader,
-      main: brandSemantic.chromeMain,
-      border: brandSemantic.border,
-    };
-    const brandVarStyle = semanticTokensToCssVars(brandSemantic) as CSSProperties;
-    const isSimularr = brand === "simularr";
-    const topBarDivider = isSimularr
-      ? alphaColor("#0f172a", isStudioGlass ? 0.22 : 0.14)
-      : alphaColor(brandSemantic.border, isStudioGlass ? 0.55 : 0.4);
-    /** Matches Studio top-bar `<select>` fields (Simularr search/dropdown strip). */
-    const simularrTopBarBlue = "#1e2430";
-    const simularrHeaderBackground = isSimularr
-      ? isStudioGlass
-        ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${simularrTopBarBlue} 80%, ${simularrTopBarBlue} 100%)`
-        : `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${brandSemantic.surfaceElevated} 80%, ${brandSemantic.surfaceElevated} 100%)`
-      : null;
+  // Studio shell (Placeholdarr app; Simularr visual layout; light vs dark via themeMode only)
+  const isActive = (path: string) =>
+    location.pathname === path || location.pathname.startsWith(`${path}/`);
+  const isStudioGlass = themeMode !== "light";
+  const studioLightChrome = {
+    page: brandSemantic.chromePage,
+    sidebar: brandSemantic.chromeSidebar,
+    header: brandSemantic.chromeHeader,
+    main: brandSemantic.chromeMain,
+    border: brandSemantic.border,
+  };
+  const brandVarStyle = semanticTokensToCssVars(brandSemantic) as CSSProperties;
+  const topBarDivider = isStudioGlass
+    ? alphaColor("#0f172a", 0.22)
+    : alphaColor("#94a3b8", 0.45);
+  /** Matches Studio top-bar search/dropdown strip. */
+  const simularrTopBarBlue = "#1e2430";
+  const simularrHeaderBackground = isStudioGlass
+    ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${simularrTopBarBlue} 80%, ${simularrTopBarBlue} 100%)`
+    : `linear-gradient(to right, ${simularrTopBarBlue} 0%, ${simularrTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
 
-    return (
+  return (
       <div
         className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
         style={{
@@ -1302,30 +1154,23 @@ export function App() {
       >
         {/* Sidebar */}
         <aside
-          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 ${isSimularr ? "pb-6 pt-0" : "py-6"} ${isStudioGlass ? `bg-white/8 backdrop-blur-2xl border-r ${isSimularr ? "" : "shadow-[20px_0_45px_rgba(8,14,30,0.45)]"}` : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
+          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-6 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
           style={isStudioGlass ? { borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: brandSemantic.glassBorder } : { backgroundColor: studioLightChrome.sidebar, borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: studioLightChrome.border }}
         >
-          {isSimularr ? (
-            <div
-              className="flex h-16 w-full shrink-0 items-center justify-center border-b px-3"
-              style={{ backgroundColor: brandSemantic.topBarBand, borderBottomColor: topBarDivider }}
-            >
-              <BrandLogo brand={brand} accentHex={brandAccent.hex} className="max-h-[52px] w-full max-w-[13.5rem] object-contain object-center" />
-            </div>
-          ) : (
-            <div className="px-6 mb-10">
-              <div className="flex items-center gap-3">
-                <BrandLogo brand={brand} accentHex={brandAccent.hex} className="h-10 w-10 flex-shrink-0 rounded-lg shadow-lg" />
-                <div className="min-w-0">
-                  <h1 className={`text-lg font-black font-brand-head leading-none ${isStudioGlass ? "text-white" : "text-slate-900"}`}>{brandMeta.label}</h1>
-                  <p className={`text-[10px] tracking-wide font-brand-label mt-1 ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>{brandMeta.tagline}</p>
-                </div>
-              </div>
-            </div>
-          )}
+          <div
+            className="flex h-16 w-full shrink-0 items-center justify-center border-b px-3"
+            style={{ backgroundColor: isStudioGlass ? brandSemantic.topBarBand : simularrTopBarBlue, borderBottomColor: topBarDivider }}
+          >
+            <BrandLogo
+              brand={brand}
+              accentHex={brandAccent.hex}
+              variant={isStudioGlass ? "blue" : "yellow"}
+              className="max-h-[52px] w-full max-w-[13.5rem] object-contain object-center"
+            />
+          </div>
 
           {/* Nav */}
-          <nav className={`flex-1 space-y-1 font-brand-label ${isSimularr ? "pt-4" : ""}`}>
+          <nav className="flex-1 space-y-1 font-brand-label pt-4">
             {[
               { icon: "analytics", label: "Activity", path: "/activity" },
               { icon: "movie_filter", label: "Library", path: "/library" },
@@ -1335,7 +1180,7 @@ export function App() {
               { icon: "settings", label: "Settings", path: "/settings" },
             ].map(({ icon, label, path }) =>
               isActive(path) ? (
-                <button key={path} type="button" onClick={() => tryNavigate(path)}
+                <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
                   className={`flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`}
                   style={{
                     backgroundColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.22 : 0.16),
@@ -1347,7 +1192,7 @@ export function App() {
                   <span>{label}</span>
                 </button>
               ) : (
-                <button key={path} type="button" onClick={() => tryNavigate(path)}
+                <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
                   className={`flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group ${isStudioGlass ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]" : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]"}`}
                 >
                   <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
@@ -1355,6 +1200,35 @@ export function App() {
                 </button>
               )
             )}
+            {currentTab === "settings" && settingsSectionNames.length ? (
+              <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                {settingsSectionNames.map((name) => {
+                  const subPath = `/settings/${SETTINGS_SECTION_SLUGS[name] ?? ""}`;
+                  const isSubActive = location.pathname === subPath;
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() => tryNavigate(subPath)}
+                      className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ${
+                        isStudioGlass
+                          ? isSubActive
+                            ? "bg-[#1e2430] text-slate-100"
+                            : "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                          : isSubActive
+                            ? "bg-sky-100 text-slate-900"
+                            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                      }`}
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                        {SETTINGS_SECTION_ICONS[name] || "settings"}
+                      </span>
+                      <span className="truncate">{name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </nav>
 
         </aside>
@@ -1363,14 +1237,8 @@ export function App() {
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Topbar */}
           <header
-            className={`flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b ${isSimularr || !isStudioGlass ? "" : "bg-white/6 backdrop-blur-xl"}`}
-            style={
-              isSimularr && simularrHeaderBackground
-                ? { backgroundImage: simularrHeaderBackground, borderBottomColor: topBarDivider }
-                : isStudioGlass
-                  ? { borderColor: alphaColor(brandSemantic.accent, 0.28) }
-                  : { backgroundColor: studioLightChrome.header, borderColor: studioLightChrome.border }
-            }
+            className="flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b"
+            style={{ backgroundImage: simularrHeaderBackground, borderBottomColor: topBarDivider }}
           >
             <div className="flex items-center flex-1 max-w-xl">
               <div
@@ -1379,7 +1247,7 @@ export function App() {
                   window.setTimeout(() => setTitleSearchOpen(false), 120);
                 }}
               >
-                <span className={`material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-lg pointer-events-none ${isStudioGlass ? (isSimularr ? "text-slate-400" : "text-slate-500") : "text-slate-400"}`}>search</span>
+                <span className={`material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-lg pointer-events-none ${isStudioGlass ? "text-slate-400" : "text-slate-400"}`}>search</span>
                 <input
                   value={titleSearch}
                   onChange={(e) => {
@@ -1411,7 +1279,7 @@ export function App() {
                       setTitleSearchOpen(false);
                     }
                   }}
-                  className={`w-full rounded-lg py-2 pl-10 pr-4 text-sm border focus:outline-none placeholder-slate-500 ${isStudioGlass ? (isSimularr ? `border-[#2a3444] bg-[#1e2430] text-slate-100 ${getBrandFocusClass(brand, themeMode)}` : `bg-white/10 text-slate-100 border-white/20 ${getBrandFocusClass(brand, themeMode)}`) : `bg-white text-slate-900 border-[#cddbeb] ${getBrandFocusClass(brand, themeMode)}`}`}
+                  className={`w-full rounded-lg py-2 pl-10 pr-4 text-sm border focus:outline-none placeholder-slate-500 ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-slate-100 ${getBrandFocusClass(brand, themeMode)}` : `bg-white text-slate-900 border-[#cddbeb] ${getBrandFocusClass(brand, themeMode)}`}`}
                   placeholder="Search titles, series, and movies..."
                 />
                 {titleSearchOpen && titleSearch.trim() ? (
@@ -1458,39 +1326,18 @@ export function App() {
               </div>
             </div>
             <div className="flex items-center gap-3 ml-4">
-              <select
-                value={theme}
-                onChange={(e) => setTheme(e.target.value as any)}
-                className={`rounded-lg border px-3 py-2 text-xs outline-none ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-slate-300 ${getBrandFocusClass(brand, themeMode)}` : `border-[#cddbeb] bg-white text-slate-700 ${getBrandFocusClass(brand, themeMode)}`}`}
-                style={{ minWidth: "120px" }}
+              <button
+                type="button"
+                onClick={() => setThemeMode((m) => (m === "dark" ? "light" : "dark"))}
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border outline-none transition-colors ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-amber-200/95 hover:bg-[#252e3a] ${getBrandFocusClass(brand, themeMode)}` : `border-transparent text-slate-900 hover:brightness-[0.97] ${getBrandFocusClass(brand, themeMode)}`}`}
+                style={!isStudioGlass ? { backgroundColor: brandSemantic.topBarBand } : undefined}
+                aria-label={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                title={themeMode === "dark" ? "Light mode" : "Dark mode"}
               >
-                {THEME_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-
-              <select
-                value={brand}
-                onChange={(e) => setBrand(e.target.value as Brand)}
-                className={`rounded-lg border px-3 py-2 text-xs outline-none ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-slate-300 ${getBrandFocusClass(brand, themeMode)}` : `border-[#cddbeb] bg-white text-slate-700 ${getBrandFocusClass(brand, themeMode)}`}`}
-                style={{ minWidth: "150px" }}
-              >
-                {BRAND_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-
-              {/* Theme mode selector moved to top-right (replaces db/connectivity/profile icons) */}
-              <select
-                value={themeMode}
-                onChange={(e) => setThemeMode(e.target.value as ThemeMode)}
-                className={`rounded-lg border px-3 py-2 pr-8 text-xs outline-none ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-slate-300 ${getBrandFocusClass(brand, themeMode)}` : `border-[#cddbeb] bg-white text-slate-700 ${getBrandFocusClass(brand, themeMode)}`}`}
-                style={{ minWidth: "118px" }}
-              >
-                {THEME_MODE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
+                <span className="material-symbols-outlined" style={{ fontSize: 22 }}>
+                  {themeMode === "dark" ? "light_mode" : "dark_mode"}
+                </span>
+              </button>
             </div>
           </header>
 
@@ -1518,7 +1365,15 @@ export function App() {
           </main>
 
           {errorMessage ? (
-            <div className="mx-6 mb-4 p-3 rounded-lg bg-red-900/30 border border-red-500/40 text-red-300 text-sm">{errorMessage}</div>
+            <div
+              className={`mx-6 mb-4 rounded-lg border p-3 text-sm ${
+                isStudioGlass
+                  ? "border-red-500/40 bg-red-900/30 text-red-300"
+                  : "border-red-200 bg-red-50 text-red-800"
+              }`}
+            >
+              {errorMessage}
+            </div>
           ) : null}
         </div>
 
@@ -1527,115 +1382,44 @@ export function App() {
           <Route path="*" element={null} />
         </Routes>
       </div>
-    );
-  }
-
-  // Main UI block with injected wrapper classes
-  return (
-    <div
-      className={`brand-theme-scope app-shell theme-${theme} layout-${brand}-${themeMode} theme-${themeMode} font-brand-body`}
-      style={{ ...(semanticTokensToCssVars(brandSemantic) as CSSProperties) }}
-    >
-      <header className="topbar">
-        <div className="topbar-content">
-          <h1>{brandMeta.label} Dashboard</h1>
-          <p>
-            Auto-refresh {REFRESH_MS / 1000}s · Last sync: {stats?.last_sync ? timeAgo(stats.last_sync) : "never"}
-          </p>
-        </div>
-            <div className="topbar-actions" style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <select
-                value={brand}
-                onChange={(e) => setBrand(e.target.value as Brand)}
-                className="input layout-selector"
-                style={{ minWidth: "150px" }}
-              >
-                {BRAND_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-              <select
-                value={themeMode}
-                onChange={(e) => setThemeMode(e.target.value as ThemeMode)}
-                className="input"
-                style={{ minWidth: "118px", paddingRight: "1.9rem" }}
-              >
-                {THEME_MODE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-              <div className="meta-pill">Dashboard route: /</div>
-            </div>
-      </header>
-
-      {!setupStatus?.setup_complete ? (
-        <div className="setup-banner">Onboarding required. Complete the setup wizard to unlock the full dashboard flow.</div>
-      ) : null}
-
-      <section className="stats-grid">
-        <StatCard accent={brandAccent} title="Movies" value={stats?.movies.total} sub={`Downloaded ${stats?.movies.downloaded ?? "--"} • Placeholders ${stats?.movies.placeholders ?? "--"}`} />
-        <StatCard accent={brandAccent} title="Series" value={stats?.series.total} sub="Tracked series" />
-        <StatCard accent={brandAccent} title="Episodes" value={stats?.episodes.total} sub={`Downloaded ${stats?.episodes.downloaded ?? "--"} • Placeholders ${stats?.episodes.placeholders ?? "--"}`} />
-        <StatCard accent={brandAccent} title="Placeholders" value={stats?.placeholders_on_disk} sub="On disk" />
-        <StatCard accent={brandAccent} title="Jobs" value={stats?.jobs.pending} sub={`Done ${stats?.jobs.done ?? "--"} • Failed ${stats?.jobs.failed ?? "--"}`} />
-      </section>
-
-      <nav className="tabs" aria-label="Dashboard sections">
-        <TabLink path="/activity" currentPath={location.pathname} label="Activity" onNavigate={tryNavigate} />
-        <TabLink path="/library" currentPath={location.pathname} label="Library" onNavigate={tryNavigate} />
-        <TabLink path="/calendar" currentPath={location.pathname} label="Calendar" onNavigate={tryNavigate} />
-        <TabLink path="/errors" currentPath={location.pathname} label={`Errors${errors.length ? ` (${errors.length})` : ""}`} onNavigate={tryNavigate} />
-        <TabLink path="/logs" currentPath={location.pathname} label="Logs" onNavigate={tryNavigate} />
-        <TabLink path="/settings" currentPath={location.pathname} label="Settings" onNavigate={tryNavigate} />
-      </nav>
-
-      <main ref={(el) => { contentScrollRef.current = el; }} className="panel">{renderTabBody()}</main>
-      {errorMessage ? <div className="error-box" style={{ marginTop: 12 }}>{errorMessage}</div> : null}
-
-      <Routes>
-        <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
-        <Route path="*" element={null} />
-      </Routes>
-
-
-    </div>
   );
 }
 
-function TabLink(props: {
-  path: string;
-  currentPath: string;
-  label: string;
-  onNavigate: (path: string) => void;
-}) {
-  const active = props.currentPath === props.path || props.currentPath.startsWith(`${props.path}/`);
-  return (
-    <button
-      type="button"
-      className={`tab ${active ? "active" : ""}`}
-      onClick={() => props.onNavigate(props.path)}
-    >
-      {props.label}
-    </button>
-  );
-}
-
-function StatCard(props: { title: string; value: number | undefined; sub: string; accent?: BrandAccent; onClick?: () => void }) {
-  const accent = props.accent ?? { label: "", hex: "#7B9FD4", text: "#fff", icon: "#cfe0ff", hoverHex: "#6889bb" };
+function StatCard(props: { title: string; value: number | undefined; sub: string; accent?: BrandAccent; themeMode?: ThemeMode; onClick?: () => void }) {
+  const accent = props.accent ?? { label: "Placeholdarr", hex: "#FBBF24", text: "#E2E8F0", icon: "#CBD5E1", hoverHex: "#d97706" };
+  const isLight = props.themeMode === "light";
   const [hover, setHover] = useState(false);
-  const baseStyle: React.CSSProperties = {
-    borderLeft: `6px solid ${accent.hex}`,
-    borderTop: `2px solid ${accent.hex}`,
-    borderBottom: `2px solid ${accent.hex}`,
-    borderRight: `1px solid ${accent.hex}`,
-    background: undefined,
-    paddingLeft: 12,
-    transition: "transform 0.18s ease, box-shadow 0.18s ease",
-    cursor: props.onClick ? "pointer" : undefined,
-  };
+  const yellow = accent.hex;
+  const cyan = accent.icon;
+  const baseStyle: React.CSSProperties = isLight
+    ? {
+        borderLeft: `6px solid ${cyan}`,
+        borderTop: `2px solid ${alphaColor(yellow, 0.92)}`,
+        borderBottom: `2px solid ${alphaColor(yellow, 0.92)}`,
+        borderRight: `1px solid ${alphaColor(cyan, 0.35)}`,
+        background: undefined,
+        paddingLeft: 12,
+        transition: "transform 0.18s ease, box-shadow 0.18s ease",
+        cursor: props.onClick ? "pointer" : undefined,
+      }
+    : {
+        borderLeft: `6px solid ${yellow}`,
+        borderTop: `2px solid ${yellow}`,
+        borderBottom: `2px solid ${yellow}`,
+        borderRight: `1px solid ${yellow}`,
+        background: undefined,
+        paddingLeft: 12,
+        transition: "transform 0.18s ease, box-shadow 0.18s ease",
+        cursor: props.onClick ? "pointer" : undefined,
+      };
 
   const hoverStyle: React.CSSProperties = hover
-    ? { transform: "translateY(-6px)", boxShadow: `0 12px 36px ${alphaColor(accent.hex, 0.22)}` }
+    ? isLight
+      ? {
+          transform: "translateY(-6px)",
+          boxShadow: `0 14px 36px ${alphaColor(cyan, 0.2)}, 0 6px 20px ${alphaColor(yellow, 0.14)}`,
+        }
+      : { transform: "translateY(-6px)", boxShadow: `0 12px 36px ${alphaColor(yellow, 0.22)}` }
     : {};
 
   return (
@@ -1647,10 +1431,10 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
       onClick={props.onClick}
     >
       <div className="stat-head">
-        <div className="stat-value" style={{ color: accent.hex }}>{props.value ?? "--"}</div>
+        <div className="stat-value" style={{ color: yellow }}>{props.value ?? "--"}</div>
         <div className="stat-title" style={{ color: accent.text }}>{props.title}</div>
       </div>
-      <div className="stat-sub" style={{ color: alphaColor(accent.hex, 0.8) }}>{props.sub}</div>
+      <div className="stat-sub" style={{ color: isLight ? alphaColor(cyan, 0.88) : alphaColor(yellow, 0.8) }}>{props.sub}</div>
     </article>
   );
 }
@@ -1667,7 +1451,15 @@ function ActivityPanel(props: {
 }) {
   const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const semantic = getBrandSemanticTokens(props.brand, props.themeMode, accent);
+  const isLight = props.themeMode === "light";
   const tab = props.activityTab || "system";
+  const panelShellStyle: React.CSSProperties | undefined = isLight
+    ? {
+        borderColor: semantic.glassBorder,
+        boxShadow: `0 14px 44px ${alphaColor(semantic.accentIce, 0.1)}`,
+      }
+    : undefined;
   const placeholderRows = props.placeholderRows || [];
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
@@ -1732,28 +1524,41 @@ function ActivityPanel(props: {
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
         <StatCard
           accent={accent}
+          themeMode={props.themeMode}
           title="Movies"
           value={s?.movies.total}
           sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
           onClick={() => props.onOpenLibraryFilter?.("movie")}
         />
-        <StatCard accent={accent} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
-        <StatCard accent={accent} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
-        <StatCard accent={accent} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
-        <StatCard accent={accent} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
       </div>
 
       {/* Tab buttons */}
-      <div className="flex gap-2 mb-6 border-b border-[#424753]/30 pb-4">
+      <div
+        className={`flex gap-2 mb-6 border-b pb-4 ${isLight ? "" : "border-[#424753]/30"}`}
+        style={isLight ? { borderBottomColor: semantic.borderSubtle } : undefined}
+      >
         <button
           type="button"
           onClick={() => props.onActivityTabChange?.("system")}
           className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-xs font-headline uppercase tracking-wider transition-colors ${
             tab === "system"
-              ? "text-white font-bold border-b-2"
-              : "text-slate-400 hover:text-slate-200"
+              ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
+              : isLight
+                ? "text-slate-500 hover:text-slate-800"
+                : "text-slate-400 hover:text-slate-200"
           }`}
-          style={tab === "system" ? { borderBottomColor: accent.hex, backgroundColor: accent.hex + "15" } : {}}
+          style={
+            tab === "system"
+              ? {
+                  borderBottomColor: semantic.accent3,
+                  backgroundColor: alphaColor(semantic.accent2, isLight ? 0.12 : 0.16),
+                }
+              : undefined
+          }
         >
           System Activity
         </button>
@@ -1762,10 +1567,19 @@ function ActivityPanel(props: {
           onClick={() => props.onActivityTabChange?.("placeholders")}
           className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-xs font-headline uppercase tracking-wider transition-colors ${
             tab === "placeholders"
-              ? "text-white font-bold border-b-2"
-              : "text-slate-400 hover:text-slate-200"
+              ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
+              : isLight
+                ? "text-slate-500 hover:text-slate-800"
+                : "text-slate-400 hover:text-slate-200"
           }`}
-          style={tab === "placeholders" ? { borderBottomColor: accent.hex, backgroundColor: accent.hex + "15" } : {}}
+          style={
+            tab === "placeholders"
+              ? {
+                  borderBottomColor: semantic.accent3,
+                  backgroundColor: alphaColor(semantic.accent2, isLight ? 0.12 : 0.16),
+                }
+              : undefined
+          }
         >
           Placeholder History
         </button>
@@ -1773,7 +1587,10 @@ function ActivityPanel(props: {
 
       {/* System Activity table */}
       {tab === "system" && (
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+        <div
+          className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
+          style={panelShellStyle}
+        >
           <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
             <div>
               <h2 className="text-xl font-bold text-white font-headline">Recent Operations</h2>
@@ -1789,7 +1606,12 @@ function ActivityPanel(props: {
                 <thead>
                   <tr className="border-b border-[#424753]/20">
                     {["When", "Operation", "Status"].map(h => (
-                      <th key={h} className="px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
+                      <th
+                        key={h}
+                        className={`px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
+                      >
+                        {h}
+                      </th>
                     ))}
                   </tr>
                 </thead>
@@ -1961,7 +1783,10 @@ function ActivityPanel(props: {
 
       {/* Placeholder history table */}
       {tab === "placeholders" && (
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+        <div
+          className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
+          style={panelShellStyle}
+        >
           <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
             <div>
               <h2 className="text-xl font-bold text-white font-headline">Placeholder History</h2>
@@ -1983,7 +1808,12 @@ function ActivityPanel(props: {
                 <thead>
                   <tr className="border-b border-[#424753]/20">
                     {["When", "Content", "Action", "Reason"].map(h => (
-                      <th key={h} className="px-2 sm:px-3 py-3 text-left text-[10px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
+                      <th
+                        key={h}
+                        className={`px-2 sm:px-3 py-3 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
+                      >
+                        {h}
+                      </th>
                     ))}
                   </tr>
                 </thead>
@@ -2326,7 +2156,15 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
           </div>
         </div>
       ) : null}
-      {error ? <div className="mx-6 mt-4 p-4 bg-red-600/15 border border-red-500/30 rounded-xl text-sm text-red-300">{error}</div> : null}
+      {error ? (
+        <div
+          className={`mx-6 mt-4 rounded-xl border p-4 text-sm ${
+            isLight ? "border-red-200 bg-red-50 text-red-800" : "border-red-500/30 bg-red-600/15 text-red-300"
+          }`}
+        >
+          {error}
+        </div>
+      ) : null}
       {!loading && !error && payload?.type === "movie" ? <MovieDetail payload={payload} brand={props.brand} themeMode={props.themeMode} /> : null}
       {!loading && !error && payload?.type === "series" ? (
         <SeriesDetail
@@ -2380,7 +2218,7 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
             {payload.arr_link && (
               <div className="mt-4">
                 <a href={payload.arr_link} target="_blank" rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
+                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider transition-colors border ${isLight ? "bg-white border-[#d7e2f0] text-slate-800 hover:bg-slate-50" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}>
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   Open in Radarr
                 </a>
@@ -2422,25 +2260,29 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
   );
   return (
     <div>
-      {/* Hero banner */}
-      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] bg-gradient-to-r from-[#0a0e14] to-[#1a2233] overflow-hidden"
-        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, rgba(8,12,18,0.78) 18%, rgba(8,12,18,0.45) 42%, rgba(8,12,18,0.08)), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : {}}>
+      {/* Hero banner — light mode uses the same soft scrim treatment as movie detail */}
+      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] overflow-hidden"
+        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.90)" : "rgba(8,12,18,0.78)"} 18%, ${isLight ? "rgba(238,243,248,0.52)" : "rgba(8,12,18,0.45)"} 42%, ${isLight ? "rgba(238,243,248,0.10)" : "rgba(8,12,18,0.08)"}), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
         <div
           className="absolute inset-0"
-          style={{ background: "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)" }}
+          style={{
+            background: isLight
+              ? "linear-gradient(180deg, rgba(238,243,248,0) 38%, rgba(238,243,248,0.28) 70%, rgba(238,243,248,0.64) 100%)"
+              : "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)",
+          }}
         />
       </div>
 
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
         <div className="flex gap-6 md:gap-10 items-end mb-8">
-          <div className="flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 border-[#424753]/40 bg-[#1e2430] shadow-[0_30px_80px_rgba(0,0,0,0.5)]">
+          <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
             {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
           </div>
           <div className="flex-1 pb-1 md:pb-2">
-            <h1 className="text-4xl md:text-6xl lg:text-7xl font-black text-white font-headline tracking-tight leading-[0.95]">{payload.title}</h1>
+            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
             <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {payload.year && <span className="text-lg text-slate-200">{payload.year}</span>}
-              {payload.network && <span className="text-lg text-slate-300">{payload.network}</span>}
+              {payload.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.year}</span>}
+              {payload.network && <span className={`text-lg ${isLight ? "text-slate-600" : "text-slate-300"}`}>{payload.network}</span>}
               <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
               {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
               {payload.sonarr_monitored != null && (
@@ -2453,7 +2295,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
             {payload.arr_link && (
               <div className="mt-4">
                 <a href={payload.arr_link} target="_blank" rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[#252e3a] border border-[#424753]/40 rounded-lg text-xs text-slate-300 hover:text-white font-headline uppercase tracking-wider transition-colors">
+                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider transition-colors border ${isLight ? "bg-white border-[#d7e2f0] text-slate-800 hover:bg-slate-50" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}>
                   <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                   Open in Sonarr
                 </a>
@@ -2462,7 +2304,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           </div>
         </div>
 
-        {payload.overview && <p className="text-lg text-slate-200 leading-relaxed max-w-5xl mb-8">{payload.overview}</p>}
+        {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
           {[
@@ -2487,10 +2329,10 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
             return (
               <div key={season.id} className={`border rounded-xl overflow-hidden ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
                 <button type="button" onClick={() => props.onToggleSeason(season.id)}
-                  className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-[#1e2430]/50 transition-colors">
+                  className={`w-full flex items-center justify-between px-5 py-4 text-left transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-[#1e2430]/50"}`}>
                   <div className="flex items-center gap-3">
                     <span className="material-symbols-outlined text-slate-500 transition-transform" style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>chevron_right</span>
-                    <span className="text-sm font-bold text-white font-headline">
+                    <span className={`text-sm font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
                       {season.season_number === 0 ? "Specials" : `Season ${season.season_number}`}
                     </span>
                   </div>
@@ -2501,12 +2343,12 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                   </div>
                 </button>
                 {open && (
-                  <div className="border-t border-[#424753]/30 divide-y divide-[#424753]/15">
+                  <div className={`border-t divide-y ${isLight ? "border-slate-200 divide-slate-200" : "border-[#424753]/30 divide-[#424753]/15"}`}>
                     {season.episodes.map(ep => (
-                      <div key={ep.id} className="flex items-start gap-4 px-5 py-3 hover:bg-[#1e2430]/30 transition-colors">
+                      <div key={ep.id} className={`flex items-start gap-4 px-5 py-3 transition-colors ${isLight ? "hover:bg-slate-50" : "hover:bg-[#1e2430]/30"}`}>
                         <span className="flex-none w-10 text-xs text-slate-500 font-mono pt-0.5">E{String(ep.episode_number).padStart(2, "0")}</span>
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm text-white font-medium">{ep.title || `Episode ${ep.episode_number}`}</div>
+                          <div className={`text-sm font-medium ${isLight ? "text-slate-900" : "text-white"}`}>{ep.title || `Episode ${ep.episode_number}`}</div>
                           <div className="ui-field-description-compact mt-0.5">{ep.air_date || "No air date"}</div>
                         </div>
                         <div className="flex-none">
@@ -3920,7 +3762,7 @@ function ArrInstancesEditor(props: {
     return (
       <div
         key={item.id}
-        className={`rounded-xl border border-[var(--brand-accent-3)] bg-[#1a2436]/95 shadow-md shadow-black/25 overflow-hidden ${isDisabled ? "opacity-60" : ""}`}
+        className={`rounded-xl border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-md shadow-black/15 overflow-hidden ${isDisabled ? "opacity-60" : ""}`}
       >
         <div className="p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
@@ -4885,13 +4727,13 @@ function SettingsPanel(props: {
   feedbackKind: "" | "success" | "error";
   brand: Brand;
   themeMode: ThemeMode;
-  onSectionChange: (name: string) => void;
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
+  const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
@@ -4926,20 +4768,15 @@ function SettingsPanel(props: {
   }
 
   const payload = props.payload;
-  const sectionNames = SETTINGS_SECTION_ORDER.filter((name) => payload.sections.some((s) => s.name === name));
   const active = payload.sections.find((s) => s.name === props.activeSection) || payload.sections[0];
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
-
-  const SECTION_ICONS: Record<string, string> = {
-    "Media Integrations": "hub",
-    "ARR Integrations": "dns",
-    "Paths":        "folder",
-    "Library sync": "sync",
-    "Calendar":     "calendar_month",
-    "Lookahead":    "fast_forward",
-    "Status Updates": "edit_notifications",
-    "Advanced":     "tune",
-  };
+  const allSettingsFieldsByKey = useMemo(() => {
+    const m = new Map<string, SettingsField>();
+    for (const section of payload.sections) {
+      for (const f of section.fields) m.set(f.key, f);
+    }
+    return m;
+  }, [payload.sections]);
 
   async function runTest(field: SettingsField) {
     const target = URL_TEST_TARGET[field.key];
@@ -5060,6 +4897,17 @@ function SettingsPanel(props: {
     );
   }
 
+  function renderOnboardingStyleSectionRows(fields: SettingsField[], opts?: { intro?: ReactNode }) {
+    return (
+      <div className="px-6 py-5">
+        <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
+          {opts?.intro ? <div className="px-6 py-5">{opts.intro}</div> : null}
+          {fields.map((field) => renderStandardField(field))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       {/* Page title row */}
@@ -5092,23 +4940,9 @@ function SettingsPanel(props: {
         </div>
       </div>
 
-      <div className="flex gap-5">
-        {/* Section sidebar */}
-        <div className="flex-none w-52">
-          <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden">
-            {sectionNames.map(name => (
-              <button key={name} type="button" onClick={() => props.onSectionChange(name)}
-                className={`w-full flex items-center gap-3 px-4 py-3 text-sm text-left border-b border-[#424753]/20 last:border-b-0 transition-colors ${name === active.name ? "text-white border-l-2" : "text-slate-400 hover:text-slate-200 hover:bg-[#1e2430]"}`}
-                style={name === active.name ? { backgroundColor: alphaColor(accent.hex, 0.15), borderLeftColor: accent.hex } : undefined}>
-                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>{SECTION_ICONS[name] || "settings"}</span>
-                {name}
-              </button>
-            ))}
-          </div>
-        </div>
-
+      <div className="w-full min-w-0">
         {/* Active section fields */}
-        <div className="flex-1 min-w-0">
+        <div className="w-full min-w-0">
           <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden">
             <div className="px-6 py-4 border-b border-[#424753]/30">
               <h2 className="text-base font-bold text-white font-headline">{active.name}</h2>
@@ -5127,9 +4961,121 @@ function SettingsPanel(props: {
                   testResults={testResults}
                 />
               ) : active.name === "Media Integrations" ? (
-                <>
-                  {active.fields.map((field) => renderStandardField(field))}
-                </>
+                (() => {
+                  const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
+                  return (
+                    <div className="space-y-5 px-6 py-5">
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                        {ONBOARDING_MEDIA_CARDS.map((card) => {
+                          const enabled = Boolean(props.values[card.enabledKey]);
+                          const availableFields = card.keys.map((key) => fieldByKey.get(key)).filter(Boolean) as SettingsField[];
+                          const urlField = availableFields.find((f) => URL_TEST_TARGET[f.key]);
+                          const urlTest = urlField ? testResults[urlField.key] : undefined;
+                          const vis = ONBOARDING_MEDIA_VISUAL[card.id];
+                          const address = urlField ? String(props.values[urlField.key] ?? "").trim() : "";
+                          const movieLib = card.id === "plex" ? String(props.values.PLEX_MOVIE_SECTION_ID ?? "").trim() : "";
+                          const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
+                          const mediaDetailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
+                          return (
+                            <div key={card.id} className={`group relative flex min-h-[250px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200`}>
+                              <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
+                                {card.id === "plex" ? (
+                                  <div className="flex max-w-full items-center justify-center gap-2 px-2 sm:px-3">
+                                    <div className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-fit shrink-0 ${MEDIA_PLEX_PAIR_LOGO_INSET}`} style={vis.well}>
+                                      <img src={plexIcon} alt="" decoding="async" className="h-8 w-auto max-h-8 shrink-0 object-contain" aria-hidden />
+                                    </div>
+                                    <span className="select-none text-xl font-extralight leading-none text-white/85" aria-hidden>×</span>
+                                    <div className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-16 shrink-0`} style={vis.well}>
+                                      <img src={tautulliIcon} alt="" decoding="async" className="h-8 w-8 shrink-0 object-contain" aria-hidden />
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex h-[5.25rem] w-[5.25rem] items-center justify-center rounded-2xl" style={vis.well}>
+                                    <img src={vis.iconSrc} alt="" decoding="async" className="h-10 w-10 object-contain" aria-hidden />
+                                  </div>
+                                )}
+                              </div>
+                              <h4 className="mt-5 w-full text-center text-lg font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                              {!enabled ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    props.onValueChange(card.enabledKey, true);
+                                    setMediaPanel(card.id);
+                                  }}
+                                  className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-sm font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09]"
+                                >
+                                  Connect
+                                </button>
+                              ) : (
+                                <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
+                                  {card.id === "plex" && "note" in card && card.note ? <p className="ui-field-description-compact mb-2">{card.note}</p> : null}
+                                  <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-snug">
+                                    <div className="flex min-w-0 gap-2">
+                                      <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
+                                      <dd className="truncate font-mono text-slate-200" title={address || undefined}>{address || "—"}</dd>
+                                    </div>
+                                    {card.id === "plex" ? (
+                                      <>
+                                        <div className="flex min-w-0 gap-2">
+                                          <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Movie lib.</dt>
+                                          <dd className="truncate font-mono text-slate-200" title={movieLib || undefined}>{movieLib || "—"}</dd>
+                                        </div>
+                                        <div className="flex min-w-0 gap-2">
+                                          <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">TV lib.</dt>
+                                          <dd className="truncate font-mono text-slate-200" title={tvLib || undefined}>{tvLib || "—"}</dd>
+                                        </div>
+                                      </>
+                                    ) : null}
+                                  </dl>
+                                  <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-xs">
+                                    {urlTest && !urlTest.ok ? <p className="text-red-400">{urlTest.message}</p> : !mediaDetailsComplete ? <p className="ui-field-description">Add URL and credentials in Configure.</p> : null}
+                                  </div>
+                                  <div className="mt-auto flex flex-col gap-2 pt-4">
+                                    <button
+                                      type="button"
+                                      onClick={() => setMediaPanel(card.id)}
+                                      className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
+                                    >
+                                      Configure
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        props.onValueChange(card.enabledKey, false);
+                                        setMediaPanel((p) => (p === card.id ? null : p));
+                                      }}
+                                      className="text-center text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
+                                    >
+                                      Remove connection
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {mediaPanel ? (() => {
+                        const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
+                        if (!card) return null;
+                        const panelFields = card.keys.map((key) => fieldByKey.get(key)).filter(Boolean) as SettingsField[];
+                        return (
+                          <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
+                            <div className="px-6 py-4 border-b border-[#424753]/30">
+                              <h3 className="text-base font-bold text-white font-headline">{card.title} Configuration</h3>
+                            </div>
+                            {panelFields.map((field) => renderStandardField(field))}
+                          </div>
+                        );
+                      })() : null}
+                      {(() => {
+                        const remaining = active.fields.filter((field) => !ONBOARDING_MEDIA_CARDS.some((card) => [card.enabledKey, ...card.keys].includes(field.key)));
+                        return remaining.length ? renderOnboardingStyleSectionRows(remaining) : null;
+                      })()}
+                    </div>
+                  );
+                })()
               ) : active.name === "ARR Integrations" ? (
                 <>
                   {active.fields
@@ -5358,21 +5304,17 @@ function SettingsPanel(props: {
                   </div>
                 </>
               ) : active.name === "Lookahead" ? (
-                <>
-                  <LookaheadSectionIntro variant="settings" />
-                  {active.fields.map((field) => renderStandardField(field))}
-                </>
+                renderOnboardingStyleSectionRows(active.fields, {
+                  intro: <LookaheadSectionIntro variant="onboarding" embedded />,
+                })
               ) : active.name === "Status Updates" ? (
-                <>
-                  <StatusUpdatesSectionIntro variant="settings" />
-                  {active.fields.map((field) => renderStandardField(field))}
-                </>
+                renderOnboardingStyleSectionRows(active.fields, {
+                  intro: <StatusUpdatesSectionIntro variant="onboarding" embedded />,
+                })
               ) : active.name === "Library sync" ? (
-                <div className={`mx-6 my-5 ${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
-                  {active.fields.map((field) => renderStandardField(field))}
-                </div>
+                renderOnboardingStyleSectionRows(active.fields)
               ) : (
-                active.fields.map((field) => renderStandardField(field))
+                renderOnboardingStyleSectionRows(active.fields)
               )}
             </div>
           </div>
@@ -5404,15 +5346,18 @@ const ONBOARDING_MEDIA_CARDS = [
   },
 ];
 
+/** Logo tile fill — solid Simularr studio navy (same as sidebar brand strip / dark chrome wells). */
+const INTEGRATION_LOGO_WELL_BG = "#1e2430";
+
 const ONBOARDING_MEDIA_VISUAL: Record<
   (typeof ONBOARDING_MEDIA_CARDS)[number]["id"],
   { iconSrc: string; well: CSSProperties }
 > = {
-  /** Icon well set D — frosted neutral fill + saturated brand ring. */
+  /** Icon wells: solid navy + service-colored ring (light and dark). */
   plex: {
     iconSrc: plexIcon,
     well: {
-      backgroundColor: "rgba(255,255,255,0.07)",
+      backgroundColor: INTEGRATION_LOGO_WELL_BG,
       border: "2px solid rgba(251, 191, 36, 0.75)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
     },
@@ -5420,7 +5365,7 @@ const ONBOARDING_MEDIA_VISUAL: Record<
   jellyfin: {
     iconSrc: jellyfinIcon,
     well: {
-      backgroundColor: "rgba(255,255,255,0.06)",
+      backgroundColor: INTEGRATION_LOGO_WELL_BG,
       border: "2px solid rgba(34, 211, 238, 0.8)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
     },
@@ -5428,7 +5373,7 @@ const ONBOARDING_MEDIA_VISUAL: Record<
   emby: {
     iconSrc: embyIcon,
     well: {
-      backgroundColor: "rgba(255,255,255,0.06)",
+      backgroundColor: INTEGRATION_LOGO_WELL_BG,
       border: "2px solid rgba(74, 222, 128, 0.78)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
     },
@@ -5439,7 +5384,7 @@ const ONBOARDING_ARR_VISUAL: Record<"radarr" | "sonarr", { iconSrc: string; well
   radarr: {
     iconSrc: radarrIcon,
     well: {
-      backgroundColor: "rgba(255,255,255,0.07)",
+      backgroundColor: INTEGRATION_LOGO_WELL_BG,
       border: "2px solid rgba(250, 204, 21, 0.78)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
     },
@@ -5447,7 +5392,7 @@ const ONBOARDING_ARR_VISUAL: Record<"radarr" | "sonarr", { iconSrc: string; well
   sonarr: {
     iconSrc: sonarrIcon,
     well: {
-      backgroundColor: "rgba(255,255,255,0.06)",
+      backgroundColor: INTEGRATION_LOGO_WELL_BG,
       border: "2px solid rgba(56, 189, 248, 0.8)",
       boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
     },
@@ -5580,7 +5525,6 @@ const ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE =
   "object-contain [filter:brightness(0)_saturate(100%)_invert(10%)_sepia(22%)_saturate(4200%)_hue-rotate(191deg)_brightness(0.96)_contrast(1.04)]";
 
 function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
-  const placeholdarrHeaderAccent = getBrandAccent("placeholdarr", "dark");
   const simAccent = getBrandAccent("simularr", "dark");
   const sim = getBrandSemanticTokens("simularr", "dark", simAccent);
   const variant = ONBOARDING_HERO_BANNER_VARIANT;
@@ -5712,8 +5656,8 @@ function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
           <div className="inline-block" style={slateLogoBrandYellowOutlineStyle}>
             {isYellow ? (
               <BrandLogo
-                brand="placeholdarr"
-                accentHex={placeholdarrHeaderAccent.hex}
+                brand="simularr"
+                accentHex={simAccent.hex}
                 className={`h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center sm:h-[5rem] sm:max-w-[15.5rem] ${ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE}`}
               />
             ) : (

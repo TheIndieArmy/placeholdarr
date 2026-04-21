@@ -409,6 +409,12 @@ async def dashboard_settings_page():
     return _serve_dashboard_index()
 
 
+@router.get("/settings/{path:path}", response_class=HTMLResponse)
+async def dashboard_settings_nested(path: str):
+    """Deep links under /settings (subsection slugs) must serve the SPA, same as /setup/*."""
+    return _serve_dashboard_index()
+
+
 @router.get("/setup", response_class=HTMLResponse)
 async def dashboard_setup_page():
     """Serve SPA for onboarding wizard (client-side /setup route)."""
