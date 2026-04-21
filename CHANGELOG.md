@@ -7,6 +7,33 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-04-21
+
+### Added
+
+- **Theme preference persistence**: The dashboard remembers **light** vs **dark** via `localStorage` (`placeholdarr:studio-theme-mode`) across reloads and new tabs.
+- **Settings subsection deep links (server)**: `GET /settings/{path:path}` serves the React shell so bookmarks, refresh, and direct URLs under `/settings/...` load the app (same pattern as `/setup/*`).
+
+### Changed
+
+- **Simularr studio shell (dashboard)**: Refined **light** chrome as the deliberate inverse of dark mode—navy sidebar brand row with yellow mark, **blue → yellow** main header band, and a header **theme toggle** that sits flush on the yellow band (no separate white chip or sky “rail”).
+- **Settings navigation & layout**: Settings live under **`/settings/<slug>`** with redirect from `/settings` to the first section; the old in-page settings sidebar was removed in favor of **nested entries in the main app sidebar** while on settings routes.
+- **Settings vs onboarding parity**: **Media Integrations** and **ARR Integrations** reuse the same **card / slot grid** patterns as onboarding; other sections use the same framed, onboarding-style section treatment where appropriate.
+- **Integration logo tiles**: Plex/Jellyfin/Emby and Radarr/Sonarr icon wells use a **solid studio navy** (`#1e2430`) in both themes so tiles match the intended dark-blue look instead of washed translucent fills.
+- **Brand logo rendering**: Sidebar mark uses a single **`BrandLogo`** path with a **`variant`** switch (blue vs yellow asset) so light and dark placement stay consistent.
+- **Dashboard document title**: Browser tab title is now **Placeholdarr** instead of “Placeholdarr Dashboard Next.”
+- **Branding type surface**: The TypeScript **`Brand`** union is now **Simularr-only**, matching the shipped Studio product chrome.
+- **Semantic / global CSS**: `brandSemanticTheme.ts`, `styles.css`, and Tailwind font-map comments were tightened so new UI prefers **`--brand-*` tokens** over legacy hard-coded slate aliases.
+
+### Fixed
+
+- **Light-mode main header**: The top bar now applies the intended **blue → yellow gradient** in light mode as well (it was only wired for dark mode before, so the strip read as a flat pastel).
+- **Settings routing guard**: Settings URL normalization waits on **`settingsPayload`** instead of an empty derived section list, avoiding edge cases where `/settings` would not redirect after load.
+
+### Dependencies
+
+- **SQLAlchemy**: Declared as **`sqlalchemy>=2.0.44`** in `requirements.txt` for consistent installs across environments.
+
 ## [0.9.4.1] - 2026-04-21 [HOTFIX]
 
 ### Fixed
