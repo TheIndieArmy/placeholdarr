@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
+## [Unreleased]
 
 ## [0.9.4.1] - 2026-04-21 [HOTFIX]
 
