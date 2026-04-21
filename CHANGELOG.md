@@ -7,6 +7,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.4.1] - 2026-04-21 [HOTFIX]
+
+### Fixed
+
+- **Playback resolution hotfix**: Enhanced playback context resolution by merging path-based info with catalog IDs (TVDB, TMDB, IMDB, Sonarr series, season/episode). This improves detection of real vs placeholder media when file paths differ (e.g., Docker, root changes), reducing unknown/ambiguous playback cases. (see `event_playback.py`)
+
 ## [0.9.4] - 2026-04-20
 
 ### Added

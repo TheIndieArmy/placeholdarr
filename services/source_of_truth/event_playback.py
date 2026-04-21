@@ -422,9 +422,182 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
     return {'media_type': 'unknown', 'playback_kind': 'unknown'}
 
 
+def _playback_kind_from_episode_row(episode_row: Episode) -> str:
+    """Infer real vs placeholder from Sonarr/FS flags when webhook path did not match stored paths."""
+    hf = bool(getattr(episode_row, 'has_file', False))
+    hp = bool(getattr(episode_row, 'has_placeholder', False))
+    if hf and not hp:
+        return 'real'
+    if hp and not hf:
+        return 'placeholder'
+    if hf and hp:
+        return 'real'
+    sn = _normalize_path(getattr(episode_row, 'sonarr_filepath', None))
+    ph = _normalize_path(getattr(episode_row, 'placeholder_filepath', None))
+    if sn and not ph:
+        return 'real'
+    if ph and not sn:
+        return 'placeholder'
+    return 'unknown'
+
+
+def _playback_kind_from_movie_row(movie_row: Movie) -> str:
+    hf = bool(getattr(movie_row, 'has_file', False))
+    hp = bool(getattr(movie_row, 'has_placeholder', False))
+    if hf and not hp:
+        return 'real'
+    if hp and not hf:
+        return 'placeholder'
+    if hf and hp:
+        return 'real'
+    rp = _normalize_path(getattr(movie_row, 'radarr_filepath', None))
+    pp = _normalize_path(getattr(movie_row, 'placeholder_filepath', None))
+    if rp and not pp:
+        return 'real'
+    if pp and not rp:
+        return 'placeholder'
+    return 'unknown'
+
+
+def _try_resolve_episode_from_catalog_ids(
+    session,
+    *,
+    tvdb_id: int | None,
+    sonarr_series_id: int | None,
+    season_number: int | None,
+    episode_number: int | None,
+) -> dict[str, Any] | None:
+    if season_number is None or episode_number is None:
+        return None
+    if tvdb_id is None and sonarr_series_id is None:
+        return None
+    q = (
+        session.query(Episode)
+        .join(Season, Episode.season_id == Season.id)
+        .join(Series, Season.series_id == Series.id)
+        .filter(
+            Episode.is_deleted == False,  # noqa: E712
+            Series.is_deleted == False,  # noqa: E712
+            Season.season_number == season_number,
+            Episode.episode_number == episode_number,
+        )
+    )
+    if tvdb_id is not None:
+        q = q.filter(Series.tvdbid == int(tvdb_id))
+    else:
+        q = q.filter(Series.sonarrid == int(sonarr_series_id))
+    rows = q.all()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        ph_candidates = [e for e in rows if bool(e.has_placeholder) and not bool(e.has_file)]
+        episode_row = ph_candidates[0] if ph_candidates else rows[0]
+        logger.debug(
+            'playback catalog id match: multiple episodes for tvdb/sonarr+S+E; '
+            f'picked episode_id={getattr(episode_row, "id", None)}',
+            extra={'emoji_type': 'debug'},
+        )
+    else:
+        episode_row = rows[0]
+    series_row = episode_row.season.series if episode_row.season else None
+    return {
+        'media_type': 'episode',
+        'playback_kind': _playback_kind_from_episode_row(episode_row),
+        'tvdb_id': int(series_row.tvdbid) if series_row and getattr(series_row, 'tvdbid', None) else None,
+        'season_number': int(episode_row.season.season_number) if episode_row.season else None,
+        'episode_number': int(episode_row.episode_number) if getattr(episode_row, 'episode_number', None) is not None else None,
+        'series_id': int(series_row.id) if series_row else None,
+        'matched_instance': _instance_label(bool(getattr(series_row, 'is_4k', False))) if series_row else None,
+    }
+
+
+def _try_resolve_movie_from_catalog_ids(session, *, tmdb_id: int | None, imdb_id: str | None) -> dict[str, Any] | None:
+    if tmdb_id is None and not imdb_id:
+        return None
+    q = session.query(Movie).filter(Movie.is_deleted == False)  # noqa: E712
+    if tmdb_id is not None:
+        q = q.filter(Movie.tmdbid == int(tmdb_id))
+    else:
+        q = q.filter(Movie.imdbid == imdb_id)
+    rows = q.all()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        ph_candidates = [m for m in rows if bool(m.has_placeholder) and not bool(m.has_file)]
+        movie_row = ph_candidates[0] if ph_candidates else rows[0]
+        logger.debug(
+            'playback catalog id match: multiple movies for tmdb/imdb; '
+            f'picked movie_id={getattr(movie_row, "id", None)}',
+            extra={'emoji_type': 'debug'},
+        )
+    else:
+        movie_row = rows[0]
+    return {
+        'media_type': 'movie',
+        'playback_kind': _playback_kind_from_movie_row(movie_row),
+        'tmdb_id': int(movie_row.tmdbid) if getattr(movie_row, 'tmdbid', None) else None,
+        'movie_id': int(movie_row.id),
+        'matched_instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+    }
+
+
+def _merge_path_info_with_catalog_ids(
+    session,
+    path_info: dict[str, Any],
+    *,
+    tmdb_id: int | None,
+    tvdb_id: int | None,
+    imdb_id: str | None,
+    sonarr_series_id: int | None,
+    season_number: int | None,
+    episode_number: int | None,
+    declared_media_type: str | None,
+) -> dict[str, Any]:
+    """When path equality fails (Docker / different roots), resolve row + playback_kind from catalog IDs."""
+    pk = str(path_info.get('playback_kind') or 'unknown')
+    if pk not in ('unknown', '', 'none', 'None'):
+        return path_info
+    merged = dict(path_info)
+
+    episode_first = declared_media_type == 'episode' or (
+        season_number is not None and episode_number is not None and (tvdb_id is not None or sonarr_series_id is not None)
+    )
+    if episode_first:
+        cat = _try_resolve_episode_from_catalog_ids(
+            session,
+            tvdb_id=tvdb_id,
+            sonarr_series_id=sonarr_series_id,
+            season_number=season_number,
+            episode_number=episode_number,
+        )
+        if cat:
+            logger.info(
+                f"playback catalog match episode tvdb={tvdb_id} sonarr_series={sonarr_series_id} "
+                f"S{season_number}E{episode_number} kind={cat.get('playback_kind')}",
+                extra={'emoji_type': 'playback'},
+            )
+            merged.update(cat)
+            return merged
+
+    # Movie: avoid treating a *series* TMDB on episode payloads as a movie id.
+    if declared_media_type == 'movie' or (
+        declared_media_type != 'episode' and tvdb_id is None and season_number is None and episode_number is None and (tmdb_id is not None or imdb_id)
+    ):
+        cat = _try_resolve_movie_from_catalog_ids(session, tmdb_id=tmdb_id, imdb_id=imdb_id)
+        if cat:
+            logger.info(
+                f"playback catalog match movie tmdb={tmdb_id} imdb={imdb_id} kind={cat.get('playback_kind')}",
+                extra={'emoji_type': 'playback'},
+            )
+            merged.update(cat)
+            return merged
+
+    return merged
+
+
 def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any]:
     tmdb_id = _extract_movie_tmdb_id(payload)
-    _, tvdb_id = _extract_series_ids(payload)
+    sonarr_series_id, tvdb_id = _extract_series_ids(payload)
     imdb_id = _extract_imdb_id(payload)
     season_number, episode_number = _extract_season_episode(payload)
     file_path = _extract_file_path(payload)
@@ -454,6 +627,17 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
             logger.debug(f"Error fetching Jellyfin file path: {e}", extra={'emoji_type': 'debug'})
     declared_media_type = _extract_declared_media_type(payload)
     path_info = _resolve_media_from_path(session, file_path)
+    path_info = _merge_path_info_with_catalog_ids(
+        session,
+        path_info,
+        tmdb_id=tmdb_id,
+        tvdb_id=tvdb_id,
+        imdb_id=imdb_id,
+        sonarr_series_id=sonarr_series_id,
+        season_number=season_number,
+        episode_number=episode_number,
+        declared_media_type=declared_media_type,
+    )
 
     if tmdb_id is None and path_info.get('tmdb_id') is not None:
         tmdb_id = int(path_info['tmdb_id'])
