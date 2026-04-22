@@ -5024,6 +5024,10 @@ function SettingsPanel(props: {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
+    serviceId: "tautulli" | "jellyfin" | "emby";
+    instanceParam: string;
+  } | null>(null);
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
@@ -5199,6 +5203,7 @@ function SettingsPanel(props: {
   }
 
   return (
+    <>
     <div>
       {/* Page title row */}
       <div className="flex justify-between items-center mb-6">
@@ -5329,6 +5334,21 @@ function SettingsPanel(props: {
                                     >
                                       Configure
                                     </button>
+                                    {mediaCardPlaybackWebhookConfig(card.id) ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const cfg = mediaCardPlaybackWebhookConfig(card.id);
+                                          if (!cfg) return;
+                                          const instanceParam =
+                                            String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+                                          setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
+                                        }}
+                                        className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                      >
+                                        Webhook URL
+                                      </button>
+                                    ) : null}
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -5611,6 +5631,14 @@ function SettingsPanel(props: {
         </div>
       </div>
     </div>
+    {playbackWebhookDialog ? (
+      <PlaybackWebhookSetupModal
+        dialog={playbackWebhookDialog}
+        onClose={() => setPlaybackWebhookDialog(null)}
+        accent={accent}
+      />
+    ) : null}
+    </>
   );
 }
 
@@ -5780,6 +5808,112 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
         content_copy
       </span>
     </button>
+  );
+}
+
+function PlaybackWebhookSetupModal(props: {
+  dialog: { serviceId: PlaybackWebhookServiceId; instanceParam: string };
+  onClose: () => void;
+  accent: { hex: string };
+}) {
+  const pb = props.dialog;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const webhookUrl = `${origin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
+  const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
+  const name = svcMeta?.name ?? pb.serviceId;
+  return (
+    <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+      <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+        <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {name}</h3>
+        <p className="text-sm text-slate-300">
+          {pb.serviceId === "tautulli"
+            ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
+            : `${name} can send playback events to Placeholdarr using this URL.`}
+        </p>
+        <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
+          {pb.serviceId === "tautulli" ? (
+            <>
+              <li>Open Tautulli and go to Settings → Notification Agents.</li>
+              <li>Create a new Webhook notification agent.</li>
+              <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+              <li>
+                <span className="text-slate-200">Webhook URL</span>
+                <div className="mt-1 flex items-start gap-2 pl-0">
+                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                </div>
+              </li>
+              <li>Paste the JSON payload template below, then save.</li>
+            </>
+          ) : pb.serviceId === "jellyfin" ? (
+            <>
+              <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
+              <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
+              <li>Set Events to include Playback Start and Content Type to application/json.</li>
+              <li>
+                <span className="text-slate-200">Webhook URL</span>
+                <div className="mt-1 flex items-start gap-2 pl-0">
+                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                </div>
+              </li>
+              <li>Paste the JSON payload template below, then save the webhook.</li>
+            </>
+          ) : (
+            <>
+              <li>In Emby, go to Settings → Notifications.</li>
+              <li>Add or edit a webhook notification.</li>
+              <li>
+                <span className="text-slate-200">Webhook URL</span>
+                <div className="mt-1 flex items-start gap-2 pl-0">
+                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                </div>
+              </li>
+              <li>Enable the playback events you want Placeholdarr to process, then save.</li>
+            </>
+          )}
+        </ol>
+        {svcMeta && svcMeta.triggers.length ? (
+          <div>
+            <div className="text-xs font-semibold text-slate-400 mb-1.5">Suggested events</div>
+            <div className="ml-1 space-y-1">
+              {svcMeta.triggers.map((t) => (
+                <div key={t.event} className="text-xs text-slate-300">
+                  {t.displayName}
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
+          </div>
+        ) : null}
+        {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
+          <div>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
+              <WebhookStepCopyButton
+                text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
+                ariaLabel={`Copy ${name} JSON payload template`}
+                variant="header"
+              />
+            </div>
+            <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
+              <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
+            </pre>
+          </div>
+        ) : null}
+        <div className="flex justify-end pt-2">
+          <button
+            type="button"
+            className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+            style={{ backgroundColor: props.accent.hex }}
+            onClick={props.onClose}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -6944,107 +7078,13 @@ function OnboardingWizard(props: {
           </div>
         );
       })() : null}
-      {playbackWebhookDialog ? (() => {
-        const pb = playbackWebhookDialog;
-        const origin = typeof window !== "undefined" ? window.location.origin : "";
-        const webhookUrl = `${origin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
-        const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
-        const name = svcMeta?.name ?? pb.serviceId;
-        return (
-          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
-            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-              <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {name}</h3>
-              <p className="text-sm text-slate-300">
-                {pb.serviceId === "tautulli"
-                  ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
-                  : `${name} can send playback events to Placeholdarr using this URL.`}
-              </p>
-              <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
-                {pb.serviceId === "tautulli" ? (
-                  <>
-                    <li>Open Tautulli and go to Settings → Notification Agents.</li>
-                    <li>Create a new Webhook notification agent.</li>
-                    <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
-                    <li>
-                      <span className="text-slate-200">Webhook URL</span>
-                      <div className="mt-1 flex items-start gap-2 pl-0">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
-                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                      </div>
-                    </li>
-                    <li>Paste the JSON payload template below, then save.</li>
-                  </>
-                ) : pb.serviceId === "jellyfin" ? (
-                  <>
-                    <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
-                    <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
-                    <li>Set Events to include Playback Start and Content Type to application/json.</li>
-                    <li>
-                      <span className="text-slate-200">Webhook URL</span>
-                      <div className="mt-1 flex items-start gap-2 pl-0">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
-                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                      </div>
-                    </li>
-                    <li>Paste the JSON payload template below, then save the webhook.</li>
-                  </>
-                ) : (
-                  <>
-                    <li>In Emby, go to Settings → Notifications.</li>
-                    <li>Add or edit a webhook notification.</li>
-                    <li>
-                      <span className="text-slate-200">Webhook URL</span>
-                      <div className="mt-1 flex items-start gap-2 pl-0">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
-                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                      </div>
-                    </li>
-                    <li>Enable the playback events you want Placeholdarr to process, then save.</li>
-                  </>
-                )}
-              </ol>
-              {svcMeta && svcMeta.triggers.length ? (
-                <div>
-                  <div className="text-xs font-semibold text-slate-400 mb-1.5">Suggested events</div>
-                  <div className="ml-1 space-y-1">
-                    {svcMeta.triggers.map((t) => (
-                      <div key={t.event} className="text-xs text-slate-300">
-                        {t.displayName}
-                      </div>
-                    ))}
-                  </div>
-                  <p className="mt-2 text-[11px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
-                </div>
-              ) : null}
-              {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
-                    <WebhookStepCopyButton
-                      text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
-                      ariaLabel={`Copy ${name} JSON payload template`}
-                      variant="header"
-                    />
-                  </div>
-                  <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
-                    <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
-                  </pre>
-                </div>
-              ) : null}
-              <div className="flex justify-end pt-2">
-                <button
-                  type="button"
-                  className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
-                  style={{ backgroundColor: accent.hex }}
-                  onClick={() => setPlaybackWebhookDialog(null)}
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })() : null}
+      {playbackWebhookDialog ? (
+        <PlaybackWebhookSetupModal
+          dialog={playbackWebhookDialog}
+          onClose={() => setPlaybackWebhookDialog(null)}
+          accent={accent}
+        />
+      ) : null}
     </>
   );
 }
