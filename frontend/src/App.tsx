@@ -2483,8 +2483,8 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           className="absolute inset-0"
           style={{
             background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 38%, rgba(238,243,248,0.28) 70%, rgba(238,243,248,0.64) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)",
+              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
+              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
           }}
         />
       </div>
@@ -2557,8 +2557,8 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           className="absolute inset-0"
           style={{
             background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 38%, rgba(238,243,248,0.28) 70%, rgba(238,243,248,0.64) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)",
+              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
+              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
           }}
         />
       </div>
