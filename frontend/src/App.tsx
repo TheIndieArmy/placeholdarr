@@ -29,6 +29,7 @@ import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticToke
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
+  ArrInstanceOpenLink,
   CalendarDay,
   CalendarResponse,
   DashboardTab,
@@ -2223,18 +2224,6 @@ function LibraryPanel(props: {
         </span>
       );
     }
-    if (item.instance_label) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider ${
-            isLight ? "text-slate-900" : "text-white"
-          }`}
-          style={{ backgroundColor: accent.hex }}
-        >
-          {item.instance_label}
-        </span>
-      );
-    }
     if (item.has_placeholder) {
       return (
         <span
@@ -2557,11 +2546,61 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   );
 }
 
+function detailArrInstanceLinks(
+  payload: { arr_instance_links?: ArrInstanceOpenLink[]; arr_link?: string | null },
+  singleFallbackLabel: string,
+): { label: string; url: string }[] {
+  if (payload.arr_instance_links?.length) {
+    return payload.arr_instance_links.map((x) => ({ label: x.label, url: x.url }));
+  }
+  if (payload.arr_link) return [{ label: singleFallbackLabel, url: payload.arr_link }];
+  return [];
+}
+
+function DetailArrLaunchBar(props: {
+  links: { label: string; url: string }[];
+  iconSrc: string;
+  heading: string;
+  isLight: boolean;
+}) {
+  if (!props.links.length) return null;
+  return (
+    <div className={`rounded-xl border p-5 md:p-6 ${props.isLight ? "bg-white border-[#d7e2f0] shadow-sm" : "bg-[#171c22] border-[#424753]/40"}`}>
+      <h3 className={`text-[11px] font-headline uppercase tracking-widest ${props.isLight ? "text-slate-500" : "text-slate-400"}`}>{props.heading}</h3>
+      <div className="mt-4 flex flex-wrap gap-3">
+        {props.links.map((lnk) => (
+          <a
+            key={lnk.url}
+            href={lnk.url}
+            target="_blank"
+            rel="noreferrer"
+            className={`group inline-flex min-w-[12.5rem] flex-1 items-center gap-3 rounded-xl border px-4 py-3 transition-colors sm:max-w-sm sm:flex-none ${
+              props.isLight
+                ? "border-slate-200 bg-slate-50/90 hover:border-slate-300 hover:bg-white"
+                : "border-[#424753]/50 bg-[#252e3a]/90 hover:border-[#424753] hover:bg-[#2a3444]"
+            }`}
+          >
+            <img src={props.iconSrc} alt="" className="h-9 w-9 shrink-0 object-contain" decoding="async" />
+            <span className={`min-w-0 flex-1 font-headline text-sm font-semibold leading-tight ${props.isLight ? "text-slate-900" : "text-white"}`}>{lnk.label}</span>
+            <span
+              className={`material-symbols-outlined shrink-0 ${props.isLight ? "text-slate-400 group-hover:text-slate-600" : "text-slate-500 group-hover:text-slate-300"}`}
+              style={{ fontSize: 18 }}
+            >
+              open_in_new
+            </span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeMode: ThemeMode }) {
   const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
   const heroArtUrl = payload.backdrop_url || payload.poster_url;
+  const arrLinks = detailArrInstanceLinks(payload, "Radarr");
   return (
     <div>
       {/* Hero banner */}
@@ -2578,30 +2617,23 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
       </div>
 
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8">
+        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
           <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
             {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
           </div>
-          <div className="flex-1 pb-1 md:pb-2">
-            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-            <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {payload.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.year}</span>}
-              <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text }}>Movie</span>
-              {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
+          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
+            {payload.year ? (
+              <div className="text-xl font-semibold tabular-nums md:text-2xl" style={{ color: accent.icon }}>
+                {payload.year}
+              </div>
+            ) : null}
+            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               {payload.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
               {payload.has_file
                 ? <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
                 : <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>}
             </div>
-            {payload.arr_link && (
-              <div className="mt-4">
-                <a href={payload.arr_link} target="_blank" rel="noreferrer"
-                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider transition-colors border ${isLight ? "bg-white border-[#d7e2f0] text-slate-800 hover:bg-slate-50" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}>
-                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
-                  Open in Radarr
-                </a>
-              </div>
-            )}
           </div>
         </div>
 
@@ -2609,8 +2641,6 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {[
-            { label: "Status", value: payload.status },
-            { label: "Determination", value: payload.determination },
             { label: "Quality", value: payload.radarr_quality },
             { label: "Theatrical", value: payload.theater_release_date },
             { label: "Digital", value: payload.digital_release_date },
@@ -2622,6 +2652,10 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
             </div>
           ))}
         </div>
+
+        <div className="mt-8">
+          <DetailArrLaunchBar links={arrLinks} iconSrc={radarrIcon} heading="Open in Radarr" isLight={isLight} />
+        </div>
       </div>
     </div>
   );
@@ -2632,6 +2666,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
   const heroArtUrl = payload.backdrop_url || payload.poster_url;
+  const arrLinks = detailArrInstanceLinks(payload, "Sonarr");
   const seasonsDesc = useMemo(
     () => [...(payload.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
     [payload.seasons],
@@ -2652,17 +2687,19 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
       </div>
 
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8">
+        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
           <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
             {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
           </div>
-          <div className="flex-1 pb-1 md:pb-2">
-            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-            <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {payload.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.year}</span>}
-              {payload.network && <span className={`text-lg ${isLight ? "text-slate-600" : "text-slate-300"}`}>{payload.network}</span>}
-              <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
-              {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
+          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
+            {payload.year ? (
+              <div className="text-xl font-semibold tabular-nums md:text-2xl" style={{ color: accent.icon }}>
+                {payload.year}
+              </div>
+            ) : null}
+            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              {payload.network && <span className={`text-sm font-medium md:text-base ${isLight ? "text-slate-600" : "text-slate-300"}`}>{payload.network}</span>}
               {payload.sonarr_monitored != null && (
                 <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${payload.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
                   style={payload.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
@@ -2670,15 +2707,6 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                 </span>
               )}
             </div>
-            {payload.arr_link && (
-              <div className="mt-4">
-                <a href={payload.arr_link} target="_blank" rel="noreferrer"
-                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider transition-colors border ${isLight ? "bg-white border-[#d7e2f0] text-slate-800 hover:bg-slate-50" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}>
-                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
-                  Open in Sonarr
-                </a>
-              </div>
-            )}
           </div>
         </div>
 
@@ -2686,8 +2714,6 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
           {[
-            { label: "Status", value: payload.status },
-            { label: "Sonarr Status", value: payload.sonarr_status },
             { label: "First Aired", value: payload.first_aired },
             { label: "Network", value: payload.network },
           ].filter(m => m.value).map(m => (
@@ -2696,6 +2722,10 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
               <div className={`text-base font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
             </div>
           ))}
+        </div>
+
+        <div className="mb-6">
+          <DetailArrLaunchBar links={arrLinks} iconSrc={sonarrIcon} heading="Open in Sonarr" isLight={isLight} />
         </div>
 
         <div className="mb-4">
@@ -2908,7 +2938,14 @@ function CalendarPanel(props: {
     return movieText || props.selectedItem.reason || "Select a release on the calendar to inspect it here.";
   })();
 
-  const spotlightArrLink = props.spotlight?.arr_link || props.selectedItem?.arr_link;
+  const spotlightArrLinks: { label: string; url: string }[] = (() => {
+    const sp = props.spotlight;
+    if (sp && Array.isArray(sp.arr_instance_links) && sp.arr_instance_links.length) {
+      return sp.arr_instance_links.map((x) => ({ label: x.label, url: x.url }));
+    }
+    const single = sp?.arr_link || props.selectedItem?.arr_link;
+    return single ? [{ label: spotlightMovie ? "Radarr" : spotlightSeries ? "Sonarr" : "Open app", url: single }] : [];
+  })();
   const spotlightPoster = props.spotlight?.poster_url || null;
   const spotlightMeta = props.selectedItem ? formatCalendarSpotlightMeta(props.selectedItem) : [];
   const heroDateParts = props.selectedItem ? formatCalendarHeroDateParts(props.selectedItem.release_date) : null;
@@ -3221,17 +3258,18 @@ function CalendarPanel(props: {
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                     Full Detail
                   </button>
-                  {spotlightArrLink ? (
+                  {spotlightArrLinks.map((lnk) => (
                     <a
-                      href={spotlightArrLink}
+                      key={lnk.url}
+                      href={lnk.url}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/40 bg-[#1e2430] px-4 py-2 text-xs font-headline uppercase tracking-wider text-slate-300 transition-colors hover:text-white"
                     >
                       <span className="material-symbols-outlined" style={{ fontSize: 14 }}>north_east</span>
-                      Open ARR
+                      {lnk.label}
                     </a>
-                  ) : null}
+                  ))}
                 </div>
               </div>
             </div>

@@ -121,6 +121,14 @@ export interface LibraryResponse {
   count: number;
 }
 
+/** Deep link to an ARR instance (Radarr / Sonarr) from detail views. */
+export interface ArrInstanceOpenLink {
+  label: string;
+  url: string;
+  movie_id?: number;
+  series_id?: number;
+}
+
 export interface MovieDetailResponse {
   ok: true;
   type: "movie";
@@ -141,6 +149,8 @@ export interface MovieDetailResponse {
   instance_id?: string | null;
   instance_label?: string | null;
   arr_link?: string | null;
+  /** One entry per configured instance that has this title (same TMDB id). */
+  arr_instance_links?: ArrInstanceOpenLink[];
   imdbid?: string | null;
   tmdbid?: number | null;
   status?: string | null;
@@ -206,6 +216,8 @@ export interface SeriesDetailResponse {
   instance_id?: string | null;
   instance_label?: string | null;
   arr_link?: string | null;
+  /** One entry per configured instance that has this show (same TVDB id). */
+  arr_instance_links?: ArrInstanceOpenLink[];
   imdbid?: string | null;
   tvdbid?: number | null;
   status?: string | null;

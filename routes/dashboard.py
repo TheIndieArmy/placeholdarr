@@ -2222,6 +2222,162 @@ async def errors(limit: int = Query(50, ge=1, le=200)):
         session.close()
 
 
+def _arr_secondary_instance(instance_id: str | None, instance_key: str | None) -> bool:
+    iid = str(instance_id or "").lower()
+    key = str(instance_key or "").lower()
+    return "secondary" in iid or iid.endswith(":secondary") or key.endswith("_secondary") or "secondary" in key
+
+
+def _movie_merge_priority(movie: Movie) -> tuple[int, int, int]:
+    """Lower tuple = preferred canonical row (primary instance, then rows with media)."""
+    secondary = 1 if _arr_secondary_instance(getattr(movie, "instance_id", None), movie.instance_key) else 0
+    has_media = 0 if (bool(movie.has_file) or bool(movie.has_placeholder)) else 1
+    return (secondary, has_media, movie.id)
+
+
+def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
+    """One grid row per TMDB id; merge stats across Radarr instances."""
+    if not entries:
+        return []
+    buckets: dict[int, list[tuple[Movie, dict]]] = defaultdict(list)
+    for movie, row in entries:
+        buckets[int(movie.tmdbid)].append((movie, row))
+    out: list[dict] = []
+    for _tmdbid, group in buckets.items():
+        group.sort(key=lambda mr: _movie_merge_priority(mr[0]))
+        _, canon_row = group[0]
+        if len(group) == 1:
+            single = dict(canon_row)
+            single["instance_label"] = None
+            out.append(single)
+            continue
+        merged: dict[str, Any] = dict(canon_row)
+        merged["has_file"] = any(bool(r["has_file"]) for _, r in group)
+        merged["has_placeholder"] = any(bool(r["has_placeholder"]) for _, r in group)
+        merged["has_missing"] = any(bool(r["has_missing"]) for _, r in group)
+        merged["is_future"] = (not merged["has_missing"]) and any(bool(r["is_future"]) for _, r in group)
+        merged["stats"] = {
+            "downloaded": 1 if merged["has_file"] else 0,
+            "placeholders": 1 if merged["has_placeholder"] else 0,
+            "future": 1 if merged["is_future"] else 0,
+            "missing": 1 if merged["has_missing"] else 0,
+        }
+        merged["instance_label"] = None
+        out.append(merged)
+    return out
+
+
+def _series_merge_priority(series: Series) -> tuple[int, int, int]:
+    secondary = 1 if _arr_secondary_instance(getattr(series, "instance_id", None), series.instance_key) else 0
+    has_media = 0 if bool(series.has_files) else 1
+    return (secondary, has_media, series.id)
+
+
+def _series_counts_empty() -> dict[str, int]:
+    return {
+        "episode_total": 0,
+        "episode_files": 0,
+        "episode_placeholders": 0,
+        "episode_future": 0,
+        "episode_missing": 0,
+    }
+
+
+def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
+    """Deep links to Radarr UI for every local row that shares this movie's TMDB id."""
+    rows = (
+        session.query(Movie)
+        .filter(Movie.is_deleted == False, Movie.tmdbid == anchor.tmdbid)
+        .all()
+    )
+    rows.sort(key=_movie_merge_priority)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in rows:
+        link = _arr_item_link(
+            item_type="movie",
+            instance_key=m.instance_key,
+            instance_id=getattr(m, "instance_id", None),
+            title=m.title,
+            payload=m.radarr_payload_raw if isinstance(m.radarr_payload_raw, dict) else None,
+        )
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        meta = _arr_instance_meta(m.instance_key, getattr(m, "instance_id", None))
+        lbl = str(meta.get("label") or m.instance_key or "").strip() or "Radarr"
+        out.append({"label": lbl, "url": link, "movie_id": m.id})
+    return out
+
+
+def _series_arr_instance_links(session, anchor: Series) -> list[dict[str, Any]]:
+    """Deep links to Sonarr UI for every local row that shares this series' TVDB id."""
+    rows = (
+        session.query(Series)
+        .filter(Series.is_deleted == False, Series.tvdbid == anchor.tvdbid)
+        .all()
+    )
+    rows.sort(key=_series_merge_priority)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for s in rows:
+        link = _arr_item_link(
+            item_type="series",
+            instance_key=s.instance_key,
+            instance_id=getattr(s, "instance_id", None),
+            title=s.title,
+            payload=s.sonarr_payload_raw if isinstance(s.sonarr_payload_raw, dict) else None,
+        )
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        meta = _arr_instance_meta(s.instance_key, getattr(s, "instance_id", None))
+        lbl = str(meta.get("label") or s.instance_key or "").strip() or "Sonarr"
+        out.append({"label": lbl, "url": link, "series_id": s.id})
+    return out
+
+
+def _merge_series_library_rows(
+    entries: list[tuple[Series, dict]],
+    series_episode_counts: dict[int, Any],
+) -> list[dict]:
+    """One grid row per TVDB id; aggregate episode stats across Sonarr instances."""
+    if not entries:
+        return []
+    buckets: dict[int, list[tuple[Series, dict]]] = defaultdict(list)
+    for series, row in entries:
+        buckets[int(series.tvdbid)].append((series, row))
+    out: list[dict] = []
+    for _tvdbid, group in buckets.items():
+        group.sort(key=lambda sr: _series_merge_priority(sr[0]))
+        _, canon_row = group[0]
+        if len(group) == 1:
+            single = dict(canon_row)
+            single["instance_label"] = None
+            out.append(single)
+            continue
+        agg = _series_counts_empty()
+        for s, _r in group:
+            c = series_episode_counts.get(s.id) or _series_counts_empty()
+            for k in agg:
+                agg[k] += int(c.get(k) or 0)
+        series_unresolved = max(
+            int(agg["episode_total"]) - int(agg["episode_files"]) - int(agg["episode_placeholders"]),
+            0,
+        )
+        series_is_future = series_unresolved > 0 and int(agg["episode_missing"]) == 0 and int(agg["episode_future"]) > 0
+        series_has_missing = int(agg["episode_missing"]) > 0
+        merged: dict[str, Any] = dict(canon_row)
+        merged["stats"] = agg
+        merged["has_file"] = any(bool(s.has_files) for s, _ in group)
+        merged["has_placeholder"] = int(agg["episode_placeholders"]) > 0
+        merged["has_missing"] = series_has_missing
+        merged["is_future"] = series_is_future
+        merged["instance_label"] = None
+        out.append(merged)
+    return out
+
+
 @router.get("/api/library")
 async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(False)):
     """Return mixed movie/series library rows with poster and placeholder stats.
@@ -2275,7 +2431,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
             .all()
         }
 
-        items: list[dict] = []
+        movie_entries: list[tuple[Movie, dict]] = []
 
         movies = (
             session.query(Movie)
@@ -2326,7 +2482,9 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
             if summary:
                 row.pop("overview", None)
                 row.pop("backdrop_url", None)
-            items.append(row)
+            movie_entries.append((movie, row))
+
+        series_entries: list[tuple[Series, dict]] = []
 
         series_rows = (
             session.query(Series)
@@ -2385,7 +2543,11 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
             if summary:
                 row.pop("overview", None)
                 row.pop("backdrop_url", None)
-            items.append(row)
+            series_entries.append((series, row))
+
+        items: list[dict] = []
+        items.extend(_merge_movie_library_rows(movie_entries))
+        items.extend(_merge_series_library_rows(series_entries, series_episode_counts))
 
         items.sort(
             key=lambda item: (
@@ -2451,6 +2613,7 @@ async def movie_detail(movie_id: int):
             "last_search": _iso(movie.last_search),
             "updated_at": _iso(movie.updated_at),
             "created_at": _iso(movie.created_at),
+            "arr_instance_links": _movie_arr_instance_links(session, movie),
         }
     finally:
         session.close()
@@ -2546,6 +2709,7 @@ async def series_detail(series_id: int):
             "updated_at": _iso(series.updated_at),
             "created_at": _iso(series.created_at),
             "seasons": seasons_out,
+            "arr_instance_links": _series_arr_instance_links(session, series),
         }
     finally:
         session.close()
