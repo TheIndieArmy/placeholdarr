@@ -127,6 +127,14 @@ export interface ArrInstanceOpenLink {
   url: string;
   movie_id?: number;
   series_id?: number;
+  has_file?: boolean;
+  has_placeholder?: boolean;
+  /** When false, this ARR instance does not have this title/show; UI shows "-" for the status line. */
+  present?: boolean;
+  episode_files?: number;
+  episode_placeholders?: number;
+  /** Episodes tracked for this show on this Sonarr instance (for ``files/total`` on series detail). */
+  episode_total?: number;
 }
 
 export interface MovieDetailResponse {

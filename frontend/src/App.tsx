@@ -37,6 +37,7 @@ import type {
   LibraryItem,
   MovieDetailResponse,
   SeriesDetailResponse,
+  SeriesSeasonDetail,
   SeriesEpisodeDetail,
   SettingsField,
   SettingsPayload,
@@ -2557,6 +2558,245 @@ function detailArrInstanceLinks(
   return [];
 }
 
+/** Logo well for movie file-state strip — matches onboarding ARR integration icon boxes (`#1e2430` + ring). */
+const MOVIE_FILE_STATE_RADARR_LOGO_WELL: CSSProperties = {
+  backgroundColor: "#1e2430",
+  border: "2px solid rgba(250, 204, 21, 0.78)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+const MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL: CSSProperties = {
+  backgroundColor: "#1e2430",
+  border: "2px solid rgba(251, 191, 36, 0.78)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+/** Sonarr icon well — matches onboarding ``ONBOARDING_ARR_VISUAL.sonarr`` ring. */
+const SERIES_FILE_STATE_SONARR_LOGO_WELL: CSSProperties = {
+  backgroundColor: "#1e2430",
+  border: "2px solid rgba(56, 189, 248, 0.8)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+function seriesFileStateSonarrFileTotal(present: boolean, episodeFiles: number): string {
+  if (!present) return "-";
+  return String(Math.max(0, Math.floor(Number.isFinite(episodeFiles) ? episodeFiles : 0)));
+}
+
+function movieFileStateRadarrStatus(row: { present: boolean; has_file_known: boolean; has_file: boolean }): string {
+  if (!row.present) return "-";
+  if (!row.has_file_known) return "-";
+  return row.has_file ? "Yes" : "No";
+}
+
+/**
+ * Onboarding-style integration tiles: fixed navy icon wells, **Placeholdarr** first (placeholder on disk),
+ * then each Radarr instance (name under logo, whole tile links to Radarr). Outer frame follows light/dark.
+ */
+function MovieFileStateSection(props: {
+  links: ArrInstanceOpenLink[] | undefined;
+  arrLink?: string | null;
+  hasFile: boolean;
+  hasPlaceholder: boolean;
+  instanceLabel?: string | null;
+  isLight: boolean;
+  brand: Brand;
+  accentHex: string;
+  radarrIconSrc: string;
+}) {
+  const instanceLabel = String(props.instanceLabel || "Radarr").trim() || "Radarr";
+  const rawMovieLinks = props.links;
+  const linkRows: {
+    label: string;
+    url: string;
+    present: boolean;
+    has_file: boolean;
+    has_file_known: boolean;
+    has_placeholder: boolean;
+  }[] = Array.isArray(rawMovieLinks) && rawMovieLinks.length
+    ? rawMovieLinks.map((l) => ({
+        label: l.label,
+        url: l.url,
+        present: l.present !== false,
+        has_file: l.has_file === true,
+        has_file_known: typeof l.has_file === "boolean",
+        has_placeholder: Boolean(l.has_placeholder),
+      }))
+    : rawMovieLinks == null
+      ? (() => {
+          const u = String(props.arrLink || "").trim();
+          if (!u) return [];
+          return [
+            {
+              label: instanceLabel,
+              url: u,
+              present: true,
+              has_file: props.hasFile,
+              has_file_known: true,
+              has_placeholder: props.hasPlaceholder,
+            },
+          ];
+        })()
+      : [];
+
+  const placeholderOnDisk =
+    Boolean(props.hasPlaceholder) || linkRows.some((r) => r.has_placeholder);
+  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
+
+  return (
+    <div
+      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
+        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
+      }`}
+    >
+      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
+        <div
+          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+          role="group"
+          aria-label="Placeholder dummy on disk"
+        >
+          <div
+            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
+            aria-hidden
+          >
+            <BrandLogo
+              brand={props.brand}
+              accentHex={props.accentHex}
+              variant="yellow"
+              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
+            />
+          </div>
+          <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{brandLabel}</div>
+          <div className="movie-file-state-tile-status text-lg font-bold font-headline tabular-nums leading-none">
+            {placeholderOnDisk ? "Yes" : "No"}
+          </div>
+        </div>
+        {linkRows.map((row, idx) => {
+          const status = movieFileStateRadarrStatus(row);
+          return (
+            <a
+              key={`${row.url}-${idx}`}
+              href={row.url}
+              target="_blank"
+              rel="noreferrer"
+              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+            >
+              <div
+                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+                style={MOVIE_FILE_STATE_RADARR_LOGO_WELL}
+                aria-hidden
+              >
+                <img src={props.radarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
+              </div>
+              <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{row.label}</div>
+              <div className="movie-file-state-tile-status text-lg font-bold font-headline tabular-nums leading-none">{status}</div>
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Same integration strip as movie detail: **Placeholdarr** first, then each **Sonarr** instance.
+ * **Placeholdarr** shows total **placeholder** episode count; each Sonarr tile shows **downloaded episode file**
+ * count, or ``-`` when ``present: false``. Uses ``arr_instance_links`` whenever the API sends a non-empty array
+ * (do not fall back to ``arr_link`` when the array is empty — that would hide padded multi-instance rows).
+ */
+function SeriesFileStateSection(props: {
+  seasons: SeriesSeasonDetail[];
+  links: ArrInstanceOpenLink[] | undefined;
+  arrLink?: string | null;
+  instanceLabel?: string | null;
+  isLight: boolean;
+  brand: Brand;
+  accentHex: string;
+  sonarrIconSrc: string;
+}) {
+  const instanceLabel = String(props.instanceLabel || "Sonarr").trim() || "Sonarr";
+  const rawLinks = props.links;
+  const linkRows: { label: string; url: string; present: boolean; episode_files: number }[] = Array.isArray(rawLinks) && rawLinks.length
+    ? rawLinks.map((l) => ({
+        label: l.label,
+        url: l.url,
+        present: l.present !== false,
+        episode_files: typeof l.episode_files === "number" ? l.episode_files : 0,
+      }))
+    : rawLinks == null
+      ? (() => {
+          const u = String(props.arrLink || "").trim();
+          if (!u) return [];
+          const files = (props.seasons || []).reduce((a, s) => a + Number(s.episode_files || 0), 0);
+          return [{ label: instanceLabel, url: u, present: true, episode_files: files }];
+        })()
+      : [];
+
+  const aggPlaceholders = useMemo(
+    () => (props.seasons || []).reduce((a, s) => a + Number(s.episode_placeholders || 0), 0),
+    [props.seasons],
+  );
+
+  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
+  const phTotalStr = String(Math.max(0, Math.floor(aggPlaceholders)));
+
+  return (
+    <div
+      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
+        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
+      }`}
+    >
+      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
+        <div
+          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+          role="group"
+          aria-label="Episodes with placeholder files"
+        >
+          <div
+            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
+            aria-hidden
+          >
+            <BrandLogo
+              brand={props.brand}
+              accentHex={props.accentHex}
+              variant="yellow"
+              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
+            />
+          </div>
+          <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{brandLabel}</div>
+          <div className="movie-file-state-tile-status text-2xl font-black font-headline tabular-nums leading-none">{phTotalStr}</div>
+          <div className="movie-file-state-tile-caption mt-0.5 text-[10px] font-headline font-medium uppercase tracking-wider">Episodes</div>
+        </div>
+        {linkRows.map((row, idx) => {
+          const totalStr = seriesFileStateSonarrFileTotal(row.present, row.episode_files);
+          return (
+            <a
+              key={`${row.label}-${row.url}-${idx}`}
+              href={row.url}
+              target="_blank"
+              rel="noreferrer"
+              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+            >
+              <div
+                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+                style={SERIES_FILE_STATE_SONARR_LOGO_WELL}
+                aria-hidden
+              >
+                <img src={props.sonarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
+              </div>
+              <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{row.label}</div>
+              <div className="movie-file-state-tile-status text-2xl font-black font-headline tabular-nums leading-none">{totalStr}</div>
+              <div className="movie-file-state-tile-caption mt-0.5 text-[10px] font-headline font-medium uppercase tracking-wider">Episodes</div>
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DetailArrLaunchBar(props: {
   links: { label: string; url: string }[];
   iconSrc: string;
@@ -2574,18 +2814,11 @@ function DetailArrLaunchBar(props: {
             href={lnk.url}
             target="_blank"
             rel="noreferrer"
-            className={`group inline-flex min-w-[12.5rem] flex-1 items-center gap-3 rounded-xl border px-4 py-3 transition-colors sm:max-w-sm sm:flex-none ${
-              props.isLight
-                ? "border-slate-200 bg-slate-50/90 hover:border-slate-300 hover:bg-white"
-                : "border-[#424753]/50 bg-[#252e3a]/90 hover:border-[#424753] hover:bg-[#2a3444]"
-            }`}
+            className="detail-arr-instance-launch group inline-flex min-w-[12.5rem] flex-1 items-center gap-3 rounded-xl border border-[#424753]/50 px-4 py-3 transition-colors hover:border-[#424753] sm:max-w-sm sm:flex-none"
           >
             <img src={props.iconSrc} alt="" className="h-9 w-9 shrink-0 object-contain" decoding="async" />
-            <span className={`min-w-0 flex-1 font-headline text-sm font-semibold leading-tight ${props.isLight ? "text-slate-900" : "text-white"}`}>{lnk.label}</span>
-            <span
-              className={`material-symbols-outlined shrink-0 ${props.isLight ? "text-slate-400 group-hover:text-slate-600" : "text-slate-500 group-hover:text-slate-300"}`}
-              style={{ fontSize: 18 }}
-            >
+            <span className="detail-arr-instance-launch__label min-w-0 flex-1 font-headline text-sm font-semibold leading-tight text-slate-100">{lnk.label}</span>
+            <span className="material-symbols-outlined shrink-0 text-slate-500 transition-colors group-hover:text-slate-300" style={{ fontSize: 18 }}>
               open_in_new
             </span>
           </a>
@@ -2600,7 +2833,6 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
   const heroArtUrl = payload.backdrop_url || payload.poster_url;
-  const arrLinks = detailArrInstanceLinks(payload, "Radarr");
   return (
     <div>
       {/* Hero banner */}
@@ -2628,16 +2860,22 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
               </div>
             ) : null}
             <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              {payload.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
-              {payload.has_file
-                ? <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
-                : <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>}
-            </div>
           </div>
         </div>
 
         {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
+
+        <MovieFileStateSection
+          links={payload.arr_instance_links}
+          arrLink={payload.arr_link}
+          hasFile={payload.has_file}
+          hasPlaceholder={payload.has_placeholder}
+          instanceLabel={payload.instance_label}
+          isLight={isLight}
+          brand={props.brand}
+          accentHex={accent.hex}
+          radarrIconSrc={radarrIcon}
+        />
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {[
@@ -2653,9 +2891,6 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           ))}
         </div>
 
-        <div className="mt-8">
-          <DetailArrLaunchBar links={arrLinks} iconSrc={radarrIcon} heading="Open in Radarr" isLight={isLight} />
-        </div>
       </div>
     </div>
   );
@@ -2666,7 +2901,6 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
   const heroArtUrl = payload.backdrop_url || payload.poster_url;
-  const arrLinks = detailArrInstanceLinks(payload, "Sonarr");
   const seasonsDesc = useMemo(
     () => [...(payload.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
     [payload.seasons],
@@ -2698,34 +2932,34 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
               </div>
             ) : null}
             <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              {payload.network && <span className={`text-sm font-medium md:text-base ${isLight ? "text-slate-600" : "text-slate-300"}`}>{payload.network}</span>}
-              {payload.sonarr_monitored != null && (
-                <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${payload.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
-                  style={payload.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
-                  {payload.sonarr_monitored ? "Monitored" : "Unmonitored"}
-                </span>
-              )}
-            </div>
           </div>
         </div>
 
         {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+        <SeriesFileStateSection
+          seasons={payload.seasons || []}
+          links={payload.arr_instance_links}
+          arrLink={payload.arr_link}
+          instanceLabel={payload.instance_label}
+          isLight={isLight}
+          brand={props.brand}
+          accentHex={accent.hex}
+          sonarrIconSrc={sonarrIcon}
+        />
+
+        <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
           {[
             { label: "First Aired", value: payload.first_aired },
             { label: "Network", value: payload.network },
-          ].filter(m => m.value).map(m => (
-            <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-              <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className={`text-base font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
-            </div>
-          ))}
-        </div>
-
-        <div className="mb-6">
-          <DetailArrLaunchBar links={arrLinks} iconSrc={sonarrIcon} heading="Open in Sonarr" isLight={isLight} />
+          ]
+            .filter((m) => m.value != null && String(m.value).length > 0)
+            .map((m) => (
+              <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
+                <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
+                <div className={`text-base font-semibold tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
+              </div>
+            ))}
         </div>
 
         <div className="mb-4">

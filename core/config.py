@@ -18,6 +18,97 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
+    """Parse ``ARR_INSTANCES_JSON`` into the same normalized list as ``Settings.configured_arr_instances``."""
+    parsed_instances: list[dict[str, Any]] = []
+    raw_str = str(raw or "").strip()
+
+    if raw_str:
+        try:
+            payload = json.loads(raw_str)
+            if isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+                    if arr_type not in {"radarr", "sonarr"}:
+                        continue
+                    key_raw = str(item.get("instance_key") or item.get("key") or item.get("name") or "").strip().lower()
+                    instance_key = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in key_raw).strip("_-")
+                    url = str(item.get("url") or "").strip()
+                    api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
+                    if not instance_key or not url or not api_key:
+                        continue
+                    instance_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
+                    if not instance_id:
+                        instance_id = f"{arr_type}:{instance_key}"
+                    aliases_raw = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
+                    instance_key_aliases: list[str] = []
+                    for a in aliases_raw:
+                        akey = "".join(
+                            ch if ch.isalnum() or ch in {"_", "-"} else "_"
+                            for ch in str(a or "").strip().lower()
+                        ).strip("_-")
+                        if akey and akey != instance_key and akey not in instance_key_aliases:
+                            instance_key_aliases.append(akey)
+                    role_raw = str(item.get("role") or "").strip().lower()
+                    role = role_raw if role_raw in {"primary", "secondary", "additional"} else ""
+                    try:
+                        priority = int(item.get("priority"))
+                    except Exception:
+                        priority = -1
+                    parsed_instances.append(
+                        {
+                            "instance_id": instance_id,
+                            "instance_key": instance_key,
+                            "instance_key_aliases": instance_key_aliases,
+                            "arr_type": arr_type,
+                            "url": url,
+                            "api_key": api_key,
+                            "label": str(item.get("label") or instance_key).strip() or instance_key,
+                            "role": role,
+                            "priority": priority,
+                        }
+                    )
+        except Exception as exc:
+            logger.warning(f"Failed to parse ARR_INSTANCES_JSON: {exc}", extra={"emoji_type": "error"})
+
+    if parsed_instances:
+        deduped: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for item in parsed_instances:
+            instance_id = str(item.get("instance_id") or "").strip().lower()
+            if not instance_id or instance_id in seen_ids:
+                continue
+            deduped.append(item)
+            seen_ids.add(instance_id)
+        if deduped:
+            rank_by_type: dict[str, int] = {"radarr": 0, "sonarr": 0}
+            normalized: list[dict[str, Any]] = []
+            for item in deduped:
+                arr_type = str(item.get("arr_type") or "").strip().lower()
+                rank = int(rank_by_type.get(arr_type, 0))
+                rank_by_type[arr_type] = rank + 1
+                row = dict(item)
+                role = str(row.get("role") or "").strip().lower()
+                if role not in {"primary", "secondary", "additional"}:
+                    role = "primary" if rank == 0 else ("secondary" if rank == 1 else "additional")
+                row["role"] = role
+                if int(row.get("priority", -1)) < 0:
+                    row["priority"] = rank
+                row["is_4k"] = role != "primary"
+                normalized.append(row)
+            return sorted(
+                normalized,
+                key=lambda item: (
+                    str(item.get("arr_type") or "").strip().lower(),
+                    int(item.get("priority", 0)),
+                ),
+            )
+
+    return []
+
+
 def _parse_octal_mode(value: str, default: int) -> int:
     text = str(value or '').strip().lower()
     if not text:
@@ -373,99 +464,7 @@ class Settings(BaseSettings):
 
     @property
     def configured_arr_instances(self) -> list[dict[str, Any]]:
-        parsed_instances: list[dict[str, Any]] = []
-        raw = str(getattr(self, "ARR_INSTANCES_JSON", "") or "").strip()
-
-        if raw:
-            try:
-                payload = json.loads(raw)
-                if isinstance(payload, list):
-                    for item in payload:
-                        if not isinstance(item, dict):
-                            continue
-                        arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
-                        if arr_type not in {"radarr", "sonarr"}:
-                            continue
-                        key_raw = str(item.get("instance_key") or item.get("key") or item.get("name") or "").strip().lower()
-                        instance_key = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in key_raw).strip("_-")
-                        url = str(item.get("url") or "").strip()
-                        api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
-                        if not instance_key or not url or not api_key:
-                            continue
-                        instance_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
-                        if not instance_id:
-                            instance_id = f"{arr_type}:{instance_key}"
-                        aliases_raw = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
-                        instance_key_aliases: list[str] = []
-                        for a in aliases_raw:
-                            akey = "".join(
-                                ch if ch.isalnum() or ch in {"_", "-"} else "_"
-                                for ch in str(a or "").strip().lower()
-                            ).strip("_-")
-                            if akey and akey != instance_key and akey not in instance_key_aliases:
-                                instance_key_aliases.append(akey)
-                        role_raw = str(item.get("role") or "").strip().lower()
-                        role = role_raw if role_raw in {"primary", "secondary", "additional"} else ""
-                        try:
-                            priority = int(item.get("priority"))
-                        except Exception:
-                            priority = -1
-                        parsed_instances.append(
-                            {
-                                "instance_id": instance_id,
-                                "instance_key": instance_key,
-                                "instance_key_aliases": instance_key_aliases,
-                                "arr_type": arr_type,
-                                "url": url,
-                                "api_key": api_key,
-                                "label": str(item.get("label") or instance_key).strip() or instance_key,
-                                "role": role,
-                                "priority": priority,
-                            }
-                        )
-            except Exception as exc:
-                logger.warning(f"Failed to parse ARR_INSTANCES_JSON; falling back to legacy settings: {exc}")
-
-        if parsed_instances:
-            deduped: list[dict[str, Any]] = []
-            seen_ids: set[str] = set()
-            for item in parsed_instances:
-                instance_id = str(item.get("instance_id") or "").strip().lower()
-                if not instance_id or instance_id in seen_ids:
-                    continue
-                deduped.append(item)
-                seen_ids.add(instance_id)
-            if deduped:
-                # Forward model:
-                # - instance_id: stable instance identity
-                # - role: primary/secondary/additional
-                # - priority: explicit per-type fallback order
-                # Compatibility output:
-                # - is_4k remains derived (primary=False, secondary/additional=True)
-                rank_by_type: dict[str, int] = {"radarr": 0, "sonarr": 0}
-                normalized: list[dict[str, Any]] = []
-                for item in deduped:
-                    arr_type = str(item.get("arr_type") or "").strip().lower()
-                    rank = int(rank_by_type.get(arr_type, 0))
-                    rank_by_type[arr_type] = rank + 1
-                    row = dict(item)
-                    role = str(row.get("role") or "").strip().lower()
-                    if role not in {"primary", "secondary", "additional"}:
-                        role = "primary" if rank == 0 else ("secondary" if rank == 1 else "additional")
-                    row["role"] = role
-                    if int(row.get("priority", -1)) < 0:
-                        row["priority"] = rank
-                    row["is_4k"] = role != "primary"
-                    normalized.append(row)
-                return sorted(
-                    normalized,
-                    key=lambda item: (
-                        str(item.get("arr_type") or "").strip().lower(),
-                        int(item.get("priority", 0)),
-                    ),
-                )
-
-        return []
+        return parse_configured_arr_instances_json(str(getattr(self, "ARR_INSTANCES_JSON", "") or "").strip())
 
     @property
     def radarr_instance_keys(self) -> tuple[str, ...]:

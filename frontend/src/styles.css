@@ -1311,6 +1311,146 @@ a { color: inherit; }
   background-color: color-mix(in srgb, var(--brand-glass-bg) 85%, transparent) !important;
 }
 
+/*
+ * Movie/series detail “Open in Radarr/Sonarr” instance links.
+ * Avoid bg-[#252e3a] utilities here: `.brand-theme-scope [class*="bg-[#252e3a]"]` maps them to
+ * `--brand-surface-muted`, which is a pale panel in light mode and washes the chip out.
+ */
+.detail-arr-instance-launch {
+  background-color: #121922;
+  transition-property: color, background-color, border-color;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+.detail-arr-instance-launch:hover {
+  background-color: #1a222e;
+}
+
+.brand-theme-scope.theme-light .detail-arr-instance-launch {
+  background-color: #0a101a !important;
+  border-color: rgba(71, 85, 105, 0.58) !important;
+}
+
+.brand-theme-scope.theme-light .detail-arr-instance-launch:hover {
+  background-color: #0f1724 !important;
+  border-color: rgba(71, 85, 105, 0.68) !important;
+}
+
+.brand-theme-scope.theme-light .detail-arr-instance-launch .detail-arr-instance-launch__label {
+  color: #f1f5f9 !important;
+}
+
+.brand-theme-scope.theme-light .detail-arr-instance-launch .material-symbols-outlined {
+  color: rgba(148, 163, 184, 0.92) !important;
+}
+
+.brand-theme-scope.theme-light .detail-arr-instance-launch:hover .material-symbols-outlined {
+  color: #e2e8f0 !important;
+}
+
+/*
+ * Movie detail file-state tiles — always studio navy (same as onboarding integration logo wells),
+ * independent of `.theme-light .bg-[#1e2430]` semantic remaps.
+ */
+.movie-file-state-dark-tile {
+  background-color: #1e2430 !important;
+  border: 1px solid rgba(71, 85, 105, 0.48);
+  border-radius: 1rem;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 22px rgba(15, 23, 42, 0.1);
+  text-decoration: none;
+}
+
+.brand-theme-scope.theme-dark .movie-file-state-dark-tile {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 22px rgba(0, 0, 0, 0.28);
+}
+
+a.movie-file-state-dark-tile:hover {
+  border-color: rgba(100, 116, 139, 0.55);
+}
+
+/* Radarr instance tiles only — reads as a tappable control (Placeholdarr tile stays static). */
+a.movie-file-state-arr-tile {
+  cursor: pointer;
+  transition:
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.22s ease;
+}
+
+a.movie-file-state-arr-tile:hover {
+  transform: translateY(-3px);
+  background-color: #243049 !important;
+  border-color: rgba(251, 191, 36, 0.42) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 14px 32px rgba(15, 23, 42, 0.2),
+    0 0 0 1px rgba(251, 191, 36, 0.14);
+}
+
+.brand-theme-scope.theme-dark a.movie-file-state-arr-tile:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 14px 36px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(251, 191, 36, 0.18);
+}
+
+a.movie-file-state-arr-tile:active {
+  transform: translateY(-1px);
+  transition-duration: 0.08s;
+}
+
+a.movie-file-state-arr-tile .movie-file-state-arr-well {
+  transition:
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.2s ease;
+}
+
+a.movie-file-state-arr-tile:hover .movie-file-state-arr-well {
+  transform: scale(1.05);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 0 0 1px rgba(250, 204, 21, 0.45),
+    0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  a.movie-file-state-arr-tile,
+  a.movie-file-state-arr-tile .movie-file-state-arr-well {
+    transition: none;
+  }
+
+  a.movie-file-state-arr-tile:hover {
+    transform: none;
+  }
+
+  a.movie-file-state-arr-tile:hover .movie-file-state-arr-well {
+    transform: none;
+  }
+}
+
+a.movie-file-state-dark-tile:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand-accent-ice) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.movie-file-state-dark-tile .movie-file-state-tile-title {
+  color: #f1f5f9 !important;
+}
+
+.movie-file-state-dark-tile .movie-file-state-tile-status {
+  color: #e2e8f0 !important;
+}
+
+.movie-file-state-dark-tile .movie-file-state-tile-caption {
+  color: rgba(148, 163, 184, 0.92) !important;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Setup route boot shell — shimmer masks perceived latency (cf. Seerr PWA splash). */
 /* -------------------------------------------------------------------------- */

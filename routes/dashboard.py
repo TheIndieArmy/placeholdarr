@@ -3,19 +3,20 @@
 import ast
 import calendar as _calendar
 from collections import defaultdict
+import json
 import os
 import glob as _glob
 import re
 import threading
 import unicodedata
 from datetime import date, datetime, timezone, timedelta
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import and_, case, func, or_, text
 
-from core.config import settings
+from core.config import parse_configured_arr_instances_json, settings
 from core.logger import logger
 from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
 from services.activity_markers import EVENT_CALENDAR_DATE_REFRESH, EVENT_STARTUP_SOURCE_OF_TRUTH
@@ -23,7 +24,14 @@ from services.activity_snapshot import get_queue_download_activity_row
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
 from services.postgres.models import (
-    Movie, Series, Season, Episode, Placeholder, Job, EventLog,
+    AppConfig,
+    Movie,
+    Series,
+    Season,
+    Episode,
+    Placeholder,
+    Job,
+    EventLog,
 )
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
@@ -2283,7 +2291,117 @@ def _series_counts_empty() -> dict[str, int]:
     }
 
 
-def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
+def _norm_movie_instance_key(value: str | None) -> str:
+    key_raw = str(value or "").strip().lower()
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in key_raw).strip("_-")
+
+
+def _arr_instances_json_effective(session) -> str:
+    """Prefer DB-persisted ARR_INSTANCES_JSON so detail routes match Settings after save (runtime env can lag)."""
+    row = session.query(AppConfig).filter(AppConfig.key == "ARR_INSTANCES_JSON").first()
+    if row and row.value not in (None, ""):
+        v = row.value
+        if isinstance(v, str):
+            s = v.strip()
+        elif isinstance(v, (list, dict)):
+            s = json.dumps(v)
+        else:
+            s = str(v).strip()
+        if s:
+            return s
+    return str(getattr(settings, "ARR_INSTANCES_JSON", "") or "").strip()
+
+
+def _ordered_radarr_instances(session) -> list[dict[str, Any]]:
+    """Configured Radarr slots from effective ARR_INSTANCES_JSON (DB first)."""
+    raw_str = _arr_instances_json_effective(session)
+    inst = parse_configured_arr_instances_json(raw_str)
+    rad = [x for x in inst if str(x.get("arr_type") or "").strip().lower() == "radarr"]
+    if not rad:
+        return []
+    role_rank = {"primary": 0, "secondary": 1, "additional": 2}
+
+    def _slot_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+        pri = item.get("priority")
+        try:
+            p_int = int(pri) if pri is not None else -1
+        except (TypeError, ValueError):
+            p_int = -1
+        role = str(item.get("role") or "").strip().lower()
+        rr = role_rank.get(role, 5)
+        ikey = str(item.get("instance_key") or "")
+        return (p_int, rr, ikey)
+
+    return sorted(rad, key=_slot_sort_key)
+
+
+def _ordered_sonarr_instances(session) -> list[dict[str, Any]]:
+    """Configured Sonarr slots from effective ARR_INSTANCES_JSON (DB first)."""
+    raw_str = _arr_instances_json_effective(session)
+    inst = parse_configured_arr_instances_json(raw_str)
+    son = [x for x in inst if str(x.get("arr_type") or "").strip().lower() == "sonarr"]
+    if not son:
+        return []
+    role_rank = {"primary": 0, "secondary": 1, "additional": 2}
+
+    def _slot_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+        pri = item.get("priority")
+        try:
+            p_int = int(pri) if pri is not None else -1
+        except (TypeError, ValueError):
+            p_int = -1
+        role = str(item.get("role") or "").strip().lower()
+        rr = role_rank.get(role, 5)
+        ikey = str(item.get("instance_key") or "")
+        return (p_int, rr, ikey)
+
+    return sorted(son, key=_slot_sort_key)
+
+
+def _append_local_rows_missing_from_slot_merge(
+    merged: list[dict[str, Any]],
+    raw: list[dict[str, Any]],
+    id_key: str,
+) -> list[dict[str, Any]]:
+    """Append raw TMDB/TVDB sibling rows not already emitted from slot padding (key/alias drift vs ARR_INSTANCES_JSON)."""
+    covered: set[int] = set()
+    for m in merged:
+        v = m.get(id_key)
+        if isinstance(v, int):
+            covered.add(int(v))
+    out = list(merged)
+    for row in raw:
+        oid = row.get(id_key)
+        if not isinstance(oid, int):
+            continue
+        if oid in covered:
+            continue
+        row_out = {k: v for k, v in row.items() if not str(k).startswith("_")}
+        row_out["present"] = True
+        out.append(row_out)
+        covered.add(oid)
+    return out
+
+
+def _find_raw_hit_for_arr_slot(
+    slot: dict[str, Any],
+    by_key: dict[str, dict[str, Any]],
+    by_id: dict[str, dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    key = str(slot.get("instance_key") or "").strip().lower()
+    if key and key in by_key:
+        return by_key[key]
+    for alias in slot.get("instance_key_aliases") or []:
+        ak = _norm_movie_instance_key(str(alias))
+        if ak and ak in by_key:
+            return by_key[ak]
+    sid = str(slot.get("instance_id") or "").strip().lower()
+    if sid and sid in by_id:
+        return by_id[sid]
+    return None
+
+
+def _movie_arr_instance_links_from_db(session, anchor: Movie) -> list[dict[str, Any]]:
     """Deep links to Radarr UI for every local row that shares this movie's TMDB id."""
     rows = (
         session.query(Movie)
@@ -2306,11 +2424,116 @@ def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
         seen.add(link)
         meta = _arr_instance_meta(m.instance_key, getattr(m, "instance_id", None))
         lbl = str(meta.get("label") or m.instance_key or "").strip() or "Radarr"
-        out.append({"label": lbl, "url": link, "movie_id": m.id})
+        ikey = _norm_movie_instance_key(m.instance_key)
+        iid = str(getattr(m, "instance_id", None) or "").strip().lower()
+        out.append(
+            {
+                "label": lbl,
+                "url": link,
+                "movie_id": m.id,
+                "has_file": bool(m.has_file),
+                "has_placeholder": bool(m.has_placeholder),
+                "_instance_key": ikey,
+                "_instance_id": iid,
+            }
+        )
     return out
 
 
-def _series_arr_instance_links(session, anchor: Series) -> list[dict[str, Any]]:
+def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
+    """Radarr UI links per configured instance when ARR_INSTANCES_JSON lists Radarr; pads missing titles with ``present: false``."""
+    raw = _movie_arr_instance_links_from_db(session, anchor)
+    rad_cfg = _ordered_radarr_instances(session)
+    if not rad_cfg:
+        return [{k: v for k, v in row.items() if not str(k).startswith("_")} for row in raw]
+
+    by_key: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in raw:
+        k = str(row.get("_instance_key") or "").strip().lower()
+        if k and k not in by_key:
+            by_key[k] = row
+        iid = str(row.get("_instance_id") or "").strip().lower()
+        if iid and iid not in by_id:
+            by_id[iid] = row
+
+    merged: list[dict[str, Any]] = []
+    for slot in rad_cfg:
+        key = str(slot.get("instance_key") or "").strip().lower()
+        hit = _find_raw_hit_for_arr_slot(slot, by_key, by_id)
+        if hit:
+            row = {k: v for k, v in hit.items() if not str(k).startswith("_")}
+            row["present"] = True
+            merged.append(row)
+        else:
+            base = _arr_base_url("movie", key, slot.get("instance_id"))
+            merged.append(
+                {
+                    "label": str(slot.get("label") or key).strip() or "Radarr",
+                    "url": base or "",
+                    "present": False,
+                    "has_file": False,
+                    "has_placeholder": False,
+                }
+            )
+    return _append_local_rows_missing_from_slot_merge(merged, raw, "movie_id")
+
+
+def _episode_stats_for_series(session, series_id: int) -> dict[str, int]:
+    """Aggregate episode counts for one series (matches /api/library series_episode_counts semantics)."""
+    row = (
+        session.query(
+            func.count(Episode.id).label("episode_total"),
+            func.sum(case((Episode.has_file == True, 1), else_=0)).label("episode_files"),
+            func.sum(case((Episode.has_placeholder == True, 1), else_=0)).label("episode_placeholders"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            func.coalesce(Episode.has_file, False) == False,
+                            func.coalesce(Episode.has_placeholder, False) == False,
+                            Episode.determination == "not_needed",
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("episode_future"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            func.coalesce(Episode.has_file, False) == False,
+                            func.coalesce(Episode.has_placeholder, False) == False,
+                            or_(Episode.determination.is_(None), Episode.determination != "not_needed"),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("episode_missing"),
+        )
+        .select_from(Episode)
+        .join(Season, Season.id == Episode.season_id)
+        .filter(
+            Season.series_id == series_id,
+            Episode.is_deleted == False,
+            Season.is_deleted == False,
+        )
+        .first()
+    )
+    if not row:
+        return _series_counts_empty()
+    return {
+        "episode_total": int(row.episode_total or 0),
+        "episode_files": int(row.episode_files or 0),
+        "episode_placeholders": int(row.episode_placeholders or 0),
+        "episode_future": int(row.episode_future or 0),
+        "episode_missing": int(row.episode_missing or 0),
+    }
+
+
+def _series_arr_instance_links_from_db(session, anchor: Series) -> list[dict[str, Any]]:
     """Deep links to Sonarr UI for every local row that shares this series' TVDB id."""
     rows = (
         session.query(Series)
@@ -2333,8 +2556,62 @@ def _series_arr_instance_links(session, anchor: Series) -> list[dict[str, Any]]:
         seen.add(link)
         meta = _arr_instance_meta(s.instance_key, getattr(s, "instance_id", None))
         lbl = str(meta.get("label") or s.instance_key or "").strip() or "Sonarr"
-        out.append({"label": lbl, "url": link, "series_id": s.id})
+        st = _episode_stats_for_series(session, s.id)
+        ikey = _norm_movie_instance_key(s.instance_key)
+        iid = str(getattr(s, "instance_id", None) or "").strip().lower()
+        out.append(
+            {
+                "label": lbl,
+                "url": link,
+                "series_id": s.id,
+                "episode_files": int(st["episode_files"]),
+                "episode_placeholders": int(st["episode_placeholders"]),
+                "episode_total": int(st["episode_total"]),
+                "_instance_key": ikey,
+                "_instance_id": iid,
+            }
+        )
     return out
+
+
+def _series_arr_instance_links(session, anchor: Series) -> list[dict[str, Any]]:
+    """Sonarr UI links per configured instance when ARR_INSTANCES_JSON lists Sonarr; pads missing shows with ``present: false``."""
+    raw = _series_arr_instance_links_from_db(session, anchor)
+    son_cfg = _ordered_sonarr_instances(session)
+    if not son_cfg:
+        return [{k: v for k, v in row.items() if not str(k).startswith("_")} for row in raw]
+
+    by_key: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in raw:
+        k = str(row.get("_instance_key") or "").strip().lower()
+        if k and k not in by_key:
+            by_key[k] = row
+        iid = str(row.get("_instance_id") or "").strip().lower()
+        if iid and iid not in by_id:
+            by_id[iid] = row
+
+    merged: list[dict[str, Any]] = []
+    for slot in son_cfg:
+        key = str(slot.get("instance_key") or "").strip().lower()
+        hit = _find_raw_hit_for_arr_slot(slot, by_key, by_id)
+        if hit:
+            row = {k: v for k, v in hit.items() if not str(k).startswith("_")}
+            row["present"] = True
+            merged.append(row)
+        else:
+            base = _arr_base_url("series", key, slot.get("instance_id"))
+            merged.append(
+                {
+                    "label": str(slot.get("label") or key).strip() or "Sonarr",
+                    "url": base or "",
+                    "present": False,
+                    "episode_files": 0,
+                    "episode_placeholders": 0,
+                    "episode_total": 0,
+                }
+            )
+    return _append_local_rows_missing_from_slot_merge(merged, raw, "series_id")
 
 
 def _merge_series_library_rows(
@@ -2613,7 +2890,7 @@ async def movie_detail(movie_id: int):
             "last_search": _iso(movie.last_search),
             "updated_at": _iso(movie.updated_at),
             "created_at": _iso(movie.created_at),
-            "arr_instance_links": _movie_arr_instance_links(session, movie),
+            "arr_instance_links": _movie_arr_instance_links(session, movie) or [],
         }
     finally:
         session.close()
@@ -2709,7 +2986,7 @@ async def series_detail(series_id: int):
             "updated_at": _iso(series.updated_at),
             "created_at": _iso(series.created_at),
             "seasons": seasons_out,
-            "arr_instance_links": _series_arr_instance_links(session, series),
+            "arr_instance_links": _series_arr_instance_links(session, series) or [],
         }
     finally:
         session.close()
