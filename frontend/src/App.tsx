@@ -2187,6 +2187,7 @@ function LibraryPanel(props: {
   brand: Brand; themeMode: ThemeMode;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
+  const isLight = props.themeMode === "light";
   const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
     { id: "all", label: "All" },
     { id: "placeholders", label: "Placeholders" },
@@ -2211,11 +2212,62 @@ function LibraryPanel(props: {
   }, [props.items]);
 
   function statusBadge(item: LibraryItem) {
-    if (item.has_missing) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white font-headline uppercase tracking-wider">Missing</span>;
-    if (item.instance_label) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white font-headline uppercase tracking-wider" style={{ backgroundColor: accent.hex }}>{item.instance_label}</span>;
-    if (item.has_placeholder) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-700 text-white font-headline uppercase tracking-wider">Placeholder</span>;
-    if (item.is_future) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-600 text-white font-headline uppercase tracking-wider">Future</span>;
-    if (item.has_file) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-500 text-white font-headline uppercase tracking-wider">1080p</span>;
+    if (item.has_missing) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-red-50 text-red-800 border-red-200" : "bg-red-600 text-white border-transparent"
+          }`}
+        >
+          Missing
+        </span>
+      );
+    }
+    if (item.instance_label) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider ${
+            isLight ? "text-slate-900" : "text-white"
+          }`}
+          style={{ backgroundColor: accent.hex }}
+        >
+          {item.instance_label}
+        </span>
+      );
+    }
+    if (item.has_placeholder) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-teal-50 text-teal-900 border-teal-200" : "bg-teal-700 text-white border-transparent"
+          }`}
+        >
+          Placeholder
+        </span>
+      );
+    }
+    if (item.is_future) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-600 text-white border-transparent"
+          }`}
+        >
+          Future
+        </span>
+      );
+    }
+    if (item.has_file) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-500 text-white border-transparent"
+          }`}
+        >
+          1080p
+        </span>
+      );
+    }
     return null;
   }
 
@@ -2224,16 +2276,24 @@ function LibraryPanel(props: {
       {/* Header + filter tabs */}
       <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
         <div>
-          <h2 className="text-3xl font-black text-white tracking-tight font-headline">{props.shelfTitle}</h2>
-          <p className="text-sm text-slate-400 mt-1">Showing {props.items.length} items matching your criteria</p>
+          <h2 className={`text-3xl font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
+          <p className={`text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
         </div>
-        <div className="flex flex-wrap gap-1 bg-[#171c22] p-1 rounded-lg border border-[#424753]/40">
+        <div
+          className={`flex flex-wrap gap-1 p-1 rounded-lg border ${
+            isLight ? "bg-white border-slate-200/90 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           {filters.map(f => (
             <button key={f.id} type="button" onClick={() => props.onFilterChange(f.id)}
               className={`px-4 py-1.5 rounded-md text-xs font-headline uppercase tracking-wider transition-colors ${
                 f.id === props.activeFilter
-                    ? "text-white font-semibold"
-                  : "text-slate-400 hover:text-slate-200"
+                  ? isLight
+                    ? "text-slate-900 font-semibold"
+                    : "text-white font-semibold"
+                  : isLight
+                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                    : "text-slate-400 hover:text-slate-200"
                   }`} style={f.id === props.activeFilter ? { backgroundColor: accent.hex } : undefined}>
               {f.label}
             </button>
@@ -2243,7 +2303,7 @@ function LibraryPanel(props: {
 
       {/* Poster grid with alphabet sections */}
       {props.items.length === 0 ? (
-        <div className="text-center text-slate-500 py-16">No library items match the current filter.</div>
+        <div className={`text-center py-16 ${isLight ? "text-slate-600" : "text-slate-500"}`}>No library items match the current filter.</div>
       ) : (
         <div className="flex items-start gap-4 mb-8">
           <div className="flex-1 space-y-8">
@@ -2255,14 +2315,22 @@ function LibraryPanel(props: {
                 }}
                 style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
               >
-                <div className="mb-3 text-xs font-headline uppercase tracking-widest text-slate-500 border-b border-[#424753]/25 pb-2">{letter}</div>
+                <div
+                  className={`mb-3 text-xs font-headline uppercase tracking-widest border-b pb-2 ${
+                    isLight ? "text-slate-700 border-slate-200" : "text-slate-500 border-[#424753]/25"
+                  }`}
+                >
+                  {letter}
+                </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                   {(groupedItems.groups[letter] || []).map((item) => (
                     <button
                       key={item.id}
                       type="button"
                       onClick={() => props.onOpenDetail(item)}
-                      className="relative isolate rounded-xl overflow-hidden bg-[#1e2430] group cursor-pointer text-left transition-transform hover:scale-[1.02]"
+                      className={`relative isolate rounded-xl overflow-hidden group cursor-pointer text-left transition-transform hover:scale-[1.02] ${
+                        isLight ? "bg-white shadow-md shadow-slate-900/8" : "bg-[#1e2430]"
+                      }`}
                       style={{
                         aspectRatio: "2/3",
                         border: `2px solid ${accent.hex}`,
@@ -2276,19 +2344,19 @@ function LibraryPanel(props: {
                         />
                       ) : null}
                       <div
-                        className="absolute pointer-events-none bottom-0 left-0 right-0 h-[34%]"
+                        className={`absolute pointer-events-none bottom-0 left-0 right-0 ${isLight ? "h-[48%]" : "h-[34%]"}`}
                         style={{
-                          background:
-                            "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
+                          background: isLight
+                            ? "linear-gradient(180deg, rgba(238,243,248,0) 0%, rgba(238,243,248,0.42) 38%, rgba(238,243,248,0.88) 68%, rgba(238,243,248,1) 88%, rgba(238,243,248,1) 100%)"
+                            : "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
                         }}
                       />
                       <div className="absolute top-2 left-2">{statusBadge(item)}</div>
-                      <div className="absolute bottom-0 left-0 right-0 p-3">
-                        <div className="font-bold text-white text-sm leading-tight truncate">{item.title}</div>
-                        <div className="mt-0.5 flex items-center justify-between gap-2">
-                          <div className="text-[11px] text-slate-400">{item.year || "--"}</div>
-                          <div className="px-1.5 py-0.5 rounded bg-black/45 border border-white/20 text-[9px] text-slate-200 font-headline uppercase tracking-wider">{item.type}</div>
+                      <div className={`absolute bottom-0 left-0 right-0 flex flex-col gap-1 px-3 ${isLight ? "pb-3 pt-12" : "pb-3 pt-8"}`}>
+                        <div className="text-xs font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
+                          {item.year || "—"}
                         </div>
+                        <div className={`font-bold text-sm leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
                       </div>
                     </button>
                   ))}
@@ -2296,13 +2364,21 @@ function LibraryPanel(props: {
               </div>
             ))}
           </div>
-          <div className="hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border border-[#424753]/35 bg-[#111722]/90 px-2 py-2">
+          <div
+            className={`hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border px-2 py-2 ${
+              isLight ? "border-slate-200 bg-white/95 shadow-sm backdrop-blur-sm" : "border-[#424753]/35 bg-[#111722]/90"
+            }`}
+          >
             {groupedItems.letters.map((letter) => (
               <button
                 key={`alpha-${letter}`}
                 type="button"
                 onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                className="w-6 h-6 rounded text-[10px] font-headline font-bold text-slate-400 hover:text-white hover:bg-[#293346] transition-colors"
+                className={`w-6 h-6 rounded text-[10px] font-headline font-bold transition-colors ${
+                  isLight
+                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                    : "text-slate-400 hover:text-white hover:bg-[#293346]"
+                }`}
                 title={`Jump to ${letter}`}
               >
                 {letter}
@@ -2314,19 +2390,27 @@ function LibraryPanel(props: {
 
       {/* Footer stat cards */}
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
+        <div
+          className={`rounded-xl border p-5 ${
+            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Total Items</div>
-            <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 18 }}>storage</span>
+            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Total Items</div>
+            <span className={`material-symbols-outlined ${isLight ? "text-slate-400" : "text-slate-600"}`} style={{ fontSize: 18 }}>storage</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{props.items.length}</div>
+          <div className={`text-3xl font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.items.length}</div>
         </div>
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
+        <div
+          className={`rounded-xl border p-5 ${
+            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Missing Assets</div>
+            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Missing Assets</div>
             <span className="material-symbols-outlined text-yellow-500" style={{ fontSize: 18 }}>warning</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{totalMissing}</div>
+          <div className={`text-3xl font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{totalMissing}</div>
           {totalMissing > 0 && (
             <button type="button" onClick={() => props.onFilterChange("missing")}
               className="mt-3 text-xs font-headline uppercase tracking-wider flex items-center gap-1" style={{ color: accent.icon }}>
@@ -2334,16 +2418,20 @@ function LibraryPanel(props: {
             </button>
           )}
         </div>
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
+        <div
+          className={`rounded-xl border p-5 ${
+            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Sync Status</div>
+            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Sync Status</div>
             <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.hex }}>sync</span>
           </div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className="text-white font-bold font-headline text-sm">Active</span>
+            <span className={`font-bold font-headline text-sm ${isLight ? "text-slate-900" : "text-white"}`}>Active</span>
           </div>
-          <div className="text-xs text-slate-400">Library indexed</div>
+          <div className={`text-xs ${isLight ? "text-slate-600" : "text-slate-400"}`}>Library indexed</div>
         </div>
       </div>
     </div>
