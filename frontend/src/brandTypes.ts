@@ -1,4 +1,4 @@
-/** Visual theme token set (Simularr). App product name is Placeholdarr everywhere in UI. */
-export type Brand = "simularr";
+/** Official Placeholdarr dashboard visual tokens (single brand). */
+export type Brand = "placeholdarr";
 
 export type ThemeMode = "light" | "dark";

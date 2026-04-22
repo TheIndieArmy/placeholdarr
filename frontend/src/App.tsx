@@ -42,7 +42,68 @@ import type {
   StatsResponse,
 } from "./types/api";
 
-const REFRESH_MS = 5000;
+const REFRESH_MS_VISIBLE = 5000;
+const REFRESH_MS_HIDDEN = 30000;
+const LIBRARY_MOVIES_PATH = "/library";
+const LIBRARY_TV_PATH = "/library/tv";
+const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
+const LIBRARY_TV_FILTER_KEY = "placeholdarr:library-shelf-filter:tv";
+/** Legacy single key (pre split movies / TV pages). */
+const LIBRARY_FILTER_STORAGE_KEY_LEGACY = "placeholdarr:library-filter";
+
+export type LibraryShelfFilter = "all" | "placeholders" | "future" | "missing";
+
+function isLibraryShelfFilter(v: string | null): v is LibraryShelfFilter {
+  return v === "all" || v === "placeholders" || v === "future" || v === "missing";
+}
+
+function readStoredShelfFilter(storageKey: string): LibraryShelfFilter {
+  try {
+    const v = sessionStorage.getItem(storageKey);
+    if (isLibraryShelfFilter(v)) return v;
+  } catch {
+    /* private / blocked storage */
+  }
+  return "all";
+}
+
+/** One-time read of legacy `placeholdarr:library-filter` into shelf filters; clears legacy key when consumed. */
+function readLegacyLibraryFilterMigration(): { movies: LibraryShelfFilter; tv: LibraryShelfFilter } | null {
+  try {
+    const v = sessionStorage.getItem(LIBRARY_FILTER_STORAGE_KEY_LEGACY);
+    if (v == null) return null;
+    sessionStorage.removeItem(LIBRARY_FILTER_STORAGE_KEY_LEGACY);
+    if (v === "movie") return { movies: "all", tv: "all" };
+    if (v === "series") return { movies: "all", tv: "all" };
+    if (isLibraryShelfFilter(v)) return { movies: v, tv: v };
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
+  const p = pathname.replace(/\/$/, "") || "/";
+  if (p === LIBRARY_TV_PATH) return "tv";
+  if (p === LIBRARY_MOVIES_PATH) return "movies";
+  return null;
+}
+
+function digestLibraryItems(items: LibraryItem[]): string {
+  return items
+    .map((i) => `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.overview ?? ""}`)
+    .join("\n");
+}
+
+function formatDashboardDataAge(msAgo: number): string {
+  const s = Math.floor(msAgo / 1000);
+  if (s < 12) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ago`;
+}
 const LOG_TAIL_LINES = 2000;
 const STUDIO_THEME_MODE_STORAGE_KEY = "placeholdarr:studio-theme-mode";
 
@@ -203,6 +264,7 @@ const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | 
   EMBY_URL: { service: "emby", credentialKey: "EMBY_TOKEN" },
 };
 
+/** Activity stat cards still route with movie/series distinction; list pages use {@link LibraryShelfFilter}. */
 type LibraryFilter = "all" | "movie" | "series" | "placeholders" | "future" | "missing";
 
 type FieldValueMap = Record<string, unknown>;
@@ -220,8 +282,8 @@ type BrandAccent = {
   hoverHex: string;
 };
 
-/** App name is Placeholdarr; `Brand` selects the Simularr visual theme (tokens only). */
-const BRAND: Brand = "simularr";
+/** Product name is Placeholdarr; `Brand` is the single official dashboard token set. */
+const BRAND: Brand = "placeholdarr";
 
 const BRAND_META: { label: string; tagline: string } = {
   label: "Placeholdarr",
@@ -270,16 +332,16 @@ function SetupBootShell(props: {
 }
 
 const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
-  "simularr-light": {
+  "placeholdarr-light": {
     label: "Placeholdarr",
-    /** Primary stat / hero yellow (matches Simularr dark + top bar band), not ochre. */
+    /** Primary stat / hero yellow (matches dark top bar band), not ochre. */
     hex: "#FBBF24",
     text: "#0f172a",
     /** Cyan rail / secondary chrome on light panels */
     icon: "#0284C7",
     hoverHex: "#D97706",
   },
-  "simularr-dark": {
+  "placeholdarr-dark": {
     label: "Placeholdarr",
     hex: "#FBBF24",
     text: "#E2E8F0",
@@ -370,7 +432,14 @@ export function App() {
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
   const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
 
-  const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
+  const [libraryShelfFilters, setLibraryShelfFilters] = useState<{ movies: LibraryShelfFilter; tv: LibraryShelfFilter }>(() => {
+    const migrated = readLegacyLibraryFilterMigration();
+    if (migrated) return migrated;
+    return {
+      movies: readStoredShelfFilter(LIBRARY_MOVIES_FILTER_KEY),
+      tv: readStoredShelfFilter(LIBRARY_TV_FILTER_KEY),
+    };
+  });
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
   const [calendarFilters, setCalendarFilters] = useState<CalendarFilters>({
     mediaTypes: { movie: true, episode: true },
@@ -407,6 +476,17 @@ export function App() {
 
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
+  const [lastDashboardSuccessAt, setLastDashboardSuccessAt] = useState<number | null>(null);
+  /** Re-render header “Live · … ago” without waiting for the next poll. */
+  const [dashboardAgeTick, setDashboardAgeTick] = useState(0);
+
+  const titleSearchRef = useRef(titleSearch);
+  useEffect(() => {
+    titleSearchRef.current = titleSearch;
+  }, [titleSearch]);
+
+  const libraryDigestRef = useRef<string>("");
 
   const currentTab = getTabFromPath(location.pathname);
   const settingsSectionNames = useMemo(
@@ -478,6 +558,21 @@ export function App() {
   }, [hasUnsavedChanges]);
 
   useEffect(() => {
+    try {
+      sessionStorage.setItem(LIBRARY_MOVIES_FILTER_KEY, libraryShelfFilters.movies);
+      sessionStorage.setItem(LIBRARY_TV_FILTER_KEY, libraryShelfFilters.tv);
+    } catch {
+      /* ignore */
+    }
+  }, [libraryShelfFilters]);
+
+  useEffect(() => {
+    if (lastDashboardSuccessAt == null) return;
+    const id = window.setInterval(() => setDashboardAgeTick((n) => n + 1), 5000);
+    return () => window.clearInterval(id);
+  }, [lastDashboardSuccessAt]);
+
+  useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!hasUnsavedChanges) return;
       event.preventDefault();
@@ -489,8 +584,22 @@ export function App() {
 
   useEffect(() => {
     let stopped = false;
+    let timeoutId = 0;
+    let showRefreshChrome = false;
 
-    async function refresh() {
+    const scheduleNext = () => {
+      window.clearTimeout(timeoutId);
+      const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
+      const delay = hidden ? REFRESH_MS_HIDDEN : REFRESH_MS_VISIBLE;
+      timeoutId = window.setTimeout(() => {
+        void runRefresh().then(() => {
+          if (!stopped) scheduleNext();
+        });
+      }, delay);
+    };
+
+    async function runRefresh() {
+      showRefreshChrome = false;
       try {
         if (currentTab === "setup") {
           // First visit: one full `getSettingsCurrent` (via loadSettings) so we do not block on status
@@ -533,16 +642,25 @@ export function App() {
           return;
         }
 
-        await loadStats(stopped, setStats);
+        showRefreshChrome = true;
+        if (!stopped) setDashboardRefreshing(true);
 
         if (currentTab === "activity") {
+          await loadStats(stopped, setStats);
           const rows = await getActivity(100);
           if (!stopped) setActivity(rows || []);
           const placeholderRows = await getPlaceholderActivity(100);
           if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
-          const payload = await getLibrary(1000);
-          if (!stopped) setLibrary(payload.items || []);
+          const searchTrim = titleSearchRef.current.trim();
+          const useSummary = searchTrim.length === 0;
+          const payload = await getLibrary(1000, { summary: useSummary });
+          const next = payload.items || [];
+          const digest = digestLibraryItems(next);
+          if (digest !== libraryDigestRef.current) {
+            libraryDigestRef.current = digest;
+            if (!stopped) setLibrary(next);
+          }
         } else if (currentTab === "calendar") {
           const payload = await getCalendar(calendarMonth);
           if (!stopped && payload.ok) {
@@ -574,32 +692,81 @@ export function App() {
         if (!stopped) {
           setErrorMessage(null);
           setLoading(false);
+          setLastDashboardSuccessAt(Date.now());
         }
       } catch (err) {
         if (!stopped) {
           setErrorMessage(err instanceof Error ? err.message : "Dashboard refresh failed");
           setLoading(false);
         }
+      } finally {
+        if (showRefreshChrome && !stopped) {
+          setDashboardRefreshing(false);
+        }
       }
     }
 
-    refresh();
-    const timer = window.setInterval(refresh, REFRESH_MS);
+    void runRefresh().then(() => {
+      if (!stopped) scheduleNext();
+    });
+
+    const onVisibility = () => {
+      window.clearTimeout(timeoutId);
+      if (stopped) return;
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void runRefresh().then(() => {
+          if (!stopped) scheduleNext();
+        });
+      } else {
+        scheduleNext();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearTimeout(timeoutId);
     };
   }, [calendarMonth, currentTab, logLevel]);
+
+  /** When the user searches from the header, load full rows (overview) so overview matches work. */
+  useEffect(() => {
+    const q = titleSearch.trim();
+    if (!q) return;
+
+    let stopped = false;
+    const handle = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const payload = await getLibrary(1000, { summary: false });
+          if (stopped) return;
+          const next = payload.items || [];
+          libraryDigestRef.current = digestLibraryItems(next);
+          setLibrary(next);
+        } catch {
+          /* ignore — periodic refresh will retry */
+        }
+      })();
+    }, 400);
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(handle);
+    };
+  }, [titleSearch]);
 
   useEffect(() => {
     if (library.length > 0) return;
     if (location.pathname === "/setup" || location.pathname.startsWith("/setup/")) return;
 
     let stopped = false;
-    getLibrary(1000)
+    getLibrary(1000, { summary: true })
       .then((payload) => {
         if (!stopped) {
-          setLibrary(payload.items || []);
+          const next = payload.items || [];
+          libraryDigestRef.current = digestLibraryItems(next);
+          setLibrary(next);
         }
       })
       .catch(() => {
@@ -752,18 +919,22 @@ export function App() {
     }
   }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload, settingsSectionNames]);
 
+  const libraryListShelf = getLibraryListShelf(location.pathname);
+
   const filteredLibrary = useMemo(() => {
+    if (!libraryListShelf) return [];
+    const shelfFilter = libraryListShelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
     return library
       .filter((item) => {
-      if (libraryFilter === "movie") return item.type === "movie";
-      if (libraryFilter === "series") return item.type === "series";
-      if (libraryFilter === "placeholders") return item.has_placeholder;
-      if (libraryFilter === "future") return item.is_future;
-      if (libraryFilter === "missing") return item.has_missing;
-      return true;
+        if (libraryListShelf === "movies" && item.type !== "movie") return false;
+        if (libraryListShelf === "tv" && item.type !== "series") return false;
+        if (shelfFilter === "placeholders") return item.has_placeholder;
+        if (shelfFilter === "future") return item.is_future;
+        if (shelfFilter === "missing") return item.has_missing;
+        return true;
       })
       .sort((left, right) => titleSortKey(left.title).localeCompare(titleSortKey(right.title)));
-  }, [library, libraryFilter]);
+  }, [library, libraryListShelf, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
     const filter = logFilter.trim().toLowerCase();
@@ -866,7 +1037,7 @@ export function App() {
   }
 
   function openLibraryDetail(item: { type: "movie" | "series"; item_id: number; title?: string }) {
-    if (currentTab === "library") {
+    if (getLibraryListShelf(location.pathname) !== null) {
       const currentScrollTop = getActiveScrollTop();
       sessionStorage.setItem("libraryScrollTop", String(currentScrollTop));
       sessionStorage.setItem("libraryScrollRestorePending", "1");
@@ -899,7 +1070,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (currentTab !== "library") return;
+    if (getLibraryListShelf(location.pathname) === null) return;
     if (sessionStorage.getItem("libraryScrollRestorePending") !== "1") return;
 
     const rawTop = sessionStorage.getItem("libraryScrollTop");
@@ -912,7 +1083,7 @@ export function App() {
     });
 
     sessionStorage.removeItem("libraryScrollRestorePending");
-  }, [currentTab, location.pathname, library.length]);
+  }, [location.pathname, library.length]);
 
   useEffect(() => {
     const isDetailRoute = location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
@@ -937,24 +1108,46 @@ export function App() {
     }
 
     const openLibraryWithFilter = (filter: LibraryFilter) => {
-      setLibraryFilter(filter);
-      navigate("/library");
+      if (filter === "movie") {
+        setLibraryShelfFilters((prev) => ({ ...prev, movies: "all" }));
+        navigate(LIBRARY_MOVIES_PATH);
+        return;
+      }
+      if (filter === "series") {
+        setLibraryShelfFilters((prev) => ({ ...prev, tv: "all" }));
+        navigate(LIBRARY_TV_PATH);
+        return;
+      }
+      if (filter === "all" || filter === "placeholders" || filter === "future" || filter === "missing") {
+        setLibraryShelfFilters((prev) => ({ ...prev, movies: filter }));
+        navigate(LIBRARY_MOVIES_PATH);
+      }
     };
 
     if (currentTab === "activity") return <ActivityPanel rows={activity} placeholderRows={placeholderActivity} activityTab={activityTab} onActivityTabChange={setActivityTab} stats={stats} brand={brand} themeMode={themeMode} onOpenLibraryFilter={openLibraryWithFilter} />;
 
     if (currentTab === "library") {
-      return (
-        <LibraryPanel
-          items={filteredLibrary}
-          activeFilter={libraryFilter}
-          onFilterChange={setLibraryFilter}
-          onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-          stats={stats}
-          brand={brand}
-          themeMode={themeMode}
-        />
-      );
+      const shelf = libraryListShelf;
+      if (shelf === "movies" || shelf === "tv") {
+        return (
+          <LibraryPanel
+            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
+            items={filteredLibrary}
+            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
+            onFilterChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
+            brand={brand}
+            themeMode={themeMode}
+          />
+        );
+      }
+      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
 
     if (currentTab === "calendar") {
@@ -1051,7 +1244,7 @@ export function App() {
     return <div className="empty">Unknown route.</div>;
   }
 
-  // Body class for global studio chrome (Placeholdarr UI: Simularr theme, light/dark)
+  // Body class for global studio chrome (Placeholdarr light/dark)
   useEffect(() => {
     document.body.className = themeMode === "light" ? "theme-studio-light" : "theme-studio-dark";
   }, [themeMode]);
@@ -1121,7 +1314,7 @@ export function App() {
     );
   }
 
-  // Studio shell (Placeholdarr app; Simularr visual layout; light vs dark via themeMode only)
+  // Studio shell (Placeholdarr layout; light vs dark via themeMode only)
   const isActive = (path: string) =>
     location.pathname === path || location.pathname.startsWith(`${path}/`);
   const isStudioGlass = themeMode !== "light";
@@ -1137,10 +1330,10 @@ export function App() {
     ? alphaColor("#0f172a", 0.22)
     : alphaColor("#94a3b8", 0.45);
   /** Matches Studio top-bar search/dropdown strip. */
-  const simularrTopBarBlue = "#1e2430";
-  const simularrHeaderBackground = isStudioGlass
-    ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${simularrTopBarBlue} 80%, ${simularrTopBarBlue} 100%)`
-    : `linear-gradient(to right, ${simularrTopBarBlue} 0%, ${simularrTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
+  const studioTopBarBlue = "#1e2430";
+  const studioHeaderBackground = isStudioGlass
+    ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${studioTopBarBlue} 80%, ${studioTopBarBlue} 100%)`
+    : `linear-gradient(to right, ${studioTopBarBlue} 0%, ${studioTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
 
   return (
       <div
@@ -1159,7 +1352,7 @@ export function App() {
         >
           <div
             className="flex h-16 w-full shrink-0 items-center justify-center border-b px-3"
-            style={{ backgroundColor: isStudioGlass ? brandSemantic.topBarBand : simularrTopBarBlue, borderBottomColor: topBarDivider }}
+            style={{ backgroundColor: isStudioGlass ? brandSemantic.topBarBand : studioTopBarBlue, borderBottomColor: topBarDivider }}
           >
             <BrandLogo
               brand={brand}
@@ -1171,35 +1364,103 @@ export function App() {
 
           {/* Nav */}
           <nav className="flex-1 space-y-1 font-brand-label pt-4">
-            {[
-              { icon: "analytics", label: "Activity", path: "/activity" },
-              { icon: "movie_filter", label: "Library", path: "/library" },
-              { icon: "calendar_month", label: "Calendar", path: "/calendar" },
-              { icon: "error", label: "Errors", path: "/errors" },
-              { icon: "terminal", label: "Logs", path: "/logs" },
-              { icon: "settings", label: "Settings", path: "/settings" },
-            ].map(({ icon, label, path }) =>
-              isActive(path) ? (
-                <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
-                  className={`flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`}
-                  style={{
-                    backgroundColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.22 : 0.16),
-                    color: isStudioGlass ? brandSemantic.fg : brandSemantic.fgOnAccent,
-                    borderLeftColor: brandSemantic.accent,
-                  }}
-                >
-                  <span className="material-symbols-outlined">{icon}</span>
-                  <span>{label}</span>
-                </button>
-              ) : (
-                <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
-                  className={`flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group ${isStudioGlass ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]" : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]"}`}
-                >
-                  <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
-                  <span>{label}</span>
-                </button>
-              )
-            )}
+            {(() => {
+              const navActiveClass =
+                `flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`;
+              const navInactiveClass =
+                "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group " +
+                (isStudioGlass
+                  ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
+              const navActiveStyle = {
+                backgroundColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.22 : 0.16),
+                color: isStudioGlass ? brandSemantic.fg : brandSemantic.fgOnAccent,
+                borderLeftColor: brandSemantic.accent,
+              } as const;
+              const librarySectionActive = isActive("/library");
+              const moviesSubActive =
+                location.pathname === LIBRARY_MOVIES_PATH ||
+                location.pathname === `${LIBRARY_MOVIES_PATH}/` ||
+                location.pathname.startsWith("/library/movie/");
+              const tvSubActive = location.pathname === LIBRARY_TV_PATH || location.pathname.startsWith("/library/series/");
+              const subBase =
+                "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ";
+              const subActiveClass = isStudioGlass ? "bg-[#1e2430] text-slate-100" : "bg-sky-100 text-slate-900";
+              const subInactiveClass = isStudioGlass
+                ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
+
+              return (
+                <>
+                  {isActive("/activity") ? (
+                    <button type="button" onClick={() => tryNavigate("/activity")} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">analytics</span>
+                      <span>Activity</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate("/activity")} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">analytics</span>
+                      <span>Activity</span>
+                    </button>
+                  )}
+
+                  {librarySectionActive ? (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  )}
+                  {currentTab === "library" ? (
+                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
+                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          movie
+                        </span>
+                        <span className="truncate">Movies</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
+                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          tv_gen
+                        </span>
+                        <span className="truncate">TV</span>
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {[
+                    { icon: "calendar_month", label: "Calendar", path: "/calendar" },
+                    { icon: "error", label: "Errors", path: "/errors" },
+                    { icon: "terminal", label: "Logs", path: "/logs" },
+                    { icon: "settings", label: "Settings", path: "/settings" },
+                  ].map(({ icon, label, path }) =>
+                    isActive(path) ? (
+                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass} style={navActiveStyle}>
+                        <span className="material-symbols-outlined">{icon}</span>
+                        <span>{label}</span>
+                      </button>
+                    ) : (
+                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navInactiveClass}>
+                        <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
+                        <span>{label}</span>
+                      </button>
+                    ),
+                  )}
+                </>
+              );
+            })()}
             {currentTab === "settings" && settingsSectionNames.length ? (
               <div className="mt-1 space-y-0.5 pl-6 pr-3">
                 {settingsSectionNames.map((name) => {
@@ -1238,7 +1499,7 @@ export function App() {
           {/* Topbar */}
           <header
             className="flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b"
-            style={{ backgroundImage: simularrHeaderBackground, borderBottomColor: topBarDivider }}
+            style={{ backgroundImage: studioHeaderBackground, borderBottomColor: topBarDivider }}
           >
             <div className="flex items-center flex-1 max-w-xl">
               <div
@@ -1325,7 +1586,27 @@ export function App() {
                 ) : null}
               </div>
             </div>
-            <div className="flex items-center gap-3 ml-4">
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-3 ml-4">
+              <div
+                className={`hidden min-w-0 truncate text-right text-[10px] font-headline uppercase tracking-widest sm:block ${isStudioGlass ? "text-slate-500" : "text-slate-500"}`}
+                title="Dashboard poll status (slower when the tab is in the background)"
+                aria-live="polite"
+              >
+                {dashboardRefreshing ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full" style={{ backgroundColor: brandAccent.hex }} />
+                    Syncing
+                  </span>
+                ) : lastDashboardSuccessAt != null ? (
+                  <span>
+                    Live ·{" "}
+                    {(() => {
+                      void dashboardAgeTick;
+                      return formatDashboardDataAge(Date.now() - lastDashboardSuccessAt);
+                    })()}
+                  </span>
+                ) : null}
+              </div>
               <button
                 type="button"
                 onClick={() => setThemeMode((m) => (m === "dark" ? "light" : "dark"))}
@@ -1591,10 +1872,10 @@ function ActivityPanel(props: {
           className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
           style={panelShellStyle}
         >
-          <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
+          <div className="flex justify-between items-start px-4 py-3 border-b border-[#424753]/30">
             <div>
-              <h2 className="text-xl font-bold text-white font-headline">Recent Operations</h2>
-              <p className="text-xs text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
+              <h2 className="text-lg font-bold text-white font-headline">Recent Operations</h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
             </div>
           </div>
           {!props.rows.length ? (
@@ -1602,13 +1883,18 @@ function ActivityPanel(props: {
           ) : (
             <>
               <div className="overflow-x-auto">
-              <table className="min-w-[520px] w-full">
+              <table className="min-w-[480px] w-full table-fixed">
+                <colgroup>
+                  <col className="w-[88px] sm:w-[104px]" />
+                  <col />
+                  <col className="w-[100px] sm:w-[112px]" />
+                </colgroup>
                 <thead>
                   <tr className="border-b border-[#424753]/20">
                     {["When", "Operation", "Status"].map(h => (
                       <th
                         key={h}
-                        className={`px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
+                        className={`px-3 py-2 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
                       >
                         {h}
                       </th>
@@ -1654,17 +1940,17 @@ function ActivityPanel(props: {
 
                     return (
                       <tr key={key} className="hover:bg-[#1e2430]/40 transition-colors">
-                        <td className="px-5 py-4 text-sm text-slate-400 whitespace-nowrap">{timeAgo(row.time || null)}</td>
-                        <td className="px-5 py-4 text-sm text-slate-300">
-                          <span className="font-medium">{displayName}</span>
-                          {detailLine && <div className="ui-field-description-compact mt-0.5">{detailLine}</div>}
-                          {errorMessage && <span className="text-xs text-red-300/70">{errorMessage}</span>}
+                        <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap align-top">{timeAgo(row.time || null)}</td>
+                        <td className="px-3 py-2 text-xs text-slate-300 min-w-0 align-top">
+                          <span className="font-medium line-clamp-2">{displayName}</span>
+                          {detailLine && <div className="ui-field-description-compact mt-0.5 line-clamp-2">{detailLine}</div>}
+                          {errorMessage && <span className="text-[11px] text-red-300/70">{errorMessage}</span>}
                           {hasExpandable && (
                             <div className="mt-2">
                               <button
                                 type="button"
                                 onClick={toggleProgress}
-                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
+                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
                               >
                                 <span className="material-symbols-outlined" style={{ fontSize: 13 }}>{isExpanded ? "expand_less" : "expand_more"}</span>
                                 {isExpanded ? "Hide details" : "Show details"}
@@ -1759,10 +2045,10 @@ function ActivityPanel(props: {
                             </div>
                           )}
                         </td>
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-2">
+                        <td className="px-3 py-2 align-top">
+                          <div className="flex items-center gap-1.5 justify-end sm:justify-start">
                             <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                            <span className={`text-xs font-medium font-headline uppercase tracking-wider ${statusColor}`}>
+                            <span className={`text-[10px] font-medium font-headline uppercase tracking-wider ${statusColor}`}>
                               {status === "done" || status === "success" ? "Complete" : status === "failed" ? "Failed" : "Running"}
                             </span>
                           </div>
@@ -1773,7 +2059,7 @@ function ActivityPanel(props: {
                 </tbody>
               </table>
               </div>
-              <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+              <div className="px-4 py-2 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
                 Showing {props.rows.length} items
               </div>
             </>
@@ -1893,18 +2179,16 @@ function ActivityPanel(props: {
 }
 
 function LibraryPanel(props: {
+  shelfTitle: string;
   items: LibraryItem[];
-  activeFilter: LibraryFilter;
-  onFilterChange: (value: LibraryFilter) => void;
+  activeFilter: LibraryShelfFilter;
+  onFilterChange: (value: LibraryShelfFilter) => void;
   onOpenDetail: (item: LibraryItem) => void;
-  stats: StatsResponse | null;
   brand: Brand; themeMode: ThemeMode;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
-  const filters: Array<{ id: LibraryFilter; label: string }> = [
+  const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
     { id: "all", label: "All" },
-    { id: "movie", label: "Movies" },
-    { id: "series", label: "Series" },
     { id: "placeholders", label: "Placeholders" },
     { id: "future", label: "Future" },
     { id: "missing", label: "Missing" },
@@ -1940,7 +2224,7 @@ function LibraryPanel(props: {
       {/* Header + filter tabs */}
       <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
         <div>
-          <h2 className="text-3xl font-black text-white tracking-tight font-headline">Library Explorer</h2>
+          <h2 className="text-3xl font-black text-white tracking-tight font-headline">{props.shelfTitle}</h2>
           <p className="text-sm text-slate-400 mt-1">Showing {props.items.length} items matching your criteria</p>
         </div>
         <div className="flex flex-wrap gap-1 bg-[#171c22] p-1 rounded-lg border border-[#424753]/40">
@@ -1964,7 +2248,13 @@ function LibraryPanel(props: {
         <div className="flex items-start gap-4 mb-8">
           <div className="flex-1 space-y-8">
             {groupedItems.letters.map((letter) => (
-              <div key={letter} ref={(el) => { sectionRefs.current[letter] = el; }}>
+              <div
+                key={letter}
+                ref={(el) => {
+                  sectionRefs.current[letter] = el;
+                }}
+                style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
+              >
                 <div className="mb-3 text-xs font-headline uppercase tracking-widest text-slate-500 border-b border-[#424753]/25 pb-2">{letter}</div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                   {(groupedItems.groups[letter] || []).map((item) => (
@@ -5346,7 +5636,7 @@ const ONBOARDING_MEDIA_CARDS = [
   },
 ];
 
-/** Logo tile fill — solid Simularr studio navy (same as sidebar brand strip / dark chrome wells). */
+/** Logo tile fill — solid studio navy (sidebar brand strip / dark chrome wells). */
 const INTEGRATION_LOGO_WELL_BG = "#1e2430";
 
 const ONBOARDING_MEDIA_VISUAL: Record<
@@ -5508,11 +5798,11 @@ function mediaCardConnectionDetailsComplete(
 }
 
 /**
- * Simularr **Spectral Data** palette (marketing guide) — recorded for hero + future UI:
+ * **Spectral Data** palette (marketing guide) — recorded for hero + future UI:
  * - **SLATE** (primary dark) `#0F172A` → token `surfacePanel`
  * - **CYBER YELLOW** (accent) `#FBBF24` → token `accent`
  * - **SURFACE** (void base) `#0B1326` → token `chromePage`
- * - **Spectral cyan** (marketing) → `SIMULARR_SPECTRAL_CYAN_HEX` in `brandSemanticTheme.ts` (`#22D3EE`; UI ice is `accentIce` `#7DD3FC`)
+ * - **Spectral cyan** (marketing) → `PLACEHOLDARR_SPECTRAL_CYAN_HEX` in `brandSemanticTheme.ts` (`#22D3EE`; UI ice is `accentIce` `#7DD3FC`)
  *
  * Variants:
  * - `blueWhite` — horizontal multiply: **CYBER YELLOW** (`accent`) at L/R edges → **void** (`chromePage`) center; lockup **CYBER YELLOW** (`accent`).
@@ -5520,13 +5810,13 @@ function mediaCardConnectionDetailsComplete(
  */
 const ONBOARDING_HERO_BANNER_VARIANT: "blueWhite" | "yellowBlue" = "blueWhite";
 
-/** Raster logo → Simularr SLATE / `surfacePanel` (`#0F172A`). Outline: thin `sim.accent` ring on wrapper (yellowBlue). */
-const ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE =
+/** Raster logo → slate `surfacePanel` (`#0F172A`). Outline: thin accent ring on wrapper (yellowBlue). */
+const ONBOARDING_HERO_LOGO_FILTER_SLATE =
   "object-contain [filter:brightness(0)_saturate(100%)_invert(10%)_sepia(22%)_saturate(4200%)_hue-rotate(191deg)_brightness(0.96)_contrast(1.04)]";
 
 function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
-  const simAccent = getBrandAccent("simularr", "dark");
-  const sim = getBrandSemanticTokens("simularr", "dark", simAccent);
+  const simAccent = getBrandAccent("placeholdarr", "dark");
+  const sim = getBrandSemanticTokens("placeholdarr", "dark", simAccent);
   const variant = ONBOARDING_HERO_BANNER_VARIANT;
   const isYellow = variant === "yellowBlue";
 
@@ -5656,9 +5946,9 @@ function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
           <div className="inline-block" style={slateLogoBrandYellowOutlineStyle}>
             {isYellow ? (
               <BrandLogo
-                brand="simularr"
+                brand="placeholdarr"
                 accentHex={simAccent.hex}
-                className={`h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center sm:h-[5rem] sm:max-w-[15.5rem] ${ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE}`}
+                className={`h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center sm:h-[5rem] sm:max-w-[15.5rem] ${ONBOARDING_HERO_LOGO_FILTER_SLATE}`}
               />
             ) : (
               <img

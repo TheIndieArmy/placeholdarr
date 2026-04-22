@@ -47,7 +47,7 @@ body {
   color-scheme: light;
 }
 
-/* Legacy Mirarr slate outline hexes → brand borders (Placeholdarr / Simularr tokens on .brand-theme-scope) */
+/* Legacy Mirarr slate outline hexes → brand borders (Placeholdarr tokens on .brand-theme-scope) */
 .theme-light .border-\[\#424753\]\/20,
 .theme-light .border-\[\#424753\]\/15,
 .theme-light .border-\[\#424753\]\/30,
@@ -1150,7 +1150,7 @@ a { color: inherit; }
   font-family: var(--brand-font-body), Inter, ui-sans-serif, system-ui, sans-serif;
 }
 
-/* Primary actions that should follow the brand tertiary token (e.g. Simularr #34DAFF). */
+/* Primary actions that should follow the brand tertiary token (spectral cyan accent). */
 .brand-theme-scope .btn-brand-tertiary {
   background-color: var(--brand-accent-tertiary);
   color: var(--brand-fg-on-accent);

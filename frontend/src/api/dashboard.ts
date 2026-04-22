@@ -27,8 +27,11 @@ export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivity
   return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
 }
 
-export function getLibrary(limit = 1000): Promise<LibraryResponse> {
-  return fetchJson<LibraryResponse>(`/api/library?limit=${limit}`);
+export function getLibrary(limit = 1000, opts?: { summary?: boolean }): Promise<LibraryResponse> {
+  const summary = opts?.summary === true;
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (summary) q.set("summary", "true");
+  return fetchJson<LibraryResponse>(`/api/library?${q.toString()}`);
 }
 
 export function getMovieDetail(movieId: number): Promise<DetailResponse> {

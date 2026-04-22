@@ -7,6 +7,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+- **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
+- **Dashboard library IA**: Sidebar **Library** opens **Movies** at `/library`; **TV** lives at `/library/tv` with nested nav (same pattern as Settings). Per-shelf filters persist in `sessionStorage` (`placeholdarr:library-shelf-filter:movies` / `:tv`); legacy `placeholdarr:library-filter` is migrated once on load.
+### Changed
+- **Dashboard polling**: Poll cadence slows while the browser tab is in the background, refetches when the tab becomes visible again, loads `/api/stats` only on the Activity tab, uses **summary** library payloads by default, and debounces a **full** library fetch when the header search may match overview text.
+### Fixed
+- **ARR file-delete webhooks**: On ``movie_file_deleted`` / ``episode_file_deleted``, clear denormalized ``has_placeholder`` / ``placeholder_filepath`` and mark linked ``Placeholder`` rows inactive before determination so materialization can use the ``needs_placeholder`` path when a dummy must be recreated (avoids stale ``placeholder_exists`` no-ops).
+
+
 ## [0.9.5] - 2026-04-21
 
 ### Added
@@ -16,13 +25,13 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
-- **Simularr studio shell (dashboard)**: Refined **light** chrome as the deliberate inverse of dark mode—navy sidebar brand row with yellow mark, **blue → yellow** main header band, and a header **theme toggle** that sits flush on the yellow band (no separate white chip or sky “rail”).
+- **Placeholdarr studio shell (dashboard)**: Refined **light** chrome as the deliberate inverse of dark mode—navy sidebar brand row with yellow mark, **blue → yellow** main header band, and a header **theme toggle** that sits flush on the yellow band (no separate white chip or sky “rail”).
 - **Settings navigation & layout**: Settings live under **`/settings/<slug>`** with redirect from `/settings` to the first section; the old in-page settings sidebar was removed in favor of **nested entries in the main app sidebar** while on settings routes.
 - **Settings vs onboarding parity**: **Media Integrations** and **ARR Integrations** reuse the same **card / slot grid** patterns as onboarding; other sections use the same framed, onboarding-style section treatment where appropriate.
 - **Integration logo tiles**: Plex/Jellyfin/Emby and Radarr/Sonarr icon wells use a **solid studio navy** (`#1e2430`) in both themes so tiles match the intended dark-blue look instead of washed translucent fills.
 - **Brand logo rendering**: Sidebar mark uses a single **`BrandLogo`** path with a **`variant`** switch (blue vs yellow asset) so light and dark placement stay consistent.
 - **Dashboard document title**: Browser tab title is now **Placeholdarr** instead of “Placeholdarr Dashboard Next.”
-- **Branding type surface**: The TypeScript **`Brand`** union is now **Simularr-only**, matching the shipped Studio product chrome.
+- **Branding type surface**: The TypeScript **`Brand`** union is now **Placeholdarr-only**, matching the shipped Studio product chrome.
 - **Semantic / global CSS**: `brandSemanticTheme.ts`, `styles.css`, and Tailwind font-map comments were tightened so new UI prefers **`--brand-*` tokens** over legacy hard-coded slate aliases.
 
 ### Fixed

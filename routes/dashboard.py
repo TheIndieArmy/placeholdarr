@@ -2223,8 +2223,11 @@ async def errors(limit: int = Query(50, ge=1, le=200)):
 
 
 @router.get("/api/library")
-async def library(limit: int = Query(300, ge=1, le=1000)):
-    """Return mixed movie/series library rows with poster and placeholder stats."""
+async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(False)):
+    """Return mixed movie/series library rows with poster and placeholder stats.
+
+    When ``summary`` is true, omit large text fields (``overview``, ``backdrop_url``) to shrink JSON for grid polling.
+    """
     session = get_session()
     try:
         series_episode_counts = {
@@ -2293,35 +2296,37 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                 title=movie.title,
                 payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
             )
-            items.append(
-                {
-                    "id": f"movie-{movie.id}",
-                    "item_id": movie.id,
-                    "type": "movie",
-                    "title": movie.title,
-                    "year": movie.year,
-                    "poster_url": movie.remote_poster,
-                    "backdrop_url": movie.remote_fanart,
-                    "is_4k": _legacy_is_4k(instance_meta),
-                    "instance_key": movie.instance_key,
-                    "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
-                    "instance_label": instance_meta.get("label") or movie.instance_key,
-                    "arr_link": arr_link,
-                    "determination": movie.determination,
-                    "status": movie.status,
-                    "has_file": bool(movie.has_file),
-                    "has_placeholder": bool(movie.has_placeholder),
-                    "is_future": movie_is_future,
-                    "has_missing": movie_has_missing,
-                    "overview": movie.radarr_overview,
-                    "stats": {
-                        "downloaded": 1 if movie.has_file else 0,
-                        "placeholders": 1 if movie.has_placeholder else 0,
-                        "future": 1 if movie_is_future else 0,
-                        "missing": 1 if movie_has_missing else 0,
-                    },
-                }
-            )
+            row = {
+                "id": f"movie-{movie.id}",
+                "item_id": movie.id,
+                "type": "movie",
+                "title": movie.title,
+                "year": movie.year,
+                "poster_url": movie.remote_poster,
+                "backdrop_url": movie.remote_fanart,
+                "is_4k": _legacy_is_4k(instance_meta),
+                "instance_key": movie.instance_key,
+                "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
+                "instance_label": instance_meta.get("label") or movie.instance_key,
+                "arr_link": arr_link,
+                "determination": movie.determination,
+                "status": movie.status,
+                "has_file": bool(movie.has_file),
+                "has_placeholder": bool(movie.has_placeholder),
+                "is_future": movie_is_future,
+                "has_missing": movie_has_missing,
+                "overview": movie.radarr_overview,
+                "stats": {
+                    "downloaded": 1 if movie.has_file else 0,
+                    "placeholders": 1 if movie.has_placeholder else 0,
+                    "future": 1 if movie_is_future else 0,
+                    "missing": 1 if movie_has_missing else 0,
+                },
+            }
+            if summary:
+                row.pop("overview", None)
+                row.pop("backdrop_url", None)
+            items.append(row)
 
         series_rows = (
             session.query(Series)
@@ -2355,30 +2360,32 @@ async def library(limit: int = Query(300, ge=1, le=1000)):
                 title=series.title,
                 payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
             )
-            items.append(
-                {
-                    "id": f"series-{series.id}",
-                    "item_id": series.id,
-                    "type": "series",
-                    "title": series.title,
-                    "year": series.year,
-                    "poster_url": series.remote_poster,
-                    "backdrop_url": series.remote_fanart or series.remote_banner,
-                    "is_4k": _legacy_is_4k(instance_meta),
-                    "instance_key": series.instance_key,
-                    "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
-                    "instance_label": instance_meta.get("label") or series.instance_key,
-                    "arr_link": arr_link,
-                    "determination": None,
-                    "status": series.status,
-                    "has_file": bool(series.has_files),
-                    "has_placeholder": counts["episode_placeholders"] > 0,
-                    "is_future": series_is_future,
-                    "has_missing": series_has_missing,
-                    "overview": series.sonarr_series_overview,
-                    "stats": counts,
-                }
-            )
+            row = {
+                "id": f"series-{series.id}",
+                "item_id": series.id,
+                "type": "series",
+                "title": series.title,
+                "year": series.year,
+                "poster_url": series.remote_poster,
+                "backdrop_url": series.remote_fanart or series.remote_banner,
+                "is_4k": _legacy_is_4k(instance_meta),
+                "instance_key": series.instance_key,
+                "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
+                "instance_label": instance_meta.get("label") or series.instance_key,
+                "arr_link": arr_link,
+                "determination": None,
+                "status": series.status,
+                "has_file": bool(series.has_files),
+                "has_placeholder": counts["episode_placeholders"] > 0,
+                "is_future": series_is_future,
+                "has_missing": series_has_missing,
+                "overview": series.sonarr_series_overview,
+                "stats": counts,
+            }
+            if summary:
+                row.pop("overview", None)
+                row.pop("backdrop_url", None)
+            items.append(row)
 
         items.sort(
             key=lambda item: (
