@@ -70,12 +70,28 @@ export interface PlaceholderActivityRow {
   id: number;
   type: "placeholder";
   action: "Created" | "Deleted" | "Status";
-  item_type: "movie" | "episode";
+  item_type: "movie" | "episode" | "batch";
   item_title: string;
   series_title?: string | null;
   path: string;
   reason: string;
   status: string;
+  time?: string | null;
+  /** Server-side batch of calendar-driven status updates; expands in the UI. */
+  group_kind?: "calendar_status_sync" | string;
+  children?: PlaceholderActivityChildRow[];
+}
+
+export interface PlaceholderActivityChildRow {
+  id: number;
+  type?: "placeholder";
+  action?: string;
+  item_type?: "movie" | "episode";
+  item_title?: string;
+  series_title?: string | null;
+  path?: string;
+  reason?: string;
+  status?: string;
   time?: string | null;
 }
 

@@ -15,6 +15,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import and_, case, func, or_, text
+from sqlalchemy.orm import joinedload
 
 from core.config import parse_configured_arr_instances_json, settings
 from core.logger import logger
@@ -33,6 +34,7 @@ from services.postgres.models import (
     Job,
     EventLog,
 )
+from services.source_of_truth.status_intent import StatusSource
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
 router = APIRouter()
@@ -661,6 +663,96 @@ def _humanize_placeholder_status(status: str | None) -> str:
     if not normalized:
         return "Unknown"
     return mapping.get(normalized, _humanize_snake_case(normalized))
+
+
+def _parse_activity_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _group_calendar_placeholder_status_rows(rows: list[dict], *, max_gap_sec: int = 180) -> list[dict]:
+    """Collapse consecutive calendar-driven status rows (same sync window) into one expandable parent."""
+    cal_src = StatusSource.CALENDAR_RELEASE_WINDOW.value
+    if not rows:
+        return rows
+    out: list[dict] = []
+    i = 0
+    parent_seq = 0
+    while i < len(rows):
+        row = rows[i]
+        if row.get("action") == "Status" and str(row.get("_status_source") or "") == cal_src:
+            cluster: list[dict] = [row]
+            j = i + 1
+            while j < len(rows):
+                nxt = rows[j]
+                if nxt.get("action") != "Status" or str(nxt.get("_status_source") or "") != cal_src:
+                    break
+                t_last = _parse_activity_dt(cluster[-1].get("time"))
+                t_nxt = _parse_activity_dt(nxt.get("time"))
+                if t_last is None or t_nxt is None:
+                    break
+                delta = (t_last - t_nxt).total_seconds()
+                if delta >= 0 and delta <= max_gap_sec:
+                    cluster.append(nxt)
+                    j += 1
+                else:
+                    break
+            if len(cluster) >= 2:
+                parent_seq += 1
+                newest = cluster[0]
+                child_rows: list[dict] = []
+                for c in cluster:
+                    child_rows.append(
+                        {
+                            "id": c["id"],
+                            "type": "placeholder",
+                            "action": c.get("action"),
+                            "item_type": c.get("item_type"),
+                            "item_title": c.get("item_title"),
+                            "series_title": c.get("series_title"),
+                            "path": c.get("path") or "",
+                            "reason": c.get("reason"),
+                            "status": c.get("status"),
+                            "time": c.get("time"),
+                        }
+                    )
+                parent_id = -(900_000_000 + parent_seq)
+                out.append(
+                    {
+                        "id": parent_id,
+                        "type": "placeholder",
+                        "group_kind": "calendar_status_sync",
+                        "action": "Status",
+                        "item_type": "batch",
+                        "item_title": f"Calendar sync — {len(child_rows)} titles",
+                        "series_title": None,
+                        "path": "",
+                        "reason": "Placeholder status updated from the calendar (coming soon, release window, release day).",
+                        "status": "Updated",
+                        "time": newest.get("time"),
+                        "children": child_rows,
+                    }
+                )
+                i = j
+            else:
+                solo = cluster[0]
+                solo.pop("_status_source", None)
+                out.append(solo)
+                i += 1
+        else:
+            row.pop("_status_source", None)
+            out.append(row)
+            i += 1
+    return out
 
 
 def _humanize_placeholder_reason(reason: str | None, *, action: str | None = None) -> str:
@@ -2102,19 +2194,56 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
             .limit(limit * 6)
             .all()
         )
+        status_ph_ids: list[int] = []
+        parsed_status_events: list[tuple[Any, dict[str, Any], str]] = []
         for ev in status_events:
             payload = ev.payload if isinstance(ev.payload, dict) else {}
             try:
                 ph_id = int(payload.get("placeholder_id"))
             except Exception:
                 continue
+            status_ph_ids.append(ph_id)
+            parsed_status_events.append((ev, payload, str(ev.source or "").strip()))
 
-            ph = placeholder_rows_by_id.get(ph_id)
-            movie = session.query(Movie).filter(Movie.id == ph.movie_id).first() if ph and ph.movie_id else None
-            episode = session.query(Episode).filter(Episode.id == ph.episode_id).first() if ph and ph.episode_id else None
+        ph_by_id: dict[int, Placeholder] = {}
+        if status_ph_ids:
+            for ph_row in (
+                session.query(Placeholder).filter(Placeholder.id.in_(status_ph_ids)).all()
+            ):
+                if getattr(ph_row, "id", None) is not None:
+                    ph_by_id[int(ph_row.id)] = ph_row
+
+        ep_ids = [p.episode_id for p in ph_by_id.values() if getattr(p, "episode_id", None)]
+        movie_ids = [p.movie_id for p in ph_by_id.values() if getattr(p, "movie_id", None)]
+        ep_by_id: dict[int, Episode] = {}
+        if ep_ids:
+            for ep in (
+                session.query(Episode)
+                .options(joinedload(Episode.season).joinedload(Season.series))
+                .filter(Episode.id.in_(ep_ids))
+                .all()
+            ):
+                ep_by_id[int(ep.id)] = ep
+        movie_by_id: dict[int, Movie] = {}
+        if movie_ids:
+            for mv in session.query(Movie).filter(Movie.id.in_(movie_ids)).all():
+                movie_by_id[int(mv.id)] = mv
+
+        for ev, payload, source in parsed_status_events:
+            try:
+                ph_id = int(payload.get("placeholder_id"))
+            except Exception:
+                continue
+
+            ph = ph_by_id.get(ph_id)
+            movie = movie_by_id.get(int(ph.movie_id)) if ph and ph.movie_id else None
+            episode = ep_by_id.get(int(ph.episode_id)) if ph and ph.episode_id else None
             series = session.query(Series).filter(Series.id == ph.series_id).first() if ph and ph.series_id else None
-            if episode and not series and hasattr(episode, "series_id") and episode.series_id:
-                series = session.query(Series).filter(Series.id == episode.series_id).first()
+            if episode and not series:
+                try:
+                    series = episode.season.series if getattr(episode, "season", None) else None
+                except Exception:
+                    series = None
 
             item_type = "movie" if (ph and ph.movie_id) else "episode"
             if item_type == "movie":
@@ -2133,11 +2262,10 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
             new_status = str(payload.get("new_status") or "").strip()
             old_status = str(payload.get("old_status") or "").strip()
             reason = str(payload.get("reason") or "").strip()
-            source = str(ev.source or "").strip()
             detail = f"{old_status or '--'} → {new_status or '--'}"
             if reason:
                 detail = f"{detail} • {reason}"
-            if source:
+            if source and source != StatusSource.CALENDAR_RELEASE_WINDOW.value:
                 detail = f"{detail} • {source}"
 
             activity_list.append(
@@ -2152,6 +2280,7 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
                     "reason": detail,
                     "status": _humanize_placeholder_status(new_status or (ph.display_status if ph is not None else None)),
                     "time": ev.created_at.isoformat() if ev.created_at else None,
+                    "_status_source": source,
                 }
             )
 
@@ -2165,7 +2294,8 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
             seen.add(key)
             deduped.append(row)
 
-        return deduped[:limit]
+        grouped = _group_calendar_placeholder_status_rows(deduped)
+        return grouped[:limit]
     finally:
         session.close()
 

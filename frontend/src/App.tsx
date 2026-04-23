@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
@@ -1368,17 +1368,25 @@ export function App() {
           <nav className="flex-1 space-y-1 font-brand-label pt-4">
             {(() => {
               const navActiveClass =
-                `flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`;
+                "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4";
               const navInactiveClass =
                 "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group " +
                 (isStudioGlass
                   ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
                   : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
-              const navActiveStyle = {
-                backgroundColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.22 : 0.16),
-                color: isStudioGlass ? brandSemantic.fg : brandSemantic.fgOnAccent,
-                borderLeftColor: brandSemantic.accent,
-              } as const;
+              const navActiveStyle = (
+                isStudioGlass
+                  ? {
+                      backgroundColor: alphaColor(brandSemantic.accent, 0.22),
+                      color: brandSemantic.fg,
+                      borderLeftColor: brandSemantic.accent,
+                    }
+                  : {
+                      backgroundColor: brandSemantic.fg,
+                      color: brandSemantic.accent,
+                      borderLeftColor: brandSemantic.accent,
+                    }
+              ) as const;
               const librarySectionActive = isActive("/library");
               const moviesSubActive =
                 location.pathname === LIBRARY_MOVIES_PATH ||
@@ -1387,7 +1395,9 @@ export function App() {
               const tvSubActive = location.pathname === LIBRARY_TV_PATH || location.pathname.startsWith("/library/series/");
               const subBase =
                 "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ";
-              const subActiveClass = isStudioGlass ? "bg-[#1e2430] text-slate-100" : "bg-sky-100 text-slate-900";
+              const subActiveClass = isStudioGlass
+                ? "bg-[#1e2430] text-slate-100"
+                : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
               const subInactiveClass = isStudioGlass
                 ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
                 : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
@@ -1479,7 +1489,7 @@ export function App() {
                             ? "bg-[#1e2430] text-slate-100"
                             : "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
                           : isSubActive
-                            ? "bg-sky-100 text-slate-900"
+                            ? "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]"
                             : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                       }`}
                     >
@@ -1674,12 +1684,14 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
   const [hover, setHover] = useState(false);
   const yellow = accent.hex;
   const cyan = accent.icon;
+  /** Light mode: one branded slate rail + frame (matches title color), not mixed yellow/cyan borders. */
+  const lightFrame = accent.text;
   const baseStyle: React.CSSProperties = isLight
     ? {
-        borderLeft: `6px solid ${cyan}`,
-        borderTop: `2px solid ${alphaColor(yellow, 0.92)}`,
-        borderBottom: `2px solid ${alphaColor(yellow, 0.92)}`,
-        borderRight: `1px solid ${alphaColor(cyan, 0.35)}`,
+        borderLeft: `6px solid ${lightFrame}`,
+        borderTop: `2px solid ${lightFrame}`,
+        borderBottom: `2px solid ${lightFrame}`,
+        borderRight: `1px solid ${lightFrame}`,
         background: undefined,
         paddingLeft: 12,
         transition: "transform 0.18s ease, box-shadow 0.18s ease",
@@ -1700,7 +1712,7 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
     ? isLight
       ? {
           transform: "translateY(-6px)",
-          boxShadow: `0 14px 36px ${alphaColor(cyan, 0.2)}, 0 6px 20px ${alphaColor(yellow, 0.14)}`,
+          boxShadow: `0 14px 36px ${alphaColor(lightFrame, 0.16)}, 0 6px 20px ${alphaColor(lightFrame, 0.1)}`,
         }
       : { transform: "translateY(-6px)", boxShadow: `0 12px 36px ${alphaColor(yellow, 0.22)}` }
     : {};
@@ -1745,6 +1757,7 @@ function ActivityPanel(props: {
     : undefined;
   const placeholderRows = props.placeholderRows || [];
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [placeholderHistoryExpanded, setPlaceholderHistoryExpanded] = useState<Record<string, boolean>>({});
 
   const rowKey = (row: ActivityRow, idx: number) => `${row.type}-${String((row as any).id ?? row.time ?? idx)}`;
 
@@ -2072,17 +2085,22 @@ function ActivityPanel(props: {
       {/* Placeholder history table */}
       {tab === "placeholders" && (
         <div
-          className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
-          style={panelShellStyle}
+          className={`rounded-xl overflow-hidden mb-6 border ${isLight ? "border-slate-200/90" : "border-[#424753]/40 bg-[#171c22]"}`}
+          style={{
+            ...(isLight ? { backgroundColor: semantic.surfacePanel } : {}),
+            ...panelShellStyle,
+          }}
         >
-          <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
+          <div
+            className={`flex justify-between items-start px-5 py-4 border-b ${isLight ? "border-slate-200/80" : "border-[#424753]/30"}`}
+          >
             <div>
-              <h2 className="text-xl font-bold text-white font-headline">Placeholder History</h2>
-              <p className="text-xs text-slate-400 mt-0.5">{placeholderRows.length} recent placeholder changes</p>
+              <h2 className={`text-xl font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>Placeholder History</h2>
+              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>{placeholderRows.length} recent placeholder changes</p>
             </div>
           </div>
           {!placeholderRows.length ? (
-            <div className="p-10 text-center text-slate-500 text-sm">No placeholder history yet.</div>
+            <div className={`p-10 text-center text-sm ${isLight ? "text-slate-500" : "text-slate-500"}`}>No placeholder history yet.</div>
           ) : (
             <>
               <div className="overflow-hidden">
@@ -2094,7 +2112,7 @@ function ActivityPanel(props: {
                   <col className="w-[96px] sm:w-[132px]" />
                 </colgroup>
                 <thead>
-                  <tr className="border-b border-[#424753]/20">
+                  <tr className={`border-b ${isLight ? "border-slate-200/90" : "border-[#424753]/20"}`}>
                     {["When", "Content", "Action", "Reason"].map(h => (
                       <th
                         key={h}
@@ -2105,7 +2123,7 @@ function ActivityPanel(props: {
                     ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#424753]/15">
+                <tbody className={isLight ? "divide-y divide-slate-200/80" : "divide-y divide-[#424753]/15"}>
                   {placeholderRows.map((row, idx) => {
                     const actionColor =
                       row.action === "Created"
@@ -2119,30 +2137,166 @@ function ActivityPanel(props: {
                         : row.action === "Deleted"
                           ? "bg-orange-500/20"
                           : "bg-sky-500/20";
+                    const actionColorLight =
+                      row.action === "Created"
+                        ? "text-green-800"
+                        : row.action === "Deleted"
+                          ? "text-orange-900"
+                          : "text-sky-900";
+                    const actionBgLight =
+                      row.action === "Created"
+                        ? "bg-green-100"
+                        : row.action === "Deleted"
+                          ? "bg-orange-100"
+                          : "bg-sky-100";
                     const contentDisplay = row.series_title
                       ? `${row.series_title} • ${row.item_title}`
                       : row.item_title;
+                    const children = Array.isArray(row.children) ? row.children : [];
+                    const isBatch = children.length > 0;
+                    const batchKey = `ph-batch-${row.id}-${idx}`;
+                    const batchOpen = !!placeholderHistoryExpanded[batchKey];
 
                     return (
-                      <tr key={`placeholder-${row.id}-${idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
-                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-400 whitespace-nowrap truncate" title={timeAgo(row.time || null)}>{timeAgo(row.time || null)}</td>
-                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-300 min-w-0">
-                          <span className="font-medium block truncate" title={contentDisplay}>{contentDisplay}</span>
-                          <div className="text-[10px] text-slate-500 mt-0.5 truncate hidden lg:block" title={row.path || undefined}>{row.path}</div>
-                        </td>
-                        <td className="px-2 sm:px-3 py-4">
-                          <span className={`inline-flex items-center px-2 py-1 rounded text-[10px] sm:text-xs font-medium font-headline uppercase tracking-wider whitespace-nowrap ${actionColor} ${actionBg}`}>
-                            {row.action}
-                          </span>
-                        </td>
-                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-400 truncate" title={row.reason || undefined}>{row.reason}</td>
-                      </tr>
+                      <Fragment key={`placeholder-${row.id}-${idx}`}>
+                        <tr
+                          className={`transition-colors ${isBatch ? "cursor-pointer" : ""} ${isLight ? "hover:bg-slate-50/90" : "hover:bg-[#1e2430]/40"}`}
+                          onClick={
+                            isBatch
+                              ? () =>
+                                  setPlaceholderHistoryExpanded((prev) => ({
+                                    ...prev,
+                                    [batchKey]: !prev[batchKey],
+                                  }))
+                              : undefined
+                          }
+                        >
+                          <td
+                            className={`px-2 sm:px-3 py-4 text-xs sm:text-sm whitespace-nowrap truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}
+                            title={timeAgo(row.time || null)}
+                          >
+                            {timeAgo(row.time || null)}
+                          </td>
+                          <td className={`px-2 sm:px-3 py-4 text-xs sm:text-sm min-w-0 ${isLight ? "text-slate-800" : "text-slate-300"}`}>
+                            <div className="flex items-start gap-1.5 min-w-0">
+                              {isBatch ? (
+                                <span
+                                  className={`material-symbols-outlined flex-none transition-transform mt-0.5 ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                  style={{ fontSize: 18, transform: batchOpen ? "rotate(90deg)" : "rotate(0deg)" }}
+                                  aria-hidden
+                                >
+                                  chevron_right
+                                </span>
+                              ) : null}
+                              <div className="min-w-0 flex-1">
+                                <span className="font-medium block truncate" title={contentDisplay}>
+                                  {contentDisplay}
+                                </span>
+                                {row.path ? (
+                                  <div
+                                    className={`text-[10px] mt-0.5 truncate hidden lg:block ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                    title={row.path}
+                                  >
+                                    {row.path}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-2 sm:px-3 py-4">
+                            <span
+                              className={`inline-flex items-center px-2 py-1 rounded text-[10px] sm:text-xs font-medium font-headline uppercase tracking-wider whitespace-nowrap ${
+                                isLight ? `${actionColorLight} ${actionBgLight}` : `${actionColor} ${actionBg}`
+                              }`}
+                            >
+                              {row.action}
+                            </span>
+                          </td>
+                          <td
+                            className={`px-2 sm:px-3 py-4 text-xs sm:text-sm truncate ${isLight ? "text-slate-600" : "text-slate-400"}`}
+                            title={row.reason || undefined}
+                          >
+                            {row.reason}
+                          </td>
+                        </tr>
+                        {isBatch && batchOpen ? (
+                          <tr
+                            key={`${batchKey}-detail`}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#12161c" }}
+                          >
+                            <td
+                              colSpan={4}
+                              className={`p-0 border-t align-top ${isLight ? "border-slate-200/90" : "border-[#424753]/25"}`}
+                            >
+                              <div className="px-3 sm:px-4 py-3.5 pl-9 sm:pl-11 space-y-4">
+                                {children.map((child: any, cidx: number) => {
+                                  const childContent = child.series_title
+                                    ? `${child.series_title} • ${child.item_title || ""}`
+                                    : child.item_title || "";
+                                  const statusLabel = String(child.status || "").trim() || "Unknown";
+                                  const railColor = isLight ? alphaColor(semantic.accent2, 0.55) : alphaColor(semantic.accentIce, 0.4);
+                                  return (
+                                    <div
+                                      key={`${batchKey}-c-${child.id}-${cidx}`}
+                                      className="min-w-0 border-l-2 pl-3.5"
+                                      style={{ borderLeftColor: railColor }}
+                                      title={child.reason ? String(child.reason) : undefined}
+                                    >
+                                      <div className="flex items-start justify-between gap-3 min-w-0">
+                                        <div
+                                          className={`text-xs sm:text-sm font-medium truncate min-w-0 flex-1 ${isLight ? "text-slate-900" : "text-slate-100"}`}
+                                          title={childContent}
+                                        >
+                                          {childContent}
+                                        </div>
+                                        <div className="flex-none flex flex-col items-end gap-1 text-right shrink-0 max-w-[min(12.5rem,46%)] sm:max-w-[14rem]">
+                                          <span
+                                            className="text-[9px] font-headline uppercase tracking-wider leading-tight"
+                                            style={{ color: semantic.fgMuted }}
+                                          >
+                                            Status updated to
+                                          </span>
+                                          <span
+                                            className="text-[11px] sm:text-xs font-headline font-semibold uppercase tracking-wide px-2.5 py-1 rounded-md border"
+                                            style={{
+                                              color: isLight ? semantic.fgOnAccent : semantic.accent,
+                                              backgroundColor: isLight
+                                                ? alphaColor(semantic.accent, 0.2)
+                                                : alphaColor(semantic.accent, 0.14),
+                                              borderColor: isLight
+                                                ? alphaColor(semantic.accent, 0.42)
+                                                : alphaColor(semantic.accent, 0.28),
+                                            }}
+                                          >
+                                            {statusLabel}
+                                          </span>
+                                        </div>
+                                      </div>
+                                      {child.path ? (
+                                        <div
+                                          className={`text-[10px] mt-1.5 truncate font-mono ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                          title={child.path}
+                                        >
+                                          {child.path}
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
                     );
                   })}
                 </tbody>
               </table>
               </div>
-              <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+              <div
+                className={`px-5 py-3 border-t text-[10px] font-headline uppercase tracking-widest ${isLight ? "border-slate-200/90 text-slate-500" : "border-[#424753]/20 text-slate-500"}`}
+              >
                 Showing {placeholderRows.length} items
               </div>
             </>
