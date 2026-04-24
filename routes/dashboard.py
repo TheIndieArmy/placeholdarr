@@ -22,15 +22,19 @@ from core.logger import logger
 from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
 from services.activity_markers import EVENT_CALENDAR_DATE_REFRESH, EVENT_STARTUP_SOURCE_OF_TRUTH
 from services.activity_snapshot import get_queue_download_activity_row
+from services.dashboard_stats_snapshot_hooks import build_dashboard_stats_payload
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
 from services.postgres.models import (
     AppConfig,
+    DashboardStatsSnapshot,
     Movie,
     Series,
     Season,
     Episode,
     Placeholder,
+    PlaceholderActivityHistory,
+    SystemActivityHistory,
     Job,
     EventLog,
 )
@@ -473,74 +477,33 @@ async def stats():
     """Return aggregate metrics for the dashboard header."""
     session = get_session()
     try:
-        # Movies
-        total_movies = session.query(func.count(Movie.id)).filter(Movie.is_deleted == False).scalar() or 0
-        movies_with_placeholder = session.query(func.count(Movie.id)).filter(
-            Movie.is_deleted == False, Movie.has_placeholder == True
-        ).scalar() or 0
-        movies_with_file = session.query(func.count(Movie.id)).filter(
-            Movie.is_deleted == False, Movie.has_file == True
-        ).scalar() or 0
-        movies_future_outside_lookahead = session.query(func.count(Movie.id)).filter(
-            Movie.is_deleted == False,
-            func.coalesce(Movie.has_file, False) == False,
-            func.coalesce(Movie.has_placeholder, False) == False,
-            Movie.determination == "not_needed",
-        ).scalar() or 0
+        snap = session.get(DashboardStatsSnapshot, 1)
+        if snap is not None:
+            return {
+                "movies": {
+                    "total": int(snap.movies_total or 0),
+                    "placeholders": int(snap.movies_placeholders or 0),
+                    "downloaded": int(snap.movies_downloaded or 0),
+                    "future_outside_lookahead": int(snap.movies_future_outside_lookahead or 0),
+                },
+                "series": {"total": int(snap.series_total or 0)},
+                "episodes": {
+                    "total": int(snap.episodes_total or 0),
+                    "placeholders": int(snap.episodes_placeholders or 0),
+                    "downloaded": int(snap.episodes_downloaded or 0),
+                    "future_outside_lookahead": int(snap.episodes_future_outside_lookahead or 0),
+                },
+                "placeholders_on_disk": int(snap.placeholders_on_disk or 0),
+                "jobs": {
+                    "pending": int(snap.jobs_pending or 0),
+                    "failed": int(snap.jobs_failed or 0),
+                    "done": int(snap.jobs_done or 0),
+                },
+                "last_sync": snap.last_sync.isoformat() if snap.last_sync else None,
+            }
 
-        # Series
-        total_series = session.query(func.count(Series.id)).filter(Series.is_deleted == False).scalar() or 0
-
-        # Episodes
-        total_episodes = session.query(func.count(Episode.id)).filter(Episode.is_deleted == False).scalar() or 0
-        episodes_with_placeholder = session.query(func.count(Episode.id)).filter(
-            Episode.is_deleted == False, Episode.has_placeholder == True
-        ).scalar() or 0
-        episodes_with_file = session.query(func.count(Episode.id)).filter(
-            Episode.is_deleted == False, Episode.has_file == True
-        ).scalar() or 0
-        episodes_future_outside_lookahead = session.query(func.count(Episode.id)).filter(
-            Episode.is_deleted == False,
-            func.coalesce(Episode.has_file, False) == False,
-            func.coalesce(Episode.has_placeholder, False) == False,
-            Episode.determination == "not_needed",
-        ).scalar() or 0
-
-        # Placeholders on disk
-        placeholders_on_disk = session.query(func.count(Placeholder.id)).filter(
-            Placeholder.has_placeholder == True
-        ).scalar() or 0
-
-        # Jobs
-        jobs_pending = session.query(func.count(Job.id)).filter(Job.status.in_(["PENDING", "CLAIMED", "WORKING"])).scalar() or 0
-        jobs_failed = session.query(func.count(Job.id)).filter(Job.status == "FAILED").scalar() or 0
-        jobs_done = session.query(func.count(Job.id)).filter(Job.status == "DONE").scalar() or 0
-
-        # Last sync (most recent DONE job of type containing 'sync' or 'full')
-        last_sync_row = session.query(Job.updated_at).filter(
-            Job.status == "DONE",
-            Job.job_type.ilike("%sync%"),
-        ).order_by(Job.updated_at.desc()).first()
-        last_sync = last_sync_row[0].isoformat() if last_sync_row and last_sync_row[0] else None
-
-        return {
-            "movies": {
-                "total": total_movies,
-                "placeholders": movies_with_placeholder,
-                "downloaded": movies_with_file,
-                "future_outside_lookahead": movies_future_outside_lookahead,
-            },
-            "series": {"total": total_series},
-            "episodes": {
-                "total": total_episodes,
-                "placeholders": episodes_with_placeholder,
-                "downloaded": episodes_with_file,
-                "future_outside_lookahead": episodes_future_outside_lookahead,
-            },
-            "placeholders_on_disk": placeholders_on_disk,
-            "jobs": {"pending": jobs_pending, "failed": jobs_failed, "done": jobs_done},
-            "last_sync": last_sync,
-        }
+        # Snapshot missing (first run / before hooks). Return live aggregate as safe fallback.
+        return build_dashboard_stats_payload(session)
     finally:
         session.close()
 
@@ -1240,114 +1203,6 @@ def _fetch_latest_calendar_activity_payload(session) -> dict[str, Any] | None:
     return row[0]
 
 
-def _build_internal_sync_marker_rows(session, *, per_type_limit: int = 10) -> list[dict[str, Any]]:
-    """Build historical activity rows from internal marker events (one row per EventLog id)."""
-    marker_rows: list[dict[str, Any]] = []
-
-    startup_events = (
-        session.query(EventLog.id, EventLog.payload, EventLog.created_at)
-        .filter(EventLog.event_type == EVENT_STARTUP_SOURCE_OF_TRUTH)
-        .order_by(EventLog.id.desc())
-        .limit(max(1, int(per_type_limit)))
-        .all()
-    )
-    for ev in startup_events:
-        payload = ev.payload if isinstance(ev.payload, dict) else {}
-        mode = str(payload.get("mode") or "").strip().lower()
-        started_at = _parse_iso_datetime(payload.get("started_at"))
-        completed_at = _parse_iso_datetime(payload.get("completed_at"))
-        is_lite = mode == "lite"
-        marker_rows.append(
-            {
-                "id": f"marker-startup-{ev.id}",
-                "type": "job",
-                "job_type": "lite_sync_progress" if is_lite else "full_sync_progress",
-                "display_name": "Lite Sync Progress" if is_lite else "Full Sync Progress",
-                "status": "DONE",
-                "details": f"Startup source-of-truth run • Mode {mode or 'auto'}",
-                "time": (
-                    started_at.isoformat()
-                    if started_at
-                    else (ev.created_at.isoformat() if ev.created_at else None)
-                ),
-                "progress": {
-                    "running": False,
-                    "sections": [
-                        {
-                            "name": "Run",
-                            "status": "done",
-                            "metrics": [
-                                {"label": "Mode", "value": mode or "--"},
-                                {"label": "Started", "value": started_at.isoformat() if started_at else "--"},
-                                {"label": "Completed", "value": completed_at.isoformat() if completed_at else "--"},
-                            ],
-                        }
-                    ],
-                },
-            }
-        )
-
-    calendar_events = (
-        session.query(EventLog.id, EventLog.payload, EventLog.created_at)
-        .filter(EventLog.event_type == EVENT_CALENDAR_DATE_REFRESH)
-        .order_by(EventLog.id.desc())
-        .limit(max(1, int(per_type_limit)))
-        .all()
-    )
-    for ev in calendar_events:
-        payload = ev.payload if isinstance(ev.payload, dict) else {}
-        started_at = _parse_iso_datetime(payload.get("started_at"))
-        completed_at = _parse_iso_datetime(payload.get("completed_at"))
-        errors = int(payload.get("errors", 0) or 0)
-        status = "FAILED" if errors > 0 else "DONE"
-        marker_rows.append(
-            {
-                "id": f"marker-calendar-{ev.id}",
-                "type": "job",
-                "job_type": "calendar_sync_progress",
-                "display_name": "Calendar Sync",
-                "status": status,
-                "details": (
-                    f"Window {payload.get('start_date', '--')} to {payload.get('end_date', '--')} • "
-                    f"Movies updated {int(payload.get('movie_rows_updated', 0) or 0)} • "
-                    f"Episodes updated {int(payload.get('episode_rows_updated', 0) or 0)}"
-                ),
-                "time": (
-                    started_at.isoformat()
-                    if started_at
-                    else (ev.created_at.isoformat() if ev.created_at else None)
-                ),
-                "progress": {
-                    "running": False,
-                    "sections": [
-                        {
-                            "name": "Calendar Window",
-                            "status": "done" if status != "FAILED" else "failed",
-                            "metrics": [
-                                {"label": "Lookahead start", "value": str(payload.get("start_date") or "--")},
-                                {"label": "Lookahead end", "value": str(payload.get("end_date") or "--")},
-                                {"label": "Completed", "value": completed_at.isoformat() if completed_at else "--"},
-                            ],
-                        },
-                        {
-                            "name": "Date Refresh Stats",
-                            "status": "done" if status != "FAILED" else "failed",
-                            "metrics": [
-                                {"label": "Movie rows seen", "value": int(payload.get("movie_rows_seen", 0) or 0)},
-                                {"label": "Movie rows updated", "value": int(payload.get("movie_rows_updated", 0) or 0)},
-                                {"label": "Episode rows seen", "value": int(payload.get("episode_rows_seen", 0) or 0)},
-                                {"label": "Episode rows updated", "value": int(payload.get("episode_rows_updated", 0) or 0)},
-                                {"label": "Errors", "value": errors},
-                            ],
-                        },
-                    ],
-                },
-            }
-        )
-
-    return marker_rows
-
-
 def _find_last_startup_mode_line_index(lines: list[str], mode: str) -> int | None:
     token = f"Startup sync mode selected: {str(mode or '').strip().lower()}"
     for idx in range(len(lines) - 1, -1, -1):
@@ -1809,482 +1664,459 @@ def _build_calendar_sync_row(session) -> dict[str, Any] | None:
     }
 
 
+def _activity_marker_row_for_startup_event(ev: EventLog) -> dict[str, Any]:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    mode = str(payload.get("mode") or "").strip().lower()
+    started_at = _parse_iso_datetime(payload.get("started_at"))
+    completed_at = _parse_iso_datetime(payload.get("completed_at"))
+    is_lite = mode == "lite"
+    return {
+        "id": f"marker-startup-{ev.id}",
+        "type": "job",
+        "job_type": "lite_sync_progress" if is_lite else "full_sync_progress",
+        "display_name": "Lite Sync Progress" if is_lite else "Full Sync Progress",
+        "status": "DONE",
+        "details": f"Startup source-of-truth run • Mode {mode or 'auto'}",
+        "time": (started_at.isoformat() if started_at else (ev.created_at.isoformat() if ev.created_at else None)),
+        "progress": {
+            "running": False,
+            "sections": [
+                {
+                    "name": "Run",
+                    "status": "done",
+                    "metrics": [
+                        {"label": "Mode", "value": mode or "--"},
+                        {"label": "Started", "value": started_at.isoformat() if started_at else "--"},
+                        {"label": "Completed", "value": completed_at.isoformat() if completed_at else "--"},
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def _activity_marker_row_for_calendar_event(ev: EventLog) -> dict[str, Any]:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    started_at = _parse_iso_datetime(payload.get("started_at"))
+    completed_at = _parse_iso_datetime(payload.get("completed_at"))
+    errors = int(payload.get("errors", 0) or 0)
+    status = "FAILED" if errors > 0 else "DONE"
+    return {
+        "id": f"marker-calendar-{ev.id}",
+        "type": "job",
+        "job_type": "calendar_sync_progress",
+        "display_name": "Calendar Sync",
+        "status": status,
+        "details": (
+            f"Window {payload.get('start_date', '--')} to {payload.get('end_date', '--')} • "
+            f"Movies updated {int(payload.get('movie_rows_updated', 0) or 0)} • "
+            f"Episodes updated {int(payload.get('episode_rows_updated', 0) or 0)}"
+        ),
+        "time": (started_at.isoformat() if started_at else (ev.created_at.isoformat() if ev.created_at else None)),
+        "progress": {
+            "running": False,
+            "sections": [
+                {
+                    "name": "Calendar Window",
+                    "status": "done" if status != "FAILED" else "failed",
+                    "metrics": [
+                        {"label": "Lookahead start", "value": str(payload.get("start_date") or "--")},
+                        {"label": "Lookahead end", "value": str(payload.get("end_date") or "--")},
+                        {"label": "Completed", "value": completed_at.isoformat() if completed_at else "--"},
+                    ],
+                },
+                {
+                    "name": "Date Refresh Stats",
+                    "status": "done" if status != "FAILED" else "failed",
+                    "metrics": [
+                        {"label": "Movie rows seen", "value": int(payload.get("movie_rows_seen", 0) or 0)},
+                        {"label": "Movie rows updated", "value": int(payload.get("movie_rows_updated", 0) or 0)},
+                        {"label": "Episode rows seen", "value": int(payload.get("episode_rows_seen", 0) or 0)},
+                        {"label": "Episode rows updated", "value": int(payload.get("episode_rows_updated", 0) or 0)},
+                        {"label": "Errors", "value": errors},
+                    ],
+                },
+            ],
+        },
+    }
+
+
+def build_activity_snapshots_for_event_log(session, e: EventLog) -> list[dict[str, Any]]:
+    """Build 0+ API activity rows for a single EventLog row (used by system_activity_history hooks)."""
+    event_type = str(e.event_type or "").strip().lower()
+    if event_type == EVENT_STARTUP_SOURCE_OF_TRUTH:
+        # Startup sync progress is now persisted phase-by-phase by startup runner snapshots.
+        return []
+    if event_type == EVENT_CALENDAR_DATE_REFRESH:
+        return [_activity_marker_row_for_calendar_event(e)]
+    if not _is_user_relevant_event(event_type):
+        return []
+
+    grouped_event_types = {
+        "movie_added",
+        "movie_imported",
+        "episode_imported",
+        "movie_file_deleted",
+        "episode_file_deleted",
+    }
+    if event_type in grouped_event_types:
+        payload_dict = e.payload if isinstance(e.payload, dict) else {}
+        return [
+            {
+                "id": e.id,
+                "type": "event",
+                "event_type": e.event_type,
+                "_regroup": True,
+                "display_name": _humanize_event_type(e.event_type),
+                "source": e.source,
+                "status": str(e.status or "DONE"),
+                "error": e.error_message,
+                "details": _activity_details_for_event(e.event_type, payload_dict),
+                "time": e.created_at.isoformat() if e.created_at else None,
+                "_payload": payload_dict,
+            }
+        ]
+
+    row_data = {
+        "id": e.id,
+        "event_type": e.event_type,
+        "source": e.source,
+        "status": e.status,
+        "created_at": e.created_at,
+        "error_message": e.error_message,
+        "payload": e.payload,
+    }
+    if event_type in {"series_added", "series_add", "seriesadd"}:
+        return [_build_series_add_summary_row(session, row_data)]
+
+    status_text = str(e.status or "")
+    display_name = _humanize_event_type(e.event_type)
+    if status_text.upper() == "FAILED":
+        display_name = f"[Failed] {display_name}"
+    payload_dict = e.payload if isinstance(e.payload, dict) else {}
+    detail_line = _activity_details_for_event(e.event_type, payload_dict)
+    return [
+        {
+            "id": e.id,
+            "type": "event",
+            "event_type": e.event_type,
+            "display_name": display_name,
+            "source": e.source,
+            "status": e.status,
+            "error": e.error_message,
+            "details": detail_line,
+            "time": e.created_at.isoformat() if e.created_at else None,
+        }
+    ]
+
+
+def build_activity_snapshots_for_job(session, j: Job) -> list[dict[str, Any]]:
+    """Build API activity rows for a Job row (expand sync placeholder stats + main job line)."""
+    out: list[dict[str, Any]] = []
+    normalized_job_type = str(j.job_type or "").strip().lower()
+    job_dict = {
+        "id": j.id,
+        "job_type": j.job_type,
+        "status": j.status,
+        "created_at": j.created_at,
+        "updated_at": j.updated_at,
+        "error_message": j.error_message,
+    }
+    if normalized_job_type in {"full_sync", "lite_sync"}:
+        out.extend(_build_sync_placeholder_rows(session, job_dict))
+    if not _is_user_relevant_job(normalized_job_type, j.status):
+        return out
+    display_name = _humanize_job_type(j.job_type)
+    if str(j.status or "").upper() == "FAILED":
+        display_name = f"[Failed] {display_name}"
+    out.append(
+        {
+            "id": j.id,
+            "type": "job",
+            "job_type": j.job_type,
+            "display_name": display_name,
+            "status": j.status,
+            "error": j.error_message,
+            "time": j.updated_at.isoformat() if j.updated_at else (j.created_at.isoformat() if j.created_at else None),
+        }
+    )
+    return out
+
+
+def _merge_regrouped_event_rows_from_flat(flat_event_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild grouped (xN) event rows from per-event snapshots stored in system_activity_history."""
+    grouped_event_types = {
+        "movie_added",
+        "movie_imported",
+        "episode_imported",
+        "movie_file_deleted",
+        "episode_file_deleted",
+    }
+    bucket: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for r in flat_event_rows:
+        et = str(r.get("event_type") or "").strip().lower()
+        if r.get("_regroup") and et in grouped_event_types:
+            payload_dict = r.get("_payload") if isinstance(r.get("_payload"), dict) else {}
+            bucket.append(
+                {
+                    "id": r.get("id"),
+                    "event_type": r.get("event_type"),
+                    "source": r.get("source"),
+                    "status": r.get("status"),
+                    "error": r.get("error"),
+                    "time": r.get("time"),
+                    "_payload": payload_dict,
+                }
+            )
+        else:
+            rest.append({k: v for k, v in r.items() if not str(k).startswith("_")})
+
+    grouped_counters: dict[str, dict[str, Any]] = {}
+    for r in bucket:
+        et = str(r.get("event_type") or "").strip().lower()
+        created_at = _parse_iso_datetime(r.get("time"))
+        entry = grouped_counters.setdefault(
+            et,
+            {"count": 0, "latest": created_at, "failed": 0},
+        )
+        entry["count"] = int(entry.get("count") or 0) + 1
+        if str(r.get("status") or "").upper() == "FAILED":
+            entry["failed"] = int(entry.get("failed") or 0) + 1
+        latest = entry.get("latest")
+        if created_at and (not latest or created_at > latest):
+            entry["latest"] = created_at
+        grouped_items = entry.setdefault("items", [])
+        payload_dict = r.get("_payload") if isinstance(r.get("_payload"), dict) else {}
+        if isinstance(grouped_items, list) and len(grouped_items) < 25:
+            grouped_items.append(
+                {
+                    "id": r.get("id"),
+                    "display_name": _humanize_event_type(r.get("event_type")),
+                    "status": str(r.get("status") or "DONE"),
+                    "source": r.get("source"),
+                    "error": r.get("error"),
+                    "details": _activity_details_for_event(r.get("event_type"), payload_dict),
+                    "time": r.get("time"),
+                }
+            )
+
+    grouped_out: list[dict[str, Any]] = []
+    for event_type, info in grouped_counters.items():
+        count = int(info.get("count") or 0)
+        failed = int(info.get("failed") or 0)
+        latest = info.get("latest")
+        display_name = _humanize_event_type(event_type)
+        if failed > 0:
+            display_name = f"[Failed] {display_name}"
+        group_details = f"Grouped {count} similar events • Failures {failed}"
+        grouped_items = info.get("items") if isinstance(info, dict) else []
+        grouped_out.append(
+            {
+                "id": f"group:{event_type}",
+                "type": "event",
+                "event_type": event_type,
+                "display_name": f"{display_name} (x{count})",
+                "status": "FAILED" if failed > 0 else "DONE",
+                "details": group_details,
+                "time": latest.isoformat() if isinstance(latest, datetime) else None,
+                "progress": {
+                    "grouped_events": grouped_items if isinstance(grouped_items, list) else [],
+                },
+            }
+        )
+    return rest + grouped_out
+
+
+def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
+    """Return merged activity rows from system_activity_history + live queue/sync rows (empty table = fresh install)."""
+    try:
+        hist = (
+            session.query(SystemActivityHistory)
+            .order_by(SystemActivityHistory.occurred_at.desc())
+            .limit(max(limit * 8, limit))
+            .all()
+        )
+    except Exception as exc:
+        logger.warning("system_activity_history read failed: %s", exc, extra={"emoji_type": "warning"})
+        hist = []
+
+    flat: list[dict[str, Any]] = []
+    for h in hist:
+        snap = h.snapshot if isinstance(h.snapshot, dict) else {}
+        rows = snap.get("rows")
+        if isinstance(rows, list):
+            for r in rows:
+                if isinstance(r, dict):
+                    flat.append(r)
+
+    flat.sort(key=lambda x: x.get("time") or "", reverse=True)
+    raw_events = [r for r in flat if r.get("type") == "event"]
+    raw_jobs = [r for r in flat if r.get("type") == "job"]
+    merged_events = _merge_regrouped_event_rows_from_flat(raw_events)
+    combined = merged_events + raw_jobs
+
+    queue_activity_row = get_queue_download_activity_row()
+    calendar_sync_row = _build_calendar_sync_row(session)
+    extra = [r for r in (queue_activity_row, calendar_sync_row) if r]
+
+    def _strip_progress_dupes(rows: list[dict[str, Any]], live: dict[str, Any] | None, job_types: set[str]) -> list[dict[str, Any]]:
+        if not live:
+            return rows
+        jt = str(live.get("job_type") or "")
+        if jt not in job_types:
+            return rows
+        if not bool((live.get("progress") or {}).get("running")):
+            return rows
+        out_rows = [r for r in rows if str(r.get("job_type") or "") not in job_types or jt != str(r.get("job_type") or "")]
+        return out_rows
+
+    prog_types = {"lite_sync_progress", "full_sync_progress", "calendar_sync_progress"}
+    combined = _strip_progress_dupes(combined, calendar_sync_row, {"calendar_sync_progress"})
+
+    combined = combined + extra
+    combined.sort(key=lambda x: x.get("time") or "", reverse=True)
+
+    unique: list[dict[str, Any]] = []
+    seen_keys: set[tuple[Any, ...]] = set()
+    for row in combined:
+        key = (row.get("type"), row.get("id"), row.get("display_name"), row.get("time"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique.append(row)
+
+    failed = [x for x in unique if x.get("status") == "FAILED"]
+    rest = [x for x in unique if x.get("status") != "FAILED"]
+    prioritized = failed + rest
+
+    top = prioritized[:limit]
+    top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
+    grouped_candidates = [
+        row
+        for row in prioritized
+        if (
+            str(row.get("job_type") or "").startswith("sync_placeholder_")
+            or str(row.get("display_name") or "").startswith("Series Added:")
+        )
+    ]
+    missing_grouped = [
+        row
+        for row in grouped_candidates
+        if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
+    ]
+    if missing_grouped and top:
+        inject = missing_grouped[: min(3, len(top))]
+        top = top[: max(0, len(top) - len(inject))] + inject
+        top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
+
+    return top[:limit]
+
+
 @router.get("/api/activity")
 async def activity(limit: int = Query(50, ge=1, le=200)):
-    """Return recent user-relevant activity: syncs, errors, and meaningful jobs."""
+    """Return recent user-relevant activity (materialized ``system_activity_history`` + live sync/queue rows)."""
     session = get_session()
     try:
-        # Recent events (filtered for user relevance)
-        events = session.query(
-            EventLog.id,
-            EventLog.event_type,
-            EventLog.source,
-            EventLog.status,
-            EventLog.created_at,
-            EventLog.error_message,
-            EventLog.payload,
-        ).order_by(EventLog.created_at.desc()).limit(limit * 2).all()  # Over-fetch to account for filtering
-        event_list = []
-        grouped_event_types = {
-            "movie_added",
-            "movie_imported",
-            "episode_imported",
-            "movie_file_deleted",
-            "episode_file_deleted",
-        }
-        grouped_counters: dict[str, dict[str, Any]] = {}
-        for e in events:
-            event_type = str(e.event_type or "").strip().lower()
-            if not _is_user_relevant_event(event_type):
-                continue
-            if event_type in grouped_event_types:
-                entry = grouped_counters.setdefault(
-                    event_type,
-                    {
-                        "count": 0,
-                        "latest": e.created_at,
-                        "failed": 0,
-                    },
-                )
-                entry["count"] = int(entry.get("count") or 0) + 1
-                if str(e.status or "").upper() == "FAILED":
-                    entry["failed"] = int(entry.get("failed") or 0) + 1
-                latest = entry.get("latest")
-                if e.created_at and (not latest or e.created_at > latest):
-                    entry["latest"] = e.created_at
-                grouped_items = entry.setdefault("items", [])
-                if isinstance(grouped_items, list) and len(grouped_items) < 25:
-                    payload_dict = e.payload if isinstance(e.payload, dict) else {}
-                    grouped_items.append(
-                        {
-                            "id": e.id,
-                            "display_name": _humanize_event_type(e.event_type),
-                            "status": str(e.status or "DONE"),
-                            "source": e.source,
-                            "error": e.error_message,
-                            "details": _activity_details_for_event(e.event_type, payload_dict),
-                            "time": e.created_at.isoformat() if e.created_at else None,
-                        }
-                    )
-                continue
-            row_data = {
-                "id": e.id,
-                "event_type": e.event_type,
-                "source": e.source,
-                "status": e.status,
-                "created_at": e.created_at,
-                "error_message": e.error_message,
-                "payload": e.payload,
-            }
-            if event_type in {"series_added", "series_add", "seriesadd"}:
-                event_list.append(_build_series_add_summary_row(session, row_data))
-                continue
-            status_text = str(e.status or "")
-            display_name = _humanize_event_type(e.event_type)
-            if status_text.upper() == "FAILED":
-                display_name = f"[Failed] {display_name}"
-            payload_dict = e.payload if isinstance(e.payload, dict) else {}
-            detail_line = _activity_details_for_event(e.event_type, payload_dict)
-            event_list.append(
-                {
-                    "id": e.id,
-                    "type": "event",
-                    "event_type": e.event_type,
-                    "display_name": display_name,
-                    "source": e.source,
-                    "status": e.status,
-                    "error": e.error_message,
-                    "details": detail_line,
-                    "time": e.created_at.isoformat() if e.created_at else None,
-                }
-            )
-
-        for event_type, info in grouped_counters.items():
-            count = int(info.get("count") or 0)
-            failed = int(info.get("failed") or 0)
-            latest = info.get("latest")
-            display_name = _humanize_event_type(event_type)
-            if failed > 0:
-                display_name = f"[Failed] {display_name}"
-            group_details = f"Grouped {count} similar events • Failures {failed}"
-            grouped_items = info.get("items") if isinstance(info, dict) else []
-            event_list.append(
-                {
-                    "id": f"group:{event_type}",
-                    "type": "event",
-                    "event_type": event_type,
-                    "display_name": f"{display_name} (x{count})",
-                    "status": "FAILED" if failed > 0 else "DONE",
-                    "details": group_details,
-                    "time": latest.isoformat() if latest else None,
-                    "progress": {
-                        "grouped_events": grouped_items if isinstance(grouped_items, list) else [],
-                    },
-                }
-            )
-
-        # Always include a few recent series-added summaries, even if they are older
-        # than the primary event window.
-        series_events = (
-            session.query(
-                EventLog.id,
-                EventLog.event_type,
-                EventLog.source,
-                EventLog.status,
-                EventLog.created_at,
-                EventLog.error_message,
-                EventLog.payload,
-            )
-            .filter(EventLog.event_type.in_(["series_added", "series_add", "seriesadd"]))
-            .order_by(EventLog.created_at.desc())
-            .limit(10)
-            .all()
-        )
-        for e in series_events:
-            event_list.append(
-                _build_series_add_summary_row(
-                    session,
-                    {
-                        "id": e.id,
-                        "event_type": e.event_type,
-                        "source": e.source,
-                        "status": e.status,
-                        "created_at": e.created_at,
-                        "error_message": e.error_message,
-                        "payload": e.payload,
-                    },
-                )
-            )
-
-        # Recent jobs (all user-relevant by default)
-        jobs = session.query(
-            Job.id,
-            Job.job_type,
-            Job.status,
-            Job.created_at,
-            Job.updated_at,
-            Job.error_message,
-        ).order_by(Job.updated_at.desc()).limit(limit).all()
-
-        job_list = []
-        for j in jobs:
-            normalized_job_type = str(j.job_type or "").strip().lower()
-            if normalized_job_type in {"full_sync", "lite_sync"}:
-                job_list.extend(
-                    _build_sync_placeholder_rows(
-                        session,
-                        {
-                            "id": j.id,
-                            "job_type": j.job_type,
-                            "status": j.status,
-                            "created_at": j.created_at,
-                            "updated_at": j.updated_at,
-                            "error_message": j.error_message,
-                        },
-                    )
-                )
-            if not _is_user_relevant_job(normalized_job_type, j.status):
-                continue
-            display_name = _humanize_job_type(j.job_type)
-            if str(j.status or "").upper() == "FAILED":
-                display_name = f"[Failed] {display_name}"
-            job_list.append(
-                {
-                    "id": j.id,
-                    "type": "job",
-                    "job_type": j.job_type,
-                    "display_name": display_name,
-                    "status": j.status,
-                    "error": j.error_message,
-                    "time": j.updated_at.isoformat() if j.updated_at else (j.created_at.isoformat() if j.created_at else None),
-                }
-            )
-
-        # Ensure recent sync summaries are present even when sync jobs are outside
-        # the latest generic job window.
-        sync_jobs = (
-            session.query(
-                Job.id,
-                Job.job_type,
-                Job.status,
-                Job.created_at,
-                Job.updated_at,
-                Job.error_message,
-            )
-            .filter(Job.job_type.in_(["full_sync", "lite_sync"]))
-            .order_by(Job.updated_at.desc())
-            .limit(10)
-            .all()
-        )
-        for j in sync_jobs:
-            job_list.extend(
-                _build_sync_placeholder_rows(
-                    session,
-                    {
-                        "id": j.id,
-                        "job_type": j.job_type,
-                        "status": j.status,
-                        "created_at": j.created_at,
-                        "updated_at": j.updated_at,
-                        "error_message": j.error_message,
-                    },
-                )
-            )
-
-        marker_rows = _build_internal_sync_marker_rows(session, per_type_limit=min(20, max(5, limit)))
-        # Keep the rich "latest run" cards (with prior detailed sections),
-        # and use marker rows for historical runs beneath them.
-        sync_progress_row = _build_startup_sync_progress_row(session)
-        calendar_sync_row = _build_calendar_sync_row(session)
-
-        if sync_progress_row is not None:
-            for idx, row in enumerate(marker_rows):
-                if str(row.get("job_type") or "") in {"lite_sync_progress", "full_sync_progress"}:
-                    marker_rows.pop(idx)
-                    break
-        if calendar_sync_row is not None:
-            for idx, row in enumerate(marker_rows):
-                if str(row.get("job_type") or "") == "calendar_sync_progress":
-                    marker_rows.pop(idx)
-                    break
-        queue_activity_row = get_queue_download_activity_row()
-        extra_rows = marker_rows + [r for r in (sync_progress_row, calendar_sync_row, queue_activity_row) if r]
-
-        # Merge and sort by time descending: show recent + high-priority (failures)
-        combined = sorted(event_list + job_list + extra_rows, key=lambda x: x.get("time") or "", reverse=True)
-        unique = []
-        seen_keys = set()
-        for row in combined:
-            key = (row.get("type"), row.get("id"), row.get("display_name"), row.get("time"))
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            unique.append(row)
-        
-        # Prioritize failures: put any FAILED status near the top
-        failed = [x for x in unique if x.get("status") == "FAILED"]
-        rest = [x for x in unique if x.get("status") != "FAILED"]
-        prioritized = failed + rest
-
-        top = prioritized[:limit]
-        top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
-        grouped_candidates = [
-            row
-            for row in prioritized
-            if (
-                str(row.get("job_type") or "").startswith("sync_placeholder_")
-                or str(row.get("display_name") or "").startswith("Series Added:")
-            )
-        ]
-        missing_grouped = [
-            row
-            for row in grouped_candidates
-            if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
-        ]
-        if missing_grouped and top:
-            inject = missing_grouped[: min(3, len(top))]
-            top = top[: max(0, len(top) - len(inject))] + inject
-            top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
-
-        top = top[:limit]
-
-        return top
+        return _activity_feed_from_history(session, limit=limit)
     finally:
         session.close()
 
 
+def _resolve_history_item_titles(session, h: PlaceholderActivityHistory) -> tuple[str, str | None]:
+    """Fill item_title / series_title from history row or FK joins (hooks often leave titles empty)."""
+    stored_title = (h.item_title or "").strip()
+    if stored_title:
+        return stored_title, h.series_title
+    item_type = str(h.item_type or "episode").strip().lower()
+    if item_type == "movie":
+        movie = session.query(Movie).filter(Movie.id == h.movie_id).first() if h.movie_id else None
+        return (movie.title if movie else "Unknown Movie"), None
+    episode = (
+        session.query(Episode)
+        .options(joinedload(Episode.season).joinedload(Season.series))
+        .filter(Episode.id == h.episode_id)
+        .first()
+        if h.episode_id
+        else None
+    )
+    series = session.query(Series).filter(Series.id == h.series_id).first() if h.series_id else None
+    if episode and not series:
+        try:
+            series = episode.season.series if getattr(episode, "season", None) else None
+        except Exception:
+            series = None
+    if episode:
+        sn = getattr(episode, "season_number", None)
+        if sn is None and getattr(h, "season_number", None) is not None:
+            sn = h.season_number
+        sn = int(sn or 0)
+        ep_num = int(getattr(episode, "episode_number", 0) or 0)
+        ep_title = getattr(episode, "title", "Unknown") or "Unknown"
+        item_title = f"S{sn:02d}E{ep_num:02d} - {ep_title}"
+    else:
+        item_title = "Unknown Episode"
+    series_title = series.title if series else None
+    return item_title, series_title
+
+
+def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> dict[str, Any]:
+    item_title, series_title = _resolve_history_item_titles(session, h)
+    action = str(h.action or "").strip()
+    action_cap = action if action in ("Created", "Deleted", "Status") else ("Status" if not action else action.title())
+    path_val = str(h.path or "") if h.path is not None else ""
+    raw_reason = str(h.reason or "")
+    if action_cap == "Created":
+        display_reason = _humanize_activity_reason(raw_reason)
+        if display_reason == "Unknown":
+            display_reason = "Library materialization"
+    elif action_cap == "Deleted":
+        display_reason = _humanize_activity_reason(raw_reason)
+        if display_reason == "Unknown":
+            lc = str(h.status_label or "").strip().lower()
+            if lc in {"missing", "deleted", "obsolete", "replaced"}:
+                display_reason = "Library cleanup"
+            else:
+                display_reason = _humanize_placeholder_reason(lc or "deleted", action="Deleted")
+    else:
+        display_reason = raw_reason
+    status_src = str(h.source or "").strip()
+    new_status_for_human = ""
+    if action_cap == "Status" and isinstance(h.extra_snapshot, dict):
+        new_status_for_human = str(h.extra_snapshot.get("new_status") or "").strip()
+    status_display = _humanize_placeholder_status(
+        new_status_for_human or h.status_label or None,
+    )
+    occurred = h.occurred_at.isoformat() if h.occurred_at else None
+    out: dict[str, Any] = {
+        "id": h.id,
+        "type": "placeholder",
+        "action": action_cap,
+        "item_type": "movie" if str(h.item_type or "").lower() == "movie" else "episode",
+        "item_title": item_title,
+        "series_title": series_title,
+        "path": path_val,
+        "reason": display_reason,
+        "status": status_display,
+        "time": occurred,
+    }
+    if action_cap == "Status":
+        out["_status_source"] = status_src
+    return out
+
+
 @router.get("/api/activity/placeholders")
 async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
-    """Return placeholder timeline (created/deleted/status) with humanized context."""
+    """Return placeholder timeline from append-only history (fast read; hooks populate the table)."""
     session = get_session()
     try:
-        # Pull a larger window, then derive up to two timeline events per row.
-        placeholders = session.query(Placeholder)\
-         .order_by(Placeholder.updated_at.desc())\
-         .limit(limit * 4)\
-         .all()
-
-        activity_list = []
-        placeholder_rows_by_id: dict[int, Placeholder] = {int(ph.id): ph for ph in placeholders if getattr(ph, "id", None) is not None}
-        for ph in placeholders:
-            # Resolve title context once for both create/delete events.
-            movie = session.query(Movie).filter(Movie.id == ph.movie_id).first() if ph.movie_id else None
-            episode = session.query(Episode).filter(Episode.id == ph.episode_id).first() if ph.episode_id else None
-            series = session.query(Series).filter(Series.id == ph.series_id).first() if ph.series_id else None
-            
-            # If episode exists but series wasn't directly set, try to get it from episode
-            if episode and not series and hasattr(episode, 'series_id') and episode.series_id:
-                series = session.query(Series).filter(Series.id == episode.series_id).first()
-            
-            item_type = "movie" if ph.movie_id else "episode"
-            if item_type == "movie":
-                item_title = movie.title if movie else "Unknown Movie"
-                series_title = None
-            else:
-                if episode:
-                    season_num = getattr(episode, 'season_number', 0) or 0
-                    ep_num = getattr(episode, 'episode_number', 0) or 0
-                    ep_title = getattr(episode, 'title', 'Unknown') or 'Unknown'
-                    item_title = f"S{season_num:02d}E{ep_num:02d} - {ep_title}"
-                else:
-                    item_title = "Unknown Episode"
-                series_title = series.title if series else None
-
-            created_at = ph.created_at
-            updated_at = ph.updated_at or ph.created_at
-            lifecycle = str(ph.lifecycle_status or "").strip().lower()
-            file_exists_now = bool(getattr(ph, "path", None) and os.path.exists(ph.path))
-            deleted_like = (not bool(ph.has_placeholder)) and (not file_exists_now) and lifecycle in {"deleted", "missing", "obsolete", "replaced", ""}
-
-            extra_meta = ph.extra if isinstance(ph.extra, dict) else {}
-            inferred_reason = _infer_reason_from_recent_events(
-                session,
-                when_dt=updated_at or created_at,
-                movie=movie,
-                episode=episode,
-            )
-            created_reason = _humanize_activity_reason(extra_meta.get("create_reason") or inferred_reason)
-            deleted_reason = _humanize_activity_reason(extra_meta.get("delete_reason") or inferred_reason)
-
-            if created_at:
-                if created_reason == "Unknown":
-                    created_reason = "Library materialization"
-                activity_list.append({
-                    "id": ph.id,
-                    "type": "placeholder",
-                    "action": "Created",
-                    "item_type": item_type,
-                    "item_title": item_title,
-                    "series_title": series_title,
-                    "path": ph.path,
-                    "reason": created_reason,
-                    "status": _humanize_placeholder_status(ph.lifecycle_status),
-                    "time": created_at.isoformat(),
-                })
-
-            if deleted_like and updated_at:
-                if deleted_reason == "Unknown":
-                    if lifecycle in {"missing", "deleted", "obsolete", "replaced"}:
-                        deleted_reason = "Library cleanup"
-                    else:
-                        deleted_reason = _humanize_placeholder_reason(lifecycle or "deleted", action="Deleted")
-                activity_list.append({
-                    "id": ph.id,
-                    "type": "placeholder",
-                    "action": "Deleted",
-                    "item_type": item_type,
-                    "item_title": item_title,
-                    "series_title": series_title,
-                    "path": ph.path,
-                    "reason": deleted_reason,
-                    "status": _humanize_placeholder_status(ph.lifecycle_status),
-                    "time": updated_at.isoformat(),
-                })
-
-        # Status transition trail from orchestrator-applied intents.
-        status_events = (
-            session.query(
-                EventLog.id,
-                EventLog.payload,
-                EventLog.source,
-                EventLog.created_at,
-            )
-            .filter(EventLog.event_type == "placeholder_status_changed")
-            .order_by(EventLog.created_at.desc())
-            .limit(limit * 6)
+        rows = (
+            session.query(PlaceholderActivityHistory)
+            .order_by(PlaceholderActivityHistory.occurred_at.desc())
+            .limit(max(limit * 4, limit))
             .all()
         )
-        status_ph_ids: list[int] = []
-        parsed_status_events: list[tuple[Any, dict[str, Any], str]] = []
-        for ev in status_events:
-            payload = ev.payload if isinstance(ev.payload, dict) else {}
-            try:
-                ph_id = int(payload.get("placeholder_id"))
-            except Exception:
-                continue
-            status_ph_ids.append(ph_id)
-            parsed_status_events.append((ev, payload, str(ev.source or "").strip()))
-
-        ph_by_id: dict[int, Placeholder] = {}
-        if status_ph_ids:
-            for ph_row in (
-                session.query(Placeholder).filter(Placeholder.id.in_(status_ph_ids)).all()
-            ):
-                if getattr(ph_row, "id", None) is not None:
-                    ph_by_id[int(ph_row.id)] = ph_row
-
-        ep_ids = [p.episode_id for p in ph_by_id.values() if getattr(p, "episode_id", None)]
-        movie_ids = [p.movie_id for p in ph_by_id.values() if getattr(p, "movie_id", None)]
-        ep_by_id: dict[int, Episode] = {}
-        if ep_ids:
-            for ep in (
-                session.query(Episode)
-                .options(joinedload(Episode.season).joinedload(Season.series))
-                .filter(Episode.id.in_(ep_ids))
-                .all()
-            ):
-                ep_by_id[int(ep.id)] = ep
-        movie_by_id: dict[int, Movie] = {}
-        if movie_ids:
-            for mv in session.query(Movie).filter(Movie.id.in_(movie_ids)).all():
-                movie_by_id[int(mv.id)] = mv
-
-        for ev, payload, source in parsed_status_events:
-            try:
-                ph_id = int(payload.get("placeholder_id"))
-            except Exception:
-                continue
-
-            ph = ph_by_id.get(ph_id)
-            movie = movie_by_id.get(int(ph.movie_id)) if ph and ph.movie_id else None
-            episode = ep_by_id.get(int(ph.episode_id)) if ph and ph.episode_id else None
-            series = session.query(Series).filter(Series.id == ph.series_id).first() if ph and ph.series_id else None
-            if episode and not series:
-                try:
-                    series = episode.season.series if getattr(episode, "season", None) else None
-                except Exception:
-                    series = None
-
-            item_type = "movie" if (ph and ph.movie_id) else "episode"
-            if item_type == "movie":
-                item_title = movie.title if movie else "Unknown Movie"
-                series_title = None
-            else:
-                if episode:
-                    season_num = getattr(episode, "season_number", 0) or 0
-                    ep_num = getattr(episode, "episode_number", 0) or 0
-                    ep_title = getattr(episode, "title", "Unknown") or "Unknown"
-                    item_title = f"S{season_num:02d}E{ep_num:02d} - {ep_title}"
-                else:
-                    item_title = "Unknown Episode"
-                series_title = series.title if series else None
-
-            new_status = str(payload.get("new_status") or "").strip()
-            old_status = str(payload.get("old_status") or "").strip()
-            reason = str(payload.get("reason") or "").strip()
-            detail = f"{old_status or '--'} → {new_status or '--'}"
-            if reason:
-                detail = f"{detail} • {reason}"
-            if source and source != StatusSource.CALENDAR_RELEASE_WINDOW.value:
-                detail = f"{detail} • {source}"
-
-            activity_list.append(
-                {
-                    "id": ph_id,
-                    "type": "placeholder",
-                    "action": "Status",
-                    "item_type": item_type,
-                    "item_title": item_title,
-                    "series_title": series_title,
-                    "path": getattr(ph, "path", None) if ph is not None else None,
-                    "reason": detail,
-                    "status": _humanize_placeholder_status(new_status or (ph.display_status if ph is not None else None)),
-                    "time": ev.created_at.isoformat() if ev.created_at else None,
-                    "_status_source": source,
-                }
-            )
-
-        # If a single-row lifecycle never changed, avoid duplicate created/deleted timestamps.
+        activity_list = [_activity_dict_from_history_row(session, h) for h in rows]
         deduped = []
         seen = set()
         for row in sorted(activity_list, key=lambda x: x.get("time") or "", reverse=True):
@@ -2293,7 +2125,6 @@ async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
                 continue
             seen.add(key)
             deduped.append(row)
-
         grouped = _group_calendar_placeholder_status_rows(deduped)
         return grouped[:limit]
     finally:

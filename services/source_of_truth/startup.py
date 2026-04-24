@@ -26,6 +26,7 @@ from services.source_of_truth.sync_runner import run_full_sync, sync_radarr_movi
 @dataclass
 class FullSyncRunRef:
     run_id: str
+    sync_stats: dict
 
 
 def _normalize_path(value: str | None) -> str | None:
@@ -117,9 +118,9 @@ def _create_run(content_type: str, is_secondary: bool = False, run_note: str | N
         f"Starting startup {content_type} fullsync ({suffix}) run {run_id} ({run_note or 'no note'})",
         extra={'emoji_type': 'gear'},
     )
-    run_full_sync(dry_run=False, types=sync_types, instance_key=instance_key)
+    sync_stats = run_full_sync(dry_run=False, types=sync_types, instance_key=instance_key)
     logger.info(f"Finished startup {content_type} fullsync ({suffix}) run {run_id}", extra={'emoji_type': 'success'})
-    return FullSyncRunRef(run_id=run_id)
+    return FullSyncRunRef(run_id=run_id, sync_stats=sync_stats or {})
 
 
 def capture_movies_fullsync_and_create_run(run_note: str | None = None) -> FullSyncRunRef:
@@ -204,7 +205,7 @@ def _extract_sonarr_series_ids(events: list[dict]) -> set[int]:
 
 
 def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -> dict:
-    stats = {'instances': 0, 'succeeded': 0, 'failed': 0}
+    stats = {'instances': 0, 'succeeded': 0, 'failed': 0, 'movies_seen': 0, 'series_seen': 0, 'episodes_seen': 0}
     if not instances:
         return stats
 
@@ -222,6 +223,10 @@ def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -
                     instance_key=instance['instance_key'],
                 )
                 run_ids.append(run.run_id)
+                run_stats = run.sync_stats if isinstance(run.sync_stats, dict) else {}
+                stats['movies_seen'] += int(run_stats.get('movies_seen', 0) or 0)
+                stats['series_seen'] += int(run_stats.get('series_seen', 0) or 0)
+                stats['episodes_seen'] += int(run_stats.get('episodes_seen', 0) or 0)
                 row = _get_or_create_arr_state(session, instance['instance_key'], instance['arr_type'])
                 row.first_full_sync_completed_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
@@ -249,6 +254,9 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
         'events_with_ids': 0,
         'targeted_sync_runs': 0,
         'path_drift_ids': 0,
+        'movies_seen': 0,
+        'series_seen': 0,
+        'episodes_seen': 0,
     }
     if not instances:
         return stats
@@ -281,6 +289,7 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
+                        stats['movies_seen'] += int(sync_stats.get('movies_seen', 0) or 0)
                         logger.info(
                             f"Startup lite targeted movie sync for {instance_key}: {sync_stats}",
                             extra={'emoji_type': 'info'},
@@ -304,6 +313,8 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
+                        stats['series_seen'] += int(sync_stats.get('series_seen', 0) or 0)
+                        stats['episodes_seen'] += int(sync_stats.get('episodes_seen', 0) or 0)
                         logger.info(
                             f"Startup lite targeted series sync for {instance_key}: {sync_stats}",
                             extra={'emoji_type': 'info'},
@@ -380,10 +391,14 @@ def run_startup_source_of_truth() -> dict:
                 extra={'emoji_type': 'warning'},
             )
 
+        from services.startup_sync_activity import record_startup_sync_progress
+
         run_ids: list[str] = []
         instances = _configured_arr_instances()
         selected_mode = _resolve_startup_sync_mode(instances)
         startup_sync_stats: dict = {}
+        determination_stats: dict = {}
+        materialization_stats: dict = {}
 
         logger.info(
             f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
@@ -400,6 +415,15 @@ def run_startup_source_of_truth() -> dict:
         else:
             # Defensive fallback. _resolve_startup_sync_mode should prevent this branch.
             startup_sync_stats = {'instances': len(instances), 'skipped': True, 'reason': f'unknown_mode:{selected_mode}'}
+
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            current_phase='determination',
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=None,
+            materialization_stats=None,
+        )
 
         scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
         scan_result = scan_once_if_needed(scan_run_id)
@@ -426,6 +450,14 @@ def run_startup_source_of_truth() -> dict:
             f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
         )
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            current_phase='materialization',
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=determination_stats,
+            materialization_stats=None,
+        )
         # Primer phase removed to accelerate startup and simplify sync pipeline.
         primer_stats = {"skipped": True, "reason": "deprecated"}
         phase_started = time.monotonic()
@@ -433,6 +465,15 @@ def run_startup_source_of_truth() -> dict:
         logger.info(
             f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
+        )
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            current_phase='complete',
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=determination_stats,
+            materialization_stats=materialization_stats,
+            completed_at=datetime.now(timezone.utc),
         )
         phase_started = time.monotonic()
         calendar_stats = run_calendar_phase()
@@ -482,5 +523,23 @@ def run_startup_source_of_truth() -> dict:
                 exc_info=True,
             )
         return result
+    except Exception as exc:
+        try:
+            from services.startup_sync_activity import record_startup_sync_progress
+
+            record_startup_sync_progress(
+                mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
+                current_phase='failed',
+                startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
+                determination_stats=determination_stats if 'determination_stats' in locals() else None,
+                materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
+                completed_at=datetime.now(timezone.utc),
+                failed=True,
+                error_message=str(exc),
+            )
+        except Exception:
+            pass
+        raise
     finally:
         settings.REFRESH_TRIGGER_SUPPRESSED = False

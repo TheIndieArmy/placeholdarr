@@ -433,6 +433,8 @@ export function App() {
   const [logFilter, setLogFilter] = useState("");
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
   const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
+  const activityTabRef = useRef<"system" | "placeholders">(activityTab);
+  activityTabRef.current = activityTab;
 
   const [libraryShelfFilters, setLibraryShelfFilters] = useState<{ movies: LibraryShelfFilter; tv: LibraryShelfFilter }>(() => {
     const migrated = readLegacyLibraryFilterMigration();
@@ -649,8 +651,10 @@ export function App() {
 
         if (currentTab === "activity") {
           await loadStats(stopped, setStats);
-          const rows = await getActivity(100);
-          if (!stopped) setActivity(rows || []);
+          if (activityTabRef.current === "system") {
+            const rows = await getActivity(100);
+            if (!stopped) setActivity(rows || []);
+          }
           const placeholderRows = await getPlaceholderActivity(100);
           if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
@@ -731,6 +735,23 @@ export function App() {
       window.clearTimeout(timeoutId);
     };
   }, [calendarMonth, currentTab, logLevel]);
+
+  /** When switching back to System Activity, refresh the feed (poll may have skipped it on Placeholder History). */
+  useEffect(() => {
+    if (currentTab !== "activity" || activityTab !== "system") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rows = await getActivity(100);
+        if (!cancelled) setActivity(rows || []);
+      } catch {
+        /* ignore — next poll will retry */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activityTab, currentTab]);
 
   /** When the user searches from the header, load full rows (overview) so overview matches work. */
   useEffect(() => {
@@ -1974,6 +1995,8 @@ function ActivityPanel(props: {
                                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                                   {progressSections.map((section: any, sidx: number) => {
                                     const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+                                    const sectionStatus = String(section?.status || "pending").toLowerCase();
+                                    const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped";
                                     return (
                                       <div key={`${key}-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
                                         <div className="mb-1 flex items-center justify-between">
@@ -1983,12 +2006,18 @@ function ActivityPanel(props: {
                                           </span>
                                         </div>
                                         <div className="space-y-0.5 text-[11px] text-slate-400">
-                                          {metrics.map((metric: any, midx: number) => (
-                                            <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
-                                              <span>{String(metric?.label || "Metric")}</span>
-                                              <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                                          {showMetrics ? (
+                                            metrics.map((metric: any, midx: number) => (
+                                              <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
+                                                <span>{String(metric?.label || "Metric")}</span>
+                                                <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                                              </div>
+                                            ))
+                                          ) : (
+                                            <div className="text-sky-300/80">
+                                              {sectionStatus === "working" ? "Running..." : "Waiting to start..."}
                                             </div>
-                                          ))}
+                                          )}
                                         </div>
                                       </div>
                                     );
