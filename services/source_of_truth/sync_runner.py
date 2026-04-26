@@ -833,9 +833,11 @@ def sync_sonarr_series_by_ids(
         'series_updated': 0,
         'series_marked_deleted': 0,
         'seasons_created': 0,
+        'seasons_marked_deleted': 0,
         'episodes_seen': 0,
         'episodes_created': 0,
         'episodes_updated': 0,
+        'episodes_marked_deleted': 0,
     }
     if not ids:
         return stats
@@ -853,12 +855,36 @@ def sync_sonarr_series_by_ids(
         for series_id in ids:
             series_entry = fetch_sonarr_series_item(series_id, base_url, api_key)
             if not isinstance(series_entry, dict):
-                marked = (
-                    session.query(Series)
+                deleted_series_rows = (
+                    session.query(Series.id)
                     .filter(and_(Series.sonarrid == series_id, Series.instance_key == effective_instance_key))
-                    .update({'is_deleted': True}, synchronize_session=False)
+                    .all()
                 )
-                stats['series_marked_deleted'] += int(marked or 0)
+                deleted_series_ids = [int(r[0]) for r in deleted_series_rows if r[0] is not None]
+                if deleted_series_ids:
+                    marked_series = (
+                        session.query(Series)
+                        .filter(Series.id.in_(deleted_series_ids))
+                        .update({'is_deleted': True}, synchronize_session=False)
+                    )
+                    stats['series_marked_deleted'] += int(marked_series or 0)
+                    marked_seasons = (
+                        session.query(Season)
+                        .filter(Season.series_id.in_(deleted_series_ids))
+                        .update({'is_deleted': True}, synchronize_session=False)
+                    )
+                    stats['seasons_marked_deleted'] += int(marked_seasons or 0)
+                    deleted_season_rows = (
+                        session.query(Season.id).filter(Season.series_id.in_(deleted_series_ids)).all()
+                    )
+                    deleted_season_ids = [int(r[0]) for r in deleted_season_rows if r[0] is not None]
+                    if deleted_season_ids:
+                        marked_episodes = (
+                            session.query(Episode)
+                            .filter(Episode.season_id.in_(deleted_season_ids))
+                            .update({'is_deleted': True}, synchronize_session=False)
+                        )
+                        stats['episodes_marked_deleted'] += int(marked_episodes or 0)
                 continue
 
             s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)

@@ -21,7 +21,7 @@ from services.placeholders import (
     resolve_calendar_variant_dummy_path,
 )
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
+from services.postgres.models import Episode, Job, Movie, Placeholder, PlaceholderActivityHistory, Season, Series
 from services.source_of_truth.determiner import (
     DETERMINATION_EXISTS,
     DETERMINATION_NEEDS,
@@ -31,6 +31,7 @@ from services.source_of_truth.determiner import (
 )
 from services.source_of_truth.arr_share_guard import filter_movie_disk_cleanup_paths
 from services.source_of_truth.placeholder_cleanup import (
+    cleanup_deleted_series_placeholder_files,
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
 )
@@ -227,15 +228,29 @@ def _mark_placeholder_row_active(
         return
 
     row = q.order_by(Placeholder.id.desc()).first()
-    # If no linked row exists yet, reuse any existing path row from fs-scan to
-    # avoid duplicate placeholder rows for the same file.
+    # If no linked row exists yet, reuse a path-only row from fs-scan (movie_id/episode_id NULL)
+    # to avoid duplicate Placeholder rows for the same file.
+    #
+    # Do **not** reuse a row already owned by a different Movie/Episode: Radarr primary vs secondary
+    # (same TMDB, same on-disk path) would otherwise steal the single FK row on each materialization,
+    # leaving the sibling Movie with has_placeholder=True in DB but no Placeholder.movie_id row —
+    # reconcile then drops linkage and the title flips needs_placeholder ↔ materialized forever.
     if not row and path:
-        row = (
+        candidate = (
             session.query(Placeholder)
             .filter(Placeholder.path == path)
             .order_by(Placeholder.id.desc())
             .first()
         )
+        if candidate:
+            c_mid = getattr(candidate, "movie_id", None)
+            c_eid = getattr(candidate, "episode_id", None)
+            if movie_id is not None:
+                if c_eid is None and (c_mid is None or int(c_mid) == int(movie_id)):
+                    row = candidate
+            elif episode_id is not None:
+                if c_mid is None and (c_eid is None or int(c_eid) == int(episode_id)):
+                    row = candidate
     if not row:
         row = Placeholder(movie_id=movie_id, episode_id=episode_id, path=path, created_by="source_of_truth.materializer")
         session.add(row)
@@ -324,6 +339,99 @@ def _mark_placeholder_rows_deleted(
         row.updated_at = func.now()
         session.add(row)
     return paths
+
+
+def _mark_placeholder_rows_deleted_for_episodes(
+    session,
+    *,
+    episode_ids: list[int],
+    activity_reason: str | None = None,
+    bulk_series_id: int | None = None,
+    bulk_series_title: str | None = None,
+) -> list[str]:
+    ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
+    if not ids:
+        return []
+    rows = session.query(Placeholder).filter(Placeholder.episode_id.in_(ids)).all()
+    paths = [r.path for r in rows if getattr(r, "path", None)]
+    for row in rows:
+        row.has_placeholder = False
+        row.lifecycle_status = "DELETED"
+        row.display_status = None
+        row.display_reason = None
+        row.display_progress = None
+        row.last_observed_at = func.now()
+        row.plex_placeholder_id = None
+        row.jellyfin_placeholder_id = None
+        row.emby_placeholder_id = None
+        row.plex_id_observed_at = None
+        row.jellyfin_id_observed_at = None
+        row.emby_id_observed_at = None
+        row.media_lookup_error = None
+        row.media_lookup_last_attempt_at = None
+        extra = dict(getattr(row, "extra", {}) or {})
+        if activity_reason:
+            extra["delete_reason"] = str(activity_reason)
+            extra["last_action_reason"] = str(activity_reason)
+            extra["last_action"] = "deleted"
+        if bulk_series_id is not None:
+            extra["bulk_series_delete"] = True
+            extra["bulk_delete_series_id"] = int(bulk_series_id)
+        if bulk_series_title:
+            extra["bulk_delete_series_title"] = str(bulk_series_title)
+        row.extra = extra
+        row.updated_at = func.now()
+        session.add(row)
+    return paths
+
+
+def _record_series_bulk_delete_history(
+    session,
+    *,
+    series: Series,
+    removed_placeholders: int,
+    files_deleted: int,
+    activity_reason: str | None,
+) -> None:
+    """Persist one aggregate placeholder-activity row for series tombstone cleanup."""
+    if int(removed_placeholders or 0) <= 0:
+        return
+    reason = (
+        f"Series removed tombstone cleanup - {int(removed_placeholders)} placeholders deleted"
+        f" ({int(files_deleted or 0)} files deleted)"
+    )
+    if activity_reason:
+        reason = f"{reason} - {str(activity_reason)}"
+    session.add(
+        PlaceholderActivityHistory(
+            occurred_at=datetime.now(timezone.utc),
+            action="Deleted",
+            item_type="series",
+            placeholder_id=None,
+            movie_id=None,
+            episode_id=None,
+            series_id=int(getattr(series, "id", 0) or 0) or None,
+            season_id=None,
+            season_number=None,
+            instance_key=getattr(series, "instance_key", None),
+            instance_id=getattr(series, "instance_id", None),
+            event_type="placeholder_deleted_series_bulk",
+            path=str(getattr(series, "placeholder_folder", "") or ""),
+            item_title=str(getattr(series, "title", "") or "Unknown Series"),
+            series_title=str(getattr(series, "title", "") or None),
+            reason=reason,
+            status_label="Deleted",
+            source="series_tombstone_bulk",
+            event_log_id=None,
+            extra_snapshot={
+                "bulk_series_delete": True,
+                "bulk_delete_series_id": int(getattr(series, "id", 0) or 0) or None,
+                "bulk_delete_series_title": str(getattr(series, "title", "") or ""),
+                "removed_placeholders": int(removed_placeholders or 0),
+                "files_deleted": int(files_deleted or 0),
+            },
+        )
+    )
 
 
 def apply_movie_materialization(movie_id: int, session=None, activity_reason: str | None = None) -> dict[str, Any]:
@@ -948,8 +1056,89 @@ def _run_materialization_for_ids(
             if should_trigger:
                 _emit_overlap_checkpoint(f"episode_{trigger_kind}")
 
+    def _process_deleted_series_bulk(series_id: int, series_episode_ids: list[int]) -> None:
+        nonlocal stats, delete_refresh_paths
+        ids = [int(x) for x in (series_episode_ids or []) if x is not None]
+        if not ids:
+            return
+        series = session.query(Series).filter(Series.id == int(series_id)).first()
+        if not series:
+            for episode_id in ids:
+                _process_single_episode_materialization(episode_id)
+            return
+
+        candidate_paths = _mark_placeholder_rows_deleted_for_episodes(
+            session,
+            episode_ids=ids,
+            activity_reason=activity_reason,
+            bulk_series_id=int(series_id),
+            bulk_series_title=str(getattr(series, "title", "") or ""),
+        )
+        db_paths = [
+            r[0]
+            for r in session.query(Episode.placeholder_filepath)
+            .filter(Episode.id.in_(ids), Episode.placeholder_filepath.isnot(None))
+            .all()
+        ]
+        candidate_paths.extend([p for p in db_paths if p])
+        cleanup_result = cleanup_deleted_series_placeholder_files(
+            session,
+            series=series,
+            candidate_paths=candidate_paths,
+        )
+        session.query(Episode).filter(Episode.id.in_(ids)).update(
+            {
+                Episode.has_placeholder: False,
+                Episode.placeholder_filepath: None,
+                Episode.updated_at: func.now(),
+            },
+            synchronize_session=False,
+        )
+        stats["deleted"] += len(ids)
+        files_deleted_count = int(cleanup_result.get("files_deleted", 0) or 0)
+        stats["files_deleted"] += files_deleted_count
+        stats["nfo_deleted"] += int(cleanup_result.get("nfo_deleted_count", 0) or 0)
+        stats["directories_deleted"] += int(cleanup_result.get("directories_deleted", 0) or 0)
+        if cleanup_result.get("series_nfo_deleted"):
+            stats["series_nfo_deleted"] += 1
+        _record_series_bulk_delete_history(
+            session,
+            series=series,
+            removed_placeholders=len(ids),
+            files_deleted=files_deleted_count,
+            activity_reason=activity_reason,
+        )
+        for refresh_path in cleanup_result.get("refresh_paths", []) or []:
+            delete_refresh_paths.add(refresh_path)
+            overlap_state["pending_delete_paths"].add(refresh_path)
+        logger.debug(
+            f"Series-level placeholder cleanup for deleted series_id={int(series_id)} "
+            f"title={getattr(series, 'title', None)!r}: episodes={len(ids)} "
+            f"files_deleted={int(cleanup_result.get('files_deleted', 0) or 0)} "
+            f"dirs_deleted={int(cleanup_result.get('directories_deleted', 0) or 0)}",
+            extra={"emoji_type": "delete"},
+        )
+
     episode_obsolete_ids, _episode_needs_seed = _split_episode_ids_by_determination(session, episode_ids)
+    bulk_deleted_series_map: dict[int, list[int]] = {}
+    if episode_obsolete_ids:
+        deleted_series_rows = (
+            session.query(Episode.id, Season.series_id)
+            .join(Season, Episode.season_id == Season.id)
+            .join(Series, Season.series_id == Series.id)
+            .filter(Episode.id.in_(episode_obsolete_ids), Series.is_deleted == True)  # noqa: E712
+            .all()
+        )
+        for eid, sid in deleted_series_rows:
+            if sid is None:
+                continue
+            bulk_deleted_series_map.setdefault(int(sid), []).append(int(eid))
+    bulk_episode_ids = {eid for eids in bulk_deleted_series_map.values() for eid in eids}
+    for sid, eids in bulk_deleted_series_map.items():
+        _process_deleted_series_bulk(sid, eids)
     for episode_id in episode_obsolete_ids:
+        if episode_id in bulk_episode_ids:
+            continue
         _process_single_episode_materialization(episode_id)
     if episode_obsolete_ids:
         run_determination_for_entities_in_session(session, movie_ids=[], episode_ids=list(episode_obsolete_ids))

@@ -70,12 +70,28 @@ export interface PlaceholderActivityRow {
   id: number;
   type: "placeholder";
   action: "Created" | "Deleted" | "Status";
-  item_type: "movie" | "episode";
+  item_type: "movie" | "episode" | "batch";
   item_title: string;
   series_title?: string | null;
   path: string;
   reason: string;
   status: string;
+  time?: string | null;
+  /** Server-side batch of calendar-driven status updates; expands in the UI. */
+  group_kind?: "calendar_status_sync" | string;
+  children?: PlaceholderActivityChildRow[];
+}
+
+export interface PlaceholderActivityChildRow {
+  id: number;
+  type?: "placeholder";
+  action?: string;
+  item_type?: "movie" | "episode";
+  item_title?: string;
+  series_title?: string | null;
+  path?: string;
+  reason?: string;
+  status?: string;
   time?: string | null;
 }
 
@@ -121,6 +137,22 @@ export interface LibraryResponse {
   count: number;
 }
 
+/** Deep link to an ARR instance (Radarr / Sonarr) from detail views. */
+export interface ArrInstanceOpenLink {
+  label: string;
+  url: string;
+  movie_id?: number;
+  series_id?: number;
+  has_file?: boolean;
+  has_placeholder?: boolean;
+  /** When false, this ARR instance does not have this title/show; UI shows "-" for the status line. */
+  present?: boolean;
+  episode_files?: number;
+  episode_placeholders?: number;
+  /** Episodes tracked for this show on this Sonarr instance (for ``files/total`` on series detail). */
+  episode_total?: number;
+}
+
 export interface MovieDetailResponse {
   ok: true;
   type: "movie";
@@ -141,6 +173,8 @@ export interface MovieDetailResponse {
   instance_id?: string | null;
   instance_label?: string | null;
   arr_link?: string | null;
+  /** One entry per configured instance that has this title (same TMDB id). */
+  arr_instance_links?: ArrInstanceOpenLink[];
   imdbid?: string | null;
   tmdbid?: number | null;
   status?: string | null;
@@ -206,6 +240,8 @@ export interface SeriesDetailResponse {
   instance_id?: string | null;
   instance_label?: string | null;
   arr_link?: string | null;
+  /** One entry per configured instance that has this show (same TVDB id). */
+  arr_instance_links?: ArrInstanceOpenLink[];
   imdbid?: string | null;
   tvdbid?: number | null;
   status?: string | null;

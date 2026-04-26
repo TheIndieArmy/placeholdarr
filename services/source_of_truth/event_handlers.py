@@ -19,7 +19,10 @@ from services.source_of_truth.arr_api import (
     fetch_sonarr_episode_item,
 )
 from services.source_of_truth.determiner import run_determination_for_entities
-from services.source_of_truth.materializer import run_materialization_for_entities
+from services.source_of_truth.materializer import (
+    _mark_placeholder_rows_deleted,
+    run_materialization_for_entities,
+)
 from services.source_of_truth.import_grace import (
     schedule_episode_import_grace,
     schedule_movie_import_grace,
@@ -600,7 +603,11 @@ def _extract_first_episode_pair(payload: dict[str, Any]) -> tuple[int, int] | No
 
 
 def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
-    """Process movie file-deleted event by resetting has_file and rerunning determination/materialization."""
+    """Process movie file-deleted event by resetting has_file and rerunning determination/materialization.
+
+    Radarr only emits file-delete when a real file was removed. Clear stale placeholder linkage so
+    determination is not stuck on ``placeholder_exists`` while the dummy/NFO may be missing on disk.
+    """
     movie_id = _extract_movie_id(payload)
     if not movie_id:
         raise ValueError("moviefiledelete_missing_movie_id")
@@ -622,9 +629,17 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         # Reset file state
         movie_row.has_file = False
         movie_row.radarr_filepath = None
+        movie_row.has_placeholder = False
+        movie_row.placeholder_filepath = None
         session.add(movie_row)
         session.flush()
         movie_row_id = int(movie_row.id)
+        _mark_placeholder_rows_deleted(
+            session,
+            movie_id=movie_row_id,
+            episode_id=None,
+            activity_reason="event_movie_file_deleted",
+        )
         session.commit()
 
         determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
@@ -711,7 +726,12 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
 
 
 def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
-    """Process episode file-deleted event by resetting has_file and rerunning determination/materialization."""
+    """Process episode file-deleted event by resetting has_file and rerunning determination/materialization.
+
+    Sonarr only emits ``episode_file_deleted`` when a real episode file existed. Clear stale
+    ``has_placeholder`` / ``placeholder_filepath`` and linked ``Placeholder`` rows so materialization
+    can take the ``needs_placeholder`` path instead of no-op ``placeholder_exists``.
+    """
     series_id = _extract_series_id(payload)
     if not series_id:
         raise ValueError("episodefiledelete_missing_series_id")
@@ -765,10 +785,19 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         for ep_row in episode_rows:
             ep_row.has_file = False
             ep_row.sonarr_filepath = None
+            ep_row.has_placeholder = False
+            ep_row.placeholder_filepath = None
             session.add(ep_row)
 
         session.flush()
         episode_ids = [int(ep.id) for ep in episode_rows if getattr(ep, "id", None)]
+        for eid in episode_ids:
+            _mark_placeholder_rows_deleted(
+                session,
+                movie_id=None,
+                episode_id=eid,
+                activity_reason="event_episode_file_deleted",
+            )
         session.commit()
 
         determination_stats = run_determination_for_entities(episode_ids=episode_ids)

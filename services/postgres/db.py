@@ -49,6 +49,24 @@ def get_engine():
     event.listen(_engine, "connect", _set_utc_timezone)
     # also prepare a Session factory so get_session can use it
     _SessionFactory = sessionmaker(bind=_engine, future=True)
+    try:
+        from services.placeholder_activity_history_hooks import register_placeholder_activity_history_hooks
+
+        register_placeholder_activity_history_hooks()
+    except Exception as ex:
+        logger.warning("Could not register placeholder_activity_history hooks: %s", ex, extra={"emoji_type": "warning"})
+    try:
+        from services.system_activity_history_hooks import register_system_activity_history_hooks
+
+        register_system_activity_history_hooks()
+    except Exception as ex:
+        logger.warning("Could not register system_activity_history hooks: %s", ex, extra={"emoji_type": "warning"})
+    try:
+        from services.dashboard_stats_snapshot_hooks import register_dashboard_stats_snapshot_hooks
+
+        register_dashboard_stats_snapshot_hooks()
+    except Exception as ex:
+        logger.warning("Could not register dashboard_stats_snapshot hooks: %s", ex, extra={"emoji_type": "warning"})
     return _engine
 
 

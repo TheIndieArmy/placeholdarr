@@ -172,6 +172,88 @@ class Placeholder(Base):
     def __repr__(self):
         return f"<Placeholder(id={self.id}, path={self.path!r})>"
 
+
+class SystemActivityHistory(Base):
+    """Append-only feed rows for `/api/activity` (materialized from EventLog / Job hooks)."""
+
+    __tablename__ = "system_activity_history"
+    __table_args__ = (Index("ix_system_activity_history_occurred_at", "occurred_at"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    origin = Column(String(32), nullable=False)
+    ref_id = Column(Integer, nullable=False)
+    snapshot = Column(JSON, nullable=False)
+
+    def __repr__(self):
+        return f"<SystemActivityHistory(id={self.id}, origin={self.origin!r}, ref_id={self.ref_id})>"
+
+
+class PlaceholderActivityHistory(Base):
+    """Append-only placeholder timeline (Radarr-style history table; written on insert/update and from status events)."""
+
+    __tablename__ = "placeholder_activity_history"
+    __table_args__ = (
+        Index("ix_placeholder_activity_history_instance_occurred", "instance_key", "occurred_at"),
+        Index("ix_placeholder_activity_history_occurred_at", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    action = Column(String(16), nullable=False)
+    item_type = Column(String(16), nullable=False)
+    placeholder_id = Column(Integer, ForeignKey("placeholder.id", ondelete="SET NULL"), nullable=True)
+    movie_id = Column(Integer, ForeignKey("movie.id", ondelete="SET NULL"), nullable=True)
+    episode_id = Column(Integer, ForeignKey("episode.id", ondelete="SET NULL"), nullable=True)
+    series_id = Column(Integer, ForeignKey("series.id", ondelete="SET NULL"), nullable=True)
+    season_id = Column(Integer, ForeignKey("season.id", ondelete="SET NULL"), nullable=True)
+    # Denormalized season number (TV) for display without joining season.
+    season_number = Column(Integer, nullable=True)
+    # Denormalized ARR slot (Radarr/Sonarr multi-instance); not the same as ``source`` (status projection).
+    instance_key = Column(String(128), nullable=True)
+    instance_id = Column(String(128), nullable=True)
+    # Stable app-level kind for grouping: placeholder_created / placeholder_deleted / placeholder_status_changed.
+    event_type = Column(String(128), nullable=True)
+    path = Column(String, nullable=False, default="")
+    item_title = Column(String, nullable=False, default="")
+    series_title = Column(String, nullable=True)
+    reason = Column(String, nullable=False, default="")
+    status_label = Column(String, nullable=False, default="")
+    source = Column(String(128), nullable=True)
+    event_log_id = Column(Integer, ForeignKey("event_log.id", ondelete="SET NULL"), nullable=True)
+    extra_snapshot = Column(JSON, nullable=True)
+
+    def __repr__(self):
+        return f"<PlaceholderActivityHistory(id={self.id}, action={self.action!r}, at={self.occurred_at!r})>"
+
+
+class DashboardStatsSnapshot(Base):
+    """Singleton materialized counters for `/api/stats` (id=1)."""
+
+    __tablename__ = "dashboard_stats_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=False, default=1)
+    movies_total = Column(Integer, nullable=False, default=0)
+    movies_placeholders = Column(Integer, nullable=False, default=0)
+    movies_downloaded = Column(Integer, nullable=False, default=0)
+    movies_future_outside_lookahead = Column(Integer, nullable=False, default=0)
+    series_total = Column(Integer, nullable=False, default=0)
+    episodes_total = Column(Integer, nullable=False, default=0)
+    episodes_placeholders = Column(Integer, nullable=False, default=0)
+    episodes_downloaded = Column(Integer, nullable=False, default=0)
+    episodes_future_outside_lookahead = Column(Integer, nullable=False, default=0)
+    placeholders_on_disk = Column(Integer, nullable=False, default=0)
+    jobs_pending = Column(Integer, nullable=False, default=0)
+    jobs_failed = Column(Integer, nullable=False, default=0)
+    jobs_done = Column(Integer, nullable=False, default=0)
+    last_sync = Column(DateTime(timezone=True), nullable=True)
+    computed_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, server_default=text("now()"))
+
+    def __repr__(self):
+        return f"<DashboardStatsSnapshot(id={self.id}, computed_at={self.computed_at!r})>"
+
+
 # New Job table: simple durable queue for batch/import jobs
 class Job(Base):
     __tablename__ = 'job'

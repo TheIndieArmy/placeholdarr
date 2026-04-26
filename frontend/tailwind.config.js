@@ -1,6 +1,8 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: 'class',
+  /** Dynamic `layout-${brand}-${mode}` in App — ensure utilities exist if we add layout-specific CSS later. */
+  safelist: ['layout-placeholdarr-light', 'layout-placeholdarr-dark'],
   content: [
     './index.html',
     './src/**/*.{js,ts,jsx,tsx}',

@@ -7,6 +7,32 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+- **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
+- **Dashboard library IA**: Sidebar **Library** opens **Movies** at `/library`; **TV** lives at `/library/tv` with nested nav (same pattern as Settings). Per-shelf filters persist in `sessionStorage` (`placeholdarr:library-shelf-filter:movies` / `:tv`); legacy `placeholdarr:library-filter` is migrated once on load.
+- **Detail ARR deep links**: Movie and series detail APIs include **`arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). **`arr_instance_links`** now also carries **`has_file` / `has_placeholder`** per movie row and **`episode_files` / `episode_placeholders`** per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
+- **Settings → Media Integrations**: **Webhook URL** on each connected Plex/Jellyfin/Emby card opens the same playback webhook setup modal as onboarding (shared `PlaybackWebhookSetupModal`).
+- **Lite sync catalog tombstones**: Startup lite now compares DB rows against current Radarr/Sonarr catalogs and targets missing IDs for tombstoning (`movies_catalog_removed` / `series_catalog_removed`), not just history and path-drift IDs.
+- **Series tombstone bulk cleanup path**: Deleted Sonarr series now use a series-level placeholder cleanup routine with progress logs, safe full-tree deletion checks, and aggregate history metadata for grouped placeholder activity UI rows.
+
+### Changed
+- **Movie & series detail API**: When **ARR_INSTANCES_JSON** lists Radarr / Sonarr instances, ``arr_instance_links`` includes **every configured slot** for that type in priority order; slots where the title/show is absent use ``present: false`` and a **base ARR UI** URL so the dashboard can show **"-"** instead of Yes/No or episode counts. **Movies** pad Radarr; **series** pad Sonarr and add ``episode_total`` per row (with existing ``episode_files`` / ``episode_placeholders``) for **files/total** in the UI. Slot lists use **DB-persisted** ``ARR_INSTANCES_JSON`` (via ``parse_configured_arr_instances_json``); rows match slots by **instance_key**, **instance_id**, and **instance_key_aliases** (normalized keys). After slot padding, any **extra local Movie/Series row** for the same TMDB/TVDB that was not already emitted (e.g. secondary instance whose key drifted from JSON) is **appended** so the UI always shows every instance that holds the title.
+- **Dashboard polling**: Poll cadence slows while the browser tab is in the background, refetches when the tab becomes visible again, loads `/api/stats` only on the Activity tab, uses **summary** library payloads by default, and debounces a **full** library fetch when the header search may match overview text.
+- **Detail ARR instance buttons**: Radarr/Sonarr “open instance” chips use a dedicated surface so light mode keeps a **deep navy** fill (legacy `bg-[#252e3a]` utilities were remapped to pale brand surfaces and looked washed out on white cards).
+- **Library API & grid**: `/api/library` **merges** rows that share the same **TMDB** (movies) or **TVDB** (series) id across instances; **`instance_label`** is cleared on list rows. Grid cards: light-theme surfaces and scrims, **year** in accent above the title, no MOVIE/SERIES type pill, no instance badges in the grid.
+- **Movie & series detail (dashboard)**: Hero uses **year above title** (accent), stronger **bottom fade** into the page background; removed hero **type**, **instance**, and single **Open in …** button in favor of bottom instance buttons; dropped **Status** / **Determination** (movies) and **Status** / **Sonarr Status** (series) tiles; series hero no longer repeats **network** or **monitored**. **Movies**: integration-style **navy tiles**: **Placeholdarr** first (on-disk **Yes/No**), then each **Radarr** instance (**Yes/No/-**, tile opens Radarr). **Series** use the **same strip**: **Placeholdarr** shows total **placeholder episode** count, each **Sonarr** tile shows **downloaded episode file** count (or **-** when the show is absent on that instance) with a small **Episodes** caption; **Open in Sonarr**, **By Sonarr instance**, and duplicate stat cards are removed. Movie and series detail always return an ``arr_instance_links`` array (possibly empty) so the UI does not fall back to a single ``arr_link`` when the list is empty. Outer chrome follows light/dark; tiles stay **#1e2430**.
+- **API-offline UX**: Replaced the small bottom error banner with a full-body reconnect panel (spinner + pulse animation) that temporarily replaces tab content while API connectivity is down; removed Ctrl+C-specific wording from network error copy.
+- **Startup/activity progress fidelity**: Startup snapshots now include an explicit `fs_scan` phase and pre-determination snapshot; determination adds periodic progress logging, and lite/full materialization metrics show deleted/files_deleted in progress rows and summary text.
+- **Calendar sync activity source of truth**: Activity feed now renders calendar sync from persisted marker snapshots only (removed duplicate synthetic log-parsed row path).
+- **Startup marker payload slimming**: Internal startup activity marker now stores slimmed determination/materialization counters to backfill dashboard progress when logs are truncated.
+### Fixed
+- **ARR file-delete webhooks**: On ``movie_file_deleted`` / ``episode_file_deleted``, clear denormalized ``has_placeholder`` / ``placeholder_filepath`` and mark linked ``Placeholder`` rows inactive before determination so materialization can use the ``needs_placeholder`` path when a dummy must be recreated (avoids stale ``placeholder_exists`` no-ops).
+- **Lite Sonarr delete convergence**: Targeted `sync_sonarr_series_by_ids` now cascades not-found tombstones to seasons/episodes, aligning with full-sync delete behavior.
+- **Placeholder reconcile path drift loops**: Reconcile now realigns valid linked rows to canonical placeholder paths when available (`canonical_path_realigned`) to prevent repeat obsolete/needs churn after folder moves.
+- **Materializer path-row ownership**: `_mark_placeholder_row_active` no longer steals a path row owned by another movie/episode (primary/secondary same-path contention), preventing `needs_placeholder` flip-flopping across instances.
+- **FS startup scan regressions**: Added incremental scan mode with canonical remap safeguards so path-only rows are not mass-marked missing during startup lite runs.
+
+
 ## [0.9.5] - 2026-04-21
 
 ### Added
@@ -16,13 +42,13 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
-- **Simularr studio shell (dashboard)**: Refined **light** chrome as the deliberate inverse of dark mode—navy sidebar brand row with yellow mark, **blue → yellow** main header band, and a header **theme toggle** that sits flush on the yellow band (no separate white chip or sky “rail”).
+- **Placeholdarr studio shell (dashboard)**: Refined **light** chrome as the deliberate inverse of dark mode—navy sidebar brand row with yellow mark, **blue → yellow** main header band, and a header **theme toggle** that sits flush on the yellow band (no separate white chip or sky “rail”).
 - **Settings navigation & layout**: Settings live under **`/settings/<slug>`** with redirect from `/settings` to the first section; the old in-page settings sidebar was removed in favor of **nested entries in the main app sidebar** while on settings routes.
 - **Settings vs onboarding parity**: **Media Integrations** and **ARR Integrations** reuse the same **card / slot grid** patterns as onboarding; other sections use the same framed, onboarding-style section treatment where appropriate.
 - **Integration logo tiles**: Plex/Jellyfin/Emby and Radarr/Sonarr icon wells use a **solid studio navy** (`#1e2430`) in both themes so tiles match the intended dark-blue look instead of washed translucent fills.
 - **Brand logo rendering**: Sidebar mark uses a single **`BrandLogo`** path with a **`variant`** switch (blue vs yellow asset) so light and dark placement stay consistent.
 - **Dashboard document title**: Browser tab title is now **Placeholdarr** instead of “Placeholdarr Dashboard Next.”
-- **Branding type surface**: The TypeScript **`Brand`** union is now **Simularr-only**, matching the shipped Studio product chrome.
+- **Branding type surface**: The TypeScript **`Brand`** union is now **Placeholdarr-only**, matching the shipped Studio product chrome.
 - **Semantic / global CSS**: `brandSemanticTheme.ts`, `styles.css`, and Tailwind font-map comments were tightened so new UI prefers **`--brand-*` tokens** over legacy hard-coded slate aliases.
 
 ### Fixed

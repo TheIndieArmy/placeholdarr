@@ -1,10 +1,12 @@
 import type { Brand, ThemeMode } from "./brandTypes";
 
 /**
- * Simularr **Spectral Data** marketing headline / rail cyan (style guide art).
- * Simularr dark UI ice blue is separate: token `accentIce` `#7DD3FC`.
+ * Style-guide **Spectral Data** cyan (marketing / rail reference).
+ * UI “ice” cyan for controls is separate: token `accentIce` `#7DD3FC` in dark theme.
  */
-export const SIMULARR_SPECTRAL_CYAN_HEX = "#22D3EE";
+export const PLACEHOLDARR_SPECTRAL_CYAN_HEX = "#22D3EE";
+/** @deprecated Use {@link PLACEHOLDARR_SPECTRAL_CYAN_HEX} */
+export const SIMULARR_SPECTRAL_CYAN_HEX = PLACEHOLDARR_SPECTRAL_CYAN_HEX;
 
 export type BrandSemanticTokens = {
   fontHeadline: string;
@@ -114,7 +116,7 @@ function defaultsFromAccent(accent: Accent, mode: ThemeMode): BrandSemanticToken
 }
 
 export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Accent): BrandSemanticTokens {
-  if (brand === "simularr" && mode === "dark") {
+  if (brand === "placeholdarr" && mode === "dark") {
     return {
       fontHeadline: `"Sora", ui-sans-serif, system-ui, sans-serif`,
       fontBody: `Inter, ui-sans-serif, system-ui, sans-serif`,
@@ -148,7 +150,7 @@ export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Ac
       topBarBand: "#FBBF24",
     };
   }
-  if (brand === "simularr" && mode === "light") {
+  if (brand === "placeholdarr" && mode === "light") {
     return {
       fontHeadline: `"Sora", ui-sans-serif, system-ui, sans-serif`,
       fontBody: `Inter, ui-sans-serif, system-ui, sans-serif`,

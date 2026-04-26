@@ -20,6 +20,7 @@ DETERMINATION_EXISTS = 'placeholder_exists'
 DETERMINATION_NEEDS = 'needs_placeholder'
 RECONCILE_PROGRESS_EVERY_ROWS = 5000
 RECONCILE_LINK_PROGRESS_EVERY_ROWS = 5000
+DETERMINATION_PROGRESS_EVERY_ROWS = 5000
 
 
 def _normalize_placeholder_path(value: str | None) -> str | None:
@@ -143,6 +144,9 @@ def run_placeholder_link_reconcile() -> dict:
         'invalid_placeholders_disconnected': 0,
         'movie_placeholders_seen': 0,
         'episode_placeholders_seen': 0,
+        # Linked rows whose on-disk path was valid but differed from current canonical path
+        # (typical after Radarr folder rename / root change while the dummy file stayed behind).
+        'canonical_path_realigned': 0,
     }
 
     def _disconnect_placeholder_row(row: Placeholder) -> bool:
@@ -238,6 +242,52 @@ def run_placeholder_link_reconcile() -> dict:
                     remapped = False
 
                 if not remapped:
+                    try:
+                        if getattr(row, 'movie_id', None):
+                            mv2 = session.query(Movie).filter(Movie.id == int(row.movie_id)).first()
+                            if mv2:
+                                candidate = os.path.abspath(movie_placeholder_path(mv2))
+                                if os.path.isfile(candidate):
+                                    for root in roots:
+                                        try:
+                                            if os.path.commonpath([candidate, root]) == root:
+                                                row.path = candidate
+                                                row.has_placeholder = True
+                                                if hasattr(row, 'last_observed_at'):
+                                                    row.last_observed_at = func.now()
+                                                remapped = True
+                                                break
+                                        except Exception:
+                                            continue
+                        elif getattr(row, 'episode_id', None):
+                            ep2 = session.query(Episode).filter(Episode.id == int(row.episode_id)).first()
+                            if ep2:
+                                season2 = session.query(Season).filter(Season.id == ep2.season_id).first()
+                                series2 = (
+                                    session.query(Series).filter(Series.id == season2.series_id).first()
+                                    if season2
+                                    else None
+                                )
+                                if season2 and series2:
+                                    candidate = os.path.abspath(
+                                        episode_placeholder_path(ep2, season2, series2)
+                                    )
+                                    if os.path.isfile(candidate):
+                                        for root in roots:
+                                            try:
+                                                if os.path.commonpath([candidate, root]) == root:
+                                                    row.path = candidate
+                                                    row.has_placeholder = True
+                                                    if hasattr(row, 'last_observed_at'):
+                                                        row.last_observed_at = func.now()
+                                                    remapped = True
+                                                    break
+                                            except Exception:
+                                                continue
+                    except Exception:
+                        pass
+
+                if not remapped:
                     row.has_placeholder = False
                     if hasattr(row, 'lifecycle_status'):
                         row.lifecycle_status = 'MISSING'
@@ -248,6 +298,83 @@ def run_placeholder_link_reconcile() -> dict:
                 if hasattr(row, 'updated_at'):
                     row.updated_at = func.now()
                 session.add(row)
+            else:
+                # Path is valid today, but Radarr/metadata may have moved the canonical folder while
+                # the dummy file still lives at the previous path. Leaving the stale path linked
+                # forces ``_movie_placeholder_path_drifts`` / episode drift → obsolete_placeholder on
+                # every determination until cleanup. Prefer the current canonical path when it exists.
+                try:
+                    if getattr(row, 'movie_id', None):
+                        mv_align = session.query(Movie).filter(Movie.id == int(row.movie_id)).first()
+                        if mv_align:
+                            canonical = os.path.abspath(movie_placeholder_path(mv_align))
+                            norm_cur = _normalize_placeholder_path(abs_path)
+                            norm_can = _normalize_placeholder_path(canonical)
+                            if (
+                                canonical
+                                and norm_can
+                                and norm_cur
+                                and norm_can != norm_cur
+                                and os.path.isfile(canonical)
+                            ):
+                                canon_in_scope = False
+                                for root in roots:
+                                    try:
+                                        if os.path.commonpath([canonical, root]) == root:
+                                            canon_in_scope = True
+                                            break
+                                    except Exception:
+                                        continue
+                                if canon_in_scope:
+                                    row.path = canonical
+                                    row.has_placeholder = True
+                                    if hasattr(row, 'last_observed_at'):
+                                        row.last_observed_at = func.now()
+                                    if hasattr(row, 'updated_at'):
+                                        row.updated_at = func.now()
+                                    session.add(row)
+                                    stats['canonical_path_realigned'] += 1
+                    elif getattr(row, 'episode_id', None):
+                        ep_align = session.query(Episode).filter(Episode.id == int(row.episode_id)).first()
+                        if ep_align:
+                            season_align = session.query(Season).filter(Season.id == ep_align.season_id).first()
+                            series_align = (
+                                session.query(Series).filter(Series.id == season_align.series_id).first()
+                                if season_align
+                                else None
+                            )
+                            if season_align and series_align:
+                                canonical = os.path.abspath(
+                                    episode_placeholder_path(ep_align, season_align, series_align)
+                                )
+                                norm_cur = _normalize_placeholder_path(abs_path)
+                                norm_can = _normalize_placeholder_path(canonical)
+                                if (
+                                    canonical
+                                    and norm_can
+                                    and norm_cur
+                                    and norm_can != norm_cur
+                                    and os.path.isfile(canonical)
+                                ):
+                                    canon_in_scope = False
+                                    for root in roots:
+                                        try:
+                                            if os.path.commonpath([canonical, root]) == root:
+                                                canon_in_scope = True
+                                                break
+                                        except Exception:
+                                            continue
+                                    if canon_in_scope:
+                                        row.path = canonical
+                                        row.has_placeholder = True
+                                        if hasattr(row, 'last_observed_at'):
+                                            row.last_observed_at = func.now()
+                                        if hasattr(row, 'updated_at'):
+                                            row.updated_at = func.now()
+                                        session.add(row)
+                                        stats['canonical_path_realigned'] += 1
+                except Exception:
+                    pass
             if idx % RECONCILE_PROGRESS_EVERY_ROWS == 0:
                 elapsed = time.monotonic() - started_mono
                 logger.info(
@@ -414,13 +541,15 @@ def run_determination_pass() -> dict:
     }
 
     try:
+        started_mono = time.monotonic()
+        logger.info("Determination phase started", extra={'emoji_type': 'info'})
         placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
         lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
         now_date = datetime.now(timezone.utc).date()
 
         movies = session.query(Movie).all()
         stats['movies_total'] = len(movies)
-        for movie in movies:
+        for idx, movie in enumerate(movies, start=1):
             value, path_drift = _resolve_movie_determination(
                 movie,
                 placeholders_enabled=placeholders_enabled,
@@ -440,11 +569,19 @@ def run_determination_pass() -> dict:
                 movie.determination_updated_at = func.now()
                 session.add(movie)
                 stats['movies_changed'] += 1
+            if idx % DETERMINATION_PROGRESS_EVERY_ROWS == 0:
+                elapsed = time.monotonic() - started_mono
+                logger.info(
+                    "Determination progress (movies): "
+                    f"processed={idx}/{len(movies)} changed={stats['movies_changed']} "
+                    f"elapsed_s={elapsed:.1f}",
+                    extra={'emoji_type': 'info'},
+                )
 
         include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
         episodes = session.query(Episode).all()
         stats['episodes_total'] = len(episodes)
-        for episode in episodes:
+        for idx, episode in enumerate(episodes, start=1):
             season = session.query(Season).filter(Season.id == episode.season_id).first()
             # Treat season 0 episodes as not_needed when specials are disabled
             if not include_specials:
@@ -456,6 +593,15 @@ def run_determination_pass() -> dict:
                         episode.determination_updated_at = func.now()
                         session.add(episode)
                         stats['episodes_changed'] += 1
+                    if idx % DETERMINATION_PROGRESS_EVERY_ROWS == 0:
+                        elapsed = time.monotonic() - started_mono
+                        logger.info(
+                            "Determination progress (episodes): "
+                            f"processed={idx}/{len(episodes)} changed={stats['episodes_changed']} "
+                            f"obsolete={stats['obsolete_placeholder']} "
+                            f"elapsed_s={elapsed:.1f}",
+                            extra={'emoji_type': 'info'},
+                        )
                     continue
             value, path_drift = _resolve_episode_determination(
                 session,
@@ -488,6 +634,15 @@ def run_determination_pass() -> dict:
                 episode.determination_updated_at = func.now()
                 session.add(episode)
                 stats['episodes_changed'] += 1
+            if idx % DETERMINATION_PROGRESS_EVERY_ROWS == 0:
+                elapsed = time.monotonic() - started_mono
+                logger.info(
+                    "Determination progress (episodes): "
+                    f"processed={idx}/{len(episodes)} changed={stats['episodes_changed']} "
+                    f"obsolete={stats['obsolete_placeholder']} "
+                    f"elapsed_s={elapsed:.1f}",
+                    extra={'emoji_type': 'info'},
+                )
 
         session.commit()
         logger.info(f"Determination phase complete: {stats}", extra={'emoji_type': 'success'})

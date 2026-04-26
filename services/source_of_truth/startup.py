@@ -26,6 +26,7 @@ from services.source_of_truth.sync_runner import run_full_sync, sync_radarr_movi
 @dataclass
 class FullSyncRunRef:
     run_id: str
+    sync_stats: dict
 
 
 def _normalize_path(value: str | None) -> str | None:
@@ -37,8 +38,12 @@ def _normalize_path(value: str | None) -> str | None:
     return os.path.normpath(text)
 
 
-def _radarr_path_drift_movie_ids(session, *, instance_key: str, base_url: str, api_key: str) -> set[int]:
-    """Detect Radarr items whose current API path differs from stored DB path."""
+def _radarr_path_drift_movie_ids(session, *, instance_key: str, api_movies: list) -> set[int]:
+    """Detect Radarr items whose current API path differs from stored DB path.
+
+    ``api_movies`` must be the current Radarr ``/api/v3/movie`` payload for this instance (caller should
+    fetch once per lite pass to avoid duplicate HTTP calls).
+    """
     rows = (
         session.query(Movie.radarrid, Movie.radarrpath)
         .filter(Movie.instance_key == instance_key, Movie.radarrid.isnot(None), Movie.is_deleted == False)  # noqa: E712
@@ -47,7 +52,6 @@ def _radarr_path_drift_movie_ids(session, *, instance_key: str, base_url: str, a
     if not rows:
         return set()
 
-    api_movies = fetch_radarr_movies(base_url, api_key) or []
     api_path_by_id: dict[int, str | None] = {}
     for item in api_movies:
         if not isinstance(item, dict):
@@ -74,8 +78,44 @@ def _radarr_path_drift_movie_ids(session, *, instance_key: str, base_url: str, a
     return changed
 
 
-def _sonarr_path_drift_series_ids(session, *, instance_key: str, base_url: str, api_key: str) -> set[int]:
-    """Detect Sonarr series whose current API path differs from stored DB path."""
+def _radarr_movie_ids_removed_from_catalog(session, *, instance_key: str, api_movies: list) -> set[int]:
+    """Radarr IDs present in our DB for this instance but absent from the current Radarr catalog.
+
+    Lite sync previously relied on ``/history`` + path drift; **removals** often do not yield a stable
+    ``movieId`` in history payloads, so rows stayed ``is_deleted=False`` until the next full sync.
+    """
+    api_ids: set[int] = set()
+    for item in api_movies or []:
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        try:
+            api_ids.add(int(mid))
+        except Exception:
+            continue
+    rows = (
+        session.query(Movie.radarrid)
+        .filter(Movie.instance_key == instance_key, Movie.radarrid.isnot(None), Movie.is_deleted == False)  # noqa: E712
+        .all()
+    )
+    out: set[int] = set()
+    for (rid,) in rows:
+        if rid is None:
+            continue
+        try:
+            rint = int(rid)
+        except Exception:
+            continue
+        if rint not in api_ids:
+            out.add(rint)
+    return out
+
+
+def _sonarr_path_drift_series_ids(session, *, instance_key: str, api_series: list) -> set[int]:
+    """Detect Sonarr series whose current API path differs from stored DB path.
+
+    ``api_series`` must be the current Sonarr ``/api/v3/series`` payload for this instance.
+    """
     rows = (
         session.query(Series.sonarrid, Series.sonarrpath)
         .filter(Series.instance_key == instance_key, Series.sonarrid.isnot(None), Series.is_deleted == False)  # noqa: E712
@@ -84,7 +124,6 @@ def _sonarr_path_drift_series_ids(session, *, instance_key: str, base_url: str, 
     if not rows:
         return set()
 
-    api_series = fetch_sonarr_series(base_url, api_key) or []
     api_path_by_id: dict[int, str | None] = {}
     for item in api_series:
         if not isinstance(item, dict):
@@ -109,6 +148,35 @@ def _sonarr_path_drift_series_ids(session, *, instance_key: str, base_url: str, 
     return changed
 
 
+def _sonarr_series_ids_removed_from_catalog(session, *, instance_key: str, api_series: list) -> set[int]:
+    """Sonarr series IDs in our DB for this instance that no longer exist in the Sonarr catalog."""
+    api_ids: set[int] = set()
+    for item in api_series or []:
+        if not isinstance(item, dict):
+            continue
+        sid = item.get("id")
+        try:
+            api_ids.add(int(sid))
+        except Exception:
+            continue
+    rows = (
+        session.query(Series.sonarrid)
+        .filter(Series.instance_key == instance_key, Series.sonarrid.isnot(None), Series.is_deleted == False)  # noqa: E712
+        .all()
+    )
+    out: set[int] = set()
+    for (rid,) in rows:
+        if rid is None:
+            continue
+        try:
+            rint = int(rid)
+        except Exception:
+            continue
+        if rint not in api_ids:
+            out.add(rint)
+    return out
+
+
 def _create_run(content_type: str, is_secondary: bool = False, run_note: str | None = None, instance_key: str | None = None) -> FullSyncRunRef:
     suffix = 'secondary' if is_secondary else 'primary'
     run_id = f'fullsync:{content_type}:{suffix}:{uuid.uuid4()}'
@@ -117,9 +185,9 @@ def _create_run(content_type: str, is_secondary: bool = False, run_note: str | N
         f"Starting startup {content_type} fullsync ({suffix}) run {run_id} ({run_note or 'no note'})",
         extra={'emoji_type': 'gear'},
     )
-    run_full_sync(dry_run=False, types=sync_types, instance_key=instance_key)
+    sync_stats = run_full_sync(dry_run=False, types=sync_types, instance_key=instance_key)
     logger.info(f"Finished startup {content_type} fullsync ({suffix}) run {run_id}", extra={'emoji_type': 'success'})
-    return FullSyncRunRef(run_id=run_id)
+    return FullSyncRunRef(run_id=run_id, sync_stats=sync_stats or {})
 
 
 def capture_movies_fullsync_and_create_run(run_note: str | None = None) -> FullSyncRunRef:
@@ -204,7 +272,7 @@ def _extract_sonarr_series_ids(events: list[dict]) -> set[int]:
 
 
 def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -> dict:
-    stats = {'instances': 0, 'succeeded': 0, 'failed': 0}
+    stats = {'instances': 0, 'succeeded': 0, 'failed': 0, 'movies_seen': 0, 'series_seen': 0, 'episodes_seen': 0}
     if not instances:
         return stats
 
@@ -222,6 +290,10 @@ def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -
                     instance_key=instance['instance_key'],
                 )
                 run_ids.append(run.run_id)
+                run_stats = run.sync_stats if isinstance(run.sync_stats, dict) else {}
+                stats['movies_seen'] += int(run_stats.get('movies_seen', 0) or 0)
+                stats['series_seen'] += int(run_stats.get('series_seen', 0) or 0)
+                stats['episodes_seen'] += int(run_stats.get('episodes_seen', 0) or 0)
                 row = _get_or_create_arr_state(session, instance['instance_key'], instance['arr_type'])
                 row.first_full_sync_completed_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
@@ -249,6 +321,14 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
         'events_with_ids': 0,
         'targeted_sync_runs': 0,
         'path_drift_ids': 0,
+        'movies_seen': 0,
+        'series_seen': 0,
+        'episodes_seen': 0,
+        # DB rows reconciled as removed-from-ARR via catalog diff (not from history payloads).
+        'movies_catalog_removed': 0,
+        'series_catalog_removed': 0,
+        'movies_marked_deleted': 0,
+        'series_marked_deleted': 0,
     }
     if not instances:
         return stats
@@ -265,14 +345,12 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                 if instance['arr_type'] == 'radarr':
                     events = fetch_radarr_history(start_id=start_id, url=instance['base_url'], api_key=instance['api_key'])
                     target_ids = _extract_radarr_movie_ids(events)
-                    drift_ids = _radarr_path_drift_movie_ids(
-                        session,
-                        instance_key=instance_key,
-                        base_url=instance['base_url'],
-                        api_key=instance['api_key'],
-                    )
-                    target_ids = set(target_ids) | set(drift_ids)
+                    api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key']) or []
+                    drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
+                    removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
+                    target_ids = set(target_ids) | set(drift_ids) | set(removed_ids)
                     stats['path_drift_ids'] += len(drift_ids)
+                    stats['movies_catalog_removed'] += len(removed_ids)
                     if target_ids:
                         sync_stats = sync_radarr_movies_by_ids(
                             target_ids,
@@ -281,6 +359,8 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
+                        stats['movies_seen'] += int(sync_stats.get('movies_seen', 0) or 0)
+                        stats['movies_marked_deleted'] += int(sync_stats.get('movies_marked_deleted', 0) or 0)
                         logger.info(
                             f"Startup lite targeted movie sync for {instance_key}: {sync_stats}",
                             extra={'emoji_type': 'info'},
@@ -288,14 +368,12 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                 else:
                     events = fetch_sonarr_history(start_id=start_id, url=instance['base_url'], api_key=instance['api_key'])
                     target_ids = _extract_sonarr_series_ids(events)
-                    drift_ids = _sonarr_path_drift_series_ids(
-                        session,
-                        instance_key=instance_key,
-                        base_url=instance['base_url'],
-                        api_key=instance['api_key'],
-                    )
-                    target_ids = set(target_ids) | set(drift_ids)
+                    api_series = fetch_sonarr_series(instance['base_url'], instance['api_key']) or []
+                    drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
+                    removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)
+                    target_ids = set(target_ids) | set(drift_ids) | set(removed_ids)
                     stats['path_drift_ids'] += len(drift_ids)
+                    stats['series_catalog_removed'] += len(removed_ids)
                     if target_ids:
                         sync_stats = sync_sonarr_series_by_ids(
                             target_ids,
@@ -304,6 +382,9 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                             instance_key=instance_key,
                         )
                         stats['targeted_sync_runs'] += 1
+                        stats['series_seen'] += int(sync_stats.get('series_seen', 0) or 0)
+                        stats['episodes_seen'] += int(sync_stats.get('episodes_seen', 0) or 0)
+                        stats['series_marked_deleted'] += int(sync_stats.get('series_marked_deleted', 0) or 0)
                         logger.info(
                             f"Startup lite targeted series sync for {instance_key}: {sync_stats}",
                             extra={'emoji_type': 'info'},
@@ -380,10 +461,14 @@ def run_startup_source_of_truth() -> dict:
                 extra={'emoji_type': 'warning'},
             )
 
+        from services.startup_sync_activity import record_startup_sync_progress
+
         run_ids: list[str] = []
         instances = _configured_arr_instances()
         selected_mode = _resolve_startup_sync_mode(instances)
         startup_sync_stats: dict = {}
+        determination_stats: dict = {}
+        materialization_stats: dict = {}
 
         logger.info(
             f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
@@ -395,14 +480,37 @@ def run_startup_source_of_truth() -> dict:
             startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
         elif selected_mode == 'lite':
             startup_sync_stats = _run_startup_lite_history_for_instances(instances)
+            logger.info(
+                'Startup lite ARR discovery phase complete '
+                f"(movies_seen={startup_sync_stats.get('movies_seen', 0)} "
+                f"series_seen={startup_sync_stats.get('series_seen', 0)} "
+                f"episodes_seen={startup_sync_stats.get('episodes_seen', 0)} "
+                f"targeted_sync_runs={startup_sync_stats.get('targeted_sync_runs', 0)} "
+                f"path_drift_ids={startup_sync_stats.get('path_drift_ids', 0)} "
+                f"movies_catalog_removed={startup_sync_stats.get('movies_catalog_removed', 0)} "
+                f"series_catalog_removed={startup_sync_stats.get('series_catalog_removed', 0)} "
+                f"movies_marked_deleted={startup_sync_stats.get('movies_marked_deleted', 0)} "
+                f"series_marked_deleted={startup_sync_stats.get('series_marked_deleted', 0)})",
+                extra={'emoji_type': 'success'},
+            )
         elif selected_mode == 'off':
             startup_sync_stats = {'instances': len(instances), 'skipped': True}
         else:
             # Defensive fallback. _resolve_startup_sync_mode should prevent this branch.
             startup_sync_stats = {'instances': len(instances), 'skipped': True, 'reason': f'unknown_mode:{selected_mode}'}
 
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
+            current_phase="fs_scan",
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=None,
+            materialization_stats=None,
+        )
+
         scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
-        scan_result = scan_once_if_needed(scan_run_id)
+        scan_result = scan_once_if_needed(scan_run_id, prefer_incremental=True)
         if isinstance(scan_result, tuple):
             scan_count, scan_info = scan_result
         else:
@@ -421,10 +529,26 @@ def run_startup_source_of_truth() -> dict:
             extra={'emoji_type': 'info'},
         )
         phase_started = time.monotonic()
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            current_phase='determination',
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=None,
+            materialization_stats=None,
+        )
         determination_stats = run_determination_pass()
         logger.info(
             f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
+        )
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            current_phase='materialization',
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=determination_stats,
+            materialization_stats=None,
         )
         # Primer phase removed to accelerate startup and simplify sync pipeline.
         primer_stats = {"skipped": True, "reason": "deprecated"}
@@ -433,6 +557,15 @@ def run_startup_source_of_truth() -> dict:
         logger.info(
             f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
+        )
+        record_startup_sync_progress(
+            mode=selected_mode,
+            started_at=started_at,
+            current_phase='complete',
+            startup_sync_stats=startup_sync_stats,
+            determination_stats=determination_stats,
+            materialization_stats=materialization_stats,
+            completed_at=datetime.now(timezone.utc),
         )
         phase_started = time.monotonic()
         calendar_stats = run_calendar_phase()
@@ -474,6 +607,8 @@ def run_startup_source_of_truth() -> dict:
                 mode=selected_mode,
                 started_at=started_at,
                 completed_at=datetime.now(timezone.utc),
+                determination=determination_stats if isinstance(determination_stats, dict) else None,
+                materialization=materialization_stats if isinstance(materialization_stats, dict) else None,
             )
         except Exception:
             logger.debug(
@@ -482,5 +617,23 @@ def run_startup_source_of_truth() -> dict:
                 exc_info=True,
             )
         return result
+    except Exception as exc:
+        try:
+            from services.startup_sync_activity import record_startup_sync_progress
+
+            record_startup_sync_progress(
+                mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
+                current_phase='failed',
+                startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
+                determination_stats=determination_stats if 'determination_stats' in locals() else None,
+                materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
+                completed_at=datetime.now(timezone.utc),
+                failed=True,
+                error_message=str(exc),
+            )
+        except Exception:
+            pass
+        raise
     finally:
         settings.REFRESH_TRIGGER_SUPPRESSED = False

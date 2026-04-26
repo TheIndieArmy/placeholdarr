@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
@@ -29,6 +29,7 @@ import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticToke
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
+  ArrInstanceOpenLink,
   CalendarDay,
   CalendarResponse,
   DashboardTab,
@@ -36,13 +37,75 @@ import type {
   LibraryItem,
   MovieDetailResponse,
   SeriesDetailResponse,
+  SeriesSeasonDetail,
   SeriesEpisodeDetail,
   SettingsField,
   SettingsPayload,
   StatsResponse,
 } from "./types/api";
 
-const REFRESH_MS = 5000;
+const REFRESH_MS_VISIBLE = 5000;
+const REFRESH_MS_HIDDEN = 30000;
+const LIBRARY_MOVIES_PATH = "/library";
+const LIBRARY_TV_PATH = "/library/tv";
+const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
+const LIBRARY_TV_FILTER_KEY = "placeholdarr:library-shelf-filter:tv";
+/** Legacy single key (pre split movies / TV pages). */
+const LIBRARY_FILTER_STORAGE_KEY_LEGACY = "placeholdarr:library-filter";
+
+export type LibraryShelfFilter = "all" | "placeholders" | "future" | "missing";
+
+function isLibraryShelfFilter(v: string | null): v is LibraryShelfFilter {
+  return v === "all" || v === "placeholders" || v === "future" || v === "missing";
+}
+
+function readStoredShelfFilter(storageKey: string): LibraryShelfFilter {
+  try {
+    const v = sessionStorage.getItem(storageKey);
+    if (isLibraryShelfFilter(v)) return v;
+  } catch {
+    /* private / blocked storage */
+  }
+  return "all";
+}
+
+/** One-time read of legacy `placeholdarr:library-filter` into shelf filters; clears legacy key when consumed. */
+function readLegacyLibraryFilterMigration(): { movies: LibraryShelfFilter; tv: LibraryShelfFilter } | null {
+  try {
+    const v = sessionStorage.getItem(LIBRARY_FILTER_STORAGE_KEY_LEGACY);
+    if (v == null) return null;
+    sessionStorage.removeItem(LIBRARY_FILTER_STORAGE_KEY_LEGACY);
+    if (v === "movie") return { movies: "all", tv: "all" };
+    if (v === "series") return { movies: "all", tv: "all" };
+    if (isLibraryShelfFilter(v)) return { movies: v, tv: v };
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
+  const p = pathname.replace(/\/$/, "") || "/";
+  if (p === LIBRARY_TV_PATH) return "tv";
+  if (p === LIBRARY_MOVIES_PATH) return "movies";
+  return null;
+}
+
+function digestLibraryItems(items: LibraryItem[]): string {
+  return items
+    .map((i) => `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.overview ?? ""}`)
+    .join("\n");
+}
+
+function formatDashboardDataAge(msAgo: number): string {
+  const s = Math.floor(msAgo / 1000);
+  if (s < 12) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ago`;
+}
 const LOG_TAIL_LINES = 2000;
 const STUDIO_THEME_MODE_STORAGE_KEY = "placeholdarr:studio-theme-mode";
 
@@ -203,6 +266,7 @@ const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | 
   EMBY_URL: { service: "emby", credentialKey: "EMBY_TOKEN" },
 };
 
+/** Activity stat cards still route with movie/series distinction; list pages use {@link LibraryShelfFilter}. */
 type LibraryFilter = "all" | "movie" | "series" | "placeholders" | "future" | "missing";
 
 type FieldValueMap = Record<string, unknown>;
@@ -220,8 +284,8 @@ type BrandAccent = {
   hoverHex: string;
 };
 
-/** App name is Placeholdarr; `Brand` selects the Simularr visual theme (tokens only). */
-const BRAND: Brand = "simularr";
+/** Product name is Placeholdarr; `Brand` is the single official dashboard token set. */
+const BRAND: Brand = "placeholdarr";
 
 const BRAND_META: { label: string; tagline: string } = {
   label: "Placeholdarr",
@@ -270,16 +334,16 @@ function SetupBootShell(props: {
 }
 
 const BRAND_ACCENTS: Record<`${Brand}-${ThemeMode}`, BrandAccent> = {
-  "simularr-light": {
+  "placeholdarr-light": {
     label: "Placeholdarr",
-    /** Primary stat / hero yellow (matches Simularr dark + top bar band), not ochre. */
+    /** Primary stat / hero yellow (matches dark top bar band), not ochre. */
     hex: "#FBBF24",
     text: "#0f172a",
     /** Cyan rail / secondary chrome on light panels */
     icon: "#0284C7",
     hoverHex: "#D97706",
   },
-  "simularr-dark": {
+  "placeholdarr-dark": {
     label: "Placeholdarr",
     hex: "#FBBF24",
     text: "#E2E8F0",
@@ -369,8 +433,17 @@ export function App() {
   const [logFilter, setLogFilter] = useState("");
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
   const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
+  const activityTabRef = useRef<"system" | "placeholders">(activityTab);
+  activityTabRef.current = activityTab;
 
-  const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
+  const [libraryShelfFilters, setLibraryShelfFilters] = useState<{ movies: LibraryShelfFilter; tv: LibraryShelfFilter }>(() => {
+    const migrated = readLegacyLibraryFilterMigration();
+    if (migrated) return migrated;
+    return {
+      movies: readStoredShelfFilter(LIBRARY_MOVIES_FILTER_KEY),
+      tv: readStoredShelfFilter(LIBRARY_TV_FILTER_KEY),
+    };
+  });
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
   const [calendarFilters, setCalendarFilters] = useState<CalendarFilters>({
     mediaTypes: { movie: true, episode: true },
@@ -407,6 +480,17 @@ export function App() {
 
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [dashboardRefreshing, setDashboardRefreshing] = useState(false);
+  const [lastDashboardSuccessAt, setLastDashboardSuccessAt] = useState<number | null>(null);
+  /** Re-render header “Live · … ago” without waiting for the next poll. */
+  const [dashboardAgeTick, setDashboardAgeTick] = useState(0);
+
+  const titleSearchRef = useRef(titleSearch);
+  useEffect(() => {
+    titleSearchRef.current = titleSearch;
+  }, [titleSearch]);
+
+  const libraryDigestRef = useRef<string>("");
 
   const currentTab = getTabFromPath(location.pathname);
   const settingsSectionNames = useMemo(
@@ -421,6 +505,7 @@ export function App() {
   /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
   const defaultLandingPath =
     setupStatus != null && setupStatus.setup_complete ? "/activity" : "/setup";
+  const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
   const brandMeta = BRAND_META;
@@ -478,6 +563,21 @@ export function App() {
   }, [hasUnsavedChanges]);
 
   useEffect(() => {
+    try {
+      sessionStorage.setItem(LIBRARY_MOVIES_FILTER_KEY, libraryShelfFilters.movies);
+      sessionStorage.setItem(LIBRARY_TV_FILTER_KEY, libraryShelfFilters.tv);
+    } catch {
+      /* ignore */
+    }
+  }, [libraryShelfFilters]);
+
+  useEffect(() => {
+    if (lastDashboardSuccessAt == null) return;
+    const id = window.setInterval(() => setDashboardAgeTick((n) => n + 1), 5000);
+    return () => window.clearInterval(id);
+  }, [lastDashboardSuccessAt]);
+
+  useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!hasUnsavedChanges) return;
       event.preventDefault();
@@ -489,8 +589,22 @@ export function App() {
 
   useEffect(() => {
     let stopped = false;
+    let timeoutId = 0;
+    let showRefreshChrome = false;
 
-    async function refresh() {
+    const scheduleNext = () => {
+      window.clearTimeout(timeoutId);
+      const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
+      const delay = hidden ? REFRESH_MS_HIDDEN : REFRESH_MS_VISIBLE;
+      timeoutId = window.setTimeout(() => {
+        void runRefresh().then(() => {
+          if (!stopped) scheduleNext();
+        });
+      }, delay);
+    };
+
+    async function runRefresh() {
+      showRefreshChrome = false;
       try {
         if (currentTab === "setup") {
           // First visit: one full `getSettingsCurrent` (via loadSettings) so we do not block on status
@@ -533,16 +647,27 @@ export function App() {
           return;
         }
 
-        await loadStats(stopped, setStats);
+        showRefreshChrome = true;
+        if (!stopped) setDashboardRefreshing(true);
 
         if (currentTab === "activity") {
-          const rows = await getActivity(100);
-          if (!stopped) setActivity(rows || []);
+          await loadStats(stopped, setStats);
+          if (activityTabRef.current === "system") {
+            const rows = await getActivity(100);
+            if (!stopped) setActivity(rows || []);
+          }
           const placeholderRows = await getPlaceholderActivity(100);
           if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
-          const payload = await getLibrary(1000);
-          if (!stopped) setLibrary(payload.items || []);
+          const searchTrim = titleSearchRef.current.trim();
+          const useSummary = searchTrim.length === 0;
+          const payload = await getLibrary(1000, { summary: useSummary });
+          const next = payload.items || [];
+          const digest = digestLibraryItems(next);
+          if (digest !== libraryDigestRef.current) {
+            libraryDigestRef.current = digest;
+            if (!stopped) setLibrary(next);
+          }
         } else if (currentTab === "calendar") {
           const payload = await getCalendar(calendarMonth);
           if (!stopped && payload.ok) {
@@ -574,32 +699,98 @@ export function App() {
         if (!stopped) {
           setErrorMessage(null);
           setLoading(false);
+          setLastDashboardSuccessAt(Date.now());
         }
       } catch (err) {
         if (!stopped) {
           setErrorMessage(err instanceof Error ? err.message : "Dashboard refresh failed");
           setLoading(false);
         }
+      } finally {
+        if (showRefreshChrome && !stopped) {
+          setDashboardRefreshing(false);
+        }
       }
     }
 
-    refresh();
-    const timer = window.setInterval(refresh, REFRESH_MS);
+    void runRefresh().then(() => {
+      if (!stopped) scheduleNext();
+    });
+
+    const onVisibility = () => {
+      window.clearTimeout(timeoutId);
+      if (stopped) return;
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void runRefresh().then(() => {
+          if (!stopped) scheduleNext();
+        });
+      } else {
+        scheduleNext();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearTimeout(timeoutId);
     };
   }, [calendarMonth, currentTab, logLevel]);
+
+  /** When switching back to System Activity, refresh the feed (poll may have skipped it on Placeholder History). */
+  useEffect(() => {
+    if (currentTab !== "activity" || activityTab !== "system") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rows = await getActivity(100);
+        if (!cancelled) setActivity(rows || []);
+      } catch {
+        /* ignore — next poll will retry */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activityTab, currentTab]);
+
+  /** When the user searches from the header, load full rows (overview) so overview matches work. */
+  useEffect(() => {
+    const q = titleSearch.trim();
+    if (!q) return;
+
+    let stopped = false;
+    const handle = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const payload = await getLibrary(1000, { summary: false });
+          if (stopped) return;
+          const next = payload.items || [];
+          libraryDigestRef.current = digestLibraryItems(next);
+          setLibrary(next);
+        } catch {
+          /* ignore — periodic refresh will retry */
+        }
+      })();
+    }, 400);
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(handle);
+    };
+  }, [titleSearch]);
 
   useEffect(() => {
     if (library.length > 0) return;
     if (location.pathname === "/setup" || location.pathname.startsWith("/setup/")) return;
 
     let stopped = false;
-    getLibrary(1000)
+    getLibrary(1000, { summary: true })
       .then((payload) => {
         if (!stopped) {
-          setLibrary(payload.items || []);
+          const next = payload.items || [];
+          libraryDigestRef.current = digestLibraryItems(next);
+          setLibrary(next);
         }
       })
       .catch(() => {
@@ -752,18 +943,22 @@ export function App() {
     }
   }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload, settingsSectionNames]);
 
+  const libraryListShelf = getLibraryListShelf(location.pathname);
+
   const filteredLibrary = useMemo(() => {
+    if (!libraryListShelf) return [];
+    const shelfFilter = libraryListShelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
     return library
       .filter((item) => {
-      if (libraryFilter === "movie") return item.type === "movie";
-      if (libraryFilter === "series") return item.type === "series";
-      if (libraryFilter === "placeholders") return item.has_placeholder;
-      if (libraryFilter === "future") return item.is_future;
-      if (libraryFilter === "missing") return item.has_missing;
-      return true;
+        if (libraryListShelf === "movies" && item.type !== "movie") return false;
+        if (libraryListShelf === "tv" && item.type !== "series") return false;
+        if (shelfFilter === "placeholders") return item.has_placeholder;
+        if (shelfFilter === "future") return item.is_future;
+        if (shelfFilter === "missing") return item.has_missing;
+        return true;
       })
       .sort((left, right) => titleSortKey(left.title).localeCompare(titleSortKey(right.title)));
-  }, [library, libraryFilter]);
+  }, [library, libraryListShelf, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
     const filter = logFilter.trim().toLowerCase();
@@ -866,7 +1061,7 @@ export function App() {
   }
 
   function openLibraryDetail(item: { type: "movie" | "series"; item_id: number; title?: string }) {
-    if (currentTab === "library") {
+    if (getLibraryListShelf(location.pathname) !== null) {
       const currentScrollTop = getActiveScrollTop();
       sessionStorage.setItem("libraryScrollTop", String(currentScrollTop));
       sessionStorage.setItem("libraryScrollRestorePending", "1");
@@ -899,7 +1094,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (currentTab !== "library") return;
+    if (getLibraryListShelf(location.pathname) === null) return;
     if (sessionStorage.getItem("libraryScrollRestorePending") !== "1") return;
 
     const rawTop = sessionStorage.getItem("libraryScrollTop");
@@ -912,7 +1107,7 @@ export function App() {
     });
 
     sessionStorage.removeItem("libraryScrollRestorePending");
-  }, [currentTab, location.pathname, library.length]);
+  }, [location.pathname, library.length]);
 
   useEffect(() => {
     const isDetailRoute = location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
@@ -937,24 +1132,46 @@ export function App() {
     }
 
     const openLibraryWithFilter = (filter: LibraryFilter) => {
-      setLibraryFilter(filter);
-      navigate("/library");
+      if (filter === "movie") {
+        setLibraryShelfFilters((prev) => ({ ...prev, movies: "all" }));
+        navigate(LIBRARY_MOVIES_PATH);
+        return;
+      }
+      if (filter === "series") {
+        setLibraryShelfFilters((prev) => ({ ...prev, tv: "all" }));
+        navigate(LIBRARY_TV_PATH);
+        return;
+      }
+      if (filter === "all" || filter === "placeholders" || filter === "future" || filter === "missing") {
+        setLibraryShelfFilters((prev) => ({ ...prev, movies: filter }));
+        navigate(LIBRARY_MOVIES_PATH);
+      }
     };
 
     if (currentTab === "activity") return <ActivityPanel rows={activity} placeholderRows={placeholderActivity} activityTab={activityTab} onActivityTabChange={setActivityTab} stats={stats} brand={brand} themeMode={themeMode} onOpenLibraryFilter={openLibraryWithFilter} />;
 
     if (currentTab === "library") {
-      return (
-        <LibraryPanel
-          items={filteredLibrary}
-          activeFilter={libraryFilter}
-          onFilterChange={setLibraryFilter}
-          onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-          stats={stats}
-          brand={brand}
-          themeMode={themeMode}
-        />
-      );
+      const shelf = libraryListShelf;
+      if (shelf === "movies" || shelf === "tv") {
+        return (
+          <LibraryPanel
+            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
+            items={filteredLibrary}
+            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
+            onFilterChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
+            brand={brand}
+            themeMode={themeMode}
+          />
+        );
+      }
+      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
 
     if (currentTab === "calendar") {
@@ -1051,7 +1268,7 @@ export function App() {
     return <div className="empty">Unknown route.</div>;
   }
 
-  // Body class for global studio chrome (Placeholdarr UI: Simularr theme, light/dark)
+  // Body class for global studio chrome (Placeholdarr light/dark)
   useEffect(() => {
     document.body.className = themeMode === "light" ? "theme-studio-light" : "theme-studio-dark";
   }, [themeMode]);
@@ -1121,7 +1338,7 @@ export function App() {
     );
   }
 
-  // Studio shell (Placeholdarr app; Simularr visual layout; light vs dark via themeMode only)
+  // Studio shell (Placeholdarr layout; light vs dark via themeMode only)
   const isActive = (path: string) =>
     location.pathname === path || location.pathname.startsWith(`${path}/`);
   const isStudioGlass = themeMode !== "light";
@@ -1137,10 +1354,10 @@ export function App() {
     ? alphaColor("#0f172a", 0.22)
     : alphaColor("#94a3b8", 0.45);
   /** Matches Studio top-bar search/dropdown strip. */
-  const simularrTopBarBlue = "#1e2430";
-  const simularrHeaderBackground = isStudioGlass
-    ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${simularrTopBarBlue} 80%, ${simularrTopBarBlue} 100%)`
-    : `linear-gradient(to right, ${simularrTopBarBlue} 0%, ${simularrTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
+  const studioTopBarBlue = "#1e2430";
+  const studioHeaderBackground = isStudioGlass
+    ? `linear-gradient(to right, ${brandSemantic.topBarBand} 0%, ${brandSemantic.topBarBand} 50%, ${studioTopBarBlue} 80%, ${studioTopBarBlue} 100%)`
+    : `linear-gradient(to right, ${studioTopBarBlue} 0%, ${studioTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
 
   return (
       <div
@@ -1159,7 +1376,7 @@ export function App() {
         >
           <div
             className="flex h-16 w-full shrink-0 items-center justify-center border-b px-3"
-            style={{ backgroundColor: isStudioGlass ? brandSemantic.topBarBand : simularrTopBarBlue, borderBottomColor: topBarDivider }}
+            style={{ backgroundColor: isStudioGlass ? brandSemantic.topBarBand : studioTopBarBlue, borderBottomColor: topBarDivider }}
           >
             <BrandLogo
               brand={brand}
@@ -1171,35 +1388,113 @@ export function App() {
 
           {/* Nav */}
           <nav className="flex-1 space-y-1 font-brand-label pt-4">
-            {[
-              { icon: "analytics", label: "Activity", path: "/activity" },
-              { icon: "movie_filter", label: "Library", path: "/library" },
-              { icon: "calendar_month", label: "Calendar", path: "/calendar" },
-              { icon: "error", label: "Errors", path: "/errors" },
-              { icon: "terminal", label: "Logs", path: "/logs" },
-              { icon: "settings", label: "Settings", path: "/settings" },
-            ].map(({ icon, label, path }) =>
-              isActive(path) ? (
-                <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
-                  className={`flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4 ${isStudioGlass ? "" : "text-slate-900"}`}
-                  style={{
-                    backgroundColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.22 : 0.16),
-                    color: isStudioGlass ? brandSemantic.fg : brandSemantic.fgOnAccent,
-                    borderLeftColor: brandSemantic.accent,
-                  }}
-                >
-                  <span className="material-symbols-outlined">{icon}</span>
-                  <span>{label}</span>
-                </button>
-              ) : (
-                <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)}
-                  className={`flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group ${isStudioGlass ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]" : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]"}`}
-                >
-                  <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
-                  <span>{label}</span>
-                </button>
-              )
-            )}
+            {(() => {
+              const navActiveClass =
+                "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4";
+              const navInactiveClass =
+                "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group " +
+                (isStudioGlass
+                  ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
+              const navActiveStyle = (
+                isStudioGlass
+                  ? {
+                      backgroundColor: alphaColor(brandSemantic.accent, 0.22),
+                      color: brandSemantic.fg,
+                      borderLeftColor: brandSemantic.accent,
+                    }
+                  : {
+                      backgroundColor: brandSemantic.fg,
+                      color: brandSemantic.accent,
+                      borderLeftColor: brandSemantic.accent,
+                    }
+              ) as const;
+              const librarySectionActive = isActive("/library");
+              const moviesSubActive =
+                location.pathname === LIBRARY_MOVIES_PATH ||
+                location.pathname === `${LIBRARY_MOVIES_PATH}/` ||
+                location.pathname.startsWith("/library/movie/");
+              const tvSubActive = location.pathname === LIBRARY_TV_PATH || location.pathname.startsWith("/library/series/");
+              const subBase =
+                "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ";
+              const subActiveClass = isStudioGlass
+                ? "bg-[#1e2430] text-slate-100"
+                : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
+              const subInactiveClass = isStudioGlass
+                ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
+
+              return (
+                <>
+                  {isActive("/activity") ? (
+                    <button type="button" onClick={() => tryNavigate("/activity")} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">analytics</span>
+                      <span>Activity</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate("/activity")} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">analytics</span>
+                      <span>Activity</span>
+                    </button>
+                  )}
+
+                  {librarySectionActive ? (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  )}
+                  {currentTab === "library" ? (
+                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
+                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          movie
+                        </span>
+                        <span className="truncate">Movies</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
+                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          tv_gen
+                        </span>
+                        <span className="truncate">TV</span>
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {[
+                    { icon: "calendar_month", label: "Calendar", path: "/calendar" },
+                    { icon: "error", label: "Errors", path: "/errors" },
+                    { icon: "terminal", label: "Logs", path: "/logs" },
+                    { icon: "settings", label: "Settings", path: "/settings" },
+                  ].map(({ icon, label, path }) =>
+                    isActive(path) ? (
+                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass} style={navActiveStyle}>
+                        <span className="material-symbols-outlined">{icon}</span>
+                        <span>{label}</span>
+                      </button>
+                    ) : (
+                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navInactiveClass}>
+                        <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
+                        <span>{label}</span>
+                      </button>
+                    ),
+                  )}
+                </>
+              );
+            })()}
             {currentTab === "settings" && settingsSectionNames.length ? (
               <div className="mt-1 space-y-0.5 pl-6 pr-3">
                 {settingsSectionNames.map((name) => {
@@ -1216,7 +1511,7 @@ export function App() {
                             ? "bg-[#1e2430] text-slate-100"
                             : "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
                           : isSubActive
-                            ? "bg-sky-100 text-slate-900"
+                            ? "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]"
                             : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                       }`}
                     >
@@ -1238,7 +1533,7 @@ export function App() {
           {/* Topbar */}
           <header
             className="flex justify-between items-center w-full px-6 py-3 h-16 z-10 flex-shrink-0 border-b"
-            style={{ backgroundImage: simularrHeaderBackground, borderBottomColor: topBarDivider }}
+            style={{ backgroundImage: studioHeaderBackground, borderBottomColor: topBarDivider }}
           >
             <div className="flex items-center flex-1 max-w-xl">
               <div
@@ -1325,7 +1620,27 @@ export function App() {
                 ) : null}
               </div>
             </div>
-            <div className="flex items-center gap-3 ml-4">
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-3 ml-4">
+              <div
+                className={`hidden min-w-0 truncate text-right text-[10px] font-headline uppercase tracking-widest sm:block ${isStudioGlass ? "text-slate-500" : "text-slate-500"}`}
+                title="Dashboard poll status (slower when the tab is in the background)"
+                aria-live="polite"
+              >
+                {dashboardRefreshing ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full" style={{ backgroundColor: brandAccent.hex }} />
+                    Syncing
+                  </span>
+                ) : lastDashboardSuccessAt != null ? (
+                  <span>
+                    Live ·{" "}
+                    {(() => {
+                      void dashboardAgeTick;
+                      return formatDashboardDataAge(Date.now() - lastDashboardSuccessAt);
+                    })()}
+                  </span>
+                ) : null}
+              </div>
               <button
                 type="button"
                 onClick={() => setThemeMode((m) => (m === "dark" ? "light" : "dark"))}
@@ -1342,7 +1657,7 @@ export function App() {
           </header>
 
           {/* Setup banner */}
-          {!setupStatus?.setup_complete ? (
+          {!setupStatus?.setup_complete && !showReconnectPanel ? (
             <div className="border-b border-l-4 px-6 py-3 text-sm"
               style={{
                 backgroundColor: alphaColor(brandSemantic.accent2, isStudioGlass ? 0.14 : 0.1),
@@ -1361,10 +1676,47 @@ export function App() {
             className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : ""}`}
             style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
           >
-            {renderTabBody()}
+            {showReconnectPanel ? (
+              <section
+                className={`rounded-xl border p-8 md:p-12 ${
+                  isStudioGlass
+                    ? "border-cyan-500/30 bg-[#0f1520]/80 text-slate-100"
+                    : "border-cyan-200 bg-cyan-50 text-slate-900"
+                }`}
+              >
+                <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
+                  <div className="relative mb-6 h-16 w-16">
+                    <div
+                      className={`absolute inset-0 rounded-full border-2 ${
+                        isStudioGlass ? "border-cyan-400/30" : "border-cyan-400/40"
+                      }`}
+                    />
+                    <div
+                      className={`absolute inset-0 rounded-full border-2 border-t-transparent animate-spin ${
+                        isStudioGlass ? "border-cyan-300" : "border-cyan-600"
+                      }`}
+                    />
+                  </div>
+                  <h2 className="text-xl font-semibold md:text-2xl">Reconnecting to Placeholdarr</h2>
+                  <p className={`mt-3 max-w-2xl text-sm md:text-base ${isStudioGlass ? "text-slate-300" : "text-slate-700"}`}>
+                    Live dashboard data is temporarily unavailable. We are automatically retrying the API connection.
+                  </p>
+                  <div className="mt-6 flex items-center gap-2">
+                    <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse ${isStudioGlass ? "bg-cyan-300" : "bg-cyan-600"}`} />
+                    <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse [animation-delay:150ms] ${isStudioGlass ? "bg-cyan-300/80" : "bg-cyan-600/80"}`} />
+                    <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse [animation-delay:300ms] ${isStudioGlass ? "bg-cyan-300/60" : "bg-cyan-600/60"}`} />
+                  </div>
+                  <p className={`mt-6 text-xs ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>
+                    This panel will close automatically once the connection is restored.
+                  </p>
+                </div>
+              </section>
+            ) : (
+              renderTabBody()
+            )}
           </main>
 
-          {errorMessage ? (
+          {errorMessage && !showReconnectPanel ? (
             <div
               className={`mx-6 mb-4 rounded-lg border p-3 text-sm ${
                 isStudioGlass
@@ -1391,12 +1743,14 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
   const [hover, setHover] = useState(false);
   const yellow = accent.hex;
   const cyan = accent.icon;
+  /** Light mode: one branded slate rail + frame (matches title color), not mixed yellow/cyan borders. */
+  const lightFrame = accent.text;
   const baseStyle: React.CSSProperties = isLight
     ? {
-        borderLeft: `6px solid ${cyan}`,
-        borderTop: `2px solid ${alphaColor(yellow, 0.92)}`,
-        borderBottom: `2px solid ${alphaColor(yellow, 0.92)}`,
-        borderRight: `1px solid ${alphaColor(cyan, 0.35)}`,
+        borderLeft: `6px solid ${lightFrame}`,
+        borderTop: `2px solid ${lightFrame}`,
+        borderBottom: `2px solid ${lightFrame}`,
+        borderRight: `1px solid ${lightFrame}`,
         background: undefined,
         paddingLeft: 12,
         transition: "transform 0.18s ease, box-shadow 0.18s ease",
@@ -1417,7 +1771,7 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
     ? isLight
       ? {
           transform: "translateY(-6px)",
-          boxShadow: `0 14px 36px ${alphaColor(cyan, 0.2)}, 0 6px 20px ${alphaColor(yellow, 0.14)}`,
+          boxShadow: `0 14px 36px ${alphaColor(lightFrame, 0.16)}, 0 6px 20px ${alphaColor(lightFrame, 0.1)}`,
         }
       : { transform: "translateY(-6px)", boxShadow: `0 12px 36px ${alphaColor(yellow, 0.22)}` }
     : {};
@@ -1462,6 +1816,7 @@ function ActivityPanel(props: {
     : undefined;
   const placeholderRows = props.placeholderRows || [];
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [placeholderHistoryExpanded, setPlaceholderHistoryExpanded] = useState<Record<string, boolean>>({});
 
   const rowKey = (row: ActivityRow, idx: number) => `${row.type}-${String((row as any).id ?? row.time ?? idx)}`;
 
@@ -1591,10 +1946,10 @@ function ActivityPanel(props: {
           className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
           style={panelShellStyle}
         >
-          <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
+          <div className="flex justify-between items-start px-4 py-3 border-b border-[#424753]/30">
             <div>
-              <h2 className="text-xl font-bold text-white font-headline">Recent Operations</h2>
-              <p className="text-xs text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
+              <h2 className="text-lg font-bold text-white font-headline">Recent Operations</h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
             </div>
           </div>
           {!props.rows.length ? (
@@ -1602,13 +1957,18 @@ function ActivityPanel(props: {
           ) : (
             <>
               <div className="overflow-x-auto">
-              <table className="min-w-[520px] w-full">
+              <table className="min-w-[480px] w-full table-fixed">
+                <colgroup>
+                  <col className="w-[88px] sm:w-[104px]" />
+                  <col />
+                  <col className="w-[100px] sm:w-[112px]" />
+                </colgroup>
                 <thead>
                   <tr className="border-b border-[#424753]/20">
                     {["When", "Operation", "Status"].map(h => (
                       <th
                         key={h}
-                        className={`px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
+                        className={`px-3 py-2 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
                       >
                         {h}
                       </th>
@@ -1654,17 +2014,17 @@ function ActivityPanel(props: {
 
                     return (
                       <tr key={key} className="hover:bg-[#1e2430]/40 transition-colors">
-                        <td className="px-5 py-4 text-sm text-slate-400 whitespace-nowrap">{timeAgo(row.time || null)}</td>
-                        <td className="px-5 py-4 text-sm text-slate-300">
-                          <span className="font-medium">{displayName}</span>
-                          {detailLine && <div className="ui-field-description-compact mt-0.5">{detailLine}</div>}
-                          {errorMessage && <span className="text-xs text-red-300/70">{errorMessage}</span>}
+                        <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap align-top">{timeAgo(row.time || null)}</td>
+                        <td className="px-3 py-2 text-xs text-slate-300 min-w-0 align-top">
+                          <span className="font-medium line-clamp-2">{displayName}</span>
+                          {detailLine && <div className="ui-field-description-compact mt-0.5 line-clamp-2">{detailLine}</div>}
+                          {errorMessage && <span className="text-[11px] text-red-300/70">{errorMessage}</span>}
                           {hasExpandable && (
                             <div className="mt-2">
                               <button
                                 type="button"
                                 onClick={toggleProgress}
-                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
+                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
                               >
                                 <span className="material-symbols-outlined" style={{ fontSize: 13 }}>{isExpanded ? "expand_less" : "expand_more"}</span>
                                 {isExpanded ? "Hide details" : "Show details"}
@@ -1673,6 +2033,8 @@ function ActivityPanel(props: {
                                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                                   {progressSections.map((section: any, sidx: number) => {
                                     const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+                                    const sectionStatus = String(section?.status || "pending").toLowerCase();
+                                    const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped";
                                     return (
                                       <div key={`${key}-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
                                         <div className="mb-1 flex items-center justify-between">
@@ -1682,12 +2044,18 @@ function ActivityPanel(props: {
                                           </span>
                                         </div>
                                         <div className="space-y-0.5 text-[11px] text-slate-400">
-                                          {metrics.map((metric: any, midx: number) => (
-                                            <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
-                                              <span>{String(metric?.label || "Metric")}</span>
-                                              <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                                          {showMetrics ? (
+                                            metrics.map((metric: any, midx: number) => (
+                                              <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
+                                                <span>{String(metric?.label || "Metric")}</span>
+                                                <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                                              </div>
+                                            ))
+                                          ) : (
+                                            <div className="text-sky-300/80">
+                                              {sectionStatus === "working" ? "Running..." : "Waiting to start..."}
                                             </div>
-                                          ))}
+                                          )}
                                         </div>
                                       </div>
                                     );
@@ -1759,10 +2127,10 @@ function ActivityPanel(props: {
                             </div>
                           )}
                         </td>
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-2">
+                        <td className="px-3 py-2 align-top">
+                          <div className="flex items-center gap-1.5 justify-end sm:justify-start">
                             <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                            <span className={`text-xs font-medium font-headline uppercase tracking-wider ${statusColor}`}>
+                            <span className={`text-[10px] font-medium font-headline uppercase tracking-wider ${statusColor}`}>
                               {status === "done" || status === "success" ? "Complete" : status === "failed" ? "Failed" : "Running"}
                             </span>
                           </div>
@@ -1773,7 +2141,7 @@ function ActivityPanel(props: {
                 </tbody>
               </table>
               </div>
-              <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+              <div className="px-4 py-2 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
                 Showing {props.rows.length} items
               </div>
             </>
@@ -1784,17 +2152,22 @@ function ActivityPanel(props: {
       {/* Placeholder history table */}
       {tab === "placeholders" && (
         <div
-          className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
-          style={panelShellStyle}
+          className={`rounded-xl overflow-hidden mb-6 border ${isLight ? "border-slate-200/90" : "border-[#424753]/40 bg-[#171c22]"}`}
+          style={{
+            ...(isLight ? { backgroundColor: semantic.surfacePanel } : {}),
+            ...panelShellStyle,
+          }}
         >
-          <div className="flex justify-between items-start px-5 py-4 border-b border-[#424753]/30">
+          <div
+            className={`flex justify-between items-start px-5 py-4 border-b ${isLight ? "border-slate-200/80" : "border-[#424753]/30"}`}
+          >
             <div>
-              <h2 className="text-xl font-bold text-white font-headline">Placeholder History</h2>
-              <p className="text-xs text-slate-400 mt-0.5">{placeholderRows.length} recent placeholder changes</p>
+              <h2 className={`text-xl font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>Placeholder History</h2>
+              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>{placeholderRows.length} recent placeholder changes</p>
             </div>
           </div>
           {!placeholderRows.length ? (
-            <div className="p-10 text-center text-slate-500 text-sm">No placeholder history yet.</div>
+            <div className={`p-10 text-center text-sm ${isLight ? "text-slate-500" : "text-slate-500"}`}>No placeholder history yet.</div>
           ) : (
             <>
               <div className="overflow-hidden">
@@ -1806,7 +2179,7 @@ function ActivityPanel(props: {
                   <col className="w-[96px] sm:w-[132px]" />
                 </colgroup>
                 <thead>
-                  <tr className="border-b border-[#424753]/20">
+                  <tr className={`border-b ${isLight ? "border-slate-200/90" : "border-[#424753]/20"}`}>
                     {["When", "Content", "Action", "Reason"].map(h => (
                       <th
                         key={h}
@@ -1817,7 +2190,7 @@ function ActivityPanel(props: {
                     ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#424753]/15">
+                <tbody className={isLight ? "divide-y divide-slate-200/80" : "divide-y divide-[#424753]/15"}>
                   {placeholderRows.map((row, idx) => {
                     const actionColor =
                       row.action === "Created"
@@ -1831,30 +2204,166 @@ function ActivityPanel(props: {
                         : row.action === "Deleted"
                           ? "bg-orange-500/20"
                           : "bg-sky-500/20";
+                    const actionColorLight =
+                      row.action === "Created"
+                        ? "text-green-800"
+                        : row.action === "Deleted"
+                          ? "text-orange-900"
+                          : "text-sky-900";
+                    const actionBgLight =
+                      row.action === "Created"
+                        ? "bg-green-100"
+                        : row.action === "Deleted"
+                          ? "bg-orange-100"
+                          : "bg-sky-100";
                     const contentDisplay = row.series_title
                       ? `${row.series_title} • ${row.item_title}`
                       : row.item_title;
+                    const children = Array.isArray(row.children) ? row.children : [];
+                    const isBatch = children.length > 0;
+                    const batchKey = `ph-batch-${row.id}-${idx}`;
+                    const batchOpen = !!placeholderHistoryExpanded[batchKey];
 
                     return (
-                      <tr key={`placeholder-${row.id}-${idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
-                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-400 whitespace-nowrap truncate" title={timeAgo(row.time || null)}>{timeAgo(row.time || null)}</td>
-                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-300 min-w-0">
-                          <span className="font-medium block truncate" title={contentDisplay}>{contentDisplay}</span>
-                          <div className="text-[10px] text-slate-500 mt-0.5 truncate hidden lg:block" title={row.path || undefined}>{row.path}</div>
-                        </td>
-                        <td className="px-2 sm:px-3 py-4">
-                          <span className={`inline-flex items-center px-2 py-1 rounded text-[10px] sm:text-xs font-medium font-headline uppercase tracking-wider whitespace-nowrap ${actionColor} ${actionBg}`}>
-                            {row.action}
-                          </span>
-                        </td>
-                        <td className="px-2 sm:px-3 py-4 text-xs sm:text-sm text-slate-400 truncate" title={row.reason || undefined}>{row.reason}</td>
-                      </tr>
+                      <Fragment key={`placeholder-${row.id}-${idx}`}>
+                        <tr
+                          className={`transition-colors ${isBatch ? "cursor-pointer" : ""} ${isLight ? "hover:bg-slate-50/90" : "hover:bg-[#1e2430]/40"}`}
+                          onClick={
+                            isBatch
+                              ? () =>
+                                  setPlaceholderHistoryExpanded((prev) => ({
+                                    ...prev,
+                                    [batchKey]: !prev[batchKey],
+                                  }))
+                              : undefined
+                          }
+                        >
+                          <td
+                            className={`px-2 sm:px-3 py-4 text-xs sm:text-sm whitespace-nowrap truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}
+                            title={timeAgo(row.time || null)}
+                          >
+                            {timeAgo(row.time || null)}
+                          </td>
+                          <td className={`px-2 sm:px-3 py-4 text-xs sm:text-sm min-w-0 ${isLight ? "text-slate-800" : "text-slate-300"}`}>
+                            <div className="flex items-start gap-1.5 min-w-0">
+                              {isBatch ? (
+                                <span
+                                  className={`material-symbols-outlined flex-none transition-transform mt-0.5 ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                  style={{ fontSize: 18, transform: batchOpen ? "rotate(90deg)" : "rotate(0deg)" }}
+                                  aria-hidden
+                                >
+                                  chevron_right
+                                </span>
+                              ) : null}
+                              <div className="min-w-0 flex-1">
+                                <span className="font-medium block truncate" title={contentDisplay}>
+                                  {contentDisplay}
+                                </span>
+                                {row.path ? (
+                                  <div
+                                    className={`text-[10px] mt-0.5 truncate hidden lg:block ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                    title={row.path}
+                                  >
+                                    {row.path}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-2 sm:px-3 py-4">
+                            <span
+                              className={`inline-flex items-center px-2 py-1 rounded text-[10px] sm:text-xs font-medium font-headline uppercase tracking-wider whitespace-nowrap ${
+                                isLight ? `${actionColorLight} ${actionBgLight}` : `${actionColor} ${actionBg}`
+                              }`}
+                            >
+                              {row.action}
+                            </span>
+                          </td>
+                          <td
+                            className={`px-2 sm:px-3 py-4 text-xs sm:text-sm truncate ${isLight ? "text-slate-600" : "text-slate-400"}`}
+                            title={row.reason || undefined}
+                          >
+                            {row.reason}
+                          </td>
+                        </tr>
+                        {isBatch && batchOpen ? (
+                          <tr
+                            key={`${batchKey}-detail`}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#12161c" }}
+                          >
+                            <td
+                              colSpan={4}
+                              className={`p-0 border-t align-top ${isLight ? "border-slate-200/90" : "border-[#424753]/25"}`}
+                            >
+                              <div className="px-3 sm:px-4 py-3.5 pl-9 sm:pl-11 space-y-4">
+                                {children.map((child: any, cidx: number) => {
+                                  const childContent = child.series_title
+                                    ? `${child.series_title} • ${child.item_title || ""}`
+                                    : child.item_title || "";
+                                  const statusLabel = String(child.status || "").trim() || "Unknown";
+                                  const railColor = isLight ? alphaColor(semantic.accent2, 0.55) : alphaColor(semantic.accentIce, 0.4);
+                                  return (
+                                    <div
+                                      key={`${batchKey}-c-${child.id}-${cidx}`}
+                                      className="min-w-0 border-l-2 pl-3.5"
+                                      style={{ borderLeftColor: railColor }}
+                                      title={child.reason ? String(child.reason) : undefined}
+                                    >
+                                      <div className="flex items-start justify-between gap-3 min-w-0">
+                                        <div
+                                          className={`text-xs sm:text-sm font-medium truncate min-w-0 flex-1 ${isLight ? "text-slate-900" : "text-slate-100"}`}
+                                          title={childContent}
+                                        >
+                                          {childContent}
+                                        </div>
+                                        <div className="flex-none flex flex-col items-end gap-1 text-right shrink-0 max-w-[min(12.5rem,46%)] sm:max-w-[14rem]">
+                                          <span
+                                            className="text-[9px] font-headline uppercase tracking-wider leading-tight"
+                                            style={{ color: semantic.fgMuted }}
+                                          >
+                                            Status updated to
+                                          </span>
+                                          <span
+                                            className="text-[11px] sm:text-xs font-headline font-semibold uppercase tracking-wide px-2.5 py-1 rounded-md border"
+                                            style={{
+                                              color: isLight ? semantic.fgOnAccent : semantic.accent,
+                                              backgroundColor: isLight
+                                                ? alphaColor(semantic.accent, 0.2)
+                                                : alphaColor(semantic.accent, 0.14),
+                                              borderColor: isLight
+                                                ? alphaColor(semantic.accent, 0.42)
+                                                : alphaColor(semantic.accent, 0.28),
+                                            }}
+                                          >
+                                            {statusLabel}
+                                          </span>
+                                        </div>
+                                      </div>
+                                      {child.path ? (
+                                        <div
+                                          className={`text-[10px] mt-1.5 truncate font-mono ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                          title={child.path}
+                                        >
+                                          {child.path}
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
                     );
                   })}
                 </tbody>
               </table>
               </div>
-              <div className="px-5 py-3 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+              <div
+                className={`px-5 py-3 border-t text-[10px] font-headline uppercase tracking-widest ${isLight ? "border-slate-200/90 text-slate-500" : "border-[#424753]/20 text-slate-500"}`}
+              >
                 Showing {placeholderRows.length} items
               </div>
             </>
@@ -1893,18 +2402,17 @@ function ActivityPanel(props: {
 }
 
 function LibraryPanel(props: {
+  shelfTitle: string;
   items: LibraryItem[];
-  activeFilter: LibraryFilter;
-  onFilterChange: (value: LibraryFilter) => void;
+  activeFilter: LibraryShelfFilter;
+  onFilterChange: (value: LibraryShelfFilter) => void;
   onOpenDetail: (item: LibraryItem) => void;
-  stats: StatsResponse | null;
   brand: Brand; themeMode: ThemeMode;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
-  const filters: Array<{ id: LibraryFilter; label: string }> = [
+  const isLight = props.themeMode === "light";
+  const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
     { id: "all", label: "All" },
-    { id: "movie", label: "Movies" },
-    { id: "series", label: "Series" },
     { id: "placeholders", label: "Placeholders" },
     { id: "future", label: "Future" },
     { id: "missing", label: "Missing" },
@@ -1927,11 +2435,50 @@ function LibraryPanel(props: {
   }, [props.items]);
 
   function statusBadge(item: LibraryItem) {
-    if (item.has_missing) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white font-headline uppercase tracking-wider">Missing</span>;
-    if (item.instance_label) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white font-headline uppercase tracking-wider" style={{ backgroundColor: accent.hex }}>{item.instance_label}</span>;
-    if (item.has_placeholder) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-700 text-white font-headline uppercase tracking-wider">Placeholder</span>;
-    if (item.is_future) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-600 text-white font-headline uppercase tracking-wider">Future</span>;
-    if (item.has_file) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-500 text-white font-headline uppercase tracking-wider">1080p</span>;
+    if (item.has_missing) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-red-50 text-red-800 border-red-200" : "bg-red-600 text-white border-transparent"
+          }`}
+        >
+          Missing
+        </span>
+      );
+    }
+    if (item.has_placeholder) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-teal-50 text-teal-900 border-teal-200" : "bg-teal-700 text-white border-transparent"
+          }`}
+        >
+          Placeholder
+        </span>
+      );
+    }
+    if (item.is_future) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-600 text-white border-transparent"
+          }`}
+        >
+          Future
+        </span>
+      );
+    }
+    if (item.has_file) {
+      return (
+        <span
+          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-500 text-white border-transparent"
+          }`}
+        >
+          1080p
+        </span>
+      );
+    }
     return null;
   }
 
@@ -1940,16 +2487,24 @@ function LibraryPanel(props: {
       {/* Header + filter tabs */}
       <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
         <div>
-          <h2 className="text-3xl font-black text-white tracking-tight font-headline">Library Explorer</h2>
-          <p className="text-sm text-slate-400 mt-1">Showing {props.items.length} items matching your criteria</p>
+          <h2 className={`text-3xl font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
+          <p className={`text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
         </div>
-        <div className="flex flex-wrap gap-1 bg-[#171c22] p-1 rounded-lg border border-[#424753]/40">
+        <div
+          className={`flex flex-wrap gap-1 p-1 rounded-lg border ${
+            isLight ? "bg-white border-slate-200/90 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           {filters.map(f => (
             <button key={f.id} type="button" onClick={() => props.onFilterChange(f.id)}
               className={`px-4 py-1.5 rounded-md text-xs font-headline uppercase tracking-wider transition-colors ${
                 f.id === props.activeFilter
-                    ? "text-white font-semibold"
-                  : "text-slate-400 hover:text-slate-200"
+                  ? isLight
+                    ? "text-slate-900 font-semibold"
+                    : "text-white font-semibold"
+                  : isLight
+                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                    : "text-slate-400 hover:text-slate-200"
                   }`} style={f.id === props.activeFilter ? { backgroundColor: accent.hex } : undefined}>
               {f.label}
             </button>
@@ -1959,20 +2514,34 @@ function LibraryPanel(props: {
 
       {/* Poster grid with alphabet sections */}
       {props.items.length === 0 ? (
-        <div className="text-center text-slate-500 py-16">No library items match the current filter.</div>
+        <div className={`text-center py-16 ${isLight ? "text-slate-600" : "text-slate-500"}`}>No library items match the current filter.</div>
       ) : (
         <div className="flex items-start gap-4 mb-8">
           <div className="flex-1 space-y-8">
             {groupedItems.letters.map((letter) => (
-              <div key={letter} ref={(el) => { sectionRefs.current[letter] = el; }}>
-                <div className="mb-3 text-xs font-headline uppercase tracking-widest text-slate-500 border-b border-[#424753]/25 pb-2">{letter}</div>
+              <div
+                key={letter}
+                ref={(el) => {
+                  sectionRefs.current[letter] = el;
+                }}
+                style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
+              >
+                <div
+                  className={`mb-3 text-xs font-headline uppercase tracking-widest border-b pb-2 ${
+                    isLight ? "text-slate-700 border-slate-200" : "text-slate-500 border-[#424753]/25"
+                  }`}
+                >
+                  {letter}
+                </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                   {(groupedItems.groups[letter] || []).map((item) => (
                     <button
                       key={item.id}
                       type="button"
                       onClick={() => props.onOpenDetail(item)}
-                      className="relative isolate rounded-xl overflow-hidden bg-[#1e2430] group cursor-pointer text-left transition-transform hover:scale-[1.02]"
+                      className={`relative isolate rounded-xl overflow-hidden group cursor-pointer text-left transition-transform hover:scale-[1.02] ${
+                        isLight ? "bg-white shadow-md shadow-slate-900/8" : "bg-[#1e2430]"
+                      }`}
                       style={{
                         aspectRatio: "2/3",
                         border: `2px solid ${accent.hex}`,
@@ -1986,19 +2555,19 @@ function LibraryPanel(props: {
                         />
                       ) : null}
                       <div
-                        className="absolute pointer-events-none bottom-0 left-0 right-0 h-[34%]"
+                        className={`absolute pointer-events-none bottom-0 left-0 right-0 ${isLight ? "h-[48%]" : "h-[34%]"}`}
                         style={{
-                          background:
-                            "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
+                          background: isLight
+                            ? "linear-gradient(180deg, rgba(238,243,248,0) 0%, rgba(238,243,248,0.42) 38%, rgba(238,243,248,0.88) 68%, rgba(238,243,248,1) 88%, rgba(238,243,248,1) 100%)"
+                            : "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
                         }}
                       />
                       <div className="absolute top-2 left-2">{statusBadge(item)}</div>
-                      <div className="absolute bottom-0 left-0 right-0 p-3">
-                        <div className="font-bold text-white text-sm leading-tight truncate">{item.title}</div>
-                        <div className="mt-0.5 flex items-center justify-between gap-2">
-                          <div className="text-[11px] text-slate-400">{item.year || "--"}</div>
-                          <div className="px-1.5 py-0.5 rounded bg-black/45 border border-white/20 text-[9px] text-slate-200 font-headline uppercase tracking-wider">{item.type}</div>
+                      <div className={`absolute bottom-0 left-0 right-0 flex flex-col gap-1 px-3 ${isLight ? "pb-3 pt-12" : "pb-3 pt-8"}`}>
+                        <div className="text-xs font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
+                          {item.year || "—"}
                         </div>
+                        <div className={`font-bold text-sm leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
                       </div>
                     </button>
                   ))}
@@ -2006,13 +2575,21 @@ function LibraryPanel(props: {
               </div>
             ))}
           </div>
-          <div className="hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border border-[#424753]/35 bg-[#111722]/90 px-2 py-2">
+          <div
+            className={`hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border px-2 py-2 ${
+              isLight ? "border-slate-200 bg-white/95 shadow-sm backdrop-blur-sm" : "border-[#424753]/35 bg-[#111722]/90"
+            }`}
+          >
             {groupedItems.letters.map((letter) => (
               <button
                 key={`alpha-${letter}`}
                 type="button"
                 onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                className="w-6 h-6 rounded text-[10px] font-headline font-bold text-slate-400 hover:text-white hover:bg-[#293346] transition-colors"
+                className={`w-6 h-6 rounded text-[10px] font-headline font-bold transition-colors ${
+                  isLight
+                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                    : "text-slate-400 hover:text-white hover:bg-[#293346]"
+                }`}
                 title={`Jump to ${letter}`}
               >
                 {letter}
@@ -2024,19 +2601,27 @@ function LibraryPanel(props: {
 
       {/* Footer stat cards */}
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
+        <div
+          className={`rounded-xl border p-5 ${
+            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Total Items</div>
-            <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 18 }}>storage</span>
+            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Total Items</div>
+            <span className={`material-symbols-outlined ${isLight ? "text-slate-400" : "text-slate-600"}`} style={{ fontSize: 18 }}>storage</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{props.items.length}</div>
+          <div className={`text-3xl font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.items.length}</div>
         </div>
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
+        <div
+          className={`rounded-xl border p-5 ${
+            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Missing Assets</div>
+            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Missing Assets</div>
             <span className="material-symbols-outlined text-yellow-500" style={{ fontSize: 18 }}>warning</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{totalMissing}</div>
+          <div className={`text-3xl font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{totalMissing}</div>
           {totalMissing > 0 && (
             <button type="button" onClick={() => props.onFilterChange("missing")}
               className="mt-3 text-xs font-headline uppercase tracking-wider flex items-center gap-1" style={{ color: accent.icon }}>
@@ -2044,16 +2629,20 @@ function LibraryPanel(props: {
             </button>
           )}
         </div>
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
+        <div
+          className={`rounded-xl border p-5 ${
+            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
+          }`}
+        >
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Sync Status</div>
+            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Sync Status</div>
             <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.hex }}>sync</span>
           </div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className="text-white font-bold font-headline text-sm">Active</span>
+            <span className={`font-bold font-headline text-sm ${isLight ? "text-slate-900" : "text-white"}`}>Active</span>
           </div>
-          <div className="text-xs text-slate-400">Library indexed</div>
+          <div className={`text-xs ${isLight ? "text-slate-600" : "text-slate-400"}`}>Library indexed</div>
         </div>
       </div>
     </div>
@@ -2179,6 +2768,287 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   );
 }
 
+function detailArrInstanceLinks(
+  payload: { arr_instance_links?: ArrInstanceOpenLink[]; arr_link?: string | null },
+  singleFallbackLabel: string,
+): { label: string; url: string }[] {
+  if (payload.arr_instance_links?.length) {
+    return payload.arr_instance_links.map((x) => ({ label: x.label, url: x.url }));
+  }
+  if (payload.arr_link) return [{ label: singleFallbackLabel, url: payload.arr_link }];
+  return [];
+}
+
+/** Logo well for movie file-state strip — matches onboarding ARR integration icon boxes (`#1e2430` + ring). */
+const MOVIE_FILE_STATE_RADARR_LOGO_WELL: CSSProperties = {
+  backgroundColor: "#1e2430",
+  border: "2px solid rgba(250, 204, 21, 0.78)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+const MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL: CSSProperties = {
+  backgroundColor: "#1e2430",
+  border: "2px solid rgba(251, 191, 36, 0.78)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+/** Sonarr icon well — matches onboarding ``ONBOARDING_ARR_VISUAL.sonarr`` ring. */
+const SERIES_FILE_STATE_SONARR_LOGO_WELL: CSSProperties = {
+  backgroundColor: "#1e2430",
+  border: "2px solid rgba(56, 189, 248, 0.8)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+function seriesFileStateSonarrFileTotal(present: boolean, episodeFiles: number): string {
+  if (!present) return "-";
+  return String(Math.max(0, Math.floor(Number.isFinite(episodeFiles) ? episodeFiles : 0)));
+}
+
+function movieFileStateRadarrStatus(row: { present: boolean; has_file_known: boolean; has_file: boolean }): string {
+  if (!row.present) return "-";
+  if (!row.has_file_known) return "-";
+  return row.has_file ? "Yes" : "No";
+}
+
+/**
+ * Onboarding-style integration tiles: fixed navy icon wells, **Placeholdarr** first (placeholder on disk),
+ * then each Radarr instance (name under logo, whole tile links to Radarr). Outer frame follows light/dark.
+ */
+function MovieFileStateSection(props: {
+  links: ArrInstanceOpenLink[] | undefined;
+  arrLink?: string | null;
+  hasFile: boolean;
+  hasPlaceholder: boolean;
+  instanceLabel?: string | null;
+  isLight: boolean;
+  brand: Brand;
+  accentHex: string;
+  radarrIconSrc: string;
+}) {
+  const instanceLabel = String(props.instanceLabel || "Radarr").trim() || "Radarr";
+  const rawMovieLinks = props.links;
+  const linkRows: {
+    label: string;
+    url: string;
+    present: boolean;
+    has_file: boolean;
+    has_file_known: boolean;
+    has_placeholder: boolean;
+  }[] = Array.isArray(rawMovieLinks) && rawMovieLinks.length
+    ? rawMovieLinks.map((l) => ({
+        label: l.label,
+        url: l.url,
+        present: l.present !== false,
+        has_file: l.has_file === true,
+        has_file_known: typeof l.has_file === "boolean",
+        has_placeholder: Boolean(l.has_placeholder),
+      }))
+    : rawMovieLinks == null
+      ? (() => {
+          const u = String(props.arrLink || "").trim();
+          if (!u) return [];
+          return [
+            {
+              label: instanceLabel,
+              url: u,
+              present: true,
+              has_file: props.hasFile,
+              has_file_known: true,
+              has_placeholder: props.hasPlaceholder,
+            },
+          ];
+        })()
+      : [];
+
+  const placeholderOnDisk =
+    Boolean(props.hasPlaceholder) || linkRows.some((r) => r.has_placeholder);
+  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
+
+  return (
+    <div
+      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
+        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
+      }`}
+    >
+      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
+        <div
+          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+          role="group"
+          aria-label="Placeholder dummy on disk"
+        >
+          <div
+            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
+            aria-hidden
+          >
+            <BrandLogo
+              brand={props.brand}
+              accentHex={props.accentHex}
+              variant="yellow"
+              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
+            />
+          </div>
+          <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{brandLabel}</div>
+          <div className="movie-file-state-tile-status text-lg font-bold font-headline tabular-nums leading-none">
+            {placeholderOnDisk ? "Yes" : "No"}
+          </div>
+        </div>
+        {linkRows.map((row, idx) => {
+          const status = movieFileStateRadarrStatus(row);
+          return (
+            <a
+              key={`${row.url}-${idx}`}
+              href={row.url}
+              target="_blank"
+              rel="noreferrer"
+              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+            >
+              <div
+                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+                style={MOVIE_FILE_STATE_RADARR_LOGO_WELL}
+                aria-hidden
+              >
+                <img src={props.radarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
+              </div>
+              <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{row.label}</div>
+              <div className="movie-file-state-tile-status text-lg font-bold font-headline tabular-nums leading-none">{status}</div>
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Same integration strip as movie detail: **Placeholdarr** first, then each **Sonarr** instance.
+ * **Placeholdarr** shows total **placeholder** episode count; each Sonarr tile shows **downloaded episode file**
+ * count, or ``-`` when ``present: false``. Uses ``arr_instance_links`` whenever the API sends a non-empty array
+ * (do not fall back to ``arr_link`` when the array is empty — that would hide padded multi-instance rows).
+ */
+function SeriesFileStateSection(props: {
+  seasons: SeriesSeasonDetail[];
+  links: ArrInstanceOpenLink[] | undefined;
+  arrLink?: string | null;
+  instanceLabel?: string | null;
+  isLight: boolean;
+  brand: Brand;
+  accentHex: string;
+  sonarrIconSrc: string;
+}) {
+  const instanceLabel = String(props.instanceLabel || "Sonarr").trim() || "Sonarr";
+  const rawLinks = props.links;
+  const linkRows: { label: string; url: string; present: boolean; episode_files: number }[] = Array.isArray(rawLinks) && rawLinks.length
+    ? rawLinks.map((l) => ({
+        label: l.label,
+        url: l.url,
+        present: l.present !== false,
+        episode_files: typeof l.episode_files === "number" ? l.episode_files : 0,
+      }))
+    : rawLinks == null
+      ? (() => {
+          const u = String(props.arrLink || "").trim();
+          if (!u) return [];
+          const files = (props.seasons || []).reduce((a, s) => a + Number(s.episode_files || 0), 0);
+          return [{ label: instanceLabel, url: u, present: true, episode_files: files }];
+        })()
+      : [];
+
+  const aggPlaceholders = useMemo(
+    () => (props.seasons || []).reduce((a, s) => a + Number(s.episode_placeholders || 0), 0),
+    [props.seasons],
+  );
+
+  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
+  const phTotalStr = String(Math.max(0, Math.floor(aggPlaceholders)));
+
+  return (
+    <div
+      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
+        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
+      }`}
+    >
+      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
+        <div
+          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+          role="group"
+          aria-label="Episodes with placeholder files"
+        >
+          <div
+            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
+            aria-hidden
+          >
+            <BrandLogo
+              brand={props.brand}
+              accentHex={props.accentHex}
+              variant="yellow"
+              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
+            />
+          </div>
+          <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{brandLabel}</div>
+          <div className="movie-file-state-tile-status text-2xl font-black font-headline tabular-nums leading-none">{phTotalStr}</div>
+          <div className="movie-file-state-tile-caption mt-0.5 text-[10px] font-headline font-medium uppercase tracking-wider">Episodes</div>
+        </div>
+        {linkRows.map((row, idx) => {
+          const totalStr = seriesFileStateSonarrFileTotal(row.present, row.episode_files);
+          return (
+            <a
+              key={`${row.label}-${row.url}-${idx}`}
+              href={row.url}
+              target="_blank"
+              rel="noreferrer"
+              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
+            >
+              <div
+                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
+                style={SERIES_FILE_STATE_SONARR_LOGO_WELL}
+                aria-hidden
+              >
+                <img src={props.sonarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
+              </div>
+              <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{row.label}</div>
+              <div className="movie-file-state-tile-status text-2xl font-black font-headline tabular-nums leading-none">{totalStr}</div>
+              <div className="movie-file-state-tile-caption mt-0.5 text-[10px] font-headline font-medium uppercase tracking-wider">Episodes</div>
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DetailArrLaunchBar(props: {
+  links: { label: string; url: string }[];
+  iconSrc: string;
+  heading: string;
+  isLight: boolean;
+}) {
+  if (!props.links.length) return null;
+  return (
+    <div className={`rounded-xl border p-5 md:p-6 ${props.isLight ? "bg-white border-[#d7e2f0] shadow-sm" : "bg-[#171c22] border-[#424753]/40"}`}>
+      <h3 className={`text-[11px] font-headline uppercase tracking-widest ${props.isLight ? "text-slate-500" : "text-slate-400"}`}>{props.heading}</h3>
+      <div className="mt-4 flex flex-wrap gap-3">
+        {props.links.map((lnk) => (
+          <a
+            key={lnk.url}
+            href={lnk.url}
+            target="_blank"
+            rel="noreferrer"
+            className="detail-arr-instance-launch group inline-flex min-w-[12.5rem] flex-1 items-center gap-3 rounded-xl border border-[#424753]/50 px-4 py-3 transition-colors hover:border-[#424753] sm:max-w-sm sm:flex-none"
+          >
+            <img src={props.iconSrc} alt="" className="h-9 w-9 shrink-0 object-contain" decoding="async" />
+            <span className="detail-arr-instance-launch__label min-w-0 flex-1 font-headline text-sm font-semibold leading-tight text-slate-100">{lnk.label}</span>
+            <span className="material-symbols-outlined shrink-0 text-slate-500 transition-colors group-hover:text-slate-300" style={{ fontSize: 18 }}>
+              open_in_new
+            </span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeMode: ThemeMode }) {
   const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
@@ -2193,46 +3063,43 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           className="absolute inset-0"
           style={{
             background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 38%, rgba(238,243,248,0.28) 70%, rgba(238,243,248,0.64) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)",
+              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
+              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
           }}
         />
       </div>
 
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8">
+        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
           <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
             {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
           </div>
-          <div className="flex-1 pb-1 md:pb-2">
-            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-            <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {payload.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.year}</span>}
-              <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text }}>Movie</span>
-              {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
-              {payload.has_placeholder && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-teal-600/30 border border-teal-500/30 text-teal-300">Placeholder</span>}
-              {payload.has_file
-                ? <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
-                : <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>}
-            </div>
-            {payload.arr_link && (
-              <div className="mt-4">
-                <a href={payload.arr_link} target="_blank" rel="noreferrer"
-                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider transition-colors border ${isLight ? "bg-white border-[#d7e2f0] text-slate-800 hover:bg-slate-50" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}>
-                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
-                  Open in Radarr
-                </a>
+          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
+            {payload.year ? (
+              <div className="text-xl font-semibold tabular-nums md:text-2xl" style={{ color: accent.icon }}>
+                {payload.year}
               </div>
-            )}
+            ) : null}
+            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
           </div>
         </div>
 
         {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
+        <MovieFileStateSection
+          links={payload.arr_instance_links}
+          arrLink={payload.arr_link}
+          hasFile={payload.has_file}
+          hasPlaceholder={payload.has_placeholder}
+          instanceLabel={payload.instance_label}
+          isLight={isLight}
+          brand={props.brand}
+          accentHex={accent.hex}
+          radarrIconSrc={radarrIcon}
+        />
+
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {[
-            { label: "Status", value: payload.status },
-            { label: "Determination", value: payload.determination },
             { label: "Quality", value: payload.radarr_quality },
             { label: "Theatrical", value: payload.theater_release_date },
             { label: "Digital", value: payload.digital_release_date },
@@ -2244,6 +3111,7 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
             </div>
           ))}
         </div>
+
       </div>
     </div>
   );
@@ -2267,57 +3135,52 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           className="absolute inset-0"
           style={{
             background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 38%, rgba(238,243,248,0.28) 70%, rgba(238,243,248,0.64) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 38%, rgba(15,20,25,0.20) 70%, rgba(15,20,25,0.58) 100%)",
+              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
+              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
           }}
         />
       </div>
 
       <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8">
+        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
           <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
             {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
           </div>
-          <div className="flex-1 pb-1 md:pb-2">
-            <h1 className={`text-4xl md:text-6xl lg:text-7xl font-black font-headline tracking-tight leading-[0.95] ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-            <div className="flex items-center gap-3 mt-4 flex-wrap">
-              {payload.year && <span className={`text-lg ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.year}</span>}
-              {payload.network && <span className={`text-lg ${isLight ? "text-slate-600" : "text-slate-300"}`}>{payload.network}</span>}
-              <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase bg-orange-600/20 border border-orange-500/30 text-orange-300">Series</span>
-              {payload.instance_label && <span className="px-2.5 py-1 rounded text-xs font-bold font-headline uppercase text-white" style={{ backgroundColor: accent.hex }}>{payload.instance_label}</span>}
-              {payload.sonarr_monitored != null && (
-                <span className={`px-2.5 py-1 rounded text-xs font-bold font-headline uppercase ${payload.sonarr_monitored ? "" : "bg-slate-600/30 border border-slate-500/30 text-slate-400"}`}
-                  style={payload.sonarr_monitored ? { backgroundColor: alphaColor(accent.hex, 0.2), border: `1px solid ${alphaColor(accent.hex, 0.35)}`, color: accent.text } : undefined}>
-                  {payload.sonarr_monitored ? "Monitored" : "Unmonitored"}
-                </span>
-              )}
-            </div>
-            {payload.arr_link && (
-              <div className="mt-4">
-                <a href={payload.arr_link} target="_blank" rel="noreferrer"
-                  className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider transition-colors border ${isLight ? "bg-white border-[#d7e2f0] text-slate-800 hover:bg-slate-50" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}>
-                  <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
-                  Open in Sonarr
-                </a>
+          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
+            {payload.year ? (
+              <div className="text-xl font-semibold tabular-nums md:text-2xl" style={{ color: accent.icon }}>
+                {payload.year}
               </div>
-            )}
+            ) : null}
+            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
           </div>
         </div>
 
         {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+        <SeriesFileStateSection
+          seasons={payload.seasons || []}
+          links={payload.arr_instance_links}
+          arrLink={payload.arr_link}
+          instanceLabel={payload.instance_label}
+          isLight={isLight}
+          brand={props.brand}
+          accentHex={accent.hex}
+          sonarrIconSrc={sonarrIcon}
+        />
+
+        <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
           {[
-            { label: "Status", value: payload.status },
-            { label: "Sonarr Status", value: payload.sonarr_status },
             { label: "First Aired", value: payload.first_aired },
             { label: "Network", value: payload.network },
-          ].filter(m => m.value).map(m => (
-            <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-              <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className={`text-base font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
-            </div>
-          ))}
+          ]
+            .filter((m) => m.value != null && String(m.value).length > 0)
+            .map((m) => (
+              <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
+                <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
+                <div className={`text-base font-semibold tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
+              </div>
+            ))}
         </div>
 
         <div className="mb-4">
@@ -2530,7 +3393,14 @@ function CalendarPanel(props: {
     return movieText || props.selectedItem.reason || "Select a release on the calendar to inspect it here.";
   })();
 
-  const spotlightArrLink = props.spotlight?.arr_link || props.selectedItem?.arr_link;
+  const spotlightArrLinks: { label: string; url: string }[] = (() => {
+    const sp = props.spotlight;
+    if (sp && Array.isArray(sp.arr_instance_links) && sp.arr_instance_links.length) {
+      return sp.arr_instance_links.map((x) => ({ label: x.label, url: x.url }));
+    }
+    const single = sp?.arr_link || props.selectedItem?.arr_link;
+    return single ? [{ label: spotlightMovie ? "Radarr" : spotlightSeries ? "Sonarr" : "Open app", url: single }] : [];
+  })();
   const spotlightPoster = props.spotlight?.poster_url || null;
   const spotlightMeta = props.selectedItem ? formatCalendarSpotlightMeta(props.selectedItem) : [];
   const heroDateParts = props.selectedItem ? formatCalendarHeroDateParts(props.selectedItem.release_date) : null;
@@ -2843,17 +3713,18 @@ function CalendarPanel(props: {
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                     Full Detail
                   </button>
-                  {spotlightArrLink ? (
+                  {spotlightArrLinks.map((lnk) => (
                     <a
-                      href={spotlightArrLink}
+                      key={lnk.url}
+                      href={lnk.url}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/40 bg-[#1e2430] px-4 py-2 text-xs font-headline uppercase tracking-wider text-slate-300 transition-colors hover:text-white"
                     >
                       <span className="material-symbols-outlined" style={{ fontSize: 14 }}>north_east</span>
-                      Open ARR
+                      {lnk.label}
                     </a>
-                  ) : null}
+                  ))}
                 </div>
               </div>
             </div>
@@ -4734,6 +5605,10 @@ function SettingsPanel(props: {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
+    serviceId: "tautulli" | "jellyfin" | "emby";
+    instanceParam: string;
+  } | null>(null);
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
@@ -4909,6 +5784,7 @@ function SettingsPanel(props: {
   }
 
   return (
+    <>
     <div>
       {/* Page title row */}
       <div className="flex justify-between items-center mb-6">
@@ -5039,6 +5915,21 @@ function SettingsPanel(props: {
                                     >
                                       Configure
                                     </button>
+                                    {mediaCardPlaybackWebhookConfig(card.id) ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const cfg = mediaCardPlaybackWebhookConfig(card.id);
+                                          if (!cfg) return;
+                                          const instanceParam =
+                                            String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+                                          setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
+                                        }}
+                                        className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                      >
+                                        Webhook URL
+                                      </button>
+                                    ) : null}
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -5321,6 +6212,14 @@ function SettingsPanel(props: {
         </div>
       </div>
     </div>
+    {playbackWebhookDialog ? (
+      <PlaybackWebhookSetupModal
+        dialog={playbackWebhookDialog}
+        onClose={() => setPlaybackWebhookDialog(null)}
+        accent={accent}
+      />
+    ) : null}
+    </>
   );
 }
 
@@ -5346,7 +6245,7 @@ const ONBOARDING_MEDIA_CARDS = [
   },
 ];
 
-/** Logo tile fill — solid Simularr studio navy (same as sidebar brand strip / dark chrome wells). */
+/** Logo tile fill — solid studio navy (sidebar brand strip / dark chrome wells). */
 const INTEGRATION_LOGO_WELL_BG = "#1e2430";
 
 const ONBOARDING_MEDIA_VISUAL: Record<
@@ -5493,6 +6392,112 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
   );
 }
 
+function PlaybackWebhookSetupModal(props: {
+  dialog: { serviceId: PlaybackWebhookServiceId; instanceParam: string };
+  onClose: () => void;
+  accent: { hex: string };
+}) {
+  const pb = props.dialog;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const webhookUrl = `${origin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
+  const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
+  const name = svcMeta?.name ?? pb.serviceId;
+  return (
+    <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+      <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+        <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {name}</h3>
+        <p className="text-sm text-slate-300">
+          {pb.serviceId === "tautulli"
+            ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
+            : `${name} can send playback events to Placeholdarr using this URL.`}
+        </p>
+        <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
+          {pb.serviceId === "tautulli" ? (
+            <>
+              <li>Open Tautulli and go to Settings → Notification Agents.</li>
+              <li>Create a new Webhook notification agent.</li>
+              <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+              <li>
+                <span className="text-slate-200">Webhook URL</span>
+                <div className="mt-1 flex items-start gap-2 pl-0">
+                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                </div>
+              </li>
+              <li>Paste the JSON payload template below, then save.</li>
+            </>
+          ) : pb.serviceId === "jellyfin" ? (
+            <>
+              <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
+              <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
+              <li>Set Events to include Playback Start and Content Type to application/json.</li>
+              <li>
+                <span className="text-slate-200">Webhook URL</span>
+                <div className="mt-1 flex items-start gap-2 pl-0">
+                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                </div>
+              </li>
+              <li>Paste the JSON payload template below, then save the webhook.</li>
+            </>
+          ) : (
+            <>
+              <li>In Emby, go to Settings → Notifications.</li>
+              <li>Add or edit a webhook notification.</li>
+              <li>
+                <span className="text-slate-200">Webhook URL</span>
+                <div className="mt-1 flex items-start gap-2 pl-0">
+                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
+                </div>
+              </li>
+              <li>Enable the playback events you want Placeholdarr to process, then save.</li>
+            </>
+          )}
+        </ol>
+        {svcMeta && svcMeta.triggers.length ? (
+          <div>
+            <div className="text-xs font-semibold text-slate-400 mb-1.5">Suggested events</div>
+            <div className="ml-1 space-y-1">
+              {svcMeta.triggers.map((t) => (
+                <div key={t.event} className="text-xs text-slate-300">
+                  {t.displayName}
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
+          </div>
+        ) : null}
+        {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
+          <div>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
+              <WebhookStepCopyButton
+                text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
+                ariaLabel={`Copy ${name} JSON payload template`}
+                variant="header"
+              />
+            </div>
+            <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
+              <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
+            </pre>
+          </div>
+        ) : null}
+        <div className="flex justify-end pt-2">
+          <button
+            type="button"
+            className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+            style={{ backgroundColor: props.accent.hex }}
+            onClick={props.onClose}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function mediaCardConnectionDetailsComplete(
   card: (typeof ONBOARDING_MEDIA_CARDS)[number],
   values: FieldValueMap,
@@ -5508,11 +6513,11 @@ function mediaCardConnectionDetailsComplete(
 }
 
 /**
- * Simularr **Spectral Data** palette (marketing guide) — recorded for hero + future UI:
+ * **Spectral Data** palette (marketing guide) — recorded for hero + future UI:
  * - **SLATE** (primary dark) `#0F172A` → token `surfacePanel`
  * - **CYBER YELLOW** (accent) `#FBBF24` → token `accent`
  * - **SURFACE** (void base) `#0B1326` → token `chromePage`
- * - **Spectral cyan** (marketing) → `SIMULARR_SPECTRAL_CYAN_HEX` in `brandSemanticTheme.ts` (`#22D3EE`; UI ice is `accentIce` `#7DD3FC`)
+ * - **Spectral cyan** (marketing) → `PLACEHOLDARR_SPECTRAL_CYAN_HEX` in `brandSemanticTheme.ts` (`#22D3EE`; UI ice is `accentIce` `#7DD3FC`)
  *
  * Variants:
  * - `blueWhite` — horizontal multiply: **CYBER YELLOW** (`accent`) at L/R edges → **void** (`chromePage`) center; lockup **CYBER YELLOW** (`accent`).
@@ -5520,13 +6525,13 @@ function mediaCardConnectionDetailsComplete(
  */
 const ONBOARDING_HERO_BANNER_VARIANT: "blueWhite" | "yellowBlue" = "blueWhite";
 
-/** Raster logo → Simularr SLATE / `surfacePanel` (`#0F172A`). Outline: thin `sim.accent` ring on wrapper (yellowBlue). */
-const ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE =
+/** Raster logo → slate `surfacePanel` (`#0F172A`). Outline: thin accent ring on wrapper (yellowBlue). */
+const ONBOARDING_HERO_LOGO_FILTER_SLATE =
   "object-contain [filter:brightness(0)_saturate(100%)_invert(10%)_sepia(22%)_saturate(4200%)_hue-rotate(191deg)_brightness(0.96)_contrast(1.04)]";
 
 function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
-  const simAccent = getBrandAccent("simularr", "dark");
-  const sim = getBrandSemanticTokens("simularr", "dark", simAccent);
+  const simAccent = getBrandAccent("placeholdarr", "dark");
+  const sim = getBrandSemanticTokens("placeholdarr", "dark", simAccent);
   const variant = ONBOARDING_HERO_BANNER_VARIANT;
   const isYellow = variant === "yellowBlue";
 
@@ -5656,9 +6661,9 @@ function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
           <div className="inline-block" style={slateLogoBrandYellowOutlineStyle}>
             {isYellow ? (
               <BrandLogo
-                brand="simularr"
+                brand="placeholdarr"
                 accentHex={simAccent.hex}
-                className={`h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center sm:h-[5rem] sm:max-w-[15.5rem] ${ONBOARDING_HERO_LOGO_FILTER_SIMULARR_SLATE}`}
+                className={`h-16 w-auto max-w-[13rem] shrink-0 object-contain object-center sm:h-[5rem] sm:max-w-[15.5rem] ${ONBOARDING_HERO_LOGO_FILTER_SLATE}`}
               />
             ) : (
               <img
@@ -6654,107 +7659,13 @@ function OnboardingWizard(props: {
           </div>
         );
       })() : null}
-      {playbackWebhookDialog ? (() => {
-        const pb = playbackWebhookDialog;
-        const origin = typeof window !== "undefined" ? window.location.origin : "";
-        const webhookUrl = `${origin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
-        const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
-        const name = svcMeta?.name ?? pb.serviceId;
-        return (
-          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
-            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-              <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {name}</h3>
-              <p className="text-sm text-slate-300">
-                {pb.serviceId === "tautulli"
-                  ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
-                  : `${name} can send playback events to Placeholdarr using this URL.`}
-              </p>
-              <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
-                {pb.serviceId === "tautulli" ? (
-                  <>
-                    <li>Open Tautulli and go to Settings → Notification Agents.</li>
-                    <li>Create a new Webhook notification agent.</li>
-                    <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
-                    <li>
-                      <span className="text-slate-200">Webhook URL</span>
-                      <div className="mt-1 flex items-start gap-2 pl-0">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
-                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                      </div>
-                    </li>
-                    <li>Paste the JSON payload template below, then save.</li>
-                  </>
-                ) : pb.serviceId === "jellyfin" ? (
-                  <>
-                    <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
-                    <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
-                    <li>Set Events to include Playback Start and Content Type to application/json.</li>
-                    <li>
-                      <span className="text-slate-200">Webhook URL</span>
-                      <div className="mt-1 flex items-start gap-2 pl-0">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
-                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                      </div>
-                    </li>
-                    <li>Paste the JSON payload template below, then save the webhook.</li>
-                  </>
-                ) : (
-                  <>
-                    <li>In Emby, go to Settings → Notifications.</li>
-                    <li>Add or edit a webhook notification.</li>
-                    <li>
-                      <span className="text-slate-200">Webhook URL</span>
-                      <div className="mt-1 flex items-start gap-2 pl-0">
-                        <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
-                        <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                      </div>
-                    </li>
-                    <li>Enable the playback events you want Placeholdarr to process, then save.</li>
-                  </>
-                )}
-              </ol>
-              {svcMeta && svcMeta.triggers.length ? (
-                <div>
-                  <div className="text-xs font-semibold text-slate-400 mb-1.5">Suggested events</div>
-                  <div className="ml-1 space-y-1">
-                    {svcMeta.triggers.map((t) => (
-                      <div key={t.event} className="text-xs text-slate-300">
-                        {t.displayName}
-                      </div>
-                    ))}
-                  </div>
-                  <p className="mt-2 text-[11px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
-                </div>
-              ) : null}
-              {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
-                    <WebhookStepCopyButton
-                      text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
-                      ariaLabel={`Copy ${name} JSON payload template`}
-                      variant="header"
-                    />
-                  </div>
-                  <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
-                    <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
-                  </pre>
-                </div>
-              ) : null}
-              <div className="flex justify-end pt-2">
-                <button
-                  type="button"
-                  className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
-                  style={{ backgroundColor: accent.hex }}
-                  onClick={() => setPlaybackWebhookDialog(null)}
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })() : null}
+      {playbackWebhookDialog ? (
+        <PlaybackWebhookSetupModal
+          dialog={playbackWebhookDialog}
+          onClose={() => setPlaybackWebhookDialog(null)}
+          accent={accent}
+        />
+      ) : null}
     </>
   );
 }
