@@ -85,15 +85,25 @@ def _build_startup_sync_row(
     series_discovered = _to_int(startup_sync_stats.get("series_seen"), 0)
     episodes_discovered = _to_int(startup_sync_stats.get("episodes_seen"), _to_int(determination_stats.get("episodes_total"), 0))
     created_n = _to_int(materialization_stats.get("created"), 0)
+    deleted_n = _to_int(materialization_stats.get("deleted"), 0)
+    files_deleted_n = _to_int(materialization_stats.get("files_deleted"), 0)
     noop_n = _to_int(materialization_stats.get("noop"), 0)
-    if bool(materialization_stats) and created_n == 0 and noop_n > 0:
+    if running and str(current_phase) == "fs_scan":
+        details = (
+            f"Filesystem scan + placeholder reconcile (full walk can take many minutes on large libraries). "
+            f"This run: {movies_discovered} movies, {series_discovered} series, {episodes_discovered} episodes • "
+            f"Mode {display_mode}"
+        )
+    elif bool(materialization_stats) and created_n == 0 and noop_n > 0:
         details = (
             f"Materialization: {noop_n} item(s) already had a placeholder file on disk • "
-            f"{created_n} new file(s) written • Mode {display_mode}"
+            f"{created_n} new file(s) written • "
+            f"{deleted_n} placeholder(s) removed • Mode {display_mode}"
         )
     else:
         details = (
             f"Materialization created {created_n} placeholders • "
+            f"removed {deleted_n} placeholders • "
             f"Mode {display_mode}"
         )
     if error_message:
@@ -132,11 +142,13 @@ def _build_startup_sync_row(
             "status": materialization_status,
             "metrics": [
                 {"label": "Created", "value": _to_int(materialization_stats.get("created"), 0) if bool(materialization_stats) else "--"},
+                {"label": "Deleted", "value": _to_int(materialization_stats.get("deleted"), 0) if bool(materialization_stats) else "--"},
                 {
                     "label": "Already on disk",
                     "value": _to_int(materialization_stats.get("noop"), 0) if bool(materialization_stats) else "--",
                 },
                 {"label": "Files created", "value": _to_int(materialization_stats.get("files_created"), 0) if bool(materialization_stats) else "--"},
+                {"label": "Files deleted", "value": files_deleted_n if bool(materialization_stats) else "--"},
                 {"label": "NFO written", "value": _to_int(materialization_stats.get("nfo_written"), 0) if bool(materialization_stats) else "--"},
             ],
         },

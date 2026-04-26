@@ -505,6 +505,7 @@ export function App() {
   /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
   const defaultLandingPath =
     setupStatus != null && setupStatus.setup_complete ? "/activity" : "/setup";
+  const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
   const brandMeta = BRAND_META;
@@ -1656,7 +1657,7 @@ export function App() {
           </header>
 
           {/* Setup banner */}
-          {!setupStatus?.setup_complete ? (
+          {!setupStatus?.setup_complete && !showReconnectPanel ? (
             <div className="border-b border-l-4 px-6 py-3 text-sm"
               style={{
                 backgroundColor: alphaColor(brandSemantic.accent2, isStudioGlass ? 0.14 : 0.1),
@@ -1675,10 +1676,47 @@ export function App() {
             className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : ""}`}
             style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
           >
-            {renderTabBody()}
+            {showReconnectPanel ? (
+              <section
+                className={`rounded-xl border p-8 md:p-12 ${
+                  isStudioGlass
+                    ? "border-cyan-500/30 bg-[#0f1520]/80 text-slate-100"
+                    : "border-cyan-200 bg-cyan-50 text-slate-900"
+                }`}
+              >
+                <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
+                  <div className="relative mb-6 h-16 w-16">
+                    <div
+                      className={`absolute inset-0 rounded-full border-2 ${
+                        isStudioGlass ? "border-cyan-400/30" : "border-cyan-400/40"
+                      }`}
+                    />
+                    <div
+                      className={`absolute inset-0 rounded-full border-2 border-t-transparent animate-spin ${
+                        isStudioGlass ? "border-cyan-300" : "border-cyan-600"
+                      }`}
+                    />
+                  </div>
+                  <h2 className="text-xl font-semibold md:text-2xl">Reconnecting to Placeholdarr</h2>
+                  <p className={`mt-3 max-w-2xl text-sm md:text-base ${isStudioGlass ? "text-slate-300" : "text-slate-700"}`}>
+                    Live dashboard data is temporarily unavailable. We are automatically retrying the API connection.
+                  </p>
+                  <div className="mt-6 flex items-center gap-2">
+                    <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse ${isStudioGlass ? "bg-cyan-300" : "bg-cyan-600"}`} />
+                    <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse [animation-delay:150ms] ${isStudioGlass ? "bg-cyan-300/80" : "bg-cyan-600/80"}`} />
+                    <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse [animation-delay:300ms] ${isStudioGlass ? "bg-cyan-300/60" : "bg-cyan-600/60"}`} />
+                  </div>
+                  <p className={`mt-6 text-xs ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>
+                    This panel will close automatically once the connection is restored.
+                  </p>
+                </div>
+              </section>
+            ) : (
+              renderTabBody()
+            )}
           </main>
 
-          {errorMessage ? (
+          {errorMessage && !showReconnectPanel ? (
             <div
               className={`mx-6 mb-4 rounded-lg border p-3 text-sm ${
                 isStudioGlass

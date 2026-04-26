@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -190,6 +192,117 @@ def cleanup_episode_placeholder_files(
 	return {
 		"deleted": deleted_any,
 		"nfo_deleted": nfo_deleted_any,
+		"directories_deleted": directories_deleted,
+		"series_nfo_deleted": series_nfo_deleted,
+		"refresh_paths": sorted(refresh_paths),
+	}
+
+
+def _tree_dir_count(root_dir: str | None) -> int:
+	if not root_dir or not os.path.isdir(root_dir):
+		return 0
+	count = 0
+	for _, dirs, _ in os.walk(root_dir):
+		count += len(dirs)
+	return count
+
+
+def _is_safe_placeholder_series_tree(folder: str | None) -> bool:
+	"""True when every non-sidecar file in ``folder`` looks like a materialized TV placeholder."""
+	if not folder or not os.path.isdir(folder):
+		return False
+	for _, _, files in os.walk(folder):
+		for name in files:
+			base = str(name or "").strip()
+			if not base:
+				continue
+			if base.lower() == "tvshow.nfo":
+				continue
+			_, ext = os.path.splitext(base.lower())
+			if ext in {".nfo", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tbn", ".srt", ".sub", ".idx", ".txt"}:
+				continue
+			if not _looks_like_materialized_tv_placeholder_filename(base):
+				return False
+	return True
+
+
+def cleanup_deleted_series_placeholder_files(
+	session,
+	*,
+	series: Any,
+	candidate_paths: list[str],
+) -> dict[str, Any]:
+	"""Bulk cleanup for a deleted series.
+
+	Optimized path for ARR series tombstones: remove tracked placeholder media sidecars,
+	then delete the whole placeholder series tree when all remaining files are safe placeholder
+	artifacts. Falls back to empty-tree prune if full-tree delete is not safe.
+	"""
+	files_deleted = 0
+	nfos_deleted = 0
+	series_nfo_deleted = False
+	directories_deleted = 0
+	refresh_paths: set[str] = set()
+	paths = _unique_paths(candidate_paths)
+	paths = filter_episode_disk_cleanup_paths(session, series=series, paths=paths)
+	started_mono = time.monotonic()
+	series_title = str(getattr(series, "title", "") or "Unknown Series")
+	logger.info(
+		f"Series tombstone cleanup started: series={series_title!r} candidate_paths={len(paths)}",
+		extra={"emoji_type": "info"},
+	)
+
+	for idx, path in enumerate(paths, start=1):
+		if remove_placeholder_file(path):
+			files_deleted += 1
+		if remove_nfo_sidecar(path):
+			nfos_deleted += 1
+		if idx % 500 == 0:
+			elapsed = time.monotonic() - started_mono
+			logger.info(
+				"Series tombstone cleanup progress: "
+				f"series={series_title!r} processed={idx}/{len(paths)} "
+				f"files_deleted={files_deleted} elapsed_s={elapsed:.1f}",
+				extra={"emoji_type": "info"},
+			)
+
+	series_folder = _derive_series_folder(series, None, paths)
+	if series_folder:
+		series_folder = os.path.abspath(series_folder)
+		if is_path_under_tv_library_roots(series_folder) and os.path.isdir(series_folder):
+			if _is_safe_placeholder_series_tree(series_folder):
+				dir_count = _tree_dir_count(series_folder)
+				try:
+					logger.info(
+						f"Series tombstone cleanup removing folder tree: series={series_title!r} folder={series_folder!r}",
+						extra={"emoji_type": "info"},
+					)
+					shutil.rmtree(series_folder)
+					directories_deleted += int(dir_count + 1)
+				except Exception:
+					# Fallback to conservative prune when a full-tree delete fails.
+					series_nfo_deleted = _remove_series_nfo(series_folder) or series_nfo_deleted
+					directories_deleted += _prune_empty_tree(series_folder)
+			else:
+				series_nfo_deleted = _remove_series_nfo(series_folder) or series_nfo_deleted
+				directories_deleted += _prune_empty_tree(series_folder)
+			refresh_path = _nearest_existing_dir(os.path.dirname(series_folder))
+			if refresh_path:
+				refresh_paths.add(refresh_path)
+
+	elapsed = time.monotonic() - started_mono
+	logger.info(
+		f"Series tombstone cleanup complete: series={series_title!r} "
+		f"files_deleted={files_deleted} nfos_deleted={nfos_deleted} "
+		f"dirs_deleted={directories_deleted} elapsed_s={elapsed:.1f}",
+		extra={"emoji_type": "success"},
+	)
+
+	return {
+		"deleted": bool(files_deleted),
+		"files_deleted": files_deleted,
+		"nfo_deleted": bool(nfos_deleted),
+		"nfo_deleted_count": nfos_deleted,
 		"directories_deleted": directories_deleted,
 		"series_nfo_deleted": series_nfo_deleted,
 		"refresh_paths": sorted(refresh_paths),

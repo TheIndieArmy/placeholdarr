@@ -1,7 +1,7 @@
 function humanizeFetchFailure(err: unknown): Error {
   if (err instanceof TypeError) {
     return new Error(
-      "Cannot reach the Placeholdarr API (network error). If you use Ctrl+C while the server is starting, wait for uvicorn to bind the port, then refresh.",
+      "Cannot reach the Placeholdarr API (network error). Trying to reconnect…",
     );
   }
   if (err instanceof Error && /failed to fetch/i.test(err.message)) {

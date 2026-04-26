@@ -33,7 +33,7 @@ def _run_self_healing_pipeline(run_id: str) -> None:
         )
         return
     try:
-        scan_result = scan_once_if_needed(run_id)
+        scan_result = scan_once_if_needed(run_id, prefer_incremental=False)
         if isinstance(scan_result, tuple):
             scan_count, scan_info = scan_result
         else:

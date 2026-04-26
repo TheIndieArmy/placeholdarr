@@ -1,13 +1,14 @@
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import func
 
 from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
-from services.postgres.models import FSScanRun, Placeholder
+from services.postgres.models import Episode, FSScanRun, Movie, Placeholder, Season, Series
+from services.placeholders import episode_placeholder_path, movie_placeholder_path
 
 
 NON_PLACEHOLDER_EXTENSIONS = {
@@ -27,6 +28,9 @@ NON_PLACEHOLDER_EXTENSIONS = {
 FS_SCAN_PROGRESS_EVERY_FILES = 2000
 FS_STALE_PROGRESS_EVERY_ROWS = 5000
 
+_NEEDS_PLACEHOLDER = "needs_placeholder"
+
+
 def looks_like_placeholder_file(path: str) -> bool:
     """Treat regular media files under configured placeholder roots as placeholders.
 
@@ -38,6 +42,10 @@ def looks_like_placeholder_file(path: str) -> bool:
         return False
     _, ext = os.path.splitext(name)
     return ext not in NON_PLACEHOLDER_EXTENSIONS
+
+
+def _norm_scan_path(path: str) -> str:
+    return os.path.abspath(os.path.normpath(path))
 
 
 def configured_roots() -> list[str]:
@@ -122,7 +130,193 @@ def _disconnect_placeholder_row(row: Placeholder) -> bool:
     return changed
 
 
-def scan_placeholder_roots(roots: list[str]) -> int:
+def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[str, Any]]:
+    """Re-stat known placeholder paths + canonical NEEDS paths (no ``os.walk`` full-tree pass).
+
+    Global stale marking is skipped here; the hourly scheduled self-heal (full scan) covers drift.
+    """
+    scanned_roots = [os.path.abspath(root) for root in roots if root]
+    upserted = 0
+    refreshed = 0
+    stale_marked = 0
+    disconnected = 0
+    needs_canonical_hits = 0
+
+    def _refresh_row(row: Placeholder, abs_p: str) -> None:
+        nonlocal refreshed
+        if row.path != abs_p:
+            row.path = abs_p
+        row.has_placeholder = True
+        row.last_observed_at = func.now()
+        session.add(row)
+        refreshed += 1
+
+    def _try_canonical_remap(row: Placeholder) -> bool:
+        """If linked to Movie/Episode, move row.path to canonical materialized path when that file exists."""
+        try:
+            mid = getattr(row, "movie_id", None)
+            if mid:
+                mv = session.query(Movie).filter(Movie.id == int(mid)).first()
+                if mv:
+                    cp = _norm_scan_path(movie_placeholder_path(mv))
+                    if (
+                        looks_like_placeholder_file(cp)
+                        and _is_path_under_roots(cp, scanned_roots)
+                        and os.path.isfile(cp)
+                    ):
+                        _refresh_row(row, cp)
+                        return True
+            eid = getattr(row, "episode_id", None)
+            if eid:
+                ep = session.query(Episode).filter(Episode.id == int(eid)).first()
+                if ep:
+                    season = session.query(Season).filter(Season.id == ep.season_id).first()
+                    series = (
+                        session.query(Series).filter(Series.id == season.series_id).first()
+                        if season
+                        else None
+                    )
+                    if season and series:
+                        cp = _norm_scan_path(episode_placeholder_path(ep, season, series))
+                        if (
+                            looks_like_placeholder_file(cp)
+                            and _is_path_under_roots(cp, scanned_roots)
+                            and os.path.isfile(cp)
+                        ):
+                            _refresh_row(row, cp)
+                            return True
+        except Exception:
+            return False
+        return False
+
+    def _placeholder_media_linked(row: Placeholder) -> bool:
+        return bool(getattr(row, "movie_id", None) or getattr(row, "episode_id", None))
+
+    for row in session.query(Placeholder).filter(Placeholder.has_placeholder == True).all():  # noqa: E712
+        raw = getattr(row, "path", None)
+        if not raw:
+            row.has_placeholder = False
+            if hasattr(row, "lifecycle_status"):
+                row.lifecycle_status = "MISSING"
+            if _disconnect_placeholder_row(row):
+                disconnected += 1
+            session.add(row)
+            stale_marked += 1
+            continue
+        try:
+            ap = _norm_scan_path(str(raw))
+        except Exception:
+            continue
+
+        under = _is_path_under_roots(ap, scanned_roots)
+        if under and os.path.isfile(ap):
+            _refresh_row(row, ap)
+            continue
+
+        if _try_canonical_remap(row):
+            continue
+
+        # Path-only rows (typical of ``fs_scan`` upserts with no movie_id/episode_id) cannot be
+        # canonical-remapped here. Marking them MISSING when ``under``/``isfile`` disagrees with
+        # DB strings would clear thousands of TV placeholders before reconcile → episodes_linked=0
+        # and mass ``needs_placeholder``. Defer orphan stale detection to the scheduled full walk.
+        if not _placeholder_media_linked(row):
+            continue
+
+        if not under:
+            row.has_placeholder = False
+            if hasattr(row, "lifecycle_status"):
+                row.lifecycle_status = "MISSING"
+            if _disconnect_placeholder_row(row):
+                disconnected += 1
+            session.add(row)
+            stale_marked += 1
+            continue
+
+        row.has_placeholder = False
+        if hasattr(row, "lifecycle_status"):
+            row.lifecycle_status = "MISSING"
+        if _disconnect_placeholder_row(row):
+            disconnected += 1
+        session.add(row)
+        stale_marked += 1
+
+    for mv in session.query(Movie).filter(Movie.determination == _NEEDS_PLACEHOLDER, Movie.is_deleted == False).all():  # noqa: E712
+        try:
+            ap = _norm_scan_path(movie_placeholder_path(mv))
+        except Exception:
+            continue
+        if not looks_like_placeholder_file(ap) or not _is_path_under_roots(ap, scanned_roots):
+            continue
+        if not os.path.isfile(ap):
+            continue
+        needs_canonical_hits += 1
+        plink = session.query(Placeholder).filter(Placeholder.movie_id == mv.id).order_by(Placeholder.id.desc()).first()
+        if plink:
+            _refresh_row(plink, ap)
+        else:
+            session.add(
+                Placeholder(
+                    path=ap,
+                    movie_id=mv.id,
+                    has_placeholder=True,
+                    created_by="fs_scan_incremental",
+                    last_observed_at=func.now(),
+                )
+            )
+            upserted += 1
+
+    ep_rows = (
+        session.query(Episode, Season, Series)
+        .join(Season, Episode.season_id == Season.id)
+        .join(Series, Season.series_id == Series.id)
+        .filter(
+            Episode.determination == _NEEDS_PLACEHOLDER,
+            Episode.is_deleted == False,  # noqa: E712
+            Season.is_deleted == False,  # noqa: E712
+            Series.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    for ep, season, series in ep_rows:
+        try:
+            ap = _norm_scan_path(episode_placeholder_path(ep, season, series))
+        except Exception:
+            continue
+        if not looks_like_placeholder_file(ap) or not _is_path_under_roots(ap, scanned_roots):
+            continue
+        if not os.path.isfile(ap):
+            continue
+        needs_canonical_hits += 1
+        plink = session.query(Placeholder).filter(Placeholder.episode_id == ep.id).order_by(Placeholder.id.desc()).first()
+        if plink:
+            _refresh_row(plink, ap)
+        else:
+            session.add(
+                Placeholder(
+                    path=ap,
+                    episode_id=ep.id,
+                    series_id=series.id,
+                    season_id=season.id,
+                    has_placeholder=True,
+                    created_by="fs_scan_incremental",
+                    last_observed_at=func.now(),
+                )
+            )
+            upserted += 1
+
+    meta: dict[str, Any] = {
+        "full_scan": False,
+        "incremental_refreshed": refreshed,
+        "incremental_stale_marked": stale_marked,
+        "incremental_disconnected": disconnected,
+        "incremental_new_rows": upserted,
+        "incremental_needs_canonical_hits": needs_canonical_hits,
+    }
+    return upserted, meta
+
+
+def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple[int, dict[str, Any]]:
     session = get_session()
     upserted = 0
     stale_marked = 0
@@ -133,8 +327,22 @@ def scan_placeholder_roots(roots: list[str]) -> int:
     observed_paths: set[str] = set()
     started_mono = time.monotonic()
     try:
+        if not full_scan:
+            upserted, meta = _incremental_placeholder_scan(session, roots)
+            session.commit()
+            elapsed = time.monotonic() - started_mono
+            logger.info(
+                "FS incremental scan complete: "
+                f"roots={len(scanned_roots)} new_rows={meta.get('incremental_new_rows', 0)} "
+                f"refreshed={meta.get('incremental_refreshed', 0)} stale_marked={meta.get('incremental_stale_marked', 0)} "
+                f"needs_canonical_hits={meta.get('incremental_needs_canonical_hits', 0)} "
+                f"elapsed_s={elapsed:.1f}",
+                extra={"emoji_type": "success"},
+            )
+            return upserted, meta
+
         logger.info(
-            f"FS scan started roots={len(scanned_roots)}",
+            f"FS scan started roots={len(scanned_roots)} full_scan=True",
             extra={'emoji_type': 'info'},
         )
         for root in roots:
@@ -214,6 +422,13 @@ def scan_placeholder_roots(roots: list[str]) -> int:
 
         session.commit()
         elapsed = time.monotonic() - started_mono
+        meta = {
+            "full_scan": True,
+            "files_seen": scanned_files,
+            "media_candidates": scanned_media_candidates,
+            "stale_marked": stale_marked,
+            "disconnected": disconnected,
+        }
         logger.info(
             "FS scan complete: "
             f"roots={len(scanned_roots)} files_seen={scanned_files} "
@@ -227,7 +442,7 @@ def scan_placeholder_roots(roots: list[str]) -> int:
                 f'FS scan marked stale placeholders missing={stale_marked} (created={upserted}, disconnected={disconnected})',
                 extra={'emoji_type': 'placeholder'},
             )
-        return upserted
+        return upserted, meta
     except Exception:
         session.rollback()
         raise
@@ -235,7 +450,7 @@ def scan_placeholder_roots(roots: list[str]) -> int:
         session.close()
 
 
-def scan_once_if_needed(run_id: Optional[str] = None):
+def scan_once_if_needed(run_id: Optional[str] = None, *, prefer_incremental: bool = False):
     session = get_session()
     try:
         if run_id:
@@ -256,9 +471,16 @@ def scan_once_if_needed(run_id: Optional[str] = None):
         if not roots:
             logger.warning('No library roots configured; skipping FS scan', extra={'emoji_type': 'warning'})
             return 0, {'reason': 'no_roots'}
-        created = scan_placeholder_roots(roots)
-        logger.debug(f'FS scan completed; placeholders created={created}', extra={'emoji_type': 'placeholder'})
-        return created, {'reason': 'ok', 'roots': roots}
+        interval_h = int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0)
+        use_incremental = bool(prefer_incremental and interval_h > 0)
+        created, scan_meta = scan_placeholder_roots(roots, full_scan=not use_incremental)
+        logger.debug(
+            f'FS scan completed; placeholders created={created} incremental={use_incremental}',
+            extra={'emoji_type': 'placeholder'},
+        )
+        info: dict[str, Any] = {'reason': 'ok', 'roots': roots, 'incremental': use_incremental}
+        info.update(scan_meta)
+        return created, info
     except Exception as e:
         logger.error(f'FS scan failed: {e}', extra={'emoji_type': 'error'})
         return 0, {'reason': 'error', 'message': str(e)}
