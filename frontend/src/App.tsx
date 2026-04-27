@@ -5655,6 +5655,19 @@ function SettingsPanel(props: {
     }
   }, [fallbackUnnecessaryBecauseAllBoth, props.payload, props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH, props.onValueChange]);
 
+  /** Must run before any conditional return — hook order must match when payload transitions null → loaded. */
+  const allSettingsFieldsByKey = useMemo(() => {
+    const m = new Map<string, SettingsField>();
+    const sections = props.payload?.sections;
+    if (!sections?.length) return m;
+    for (const section of sections) {
+      for (const f of section.fields) {
+        m.set(f.key, f);
+      }
+    }
+    return m;
+  }, [props.payload]);
+
   if (!props.payload) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -5681,13 +5694,6 @@ function SettingsPanel(props: {
   }
   const active = payload.sections.find((s) => s.name === props.activeSection) || payload.sections[0];
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
-  const allSettingsFieldsByKey = useMemo(() => {
-    const m = new Map<string, SettingsField>();
-    for (const section of payload.sections) {
-      for (const f of section.fields) m.set(f.key, f);
-    }
-    return m;
-  }, [payload.sections]);
 
   async function runTest(field: SettingsField) {
     const target = URL_TEST_TARGET[field.key];

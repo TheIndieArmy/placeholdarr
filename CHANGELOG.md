@@ -7,8 +7,17 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-## [0.9.6] - 2026-04-27
+## [0.9.6.1] - 2026-04-27 [HOTFIX]
 
+### Summary for users
+
+- **Settings works again after refresh.** Opening or reloading **Settings** no longer leaves you on a blank/black main panel while the page loads your configuration.
+
+### Fixed
+
+- **Dashboard Settings blank screen on refresh**: `SettingsPanel` called `useMemo` for `allSettingsFieldsByKey` only after the settings payload arrived, but returned early when `payload` was still `null`. That violated the Rules of Hooks when the first fetch completed, crashed the React tree, and showed an empty/black content area on `/settings`. The field map memo now runs on every render (empty until sections exist). (`frontend/src/App.tsx`)
+
+## [0.9.6] - 2026-04-27
 
 ### Summary
 
