@@ -7,7 +7,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-## [0.9.7] - 2026-04-27
+## [0.9.6] - 2026-04-27
 
 ### Added
 
@@ -55,8 +55,6 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Removed dead startup-lite legacy parsing/client code.**
   - Removed unused ARR history client helpers (`_fetch_arr_history`, `fetch_radarr_history`, `fetch_sonarr_history`) now that startup lite no longer paginates ARR history.
   - Removed obsolete dashboard lite log scrapers for no-longer-emitted targeted-sync JSON lines.
-
-## [0.9.6] - 2026-04-26
 
 ### Added
 - **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
