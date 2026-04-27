@@ -1329,7 +1329,9 @@ def _build_startup_sync_progress_row(session) -> dict[str, Any] | None:
 
     re_series_fetch = re.compile(r"Series fullsync: fetched\s+(\d+)\s+series", re.IGNORECASE)
     re_series_progress = re.compile(r"Series fullsync progress:\s*(\d+)/(\d+)\s+series processed\s*\((\d+)\s+episodes", re.IGNORECASE)
-    re_determination = re.compile(r"Determination phase complete:\s*(\{.*\})")
+    re_determination = re.compile(
+        r"(?:Determination phase complete:|Determination · full_scan · complete:|Determination · scoped · complete:|Scoped determination complete:)\s*(\{.*\})"
+    )
     re_materialization = re.compile(r"Materialization phase complete:\s*(\{.*\})")
     re_observation_poll = re.compile(
         r"Observation poll pass #(\d+):\s*start_unresolved=(\d+)\s+remaining_unresolved=(\d+)\s+"
@@ -1343,15 +1345,19 @@ def _build_startup_sync_progress_row(session) -> dict[str, Any] | None:
     movie_refresh_triggered = False
     tv_refresh_triggered = False
     run_timestamp = ""
-    lite_movies_requested = 0
     lite_movies_seen = 0
-    lite_series_requested = 0
     lite_series_seen = 0
     lite_episodes_seen = 0
     startup_completed = False
 
-    re_lite_movie = re.compile(r"Startup lite targeted movie sync .*: (\{.*\})", re.IGNORECASE)
-    re_lite_series = re.compile(r"Startup lite targeted series sync .*: (\{.*\})", re.IGNORECASE)
+    re_lite_movie_human = re.compile(
+        r"Startup lite .* movies:\s*(\d+)\s+synced from Radarr",
+        re.IGNORECASE,
+    )
+    re_lite_series_human = re.compile(
+        r"Startup lite .* TV shows:\s*(\d+)\s+series and\s*(\d+)\s+episodes updated from Sonarr",
+        re.IGNORECASE,
+    )
     re_startup_completed = re.compile(r"Startup source-of-truth completed .*", re.IGNORECASE)
 
     for raw in scoped_lines:
@@ -1410,17 +1416,13 @@ def _build_startup_sync_progress_row(session) -> dict[str, Any] | None:
             movie_refresh_triggered = True
         if re_tv_refresh.search(line):
             tv_refresh_triggered = True
-        match = re_lite_movie.search(line)
+        match = re_lite_movie_human.search(line)
         if match:
-            lite_metrics = _parse_metrics_dict(match.group(1))
-            lite_movies_requested += int(lite_metrics.get("movies_requested", 0) or 0)
-            lite_movies_seen += int(lite_metrics.get("movies_seen", 0) or 0)
-        match = re_lite_series.search(line)
+            lite_movies_seen += int(match.group(1) or 0)
+        match = re_lite_series_human.search(line)
         if match:
-            lite_metrics = _parse_metrics_dict(match.group(1))
-            lite_series_requested += int(lite_metrics.get("series_requested", 0) or 0)
-            lite_series_seen += int(lite_metrics.get("series_seen", 0) or 0)
-            lite_episodes_seen += int(lite_metrics.get("episodes_seen", 0) or 0)
+            lite_series_seen += int(match.group(1) or 0)
+            lite_episodes_seen += int(match.group(2) or 0)
         if re_startup_completed.search(line):
             startup_completed = True
 
@@ -1503,7 +1505,7 @@ def _build_startup_sync_progress_row(session) -> dict[str, Any] | None:
                 {
                     "label": "Series progress",
                     "value": (
-                        f"{int(lite_series_seen)}/{int(lite_series_requested or lite_series_seen)}"
+                        str(int(lite_series_seen))
                         if startup_mode == "lite"
                         else (f"{int(series_processed)}/{int(series_total)}" if series_total else str(int(series_processed)))
                     ),
@@ -1519,8 +1521,18 @@ def _build_startup_sync_progress_row(session) -> dict[str, Any] | None:
             "status": determination_status,
             "metrics": [
                 {"label": "Needs placeholder", "value": int(determination.get("needs_placeholder", 0) or 0)},
-                {"label": "Already had placeholder", "value": int(determination.get("placeholder_exists", 0) or 0)},
-                {"label": "Not needed", "value": int(determination.get("not_needed", 0) or 0)},
+                {"label": "Placeholder on disk OK", "value": int(determination.get("placeholder_exists", 0) or 0)},
+                {"label": "No placeholder (file, deleted, or rules)", "value": int(determination.get("not_needed", 0) or 0)},
+                {"label": "Remove stale placeholder", "value": int(determination.get("obsolete_placeholder", 0) or 0)},
+                {
+                    "label": "Path corrected",
+                    "value": int(determination.get("path_drift_movies", 0) or 0)
+                    + int(determination.get("path_drift_episodes", 0) or 0),
+                },
+                {
+                    "label": "Rows updated (DB)",
+                    "value": int(determination.get("movies_changed", 0) or 0) + int(determination.get("episodes_changed", 0) or 0),
+                },
             ],
         }
     )
@@ -1925,6 +1937,40 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
     extra = [r for r in (queue_activity_row,) if r]
 
     combined = combined + extra
+
+    # ``startup_sync_progress`` persists multiple phase snapshots for the same run id.
+    # Keep only the latest snapshot per startup sync row id so the activity list
+    # doesn't show both "WORKING" and "DONE" cards for one run.
+    collapsed_startup: dict[tuple[str, str], dict[str, Any]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for row in combined:
+        if str(row.get("type") or "") != "job":
+            passthrough.append(row)
+            continue
+        jt = str(row.get("job_type") or "")
+        if jt not in {"lite_sync_progress", "full_sync_progress"}:
+            passthrough.append(row)
+            continue
+        row_id = str(row.get("id") or "")
+        if not row_id:
+            passthrough.append(row)
+            continue
+        key = (jt, row_id)
+        existing = collapsed_startup.get(key)
+        if existing is None:
+            collapsed_startup[key] = row
+            continue
+        row_time = str(row.get("time") or "")
+        existing_time = str(existing.get("time") or "")
+        if row_time > existing_time:
+            collapsed_startup[key] = row
+            continue
+        if row_time == existing_time:
+            row_terminal = str(row.get("status") or "").upper() in {"DONE", "FAILED"}
+            existing_terminal = str(existing.get("status") or "").upper() in {"DONE", "FAILED"}
+            if row_terminal and not existing_terminal:
+                collapsed_startup[key] = row
+    combined = passthrough + list(collapsed_startup.values())
     combined.sort(key=lambda x: x.get("time") or "", reverse=True)
 
     unique: list[dict[str, Any]] = []

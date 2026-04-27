@@ -20,7 +20,37 @@ DETERMINATION_EXISTS = 'placeholder_exists'
 DETERMINATION_NEEDS = 'needs_placeholder'
 RECONCILE_PROGRESS_EVERY_ROWS = 5000
 RECONCILE_LINK_PROGRESS_EVERY_ROWS = 5000
-DETERMINATION_PROGRESS_EVERY_ROWS = 5000
+# Determination can run tens of thousands of ORM checks; log by row count and wall time so operators see steady progress.
+DETERMINATION_PROGRESS_EVERY_ROWS = 500
+DETERMINATION_PROGRESS_MIN_INTERVAL_S = 20.0
+
+
+def _determination_log_progress(
+    *,
+    scope: str,
+    label: str,
+    idx: int,
+    total: int,
+    stats: dict,
+    started_mono: float,
+    last_log_mono: list[float],
+    movie_phase: bool,
+) -> None:
+    """Emit a progress line when row interval or min wall time since last log is reached."""
+    if total <= 0 or idx <= 0:
+        return
+    now = time.monotonic()
+    if idx % DETERMINATION_PROGRESS_EVERY_ROWS != 0 and (now - last_log_mono[0]) < DETERMINATION_PROGRESS_MIN_INTERVAL_S:
+        return
+    last_log_mono[0] = now
+    updates = int(stats.get("movies_changed", 0) or 0) if movie_phase else int(stats.get("episodes_changed", 0) or 0)
+    logger.info(
+        f"Determination · {scope} · {label}: {idx}/{total} checked · "
+        f"{'movie' if movie_phase else 'episode'}_rows_updated={updates} · "
+        f"obsolete_placeholder={int(stats.get('obsolete_placeholder', 0) or 0)} · "
+        f"elapsed_s={now - started_mono:.1f}",
+        extra={'emoji_type': 'info'},
+    )
 
 
 def _normalize_placeholder_path(value: str | None) -> str | None:
@@ -542,13 +572,18 @@ def run_determination_pass() -> dict:
 
     try:
         started_mono = time.monotonic()
-        logger.info("Determination phase started", extra={'emoji_type': 'info'})
+        last_log_movies: list[float] = [started_mono]
+        last_log_episodes: list[float] = [started_mono]
         placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
         lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
         now_date = datetime.now(timezone.utc).date()
 
         movies = session.query(Movie).all()
         stats['movies_total'] = len(movies)
+        logger.info(
+            f"Determination · full_scan · movies: {len(movies)} rows to check",
+            extra={'emoji_type': 'info'},
+        )
         for idx, movie in enumerate(movies, start=1):
             value, path_drift = _resolve_movie_determination(
                 movie,
@@ -569,18 +604,25 @@ def run_determination_pass() -> dict:
                 movie.determination_updated_at = func.now()
                 session.add(movie)
                 stats['movies_changed'] += 1
-            if idx % DETERMINATION_PROGRESS_EVERY_ROWS == 0:
-                elapsed = time.monotonic() - started_mono
-                logger.info(
-                    "Determination progress (movies): "
-                    f"processed={idx}/{len(movies)} changed={stats['movies_changed']} "
-                    f"elapsed_s={elapsed:.1f}",
-                    extra={'emoji_type': 'info'},
-                )
+            _determination_log_progress(
+                scope="full_scan",
+                label="movies",
+                idx=idx,
+                total=len(movies),
+                stats=stats,
+                started_mono=started_mono,
+                last_log_mono=last_log_movies,
+                movie_phase=True,
+            )
 
         include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
         episodes = session.query(Episode).all()
         stats['episodes_total'] = len(episodes)
+        logger.info(
+            f"Determination · full_scan · episodes: {len(episodes)} rows to check",
+            extra={'emoji_type': 'info'},
+        )
+        last_log_episodes[0] = time.monotonic()
         for idx, episode in enumerate(episodes, start=1):
             season = session.query(Season).filter(Season.id == episode.season_id).first()
             # Treat season 0 episodes as not_needed when specials are disabled
@@ -593,15 +635,16 @@ def run_determination_pass() -> dict:
                         episode.determination_updated_at = func.now()
                         session.add(episode)
                         stats['episodes_changed'] += 1
-                    if idx % DETERMINATION_PROGRESS_EVERY_ROWS == 0:
-                        elapsed = time.monotonic() - started_mono
-                        logger.info(
-                            "Determination progress (episodes): "
-                            f"processed={idx}/{len(episodes)} changed={stats['episodes_changed']} "
-                            f"obsolete={stats['obsolete_placeholder']} "
-                            f"elapsed_s={elapsed:.1f}",
-                            extra={'emoji_type': 'info'},
-                        )
+                    _determination_log_progress(
+                        scope="full_scan",
+                        label="episodes",
+                        idx=idx,
+                        total=len(episodes),
+                        stats=stats,
+                        started_mono=started_mono,
+                        last_log_mono=last_log_episodes,
+                        movie_phase=False,
+                    )
                     continue
             value, path_drift = _resolve_episode_determination(
                 session,
@@ -634,22 +677,23 @@ def run_determination_pass() -> dict:
                 episode.determination_updated_at = func.now()
                 session.add(episode)
                 stats['episodes_changed'] += 1
-            if idx % DETERMINATION_PROGRESS_EVERY_ROWS == 0:
-                elapsed = time.monotonic() - started_mono
-                logger.info(
-                    "Determination progress (episodes): "
-                    f"processed={idx}/{len(episodes)} changed={stats['episodes_changed']} "
-                    f"obsolete={stats['obsolete_placeholder']} "
-                    f"elapsed_s={elapsed:.1f}",
-                    extra={'emoji_type': 'info'},
-                )
+            _determination_log_progress(
+                scope="full_scan",
+                label="episodes",
+                idx=idx,
+                total=len(episodes),
+                stats=stats,
+                started_mono=started_mono,
+                last_log_mono=last_log_episodes,
+                movie_phase=False,
+            )
 
         session.commit()
-        logger.info(f"Determination phase complete: {stats}", extra={'emoji_type': 'success'})
+        logger.info(f"Determination · full_scan · complete: {stats}", extra={'emoji_type': 'success'})
         return stats
     except Exception as e:
         session.rollback()
-        logger.error(f"Determination phase failed: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Determination · full_scan · failed: {e}", extra={'emoji_type': 'error'})
         raise
     finally:
         session.close()
@@ -675,11 +719,11 @@ def run_determination_for_entities(
             episode_ids=episode_ids,
         )
         session.commit()
-        logger.info(f"Scoped determination complete: {stats}", extra={'emoji_type': 'success'})
+        logger.info(f"Determination · scoped · complete: {stats}", extra={'emoji_type': 'success'})
         return stats
     except Exception as e:
         session.rollback()
-        logger.error(f"Scoped determination failed: {e}", extra={'emoji_type': 'error'})
+        logger.error(f"Determination · scoped · failed: {e}", extra={'emoji_type': 'error'})
         raise
     finally:
         session.close()
@@ -706,6 +750,10 @@ def run_determination_for_entities_in_session(
         'path_drift_episodes': 0,
     }
 
+    started_mono = time.monotonic()
+    last_log_movies: list[float] = [started_mono]
+    last_log_episodes: list[float] = [started_mono]
+
     placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
     lookahead_days = int(getattr(settings, 'CALENDAR_LOOKAHEAD_DAYS', 30) or 30)
     now_date = datetime.now(timezone.utc).date()
@@ -717,8 +765,13 @@ def run_determination_for_entities_in_session(
         movies_q = movies_q.filter(Movie.id == -1)
     movies = movies_q.all()
     stats['movies_total'] = len(movies)
+    if movies:
+        logger.info(
+            f"Determination · scoped · movies: {len(movies)} rows to check",
+            extra={'emoji_type': 'info'},
+        )
 
-    for movie in movies:
+    for idx, movie in enumerate(movies, start=1):
         value, path_drift = _resolve_movie_determination(
             movie,
             placeholders_enabled=placeholders_enabled,
@@ -733,6 +786,16 @@ def run_determination_for_entities_in_session(
             movie.determination_updated_at = func.now()
             session.add(movie)
             stats['movies_changed'] += 1
+        _determination_log_progress(
+            scope="scoped",
+            label="movies",
+            idx=idx,
+            total=len(movies),
+            stats=stats,
+            started_mono=started_mono,
+            last_log_mono=last_log_movies,
+            movie_phase=True,
+        )
 
     include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
     episodes_q = session.query(Episode)
@@ -742,8 +805,14 @@ def run_determination_for_entities_in_session(
         episodes_q = episodes_q.filter(Episode.id == -1)
     episodes = episodes_q.all()
     stats['episodes_total'] = len(episodes)
+    if episodes:
+        logger.info(
+            f"Determination · scoped · episodes: {len(episodes)} rows to check",
+            extra={'emoji_type': 'info'},
+        )
+        last_log_episodes[0] = time.monotonic()
 
-    for episode in episodes:
+    for idx, episode in enumerate(episodes, start=1):
         if not include_specials:
             season = session.query(Season).filter(Season.id == episode.season_id).first()
             if season and int(getattr(season, 'season_number', -1)) == 0:
@@ -754,6 +823,16 @@ def run_determination_for_entities_in_session(
                     episode.determination_updated_at = func.now()
                     session.add(episode)
                     stats['episodes_changed'] += 1
+                _determination_log_progress(
+                    scope="scoped",
+                    label="episodes",
+                    idx=idx,
+                    total=len(episodes),
+                    stats=stats,
+                    started_mono=started_mono,
+                    last_log_mono=last_log_episodes,
+                    movie_phase=False,
+                )
                 continue
 
         value, path_drift = _resolve_episode_determination(
@@ -771,5 +850,15 @@ def run_determination_for_entities_in_session(
             episode.determination_updated_at = func.now()
             session.add(episode)
             stats['episodes_changed'] += 1
+        _determination_log_progress(
+            scope="scoped",
+            label="episodes",
+            idx=idx,
+            total=len(episodes),
+            stats=stats,
+            started_mono=started_mono,
+            last_log_mono=last_log_episodes,
+            movie_phase=False,
+        )
 
     return stats

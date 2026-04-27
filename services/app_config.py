@@ -186,9 +186,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 # Intro copy is also structured in `frontend/src/App.tsx` (`StartupSyncModeDescription`); update both together.
                 "description": (
                     "Controls how Placeholdarr refreshes from Radarr and Sonarr during startup. Full sync will scan arrs services "
-                    "and Placeholdarr root folder before proceeding to add/delete placeholder files as needed. Lite sync will use "
-                    "arrs recent history and Placeholdarr root folder to make necessary changes for any recent events. Auto will "
-                    "run full at startup when needed (for example, after adding a new arr instance), and a lite sync at other times. "
+                    "and Placeholdarr root folder before proceeding to add/delete placeholder files as needed. Lite sync compares "
+                    "each instance's live Radarr/Sonarr catalogs to the database, runs targeted API sync only for changed titles, "
+                    "then scoped determination and placeholder materialization for touched rows (skipping a full filesystem scan). "
+                    "Auto will run full at startup when needed (for example, after adding a new arr instance), and a lite sync at other times. "
                     "Placeholdarr operations are relatively quick. However, media player libraries still need to scan and update, "
                     "which can take some time for large library changes. "
                     "A full sync will automatically start in the background at the completion of this setup."
@@ -198,7 +199,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "options": [
                     {"value": "auto", "label": "Auto — Full sync when needed; Lite sync all other times"},
                     {"value": "full", "label": "Full — always full ARR sync on every startup"},
-                    {"value": "lite", "label": "Lite — history/delta catch-up only"},
+                    {"value": "lite", "label": "Lite — catalog diff + targeted sync only"},
                     {"value": "off", "label": "Off — skip ARR startup sync"},
                 ],
             },
@@ -816,6 +817,8 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
     validated: dict[str, Any] = {}
     created_paths: list[str] = []
     derived_library_paths: list[str] = []
+    specials_before: bool | None = None
+    specials_after: bool | None = None
     try:
         for key, raw_value in values.items():
             if key not in SETTINGS_SCHEMA:
@@ -964,6 +967,12 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
         for key, value in validated.items():
             meta = SETTINGS_SCHEMA[key]
             row = _get_row(session, key)
+            if key == "INCLUDE_SPECIALS":
+                if row is not None:
+                    specials_before = _coerce_bool(row.value)
+                else:
+                    specials_before = _coerce_bool(getattr(settings, "INCLUDE_SPECIALS", False))
+                specials_after = _coerce_bool(value)
             if not row:
                 row = AppConfig(
                     key=key,
@@ -1002,6 +1011,21 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                 session.add(setup_row)
 
         session.commit()
+        if specials_before is not None and specials_after is not None and specials_before != specials_after:
+            try:
+                from services.source_of_truth.lite_reconcile import mark_specials_backfill_pending
+
+                mark_specials_backfill_pending(enabled=bool(specials_after))
+                logger.info(
+                    f"Settings change detected: INCLUDE_SPECIALS {specials_before} -> {specials_after}; "
+                    f"specials_backfill_pending={bool(specials_after)}",
+                    extra={"emoji_type": "info"},
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to persist specials backfill marker after INCLUDE_SPECIALS change: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
         arr_instance_reconcile: dict[str, Any] | None = None
         if not partial and "ARR_INSTANCES_JSON" in validated:
             try:

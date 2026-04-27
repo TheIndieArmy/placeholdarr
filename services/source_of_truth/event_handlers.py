@@ -12,6 +12,11 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Season, Series, Movie, Placeholder
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
+from services.placeholder_activity_log import (
+    append_placeholder_activity_status,
+    materialization_stats_dict,
+    outcome_reason_and_status_from_materialization,
+)
 from services.source_of_truth.arr_api import (
     fetch_radarr_movie,
     fetch_sonarr_episodes,
@@ -187,7 +192,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
         if not s_fields.get("tvdbid"):
             raise ValueError("seriesadd_missing_tvdbid")
 
-        series_row, _ = _upsert_series(session, s_fields)
+        series_row, _, _ = _upsert_series(session, s_fields)
         stats["series_upserted"] = 1
 
         episodes = fetch_sonarr_episodes(series_id, base_url, api_key)
@@ -198,7 +203,6 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             )
             episodes = payload.get("episodes") or []
 
-        include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
         season_rows_by_number: dict[int, Season] = {}
         season_rollups: dict[int, dict[str, int | bool | str | None]] = {}
         season_overview_by_number: dict[int, str] = {}
@@ -207,9 +211,6 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
 
         for ep in episodes:
             season_number = int(ep.get("seasonNumber") or 0)
-            if season_number == 0 and not include_specials:
-                continue
-
             season_row, season_created = _upsert_season(session, series_row, season_number)
             season_rows_by_number[season_number] = season_row
             if season_created:
@@ -240,7 +241,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             if not rollup.get("status") and ep_fields.get("sonarr_status"):
                 rollup["status"] = ep_fields.get("sonarr_status")
 
-            ep_row, ep_created = _upsert_episode(session, ep_fields)
+            ep_row, ep_created, _ = _upsert_episode(session, ep_fields)
 
             # Event-scoped FS truth check: if users manually removed placeholder files
             # out-of-band, clear stale DB placeholder flags for this episode before determination.
@@ -304,6 +305,37 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             observation_source="event_series_add",
         )
 
+        series_db_id = int(series_row.id)
+        series_after = session.query(Series).filter(Series.id == series_db_id).first()
+        mat = materialization_stats_dict(materialization_stats)
+        result_reason, status_label = outcome_reason_and_status_from_materialization("Series added", mat)
+        append_placeholder_activity_status(
+            session,
+            item_type="series",
+            movie_id=None,
+            episode_id=None,
+            series_id=series_db_id,
+            season_id=None,
+            season_number=None,
+            instance_key=getattr(series_after, "instance_key", None) if series_after else getattr(series_row, "instance_key", None),
+            instance_id=getattr(series_after, "instance_id", None) if series_after else getattr(series_row, "instance_id", None),
+            event_type="placeholder_event_series_add_result",
+            path=str(getattr(series_after, "placeholder_folder", "") or getattr(series_row, "placeholder_folder", "") or ""),
+            item_title=str(getattr(series_after, "title", None) or getattr(series_row, "title", None) or "Unknown Series"),
+            series_title=str(getattr(series_after, "title", None) or getattr(series_row, "title", None) or "") or None,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_series_add",
+            extra_snapshot={
+                "determination": determination_stats if isinstance(determination_stats, dict) else {},
+                "materialization": mat,
+                "series_id": series_db_id,
+                "episode_ids": episode_ids,
+                "episodes_touched": len(episode_ids),
+            },
+        )
+        session.commit()
+
         # Followup logic removed as observation system is deprecated.
         pass
 
@@ -311,7 +343,7 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             "ok": True,
             "event": "seriesadd",
             "is_4k": inferred_is_4k,
-            "series_id": int(series_row.id),
+            "series_id": series_db_id,
             "episode_ids": episode_ids,
             "upsert_stats": stats,
             "determination": determination_stats,
@@ -353,7 +385,7 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
         if not fields.get("tmdbid"):
             raise ValueError("movieadd_missing_tmdbid")
 
-        movie_row, _ = _upsert_movie(session, fields)
+        movie_row, _, _ = _upsert_movie(session, fields)
         movie_row.last_found_in_radarr = datetime.now(timezone.utc)
 
         # Event-scoped FS truth check: if users manually removed placeholder files
@@ -386,6 +418,38 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
             movie_ids=[movie_row_id],
             observation_source="event_movie_add",
         )
+        movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
+        mat = materialization_stats_dict(materialization_stats)
+        result_reason, status_label = outcome_reason_and_status_from_materialization("Movie added", mat)
+        result_path = (
+            str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
+            if movie_after
+            else ""
+        ) or movie_placeholder_path(movie_after or movie_row)
+        append_placeholder_activity_status(
+            session,
+            item_type="movie",
+            movie_id=movie_row_id,
+            episode_id=None,
+            series_id=None,
+            season_id=None,
+            season_number=None,
+            instance_key=getattr(movie_after, "instance_key", None) if movie_after else getattr(movie_row, "instance_key", None),
+            instance_id=getattr(movie_after, "instance_id", None) if movie_after else getattr(movie_row, "instance_id", None),
+            event_type="placeholder_event_movie_add_result",
+            path=str(result_path or ""),
+            item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
+            series_title=None,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_movie_add",
+            extra_snapshot={
+                "determination": determination_stats if isinstance(determination_stats, dict) else {},
+                "materialization": mat,
+                "movie_id": int(movie_row_id),
+            },
+        )
+        session.commit()
 
         # Followup logic removed as observation system is deprecated.
         pass
@@ -442,6 +506,45 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
             session,
             movie_row_id=movie_row_id,
             file_path=file_path,
+        )
+        session.commit()
+
+        movie_ref = session.query(Movie).filter(Movie.id == movie_row_id).first()
+        g = grace_stats if isinstance(grace_stats, dict) else {}
+        ph_count = int(g.get("placeholder_count", 0) or 0)
+        active_n = int(g.get("active_placeholder_count", 0) or 0)
+        if ph_count <= 0:
+            result_reason = "Movie import detected - no linked placeholders to retire; grace timer not scheduled."
+            status_label = "No Action"
+        else:
+            result_reason = (
+                f"Movie import detected - import grace scheduled for {ph_count} linked placeholder(s) "
+                f"({active_n} received countdown status)."
+            )
+            status_label = "Grace Scheduled"
+        result_path = (
+            str(getattr(movie_ref, "placeholder_filepath", "") or "").strip()
+            if movie_ref
+            else ""
+        ) or movie_placeholder_path(movie_ref or movie_row)
+        append_placeholder_activity_status(
+            session,
+            item_type="movie",
+            movie_id=movie_row_id,
+            episode_id=None,
+            series_id=None,
+            season_id=None,
+            season_number=None,
+            instance_key=getattr(movie_ref, "instance_key", None) if movie_ref else getattr(movie_row, "instance_key", None),
+            instance_id=getattr(movie_ref, "instance_id", None) if movie_ref else getattr(movie_row, "instance_id", None),
+            event_type="placeholder_event_movie_import_result",
+            path=str(result_path or ""),
+            item_title=str(getattr(movie_ref, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
+            series_title=None,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_movie_import",
+            extra_snapshot={"grace": g, "movie_id": int(movie_row_id), "import_file_path": file_path},
         )
         session.commit()
 
@@ -530,6 +633,58 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
                     episode_row_id=episode_row_id,
                     file_path=file_path,
                 )
+            )
+        session.commit()
+
+        for episode_row, g in zip(deduped_episode_rows, grace_stats):
+            eid = int(getattr(episode_row, "id", 0) or 0)
+            if not eid:
+                continue
+            ctx = (
+                session.query(Episode, Season, Series)
+                .join(Season, Episode.season_id == Season.id)
+                .join(Series, Season.series_id == Series.id)
+                .filter(Episode.id == eid)
+                .first()
+            )
+            if not ctx:
+                continue
+            ep, season, series = ctx
+            gd = g if isinstance(g, dict) else {}
+            ph_count = int(gd.get("placeholder_count", 0) or 0)
+            active_n = int(gd.get("active_placeholder_count", 0) or 0)
+            if ph_count <= 0:
+                result_reason = "Episode import detected - no linked placeholders to retire; grace timer not scheduled."
+                status_label = "No Action"
+            else:
+                result_reason = (
+                    f"Episode import detected - import grace scheduled for {ph_count} linked placeholder(s) "
+                    f"({active_n} received countdown status)."
+                )
+                status_label = "Grace Scheduled"
+            ep_label = f"S{int(season.season_number):02d}E{int(ep.episode_number):02d} - {ep.title}"
+            result_path = (
+                str(getattr(ep, "placeholder_filepath", "") or "").strip()
+                or episode_placeholder_path(ep, season, series)
+            )
+            append_placeholder_activity_status(
+                session,
+                item_type="episode",
+                movie_id=None,
+                episode_id=eid,
+                series_id=int(series.id),
+                season_id=int(season.id),
+                season_number=int(season.season_number),
+                instance_key=getattr(series, "instance_key", None),
+                instance_id=getattr(series, "instance_id", None),
+                event_type="placeholder_event_episode_import_result",
+                path=str(result_path or ""),
+                item_title=str(ep_label),
+                series_title=str(getattr(series, "title", "") or "") or None,
+                reason=result_reason,
+                status_label=status_label,
+                source="event_episode_import",
+                extra_snapshot={"grace": gd, "episode_id": eid, "import_file_path": file_path},
             )
         session.commit()
 
@@ -648,6 +803,39 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
             observation_source="event_movie_file_deleted",
         )
 
+        movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
+        mat = materialization_stats_dict(materialization_stats)
+        result_reason, status_label = outcome_reason_and_status_from_materialization("Movie file deleted", mat)
+        result_path = (
+            str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
+            if movie_after
+            else ""
+        ) or movie_placeholder_path(movie_after or movie_row)
+        append_placeholder_activity_status(
+            session,
+            item_type="movie",
+            movie_id=movie_row_id,
+            episode_id=None,
+            series_id=None,
+            season_id=None,
+            season_number=None,
+            instance_key=getattr(movie_after, "instance_key", None) if movie_after else getattr(movie_row, "instance_key", None),
+            instance_id=getattr(movie_after, "instance_id", None) if movie_after else getattr(movie_row, "instance_id", None),
+            event_type="placeholder_event_movie_file_deleted_result",
+            path=str(result_path or ""),
+            item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
+            series_title=None,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_movie_file_deleted",
+            extra_snapshot={
+                "determination": determination_stats if isinstance(determination_stats, dict) else {},
+                "materialization": mat,
+                "movie_id": int(movie_row_id),
+            },
+        )
+        session.commit()
+
         return {
             "ok": True,
             "event": "movie_file_deleted",
@@ -709,6 +897,39 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
             movie_ids=[movie_row_id],
             observation_source="event_movie_deleted",
         )
+
+        movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
+        mat = materialization_stats_dict(materialization_stats)
+        result_reason, status_label = outcome_reason_and_status_from_materialization("Movie removed from Radarr", mat)
+        result_path = (
+            str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
+            if movie_after
+            else ""
+        ) or movie_placeholder_path(movie_after or movie_row)
+        append_placeholder_activity_status(
+            session,
+            item_type="movie",
+            movie_id=movie_row_id,
+            episode_id=None,
+            series_id=None,
+            season_id=None,
+            season_number=None,
+            instance_key=getattr(movie_after, "instance_key", None) if movie_after else getattr(movie_row, "instance_key", None),
+            instance_id=getattr(movie_after, "instance_id", None) if movie_after else getattr(movie_row, "instance_id", None),
+            event_type="placeholder_event_movie_deleted_result",
+            path=str(result_path or ""),
+            item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
+            series_title=None,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_movie_deleted",
+            extra_snapshot={
+                "determination": determination_stats if isinstance(determination_stats, dict) else {},
+                "materialization": mat,
+                "movie_id": int(movie_row_id),
+            },
+        )
+        session.commit()
 
         return {
             "ok": True,
@@ -806,6 +1027,59 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
             observation_source="event_episode_file_deleted",
         )
 
+        mat = materialization_stats_dict(materialization_stats)
+        n_eps = len(episode_ids)
+        prefix = "Episode file deleted" if n_eps == 1 else f"Episode file deleted ({n_eps} episodes)"
+        result_reason, status_label = outcome_reason_and_status_from_materialization(prefix, mat)
+        primary_ep_id = int(episode_ids[0]) if episode_ids else None
+        ctx = None
+        if primary_ep_id:
+            ctx = (
+                session.query(Episode, Season, Series)
+                .join(Season, Episode.season_id == Season.id)
+                .join(Series, Season.series_id == Series.id)
+                .filter(Episode.id == primary_ep_id)
+                .first()
+            )
+        item_title = "Episode batch"
+        series_title_val: str | None = str(getattr(series_row, "title", "") or "") or None
+        path_val = ""
+        season_id_val: int | None = None
+        season_num_val: int | None = None
+        if ctx:
+            ep, season, series = ctx
+            season_id_val = int(season.id)
+            season_num_val = int(season.season_number)
+            item_title = f"S{season_num_val:02d}E{int(ep.episode_number):02d} - {ep.title}"
+            if n_eps > 1:
+                item_title = f"{n_eps} episodes (first: {item_title})"
+            path_val = str(getattr(ep, "placeholder_filepath", "") or "").strip() or episode_placeholder_path(ep, season, series)
+        append_placeholder_activity_status(
+            session,
+            item_type="episode",
+            movie_id=None,
+            episode_id=primary_ep_id,
+            series_id=int(series_row.id),
+            season_id=season_id_val,
+            season_number=season_num_val,
+            instance_key=getattr(series_row, "instance_key", None),
+            instance_id=getattr(series_row, "instance_id", None),
+            event_type="placeholder_event_episode_file_deleted_result",
+            path=str(path_val or ""),
+            item_title=item_title,
+            series_title=series_title_val,
+            reason=result_reason,
+            status_label=status_label,
+            source="event_episode_file_deleted",
+            extra_snapshot={
+                "determination": determination_stats if isinstance(determination_stats, dict) else {},
+                "materialization": mat,
+                "episode_ids": episode_ids,
+                "series_id": int(series_row.id),
+            },
+        )
+        session.commit()
+
         return {
             "ok": True,
             "event": "episode_file_deleted",
@@ -823,7 +1097,11 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
 
 
 def process_series_deleted_event(payload: dict[str, Any], instance: str | None = None) -> dict[str, Any]:
-    """Process series delete event by marking deleted and running targeted determination/materialization."""
+    """Process series delete event by marking deleted and running targeted determination/materialization.
+
+    Placeholder activity: aggregate ``PlaceholderActivityHistory`` is written inside materialization
+    (bulk series tombstone path) to avoid duplicate rows here.
+    """
     sonarr_series_id = _extract_series_id(payload)
     if not sonarr_series_id:
         raise ValueError("seriesdelete_missing_series_id")

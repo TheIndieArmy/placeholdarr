@@ -4,7 +4,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.config import settings
-from services.postgres.models import Episode, Job, Movie, Placeholder
+from services.placeholders import episode_placeholder_path, movie_placeholder_path
+from services.placeholder_activity_log import (
+    append_placeholder_activity_status,
+    materialization_stats_dict,
+    outcome_reason_and_status_from_materialization,
+)
+from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
@@ -200,6 +206,8 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
         extra={'emoji_type': 'debug'}
     )
 
+    materialization: dict[str, Any] = {}
+
     if is_finalize:
         logger.info(
             f"Import grace finalization starting: content_type={content_type}, entity_id={entity_id}, placeholder_ids={placeholder_ids}",
@@ -230,6 +238,40 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                 observation_source="event_movie_imported_grace_finalize",
             )
             logger.debug(f"Finalize: Materialization complete for movie_id={entity_id}: {materialization}", extra={'emoji_type': 'debug'})
+            movie_ref = session.query(Movie).filter(Movie.id == entity_id).first()
+            mat = materialization_stats_dict(materialization)
+            result_reason, status_label = outcome_reason_and_status_from_materialization(
+                "Import grace finished (movie)", mat
+            )
+            result_path = (
+                str(getattr(movie_ref, "placeholder_filepath", "") or "").strip()
+                if movie_ref
+                else ""
+            ) or (movie_placeholder_path(movie_ref) if movie_ref else "")
+            append_placeholder_activity_status(
+                session,
+                item_type="movie",
+                movie_id=int(entity_id),
+                episode_id=None,
+                series_id=None,
+                season_id=None,
+                season_number=None,
+                instance_key=getattr(movie_ref, "instance_key", None) if movie_ref else None,
+                instance_id=getattr(movie_ref, "instance_id", None) if movie_ref else None,
+                event_type="placeholder_event_import_grace_movie_finalize",
+                path=str(result_path or ""),
+                item_title=str(getattr(movie_ref, "title", "") or "Unknown Movie") if movie_ref else "Unknown Movie",
+                series_title=None,
+                reason=result_reason,
+                status_label=status_label,
+                source="import_grace_finalize",
+                extra_snapshot={
+                    "determination": determination if isinstance(determination, dict) else {},
+                    "materialization": mat,
+                    "movie_id": int(entity_id),
+                    "placeholder_ids": placeholder_ids,
+                },
+            )
         elif content_type == "episode":
             logger.debug(f"Finalize: Looking up episode with id={entity_id}", extra={'emoji_type': 'debug'})
             episode_row = session.query(Episode).filter(Episode.id == entity_id).first()
@@ -255,6 +297,73 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
                 observation_source="event_episode_imported_grace_finalize",
             )
             logger.debug(f"Finalize: Materialization complete for episode_id={entity_id}: {materialization}", extra={'emoji_type': 'debug'})
+            ctx = (
+                session.query(Episode, Season, Series)
+                .join(Season, Episode.season_id == Season.id)
+                .join(Series, Season.series_id == Series.id)
+                .filter(Episode.id == entity_id)
+                .first()
+            )
+            mat = materialization_stats_dict(materialization)
+            result_reason, status_label = outcome_reason_and_status_from_materialization(
+                "Import grace finished (episode)", mat
+            )
+            if ctx:
+                ep, season, series = ctx
+                sn = int(season.season_number)
+                ep_label = f"S{sn:02d}E{int(ep.episode_number):02d} - {ep.title}"
+                result_path = str(getattr(ep, "placeholder_filepath", "") or "").strip() or episode_placeholder_path(
+                    ep, season, series
+                )
+                append_placeholder_activity_status(
+                    session,
+                    item_type="episode",
+                    movie_id=None,
+                    episode_id=int(entity_id),
+                    series_id=int(series.id),
+                    season_id=int(season.id),
+                    season_number=sn,
+                    instance_key=getattr(series, "instance_key", None),
+                    instance_id=getattr(series, "instance_id", None),
+                    event_type="placeholder_event_import_grace_episode_finalize",
+                    path=str(result_path or ""),
+                    item_title=ep_label,
+                    series_title=str(getattr(series, "title", "") or "") or None,
+                    reason=result_reason,
+                    status_label=status_label,
+                    source="import_grace_finalize",
+                    extra_snapshot={
+                        "determination": determination if isinstance(determination, dict) else {},
+                        "materialization": mat,
+                        "episode_id": int(entity_id),
+                        "placeholder_ids": placeholder_ids,
+                    },
+                )
+            else:
+                append_placeholder_activity_status(
+                    session,
+                    item_type="episode",
+                    movie_id=None,
+                    episode_id=int(entity_id),
+                    series_id=None,
+                    season_id=None,
+                    season_number=None,
+                    instance_key=None,
+                    instance_id=None,
+                    event_type="placeholder_event_import_grace_episode_finalize",
+                    path="",
+                    item_title="Unknown episode",
+                    series_title=None,
+                    reason=result_reason,
+                    status_label=status_label,
+                    source="import_grace_finalize",
+                    extra_snapshot={
+                        "determination": determination if isinstance(determination, dict) else {},
+                        "materialization": mat,
+                        "episode_id": int(entity_id),
+                        "placeholder_ids": placeholder_ids,
+                    },
+                )
         else:
             logger.warning(f"Finalize: Unsupported content_type={content_type}", extra={'emoji_type': 'warning'})
             return {"done": True, "ok": False, "reason": f"unsupported_content_type:{content_type}"}

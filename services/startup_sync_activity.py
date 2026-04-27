@@ -128,12 +128,34 @@ def _build_startup_sync_row(
                     "value": _to_int(determination_stats.get("needs_placeholder"), 0) if bool(determination_stats) else "--",
                 },
                 {
-                    "label": "Already had placeholder",
+                    "label": "Placeholder on disk OK",
                     "value": _to_int(determination_stats.get("placeholder_exists"), 0) if bool(determination_stats) else "--",
                 },
                 {
-                    "label": "Not needed",
+                    "label": "No placeholder (file, deleted, or rules)",
                     "value": _to_int(determination_stats.get("not_needed"), 0) if bool(determination_stats) else "--",
+                },
+                {
+                    "label": "Remove stale placeholder",
+                    "value": _to_int(determination_stats.get("obsolete_placeholder"), 0) if bool(determination_stats) else "--",
+                },
+                {
+                    "label": "Path corrected",
+                    "value": (
+                        _to_int(determination_stats.get("path_drift_movies"), 0)
+                        + _to_int(determination_stats.get("path_drift_episodes"), 0)
+                    )
+                    if bool(determination_stats)
+                    else "--",
+                },
+                {
+                    "label": "Rows updated (DB)",
+                    "value": (
+                        _to_int(determination_stats.get("movies_changed"), 0)
+                        + _to_int(determination_stats.get("episodes_changed"), 0)
+                    )
+                    if bool(determination_stats)
+                    else "--",
                 },
             ],
         },

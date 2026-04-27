@@ -22,8 +22,12 @@ def _slim_determination_for_marker(stats: dict[str, Any] | None) -> dict[str, An
         "placeholder_exists",
         "not_needed",
         "obsolete_placeholder",
+        "path_drift_movies",
+        "path_drift_episodes",
         "movies_total",
         "episodes_total",
+        "movies_changed",
+        "episodes_changed",
     )
     out: dict[str, Any] = {}
     for k in keys:
