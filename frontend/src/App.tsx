@@ -1014,6 +1014,17 @@ export function App() {
     }
   }
 
+  /** Load `/api/settings/current` as soon as the Settings tab is opened — do not wait for the next 5s poll tick (avoids a blank main pane when settings were never fetched while on Activity). */
+  useEffect(() => {
+    if (currentTab !== "settings") return;
+    if (settingsPayload) return;
+    if (hasUnsavedChangesRef.current) return;
+    void loadSettings(false).catch(() => {
+      /* Errors surface via dashboard refresh / error banner; poll will retry. */
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings omitted: new function identity each render would retrigger while payload is null.
+  }, [currentTab, settingsPayload]);
+
   async function handlePartialSave(result: any, partialValues: Record<string, unknown>) {
     if (!result) return;
     if (!result.ok) {
@@ -1125,7 +1136,19 @@ export function App() {
   }, [location.pathname]);
 
   function renderTabBody() {
-    if (loading) return <div className="empty">Loading dashboard data...</div>;
+    // Settings has its own loading UI (`SettingsPanel` when payload is null). Do not gate it on the global
+    // bootstrap flag — otherwise cold loads on `/settings/...` or slow first refresh can show an empty main area.
+    if (loading && currentTab !== "settings") {
+      return (
+        <div
+          className={`min-h-[40vh] flex items-center justify-center text-sm font-headline uppercase tracking-widest ${
+            themeMode === "light" ? "text-slate-600" : "text-slate-400"
+          }`}
+        >
+          Loading dashboard data...
+        </div>
+      );
+    }
 
     if (location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"))) {
       return <DetailRoutePage brand={brand} themeMode={themeMode} scrollContainerRef={contentScrollRef} />;
@@ -5571,7 +5594,8 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
         <li>
           <span className="font-medium text-slate-200">Lite sync</span>
           {" "}
-          will use arrs recent history and Placeholdarr root folder to make necessary changes for any recent events.
+          compares each configured Radarr/Sonarr catalog to the database, syncs only what changed, then runs scoped placeholder
+          work (no full library filesystem scan on startup).
         </li>
         <li>
           <span className="font-medium text-slate-200">Auto</span>
@@ -5643,6 +5667,18 @@ function SettingsPanel(props: {
   }
 
   const payload = props.payload;
+  if (!payload.sections?.length) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 min-h-[40vh] px-6 text-center">
+        <p className={`text-sm font-headline uppercase tracking-widest ${props.themeMode === "light" ? "text-slate-600" : "text-slate-400"}`}>
+          No settings sections were returned from the API.
+        </p>
+        <p className={`text-xs max-w-md ${props.themeMode === "light" ? "text-slate-500" : "text-slate-500"}`}>
+          Refresh the page or check server logs. If the problem persists, verify `/api/settings/current` returns a non-empty `sections` list.
+        </p>
+      </div>
+    );
+  }
   const active = payload.sections.find((s) => s.name === props.activeSection) || payload.sections[0];
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const allSettingsFieldsByKey = useMemo(() => {

@@ -234,9 +234,9 @@ def cleanup_deleted_series_placeholder_files(
 ) -> dict[str, Any]:
 	"""Bulk cleanup for a deleted series.
 
-	Optimized path for ARR series tombstones: remove tracked placeholder media sidecars,
-	then delete the whole placeholder series tree when all remaining files are safe placeholder
-	artifacts. Falls back to empty-tree prune if full-tree delete is not safe.
+	When the derived series folder is entirely placeholder-shaped, remove the whole tree first
+	(fast path), then only handle candidate paths that live outside that tree. Otherwise keep
+	the conservative per-file pass, then attempt the same whole-tree delete as a second step.
 	"""
 	files_deleted = 0
 	nfos_deleted = 0
@@ -252,7 +252,43 @@ def cleanup_deleted_series_placeholder_files(
 		extra={"emoji_type": "info"},
 	)
 
+	series_folder = _derive_series_folder(series, None, paths)
+	tree_removed = False
+	if series_folder:
+		series_folder_abs = os.path.abspath(series_folder)
+		if (
+			is_path_under_tv_library_roots(series_folder_abs)
+			and os.path.isdir(series_folder_abs)
+			and _is_safe_placeholder_series_tree(series_folder_abs)
+		):
+			try:
+				file_tally = 0
+				for _, _, fnames in os.walk(series_folder_abs):
+					file_tally += len(fnames)
+				logger.info(
+					f"Series tombstone cleanup removing folder tree (fast path): series={series_title!r} "
+					f"folder={series_folder_abs!r}",
+					extra={"emoji_type": "info"},
+				)
+				shutil.rmtree(series_folder_abs)
+				files_deleted += int(file_tally)
+				directories_deleted += int(_tree_dir_count(series_folder_abs) + 1)
+				tree_removed = True
+				refresh_path = _nearest_existing_dir(os.path.dirname(series_folder_abs))
+				if refresh_path:
+					refresh_paths.add(refresh_path)
+			except Exception:
+				tree_removed = False
+
+	prefix = (os.path.abspath(series_folder) + os.sep) if tree_removed and series_folder else None
+
 	for idx, path in enumerate(paths, start=1):
+		if prefix:
+			try:
+				if os.path.abspath(path).startswith(prefix):
+					continue
+			except Exception:
+				pass
 		if remove_placeholder_file(path):
 			files_deleted += 1
 		if remove_nfo_sidecar(path):
@@ -266,27 +302,26 @@ def cleanup_deleted_series_placeholder_files(
 				extra={"emoji_type": "info"},
 			)
 
-	series_folder = _derive_series_folder(series, None, paths)
-	if series_folder:
-		series_folder = os.path.abspath(series_folder)
-		if is_path_under_tv_library_roots(series_folder) and os.path.isdir(series_folder):
-			if _is_safe_placeholder_series_tree(series_folder):
-				dir_count = _tree_dir_count(series_folder)
+	if not tree_removed and series_folder:
+		series_folder_resolved = os.path.abspath(series_folder)
+		if is_path_under_tv_library_roots(series_folder_resolved) and os.path.isdir(series_folder_resolved):
+			if _is_safe_placeholder_series_tree(series_folder_resolved):
+				dir_count = _tree_dir_count(series_folder_resolved)
 				try:
 					logger.info(
-						f"Series tombstone cleanup removing folder tree: series={series_title!r} folder={series_folder!r}",
+						f"Series tombstone cleanup removing folder tree: series={series_title!r} folder={series_folder_resolved!r}",
 						extra={"emoji_type": "info"},
 					)
-					shutil.rmtree(series_folder)
+					shutil.rmtree(series_folder_resolved)
 					directories_deleted += int(dir_count + 1)
 				except Exception:
 					# Fallback to conservative prune when a full-tree delete fails.
-					series_nfo_deleted = _remove_series_nfo(series_folder) or series_nfo_deleted
-					directories_deleted += _prune_empty_tree(series_folder)
+					series_nfo_deleted = _remove_series_nfo(series_folder_resolved) or series_nfo_deleted
+					directories_deleted += _prune_empty_tree(series_folder_resolved)
 			else:
-				series_nfo_deleted = _remove_series_nfo(series_folder) or series_nfo_deleted
-				directories_deleted += _prune_empty_tree(series_folder)
-			refresh_path = _nearest_existing_dir(os.path.dirname(series_folder))
+				series_nfo_deleted = _remove_series_nfo(series_folder_resolved) or series_nfo_deleted
+				directories_deleted += _prune_empty_tree(series_folder_resolved)
+			refresh_path = _nearest_existing_dir(os.path.dirname(series_folder_resolved))
 			if refresh_path:
 				refresh_paths.add(refresh_path)
 

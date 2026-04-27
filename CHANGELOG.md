@@ -7,6 +7,57 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-04-27
+
+### Added
+
+- **Startup lite now catches real offline changes without a full startup sweep.**
+  - Added pre-discovery reconciliation (`lite_reconcile.py`) to seed scoped work for rows with placeholder/path truth mismatches and triple-false state patterns.
+  - Added one-time specials retroactive backfill trigger when `INCLUDE_SPECIALS` is enabled, so season 0 episodes can be re-evaluated and materialized without forcing a global pass.
+
+### Changed
+
+- **Startup lite is now a focused catalog-diff workflow (faster, less churn).**
+  - Replaced history-driven startup lite with per-instance snapshot diffing against live Radarr/Sonarr catalogs (`/movie` + `/series`) and DB state.
+  - Scoped startup lite to targeted sync + determination + materialization for touched rows, and skipped full filesystem scan/global placeholder reconcile in lite mode.
+  - Added per-entity placeholder truth refresh ahead of scoped determination in lite mode.
+  - Updated targeted sync return contracts to include touched row IDs (`touched_movie_row_ids` / `touched_episode_row_ids`) and merged them with reconciliation seeds.
+  - Updated ARR upsert helpers to return created/changed signals so no-op writes do not inflate churn.
+
+- **Startup and dashboard progress reporting is clearer and more actionable.**
+  - Added immediate `system_activity_history` startup-lite discovery snapshots so progress shows as working early instead of appearing idle.
+  - Expanded startup-lite catalog logs with grouped title outcomes (added/updated/path-changed/removed) and compact refresh summaries.
+  - Improved Sonarr targeted sync progress logs to show titled `Series i/N` progress with episode counters and elapsed time.
+  - Standardized determination completion anchors (`Determination · full_scan · complete` / `Determination · scoped · complete`) and improved dashboard determination metric labels/counters.
+  - Updated startup sync mode UI/settings copy to describe current lite behavior (catalog diff + targeted sync) instead of legacy history wording.
+  - Collapsed duplicate startup progress snapshots in the activity feed so a single run shows one canonical lite/full progress row.
+
+- **Series deletion cleanup is more efficient and safer.**
+  - Prefer fast whole-folder series tombstone cleanup when safe-tree checks pass; retain per-file/prune fallback when full-tree delete is not safe.
+
+- **Specials handling is now model-first and behavior-gated.**
+  - Sonarr sync/event ingestion now captures season 0 rows consistently in DB.
+  - `INCLUDE_SPECIALS` now controls placeholder determination/materialization behavior instead of whether specials are captured.
+
+### Fixed
+
+- **Lite Sonarr catalog comparison now avoids false updates and stale diffs.**
+  - Switched lite series episode-total comparison to Sonarr `statistics.totalEpisodeCount`.
+  - Excluded `Episode.is_deleted` rows from lite catalog-vs-DB episode/file aggregate comparisons.
+  - Fixed ArrState shadowing bug in Sonarr catalog diff diagnostics so `last_history_checked_at` persists correctly.
+  - Reduced repeated specials churn by skipping season 0 triple-flag reconciliation when `INCLUDE_SPECIALS` is disabled.
+
+- **Settings and activity UX edge cases were tightened.**
+  - Fixed settings first paint so `/api/settings/current` is fetched immediately and empty-section payloads render explicit state.
+
+### Removed
+
+- **Removed dead startup-lite legacy parsing/client code.**
+  - Removed unused ARR history client helpers (`_fetch_arr_history`, `fetch_radarr_history`, `fetch_sonarr_history`) now that startup lite no longer paginates ARR history.
+  - Removed obsolete dashboard lite log scrapers for no-longer-emitted targeted-sync JSON lines.
+
+## [0.9.6] - 2026-04-26
+
 ### Added
 - **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
 - **Dashboard library IA**: Sidebar **Library** opens **Movies** at `/library`; **TV** lives at `/library/tv` with nested nav (same pattern as Settings). Per-shelf filters persist in `sessionStorage` (`placeholdarr:library-shelf-filter:movies` / `:tv`); legacy `placeholdarr:library-filter` is migrated once on load.
@@ -14,6 +65,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Settings → Media Integrations**: **Webhook URL** on each connected Plex/Jellyfin/Emby card opens the same playback webhook setup modal as onboarding (shared `PlaybackWebhookSetupModal`).
 - **Lite sync catalog tombstones**: Startup lite now compares DB rows against current Radarr/Sonarr catalogs and targets missing IDs for tombstoning (`movies_catalog_removed` / `series_catalog_removed`), not just history and path-drift IDs.
 - **Series tombstone bulk cleanup path**: Deleted Sonarr series now use a series-level placeholder cleanup routine with progress logs, safe full-tree deletion checks, and aggregate history metadata for grouped placeholder activity UI rows.
+- **Webhook placeholder activity outcomes**: Radarr/Sonarr webhook handlers now append `PlaceholderActivityHistory` rows for series add, movie/episode import (grace scheduling), movie file delete, movie delete, and episode file delete (with aggregate materialization stats), alongside the existing movie-add outcome row. Series delete webhooks continue to rely on the materializer’s aggregate bulk-delete history row to avoid duplicates. Import grace **finalize** jobs record one outcome row per movie/episode after deferred materialization.
 
 ### Changed
 - **Movie & series detail API**: When **ARR_INSTANCES_JSON** lists Radarr / Sonarr instances, ``arr_instance_links`` includes **every configured slot** for that type in priority order; slots where the title/show is absent use ``present: false`` and a **base ARR UI** URL so the dashboard can show **"-"** instead of Yes/No or episode counts. **Movies** pad Radarr; **series** pad Sonarr and add ``episode_total`` per row (with existing ``episode_files`` / ``episode_placeholders``) for **files/total** in the UI. Slot lists use **DB-persisted** ``ARR_INSTANCES_JSON`` (via ``parse_configured_arr_instances_json``); rows match slots by **instance_key**, **instance_id**, and **instance_key_aliases** (normalized keys). After slot padding, any **extra local Movie/Series row** for the same TMDB/TVDB that was not already emitted (e.g. secondary instance whose key drifted from JSON) is **appended** so the UI always shows every instance that holds the title.

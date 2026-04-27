@@ -4,21 +4,26 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import func
+
 from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
-from services.postgres.models import ArrState, Movie, Series
+from services.placeholders import episode_placeholder_path, movie_placeholder_path
+from services.postgres.models import ArrState, Episode, Movie, Season, Series
 from services.source_of_truth.arr_api import (
-    fetch_radarr_history,
     fetch_radarr_movies,
-    fetch_sonarr_history,
     fetch_sonarr_series,
 )
 from services.source_of_truth.calendar_phase import run_calendar_phase
 from services.source_of_truth.calendar_date_refresh import run_calendar_date_refresh
-from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
+from services.source_of_truth.determiner import (
+    run_determination_for_entities,
+    run_determination_pass,
+    run_placeholder_link_reconcile,
+)
 from services.source_of_truth.filesystem import scan_once_if_needed
-from services.source_of_truth.materializer import run_materialization_pass
+from services.source_of_truth.materializer import run_materialization_for_entities, run_materialization_pass
 from services.source_of_truth.placeholder_cleanup import run_orphan_placeholder_cleanup
 from services.source_of_truth.sync_runner import run_full_sync, sync_radarr_movies_by_ids, sync_sonarr_series_by_ids
 
@@ -230,45 +235,232 @@ def _get_or_create_arr_state(session, instance_key: str, arr_type: str) -> ArrSt
     return row
 
 
-def _parse_history_max_id(events: list[dict]) -> int | None:
-    max_id = None
-    for event in events:
-        ev_id = event.get('id')
-        try:
-            ev_id_int = int(ev_id)
-        except Exception:
+def _api_movie_has_file(item: dict) -> bool:
+    return bool(item.get("hasFile") or (item.get("movieFile") or {}).get("path"))
+
+
+def _api_movie_file_path(item: dict) -> str | None:
+    return _normalize_path((item.get("movieFile") or {}).get("path"))
+
+
+def _api_movie_library_path(item: dict) -> str | None:
+    return _normalize_path(item.get("path") or item.get("folderPath") or item.get("rootFolderPath"))
+
+
+def _api_series_library_path(item: dict) -> str | None:
+    return _normalize_path(item.get("path") or item.get("folderPath") or item.get("rootFolderPath"))
+
+
+def _api_series_monitored(item: dict) -> bool:
+    return bool(item.get("monitored"))
+
+
+def _api_series_total_episode_count(item: dict) -> int | None:
+    """Sonarr ``statistics.totalEpisodeCount`` — full episode catalog size (includes specials).
+
+    Lite series catalog diff compares this to DB non-deleted episode row totals.
+    """
+    stats = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+    value = stats.get("totalEpisodeCount")
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _api_series_episode_file_count(item: dict) -> int | None:
+    stats = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+    value = stats.get("episodeFileCount")
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+_LITE_SNAPSHOT_NAME_CAP = 100
+
+
+def _radarr_item_title(item: dict | None, *, radarr_id: int | None = None) -> str:
+    if isinstance(item, dict):
+        t = str(item.get("title") or item.get("sortTitle") or "").strip()
+        if t:
+            return t
+    return f"Movie id {radarr_id}" if radarr_id is not None else "Unknown movie"
+
+
+def _sonarr_item_title(item: dict | None, *, sonarr_id: int | None = None) -> str:
+    if isinstance(item, dict):
+        t = str(item.get("title") or item.get("sortTitle") or "").strip()
+        if t:
+            return t
+    return f"Series id {sonarr_id}" if sonarr_id is not None else "Unknown series"
+
+
+def _lite_format_title_block(label: str, titles: list[str]) -> str:
+    if not titles:
+        return ""
+    titles_sorted = sorted(titles, key=lambda s: s.casefold())
+    if len(titles_sorted) <= _LITE_SNAPSHOT_NAME_CAP:
+        joined = ", ".join(titles_sorted)
+    else:
+        joined = ", ".join(titles_sorted[:_LITE_SNAPSHOT_NAME_CAP]) + f" … and {len(titles_sorted) - _LITE_SNAPSHOT_NAME_CAP} more"
+    return f"{label} ({len(titles)}): {joined}"
+
+
+def _log_startup_lite_radarr_catalog_breakdown(
+    session,
+    *,
+    instance_key: str,
+    catalog_count: int,
+    api_by_id: dict[int, dict],
+    added_ids: set[int],
+    changed_ids: set[int],
+    drift_ids: set[int],
+    removed_ids: set[int],
+    prep_elapsed_s: float,
+) -> None:
+    title_by_id: dict[int, str] = {}
+    for mid in added_ids | changed_ids | drift_ids:
+        title_by_id[mid] = _radarr_item_title(api_by_id.get(mid), radarr_id=mid)
+    if removed_ids:
+        rows = (
+            session.query(Movie.radarrid, Movie.title)
+            .filter(Movie.instance_key == instance_key, Movie.radarrid.in_(list(removed_ids)))
+            .all()
+        )
+        for rid, ttl in rows:
+            if rid is not None:
+                title_by_id[int(rid)] = str(ttl).strip() or _radarr_item_title(None, radarr_id=int(rid))
+        for mid in removed_ids:
+            title_by_id.setdefault(mid, _radarr_item_title(None, radarr_id=mid))
+
+    logger.info(
+        f"Startup lite · {instance_key} · movies: {catalog_count} titles in Radarr",
+        extra={'emoji_type': 'info'},
+    )
+    for label, idset in (
+        ("Added", added_ids),
+        ("Updated", changed_ids),
+        ("Library path changed", drift_ids),
+        ("Removed from Radarr", removed_ids),
+    ):
+        if not idset:
             continue
-        if max_id is None or ev_id_int > max_id:
-            max_id = ev_id_int
-    return max_id
+        names = [title_by_id.get(i) or _radarr_item_title(None, radarr_id=i) for i in idset]
+        logger.info(f"  {_lite_format_title_block(label, names)}", extra={'emoji_type': 'info'})
+    n_target = len(added_ids | changed_ids | drift_ids | removed_ids)
+    logger.info(
+        f"  → Refreshing {n_target} movies · catalog check took {prep_elapsed_s:.1f}s",
+        extra={'emoji_type': 'info'},
+    )
 
 
-def _extract_radarr_movie_ids(events: list[dict]) -> set[int]:
-    ids: set[int] = set()
-    for event in events:
-        movie_id = event.get('movieId')
-        if movie_id is None and isinstance(event.get('movie'), dict):
-            movie_id = event['movie'].get('id')
-        try:
-            if movie_id is not None:
-                ids.add(int(movie_id))
-        except Exception:
+def _log_startup_lite_sonarr_catalog_breakdown(
+    session,
+    *,
+    instance_key: str,
+    catalog_count: int,
+    api_by_id: dict[int, dict],
+    added_ids: set[int],
+    changed_ids: set[int],
+    drift_ids: set[int],
+    removed_ids: set[int],
+    prep_elapsed_s: float,
+) -> None:
+    title_by_id: dict[int, str] = {}
+    for sid in added_ids | changed_ids | drift_ids:
+        title_by_id[sid] = _sonarr_item_title(api_by_id.get(sid), sonarr_id=sid)
+    if removed_ids:
+        rows = (
+            session.query(Series.sonarrid, Series.title)
+            .filter(Series.instance_key == instance_key, Series.sonarrid.in_(list(removed_ids)))
+            .all()
+        )
+        for rid, ttl in rows:
+            if rid is not None:
+                title_by_id[int(rid)] = str(ttl).strip() or _sonarr_item_title(None, sonarr_id=int(rid))
+        for sid in removed_ids:
+            title_by_id.setdefault(sid, _sonarr_item_title(None, sonarr_id=sid))
+
+    logger.info(
+        f"Startup lite · {instance_key} · TV shows: {catalog_count} series in Sonarr",
+        extra={'emoji_type': 'info'},
+    )
+    for label, idset in (
+        ("Added", added_ids),
+        ("Updated", changed_ids),
+        ("Library path changed", drift_ids),
+        ("Removed from Sonarr", removed_ids),
+    ):
+        if not idset:
             continue
-    return ids
+        names = [title_by_id.get(i) or _sonarr_item_title(None, sonarr_id=i) for i in idset]
+        logger.info(f"  {_lite_format_title_block(label, names)}", extra={'emoji_type': 'info'})
+    n_target = len(added_ids | changed_ids | drift_ids | removed_ids)
+    logger.info(
+        f"  → Refreshing {n_target} series · catalog check took {prep_elapsed_s:.1f}s",
+        extra={'emoji_type': 'info'},
+    )
 
 
-def _extract_sonarr_series_ids(events: list[dict]) -> set[int]:
-    ids: set[int] = set()
-    for event in events:
-        series_id = event.get('seriesId')
-        if series_id is None and isinstance(event.get('series'), dict):
-            series_id = event['series'].get('id')
-        try:
-            if series_id is not None:
-                ids.add(int(series_id))
-        except Exception:
-            continue
-    return ids
+def _refresh_placeholder_presence_for_entities(*, movie_row_ids: list[int], episode_row_ids: list[int]) -> dict:
+    """Recompute has_placeholder/path for changed entities only (cheap startup-lite consistency check)."""
+    stats = {
+        "movies_checked": 0,
+        "movies_updated": 0,
+        "episodes_checked": 0,
+        "episodes_updated": 0,
+    }
+    if not movie_row_ids and not episode_row_ids:
+        return stats
+
+    session = get_session()
+    try:
+        if movie_row_ids:
+            movies = session.query(Movie).filter(Movie.id.in_(movie_row_ids)).all()
+            for movie in movies:
+                stats["movies_checked"] += 1
+                expected_path = movie_placeholder_path(movie)
+                exists = bool(expected_path and os.path.isfile(expected_path))
+                new_path = expected_path if exists else None
+                if bool(getattr(movie, "has_placeholder", False)) != exists or (
+                    _normalize_path(getattr(movie, "placeholder_filepath", None)) != _normalize_path(new_path)
+                ):
+                    movie.has_placeholder = exists
+                    movie.placeholder_filepath = new_path
+                    movie.updated_at = func.now()
+                    session.add(movie)
+                    stats["movies_updated"] += 1
+
+        if episode_row_ids:
+            rows = (
+                session.query(Episode, Season, Series)
+                .join(Season, Episode.season_id == Season.id)
+                .join(Series, Season.series_id == Series.id)
+                .filter(Episode.id.in_(episode_row_ids))
+                .all()
+            )
+            for episode, season, series in rows:
+                stats["episodes_checked"] += 1
+                expected_path = episode_placeholder_path(episode, season, series)
+                exists = bool(expected_path and os.path.isfile(expected_path))
+                new_path = expected_path if exists else None
+                if bool(getattr(episode, "has_placeholder", False)) != exists or (
+                    _normalize_path(getattr(episode, "placeholder_filepath", None)) != _normalize_path(new_path)
+                ):
+                    episode.has_placeholder = exists
+                    episode.placeholder_filepath = new_path
+                    episode.updated_at = func.now()
+                    session.add(episode)
+                    stats["episodes_updated"] += 1
+
+        session.commit()
+        return stats
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -> dict:
@@ -313,12 +505,17 @@ def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -
         session.close()
 
 
-def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
+def _run_startup_lite_snapshot_for_instances(
+    instances: list[dict],
+    *,
+    seed_movie_row_ids: set[int] | None = None,
+    seed_episode_row_ids: set[int] | None = None,
+    lite_reconciliation_pre: dict | None = None,
+) -> dict:
     stats = {
         'instances': 0,
         'instances_failed': 0,
-        'events_seen': 0,
-        'events_with_ids': 0,
+        'snapshot_rows_seen': 0,
         'targeted_sync_runs': 0,
         'path_drift_ids': 0,
         'movies_seen': 0,
@@ -329,28 +526,104 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
         'series_catalog_removed': 0,
         'movies_marked_deleted': 0,
         'series_marked_deleted': 0,
+        'movies_targeted': 0,
+        'series_targeted': 0,
+        'movie_row_ids': [],
+        'episode_row_ids': [],
+        'lite_reconciliation_pre': lite_reconciliation_pre or {},
     }
     if not instances:
         return stats
 
     session = get_session()
+    touched_movie_row_ids: set[int] = set(seed_movie_row_ids or ())
+    touched_episode_row_ids: set[int] = set(seed_episode_row_ids or ())
     try:
         for instance in instances:
             stats['instances'] += 1
             instance_key = instance['instance_key']
             try:
                 row = _get_or_create_arr_state(session, instance_key, instance['arr_type'])
-                start_id = int(row.last_history_id or 0)
+                t0 = time.monotonic()
+                logger.info(
+                    f"Startup lite · {instance_key} · {'movies' if instance['arr_type'] == 'radarr' else 'TV shows'} · catalog check",
+                    extra={'emoji_type': 'info'},
+                )
 
                 if instance['arr_type'] == 'radarr':
-                    events = fetch_radarr_history(start_id=start_id, url=instance['base_url'], api_key=instance['api_key'])
-                    target_ids = _extract_radarr_movie_ids(events)
                     api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key']) or []
+                    stats['snapshot_rows_seen'] += len(api_movies)
                     drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
                     removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
-                    target_ids = set(target_ids) | set(drift_ids) | set(removed_ids)
+                    api_by_id: dict[int, dict] = {}
+                    for item in api_movies:
+                        if not isinstance(item, dict):
+                            continue
+                        mid = item.get("id")
+                        try:
+                            api_by_id[int(mid)] = item
+                        except Exception:
+                            continue
+
+                    db_rows = (
+                        session.query(
+                            Movie.radarrid,
+                            Movie.has_file,
+                            Movie.radarrpath,
+                            Movie.radarr_filepath,
+                            Movie.radarr_monitored,
+                            Movie.is_deleted,
+                        )
+                        .filter(Movie.instance_key == instance_key, Movie.radarrid.isnot(None))
+                        .all()
+                    )
+                    db_by_id: dict[int, tuple[bool, str | None, str | None, bool, bool]] = {}
+                    for rid, has_file, radarrpath, radarr_filepath, monitored, is_deleted in db_rows:
+                        try:
+                            db_by_id[int(rid)] = (
+                                bool(has_file),
+                                _normalize_path(radarrpath),
+                                _normalize_path(radarr_filepath),
+                                bool(monitored),
+                                bool(is_deleted),
+                            )
+                        except Exception:
+                            continue
+
+                    added_ids = set(api_by_id.keys()) - set(db_by_id.keys())
+                    changed_ids: set[int] = set()
+                    for mid, (db_has_file, db_path, db_file_path, db_monitored, db_is_deleted) in db_by_id.items():
+                        item = api_by_id.get(mid)
+                        if not item:
+                            continue
+                        api_has_file = _api_movie_has_file(item)
+                        api_path = _api_movie_library_path(item)
+                        api_file_path = _api_movie_file_path(item)
+                        api_monitored = bool(item.get("monitored"))
+                        if (
+                            db_has_file != api_has_file
+                            or db_path != api_path
+                            or db_file_path != api_file_path
+                            or db_monitored != api_monitored
+                            or db_is_deleted
+                        ):
+                            changed_ids.add(mid)
+
+                    target_ids = set(added_ids) | set(changed_ids) | set(drift_ids) | set(removed_ids)
                     stats['path_drift_ids'] += len(drift_ids)
                     stats['movies_catalog_removed'] += len(removed_ids)
+                    stats['movies_targeted'] += len(target_ids)
+                    _log_startup_lite_radarr_catalog_breakdown(
+                        session,
+                        instance_key=instance_key,
+                        catalog_count=len(api_movies),
+                        api_by_id=api_by_id,
+                        added_ids=added_ids,
+                        changed_ids=changed_ids,
+                        drift_ids=drift_ids,
+                        removed_ids=removed_ids,
+                        prep_elapsed_s=time.monotonic() - t0,
+                    )
                     if target_ids:
                         sync_stats = sync_radarr_movies_by_ids(
                             target_ids,
@@ -362,18 +635,190 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                         stats['movies_seen'] += int(sync_stats.get('movies_seen', 0) or 0)
                         stats['movies_marked_deleted'] += int(sync_stats.get('movies_marked_deleted', 0) or 0)
                         logger.info(
-                            f"Startup lite targeted movie sync for {instance_key}: {sync_stats}",
+                            f"Startup lite · {instance_key} · movies: "
+                            f"{int(sync_stats.get('movies_seen', 0) or 0)} synced from Radarr "
+                            f"({int(sync_stats.get('movies_created', 0) or 0)} new, "
+                            f"{int(sync_stats.get('movies_updated', 0) or 0)} updated, "
+                            f"{int(sync_stats.get('movies_marked_deleted', 0) or 0)} removed from library here)",
                             extra={'emoji_type': 'info'},
                         )
+                        raw_touched = sync_stats.get("touched_movie_row_ids")
+                        if isinstance(raw_touched, list) and raw_touched:
+                            touched_movie_row_ids.update(int(x) for x in raw_touched if x is not None)
+                        else:
+                            row_ids = [
+                                int(r[0])
+                                for r in session.query(Movie.id)
+                                .filter(Movie.instance_key == instance_key, Movie.radarrid.in_(list(target_ids)))
+                                .all()
+                            ]
+                            touched_movie_row_ids.update(row_ids)
                 else:
-                    events = fetch_sonarr_history(start_id=start_id, url=instance['base_url'], api_key=instance['api_key'])
-                    target_ids = _extract_sonarr_series_ids(events)
                     api_series = fetch_sonarr_series(instance['base_url'], instance['api_key']) or []
+                    stats['snapshot_rows_seen'] += len(api_series)
                     drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
                     removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)
-                    target_ids = set(target_ids) | set(drift_ids) | set(removed_ids)
+                    api_by_id: dict[int, dict] = {}
+                    for item in api_series:
+                        if not isinstance(item, dict):
+                            continue
+                        sid = item.get("id")
+                        try:
+                            api_by_id[int(sid)] = item
+                        except Exception:
+                            continue
+
+                    db_series_rows = (
+                        session.query(
+                            Series.sonarrid,
+                            Series.sonarrpath,
+                            Series.sonarr_monitored,
+                            Series.is_deleted,
+                            Series.seriesfile_count,
+                            Series.id,
+                        )
+                        .filter(Series.instance_key == instance_key, Series.sonarrid.isnot(None))
+                        .all()
+                    )
+                    db_by_id: dict[int, tuple[str | None, bool, bool, int, int]] = {}
+                    for sid, path, monitored, is_deleted, seriesfile_count, row_id in db_series_rows:
+                        try:
+                            db_by_id[int(sid)] = (
+                                _normalize_path(path),
+                                bool(monitored),
+                                bool(is_deleted),
+                                int(seriesfile_count or 0),
+                                int(row_id),
+                            )
+                        except Exception:
+                            continue
+
+                    db_episode_counts: dict[int, int] = {}
+                    db_episode_file_counts: dict[int, int] = {}
+                    grouped = (
+                        session.query(
+                            Series.sonarrid,
+                            func.count(Episode.id),
+                        )
+                        .join(Season, Season.series_id == Series.id)
+                        .join(Episode, Episode.season_id == Season.id)
+                        .filter(
+                            Series.instance_key == instance_key,
+                            Series.sonarrid.isnot(None),
+                            Series.is_deleted == False,  # noqa: E712
+                            Episode.is_deleted == False,  # noqa: E712
+                        )
+                        .group_by(Series.sonarrid)
+                        .all()
+                    )
+                    file_grouped = (
+                        session.query(
+                            Series.sonarrid,
+                            func.count(Episode.id),
+                        )
+                        .join(Season, Season.series_id == Series.id)
+                        .join(Episode, Episode.season_id == Season.id)
+                        .filter(
+                            Series.instance_key == instance_key,
+                            Series.sonarrid.isnot(None),
+                            Series.is_deleted == False,  # noqa: E712
+                            Episode.is_deleted == False,  # noqa: E712
+                            Episode.has_file == True,  # noqa: E712
+                        )
+                        .group_by(Series.sonarrid)
+                        .all()
+                    )
+                    file_count_by_sid: dict[int, int] = {}
+                    for sid, ep_file_count in file_grouped:
+                        try:
+                            file_count_by_sid[int(sid)] = int(ep_file_count or 0)
+                        except Exception:
+                            continue
+
+                    for sid, ep_count in grouped:
+                        try:
+                            db_episode_counts[int(sid)] = int(ep_count or 0)
+                            db_episode_file_counts[int(sid)] = int(file_count_by_sid.get(int(sid), 0))
+                        except Exception:
+                            continue
+
+                    added_ids = set(api_by_id.keys()) - set(db_by_id.keys())
+                    changed_ids: set[int] = set()
+                    for sid, (db_path, db_monitored, db_is_deleted, db_seriesfile_count, _row_id) in db_by_id.items():
+                        item = api_by_id.get(sid)
+                        if not item:
+                            continue
+                        api_path = _api_series_library_path(item)
+                        api_monitored = _api_series_monitored(item)
+                        api_total_episodes = _api_series_total_episode_count(item)
+                        api_episode_file_count = _api_series_episode_file_count(item)
+                        db_episode_count = int(db_episode_counts.get(sid, 0))
+                        db_episode_file_count = int(db_episode_file_counts.get(sid, db_seriesfile_count))
+                        if (
+                            db_path != api_path
+                            or db_monitored != api_monitored
+                            or db_is_deleted
+                            or (
+                                api_total_episodes is not None
+                                and db_episode_count != api_total_episodes
+                            )
+                            or (api_episode_file_count is not None and db_episode_file_count != api_episode_file_count)
+                        ):
+                            changed_ids.add(sid)
+
+                    if changed_ids:
+                        n_path = n_mon = n_del = n_tot = n_file = 0
+                        for sid in changed_ids:
+                            item = api_by_id.get(sid)
+                            if not item:
+                                continue
+                            db_row = db_by_id.get(sid)
+                            if not db_row:
+                                continue
+                            db_path, db_monitored, db_is_deleted, db_seriesfile_count, _ = db_row
+                            api_path = _api_series_library_path(item)
+                            api_monitored = _api_series_monitored(item)
+                            api_total = _api_series_total_episode_count(item)
+                            api_files = _api_series_episode_file_count(item)
+                            db_ep = int(db_episode_counts.get(sid, 0))
+                            db_files = int(db_episode_file_counts.get(sid, db_seriesfile_count))
+                            hit_path = db_path != api_path
+                            hit_mon = db_monitored != api_monitored
+                            hit_del = bool(db_is_deleted)
+                            hit_tot = api_total is not None and db_ep != api_total
+                            hit_file = api_files is not None and db_files != api_files
+                            if hit_path:
+                                n_path += 1
+                            if hit_mon:
+                                n_mon += 1
+                            if hit_del:
+                                n_del += 1
+                            if hit_tot:
+                                n_tot += 1
+                            if hit_file:
+                                n_file += 1
+                        logger.info(
+                            f"Startup lite · {instance_key} · TV catalog diff · among changed={len(changed_ids)}: "
+                            f"path={n_path} monitored={n_mon} series_row_deleted={n_del} "
+                            f"total_episodes_vs_DB={n_tot} episode_files_vs_DB={n_file}",
+                            extra={"emoji_type": "info"},
+                        )
+
+                    target_ids = set(added_ids) | set(changed_ids) | set(drift_ids) | set(removed_ids)
                     stats['path_drift_ids'] += len(drift_ids)
                     stats['series_catalog_removed'] += len(removed_ids)
+                    stats['series_targeted'] += len(target_ids)
+                    _log_startup_lite_sonarr_catalog_breakdown(
+                        session,
+                        instance_key=instance_key,
+                        catalog_count=len(api_series),
+                        api_by_id=api_by_id,
+                        added_ids=added_ids,
+                        changed_ids=changed_ids,
+                        drift_ids=drift_ids,
+                        removed_ids=removed_ids,
+                        prep_elapsed_s=time.monotonic() - t0,
+                    )
                     if target_ids:
                         sync_stats = sync_sonarr_series_by_ids(
                             target_ids,
@@ -386,27 +831,47 @@ def _run_startup_lite_history_for_instances(instances: list[dict]) -> dict:
                         stats['episodes_seen'] += int(sync_stats.get('episodes_seen', 0) or 0)
                         stats['series_marked_deleted'] += int(sync_stats.get('series_marked_deleted', 0) or 0)
                         logger.info(
-                            f"Startup lite targeted series sync for {instance_key}: {sync_stats}",
+                            f"Startup lite · {instance_key} · TV shows: "
+                            f"{sync_stats.get('series_seen', 0)} series and "
+                            f"{sync_stats.get('episodes_seen', 0)} episodes updated from Sonarr "
+                            f"({sync_stats.get('series_created', 0)} new series, "
+                            f"{sync_stats.get('series_marked_deleted', 0)} series removed here)",
                             extra={'emoji_type': 'info'},
                         )
+                        raw_ep = sync_stats.get("touched_episode_row_ids")
+                        if isinstance(raw_ep, list) and raw_ep:
+                            touched_episode_row_ids.update(int(x) for x in raw_ep if x is not None)
+                        else:
+                            series_row_ids = [
+                                int(r[0])
+                                for r in session.query(Series.id)
+                                .filter(Series.instance_key == instance_key, Series.sonarrid.in_(list(target_ids)))
+                                .all()
+                            ]
+                            if series_row_ids:
+                                episode_row_ids = [
+                                    int(r[0])
+                                    for r in session.query(Episode.id)
+                                    .join(Season, Episode.season_id == Season.id)
+                                    .filter(Season.series_id.in_(series_row_ids))
+                                    .all()
+                                ]
+                                touched_episode_row_ids.update(episode_row_ids)
 
-                max_id = _parse_history_max_id(events)
-                stats['events_seen'] += len(events)
-                stats['events_with_ids'] += len(target_ids)
                 row.last_history_checked_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
-                if max_id is not None and max_id > int(row.last_history_id or 0):
-                    row.last_history_id = max_id
                 session.add(row)
                 session.commit()
             except Exception as e:
                 session.rollback()
                 stats['instances_failed'] += 1
                 logger.warning(
-                    f"Startup lite history sync failed for {instance_key}: {e}",
+                    f"Startup lite snapshot sync failed for {instance_key}: {e}",
                     extra={'emoji_type': 'warning'},
                 )
 
+        stats["movie_row_ids"] = sorted(touched_movie_row_ids)
+        stats["episode_row_ids"] = sorted(touched_episode_row_ids)
         return stats
     finally:
         session.close()
@@ -479,18 +944,48 @@ def run_startup_source_of_truth() -> dict:
         if selected_mode == 'full':
             startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
         elif selected_mode == 'lite':
-            startup_sync_stats = _run_startup_lite_history_for_instances(instances)
+            # Activity UI + operators otherwise see nothing until this phase finishes (can be many minutes:
+            # full /movie or /series catalogs per instance, then per-item targeted sync).
+            record_startup_sync_progress(
+                mode=selected_mode,
+                started_at=started_at,
+                current_phase="discovery",
+                startup_sync_stats=None,
+                determination_stats=None,
+                materialization_stats=None,
+            )
+            from services.source_of_truth.lite_reconcile import (
+                run_lite_startup_reconciliation_pre_discovery,
+                run_specials_backfill_if_pending,
+            )
+
+            specials_backfill_stats = run_specials_backfill_if_pending(instances=instances)
+            pre_movie_ids, pre_episode_ids, recon_stats = run_lite_startup_reconciliation_pre_discovery()
+            startup_sync_stats = _run_startup_lite_snapshot_for_instances(
+                instances,
+                seed_movie_row_ids=set(pre_movie_ids),
+                seed_episode_row_ids=set(pre_episode_ids),
+                lite_reconciliation_pre=recon_stats,
+            )
+            specials_determination_ids = {
+                int(x)
+                for x in (specials_backfill_stats.get("determination_episode_row_ids") or [])
+                if x is not None
+            }
+            if specials_determination_ids:
+                merged_episode_ids = {
+                    int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None
+                }
+                merged_episode_ids.update(specials_determination_ids)
+                startup_sync_stats["episode_row_ids"] = sorted(merged_episode_ids)
+            startup_sync_stats["specials_backfill"] = specials_backfill_stats
             logger.info(
-                'Startup lite ARR discovery phase complete '
-                f"(movies_seen={startup_sync_stats.get('movies_seen', 0)} "
-                f"series_seen={startup_sync_stats.get('series_seen', 0)} "
-                f"episodes_seen={startup_sync_stats.get('episodes_seen', 0)} "
-                f"targeted_sync_runs={startup_sync_stats.get('targeted_sync_runs', 0)} "
-                f"path_drift_ids={startup_sync_stats.get('path_drift_ids', 0)} "
-                f"movies_catalog_removed={startup_sync_stats.get('movies_catalog_removed', 0)} "
-                f"series_catalog_removed={startup_sync_stats.get('series_catalog_removed', 0)} "
-                f"movies_marked_deleted={startup_sync_stats.get('movies_marked_deleted', 0)} "
-                f"series_marked_deleted={startup_sync_stats.get('series_marked_deleted', 0)})",
+                "Startup lite · catalog refresh finished · "
+                f"{int(startup_sync_stats.get('movies_targeted', 0) or 0)} movies and "
+                f"{int(startup_sync_stats.get('series_targeted', 0) or 0)} series were checked against Radarr/Sonarr "
+                f"({int(startup_sync_stats.get('movies_seen', 0) or 0)} movie rows updated, "
+                f"{int(startup_sync_stats.get('series_seen', 0) or 0)} series / "
+                f"{int(startup_sync_stats.get('episodes_seen', 0) or 0)} episode rows updated)",
                 extra={'emoji_type': 'success'},
             )
         elif selected_mode == 'off':
@@ -499,29 +994,49 @@ def run_startup_source_of_truth() -> dict:
             # Defensive fallback. _resolve_startup_sync_mode should prevent this branch.
             startup_sync_stats = {'instances': len(instances), 'skipped': True, 'reason': f'unknown_mode:{selected_mode}'}
 
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
-            # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
-            current_phase="fs_scan",
-            startup_sync_stats=startup_sync_stats,
-            determination_stats=None,
-            materialization_stats=None,
-        )
-
-        scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
-        scan_result = scan_once_if_needed(scan_run_id, prefer_incremental=True)
-        if isinstance(scan_result, tuple):
-            scan_count, scan_info = scan_result
+        if selected_mode == "lite":
+            scan_count = 0
+            scan_info = {"skipped": True, "reason": "lite_snapshot_diff"}
+            reconcile_stats = {"skipped": True, "reason": "lite_snapshot_diff"}
+            movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
+            episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
+            placeholder_truth_stats = _refresh_placeholder_presence_for_entities(
+                movie_row_ids=movie_row_ids,
+                episode_row_ids=episode_row_ids,
+            )
+            logger.info(
+                "Startup lite placeholder truth refresh complete: "
+                f"movies_checked={placeholder_truth_stats.get('movies_checked', 0)} "
+                f"movies_updated={placeholder_truth_stats.get('movies_updated', 0)} "
+                f"episodes_checked={placeholder_truth_stats.get('episodes_checked', 0)} "
+                f"episodes_updated={placeholder_truth_stats.get('episodes_updated', 0)}",
+                extra={'emoji_type': 'info'},
+            )
         else:
-            scan_count, scan_info = scan_result, {'reason': 'ok'}
+            record_startup_sync_progress(
+                mode=selected_mode,
+                started_at=started_at,
+                # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
+                current_phase="fs_scan",
+                startup_sync_stats=startup_sync_stats,
+                determination_stats=None,
+                materialization_stats=None,
+            )
 
-        phase_started = time.monotonic()
-        reconcile_stats = run_placeholder_link_reconcile()
-        logger.info(
-            f"Startup phase complete: placeholder_reconcile elapsed_s={time.monotonic() - phase_started:.1f}",
-            extra={'emoji_type': 'info'},
-        )
+            scan_run_id = run_ids[0] if run_ids else f'fullsync:startup:{int(time.time())}'
+            scan_result = scan_once_if_needed(scan_run_id, prefer_incremental=True)
+            if isinstance(scan_result, tuple):
+                scan_count, scan_info = scan_result
+            else:
+                scan_count, scan_info = scan_result, {'reason': 'ok'}
+
+            phase_started = time.monotonic()
+            reconcile_stats = run_placeholder_link_reconcile()
+            logger.info(
+                f"Startup phase complete: placeholder_reconcile elapsed_s={time.monotonic() - phase_started:.1f}",
+                extra={'emoji_type': 'info'},
+            )
+
         phase_started = time.monotonic()
         calendar_date_refresh_stats = run_calendar_date_refresh()
         logger.info(
@@ -537,7 +1052,35 @@ def run_startup_source_of_truth() -> dict:
             determination_stats=None,
             materialization_stats=None,
         )
-        determination_stats = run_determination_pass()
+        if selected_mode == "lite":
+            movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
+            episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
+            if movie_row_ids or episode_row_ids:
+                determination_stats = run_determination_for_entities(
+                    movie_ids=movie_row_ids,
+                    episode_ids=episode_row_ids,
+                )
+            else:
+                determination_stats = {
+                    "movies_total": 0,
+                    "movies_changed": 0,
+                    "episodes_total": 0,
+                    "episodes_changed": 0,
+                    "obsolete_placeholder": 0,
+                    "not_needed": 0,
+                    "placeholder_exists": 0,
+                    "needs_placeholder": 0,
+                    "path_drift_movies": 0,
+                    "path_drift_episodes": 0,
+                    "skipped": True,
+                    "reason": "no_lite_changes_detected",
+                }
+                logger.info(
+                    "Startup lite determination skipped: no changed entities detected",
+                    extra={"emoji_type": "info"},
+                )
+        else:
+            determination_stats = run_determination_pass()
         logger.info(
             f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
@@ -553,7 +1096,36 @@ def run_startup_source_of_truth() -> dict:
         # Primer phase removed to accelerate startup and simplify sync pipeline.
         primer_stats = {"skipped": True, "reason": "deprecated"}
         phase_started = time.monotonic()
-        materialization_stats = run_materialization_pass()
+        if selected_mode == "lite":
+            movie_row_ids = [int(x) for x in (startup_sync_stats.get("movie_row_ids") or []) if x is not None]
+            episode_row_ids = [int(x) for x in (startup_sync_stats.get("episode_row_ids") or []) if x is not None]
+            materialization_stats = run_materialization_for_entities(
+                movie_ids=movie_row_ids,
+                episode_ids=episode_row_ids,
+                observation_source="startup_lite_materialization",
+            ) if (movie_row_ids or episode_row_ids) else {
+                "movies_considered": 0,
+                "episodes_considered": 0,
+                "created": 0,
+                "deleted": 0,
+                "noop": 0,
+                "errors": 0,
+                "files_created": 0,
+                "files_deleted": 0,
+                "directories_deleted": 0,
+                "nfo_written": 0,
+                "nfo_deleted": 0,
+                "series_nfo_deleted": 0,
+                "skipped": True,
+                "reason": "no_lite_changes_detected",
+            }
+            if not (movie_row_ids or episode_row_ids):
+                logger.info(
+                    "Startup lite materialization skipped: no changed entities detected",
+                    extra={"emoji_type": "info"},
+                )
+        else:
+            materialization_stats = run_materialization_pass()
         logger.info(
             f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},

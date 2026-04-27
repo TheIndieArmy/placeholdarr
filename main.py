@@ -337,6 +337,7 @@ async def lifespan(app: FastAPI):
                         f"date_refresh_movies={calendar_date_refresh.get('movie_rows_updated', 0)} "
                         f"date_refresh_episodes={calendar_date_refresh.get('episode_rows_updated', 0)} "
                         f"needs={determination.get('needs_placeholder')} exists={determination.get('placeholder_exists')} "
+                        f"not_needed={determination.get('not_needed')} obsolete={determination.get('obsolete_placeholder')} "
                         f"calendar_intents={calendar.get('status_intents', 0)} "
                         f"calendar_applied={calendar.get('status_applied', 0)} "
                         f"variant_switched={calendar.get('variant_switched', 0)} "
