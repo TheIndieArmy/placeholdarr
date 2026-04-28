@@ -7,12 +7,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-04-29
+
 ### Summary
 
 - Lite startup activity is now easier to read at a glance, with user-focused sections (`Scope Checked`, `What Changed`, `Why Items Were Skipped`) and less technical noise.
 - Skipped placeholder reasons are clearer, with separate buckets for `Not yet aired` and `Air date unknown`, plus tooltip context explaining the Sonarr-based future assumption behavior.
 - Missing-air-date episode handling is more practical: null-date “middle” episodes can now become eligible when later episodes in the same series have known dates inside the lookahead window.
 - Targeted Sonarr sync now reconciles episodes removed upstream by soft-deleting missing DB episode rows, preventing repeated “changed series” churn from episode-count mismatch drift.
+- Dashboard and shared UI text are slightly larger for readability; primary movie/series hero titles and the calendar spotlight headline keep their previous display scale.
 
 ### Changed
 
@@ -24,12 +27,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
     - conditional `Issues & Alerts`
   - Updated summary copy to emphasize outcomes (created/removed/up-to-date) instead of internals.
   - Removed file-level counters from the lite sync activity card details (kept for placeholder history workflows).
+  - “Scope Checked” counts now use the larger of catalog-seen totals and determination totals so scoped lite runs do not show zero scope when skip-reason metrics are non-zero.
 - **Skipped-reason clarity for lite sync**
   - Split skipped not-needed counts into separate buckets:
     - `Not yet aired`
     - `Air date unknown`
-  - Added tooltip support for activity metrics and included non-technical context for unknown air dates:
+  - Added tooltip support for activity metrics (custom “?” control; avoids duplicate native browser tooltips) and included non-technical context for unknown air dates:
     - “If Sonarr has no date for an episode, Placeholdarr checks later episodes. If all later dated episodes are still in the future, this episode is treated as not yet aired.”
+- **Lite sync activity layout**
+  - Progress detail grid uses responsive columns with a sensible max width so cards use wide screens better without overstretching.
 - **Missing-air-date determination refinement**
   - Added a “middle episode” heuristic for episodes with no air date: if a later episode in the same series has a known date within the configured lookahead horizon, the null-date episode is treated as in-window for placeholder lifecycle decisions.
   - Applied this behavior in both full-scan and scoped determination paths.
@@ -37,12 +43,16 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
   - Materialization now emits user-facing INFO lines for actual placeholder creation events.
   - NFO follow-up processing logs were downgraded from prominent INFO phrasing to technical DEBUG phrasing to reduce operator confusion during create-heavy runs.
   - End-of-batch materialization INFO summary text now prioritizes user outcomes (`placeholders_created`, `already_present`, `deleted`, `errors`).
+- **Dashboard typography**
+  - Increased typical UI text sizes by 2px across the dashboard (Tailwind utilities and shared CSS helpers such as `ui-field-description`), excluding primary detail-page hero titles (`h1` on movie/series) and the calendar spotlight title so large display type stays unchanged.
 
 ### Fixed
 
 - **Targeted Sonarr sync now reconciles removed episodes**
   - During `sync_sonarr_series_by_ids`, episodes that remain active in DB but are missing from Sonarr’s current episode list for that series are now soft-deleted (`is_deleted=true`).
   - This resolves repeated lite startup recataloging of unchanged series caused by persistent `total_episodes_vs_DB` mismatches after upstream Sonarr/TVDB episode-list churn.
+- **npm audit (frontend)**
+  - Addressed the moderate-severity `postcss` advisory by updating the dashboard dependency pin (`frontend/package.json` / lockfile).
 
 ## [0.9.7] - 2026-04-28
 
