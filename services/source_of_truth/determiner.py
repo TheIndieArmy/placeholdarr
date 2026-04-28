@@ -567,6 +567,20 @@ def _compute_determination(
     return DETERMINATION_NEEDS
 
 
+def _classify_episode_not_needed_bucket(episode: Episode, *, now_date: date) -> str | None:
+    """Classify user-facing not_needed buckets for episode rows."""
+    has_file = bool(getattr(episode, 'has_file', False))
+    is_deleted = bool(getattr(episode, 'is_deleted', False))
+    if has_file or is_deleted:
+        return None
+    target_date = getattr(episode, 'air_date', None)
+    if target_date is None:
+        return 'not_needed_air_date_unknown'
+    if target_date > now_date:
+        return 'not_needed_not_yet_aired'
+    return None
+
+
 def run_determination_pass() -> dict:
     """Compute and persist determinations for movies and episodes.
 
@@ -583,6 +597,8 @@ def run_determination_pass() -> dict:
         'not_needed': 0,
         'placeholder_exists': 0,
         'needs_placeholder': 0,
+        'not_needed_not_yet_aired': 0,
+        'not_needed_air_date_unknown': 0,
         'path_drift_movies': 0,
         'path_drift_episodes': 0,
     }
@@ -738,6 +754,10 @@ def run_determination_pass() -> dict:
                     extra={'emoji_type': 'debug'},
                 )
             stats[value] += 1
+            if value == DETERMINATION_NOT_NEEDED:
+                bucket = _classify_episode_not_needed_bucket(episode, now_date=now_date)
+                if bucket:
+                    stats[bucket] += 1
             if getattr(episode, 'determination', None) != value:
                 episode.determination = value
                 episode.determination_updated_at = func.now()
@@ -812,6 +832,8 @@ def run_determination_for_entities_in_session(
         'not_needed': 0,
         'placeholder_exists': 0,
         'needs_placeholder': 0,
+        'not_needed_not_yet_aired': 0,
+        'not_needed_air_date_unknown': 0,
         'path_drift_movies': 0,
         'path_drift_episodes': 0,
     }
@@ -960,6 +982,10 @@ def run_determination_for_entities_in_session(
         if path_drift:
             stats['path_drift_episodes'] += 1
         stats[value] += 1
+        if value == DETERMINATION_NOT_NEEDED:
+            bucket = _classify_episode_not_needed_bucket(episode, now_date=now_date)
+            if bucket:
+                stats[bucket] += 1
         if getattr(episode, 'determination', None) != value:
             episode.determination = value
             episode.determination_updated_at = func.now()

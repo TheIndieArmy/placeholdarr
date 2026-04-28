@@ -2073,7 +2073,18 @@ function ActivityPanel(props: {
                                           {showMetrics ? (
                                             metrics.map((metric: any, midx: number) => (
                                               <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
-                                                <span>{String(metric?.label || "Metric")}</span>
+                                                <span className="inline-flex items-center gap-1">
+                                                  <span>{String(metric?.label || "Metric")}</span>
+                                                  {metric?.tooltip ? (
+                                                    <span
+                                                      className="material-symbols-outlined text-slate-500"
+                                                      style={{ fontSize: 12 }}
+                                                      title={String(metric.tooltip)}
+                                                    >
+                                                      info
+                                                    </span>
+                                                  ) : null}
+                                                </span>
                                                 <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
                                               </div>
                                             ))
