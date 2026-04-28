@@ -299,8 +299,8 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     do_player = _job_player_metadata_refresh(job)
     subject = _nfo_refresh_subject_summary(session, placeholders)
     subj_part = f" · {subject}" if subject else ""
-    logger.info(
-        f"NFO refresh job processed · {len(ids)} id(s){subj_part} · refreshed={refreshed} · player_metadata_refresh={do_player}",
+    logger.debug(
+        f"Placeholder follow-up processed · {len(ids)} id(s){subj_part} · nfo_refreshed={refreshed} · player_metadata_refresh={do_player}",
         extra={"emoji_type": "info"},
     )
 
