@@ -202,8 +202,8 @@ def run_specials_backfill_if_pending(*, instances: list[dict]) -> dict:
                     continue
                 stats["series_requested"] += len(api_series)
                 logger.info(
-                    f"Startup lite · specials backfill · {instance_key}: season 0 only for "
-                    f"{len(api_series)} series (lite snapshot reconciles other drift)",
+                    f"Startup lite · specials backfill · {instance_key}: "
+                    f"season 0 · {len(api_series)} series",
                     extra={"emoji_type": "info"},
                 )
                 sync_stats = sync_sonarr_series_specials_season0_backfill(
