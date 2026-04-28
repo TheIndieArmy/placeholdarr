@@ -212,19 +212,40 @@ def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key:
     return None
 
 
-def fetch_sonarr_episodes(series_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
+def fetch_sonarr_episodes(
+    series_id: int,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    season_number: Optional[int] = None,
+) -> List[Dict]:
+    """Fetch Sonarr episodes for a series.
+
+    When ``season_number`` is set (e.g. ``0`` for specials), requests include
+    Sonarr's ``seasonNumber`` filter when supported and always trims client-side
+    so a server that ignores the query param cannot pollute results.
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return []
 
     endpoint = _build_endpoint(url, 'episode')
-    cache_key = f'sonarr_episodes:{endpoint}:{series_id}'
+    cache_scope = 'all' if season_number is None else str(int(season_number))
+    cache_key = f'sonarr_episodes:{endpoint}:{series_id}:{cache_scope}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    data = _get_json(endpoint, {'apikey': api_key, 'seriesId': series_id}) or []
+    params: Dict = {'apikey': api_key, 'seriesId': series_id}
+    if season_number is not None:
+        params['seasonNumber'] = int(season_number)
+
+    raw = _get_json(endpoint, params)
+    data = raw if isinstance(raw, list) else []
+    if season_number is not None:
+        want = int(season_number)
+        data = [x for x in data if isinstance(x, dict) and int(x.get('seasonNumber') or -1) == want]
     _cache_set(cache_key, data)
     return data
 

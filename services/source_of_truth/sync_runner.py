@@ -2,7 +2,7 @@ import os
 import re
 import time
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 from sqlalchemy import and_, or_
 
@@ -857,6 +857,158 @@ def _sonarr_series_display_name(series_entry: dict | None, series_id: int) -> st
         if t:
             return t
     return f"Series id {series_id}"
+
+
+def sync_sonarr_series_specials_season0_backfill(
+    series_items: Iterable[dict],
+    *,
+    base_url: str,
+    api_key: str,
+    instance_key: str | None = None,
+    is_4k: bool | None = None,
+) -> dict:
+    """Season 0 (specials) catalog capture using bulk ``/series`` rows.
+
+    Avoids per-series ``GET /series/{id}`` (reuses list payloads like full sync),
+    only pulls and upserts Sonarr season 0 episodes, and commits once per instance
+    without per-episode flushes. Other seasons stay unchanged here; lite snapshot /
+    targeted sync reconcile remaining drift.
+    """
+    items: List[dict] = [s for s in series_items if isinstance(s, dict) and s.get("id") is not None]
+    stats = {
+        "series_requested": len(items),
+        "series_seen": 0,
+        "series_created": 0,
+        "series_updated": 0,
+        "series_marked_deleted": 0,
+        "seasons_created": 0,
+        "seasons_marked_deleted": 0,
+        "episodes_seen": 0,
+        "episodes_created": 0,
+        "episodes_updated": 0,
+        "episodes_marked_deleted": 0,
+        "touched_episode_row_ids": [],
+    }
+    if not items:
+        return stats
+
+    if is_4k is None:
+        resolved = settings.resolve_arr_instance("sonarr", instance_key=instance_key) or {}
+        inferred_secondary = str(resolved.get("role") or "primary").strip().lower() != "primary"
+    else:
+        inferred_secondary = bool(is_4k)
+    effective_instance_key = str(instance_key or _default_instance_key("series", inferred_secondary)).strip().lower()
+
+    session = get_session()
+    touched_episode_ids: set[int] = set()
+    pending_episode_rows: List[Any] = []
+    try:
+        total_series = len(items)
+        for series_idx, series_entry in enumerate(items, start=1):
+            t_series = time.monotonic()
+            sonarr_series_id = series_entry.get("id")
+            label = _sonarr_series_display_name(series_entry, int(sonarr_series_id))
+            s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)
+            s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
+            if not s_fields["tvdbid"]:
+                logger.info(
+                    f"Specials backfill S0 {series_idx}/{total_series} — {label} — skipped (no TVDB id) · "
+                    f"{time.monotonic() - t_series:.1f}s",
+                    extra={"emoji_type": "info"},
+                )
+                continue
+
+            stats["series_seen"] += 1
+            series_row, series_created, series_changed = _upsert_series(session, s_fields)
+            if series_created:
+                stats["series_created"] += 1
+            else:
+                stats["series_updated"] += 1
+
+            episodes = fetch_sonarr_episodes(int(sonarr_series_id), base_url, api_key, season_number=0)
+            episodes_list = [e for e in (episodes or []) if isinstance(e, dict)]
+            if series_idx % 50 == 0 or series_idx == total_series:
+                logger.info(
+                    f"Specials backfill S0 progress: {series_idx}/{total_series} series "
+                    f"({stats['episodes_seen']} specials episodes so far)",
+                    extra={"emoji_type": "info"},
+                )
+
+            season_rows_by_number: Dict[int, Season] = {}
+            season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
+            season_overview_by_number: Dict[int, str] = {}
+
+            for ep in episodes_list:
+                season_number = int(ep.get("seasonNumber") or 0)
+                season_row, season_created = _upsert_season(session, series_row, season_number)
+                season_rows_by_number[season_number] = season_row
+                if season_created:
+                    stats["seasons_created"] += 1
+
+                sonarr_ep_id = ep.get("id")
+                detailed_ep = (
+                    fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key) if sonarr_ep_id else None
+                )
+                ep_effective = detailed_ep if detailed_ep else ep
+
+                episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
+
+                overview = str(ep.get("overview") or "").strip()
+                if overview and season_number not in season_overview_by_number:
+                    season_overview_by_number[season_number] = overview
+
+                rollup = season_rollups.setdefault(
+                    season_number,
+                    {"files": 0, "episodes": 0, "monitored": False, "status": None},
+                )
+                rollup["episodes"] = int(rollup["episodes"] or 0) + 1
+                if ep_fields.get("has_file"):
+                    rollup["files"] = int(rollup["files"] or 0) + 1
+                rollup["monitored"] = bool(rollup["monitored"]) or bool(ep_fields.get("sonarr_monitored"))
+                if not rollup.get("status") and ep_fields.get("sonarr_status"):
+                    rollup["status"] = ep_fields.get("sonarr_status")
+
+                stats["episodes_seen"] += 1
+                ep_row, ep_created, ep_changed = _upsert_episode(session, ep_fields)
+                if ep_created:
+                    stats["episodes_created"] += 1
+                else:
+                    stats["episodes_updated"] += 1
+                if ep_created or ep_changed:
+                    rid = getattr(ep_row, "id", None)
+                    if rid is not None:
+                        touched_episode_ids.add(int(rid))
+                    else:
+                        pending_episode_rows.append(ep_row)
+
+            for season_number, srow in season_rows_by_number.items():
+                rollup = season_rollups.get(season_number) or {}
+                files_count = int(rollup.get("files") or 0)
+                srow.has_files = bool(files_count)
+                srow.seasonfile_count = files_count
+                srow.sonarr_monitored = bool(rollup.get("monitored"))
+                if rollup.get("status"):
+                    srow.sonarr_status = str(rollup["status"])
+                if season_overview_by_number.get(season_number):
+                    srow.sonarr_season_overview = season_overview_by_number[season_number]
+                srow.is_deleted = False
+                session.add(srow)
+
+        if pending_episode_rows:
+            session.flush()
+            for row in pending_episode_rows:
+                if getattr(row, "id", None) is not None:
+                    touched_episode_ids.add(int(row.id))
+
+        session.commit()
+        stats["touched_episode_row_ids"] = sorted(touched_episode_ids)
+        return stats
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def sync_sonarr_series_by_ids(

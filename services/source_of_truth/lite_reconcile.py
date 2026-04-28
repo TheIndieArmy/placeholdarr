@@ -9,7 +9,7 @@ from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import AppConfig, Episode, Movie, Season, Series
 from services.source_of_truth.arr_api import fetch_sonarr_series
-from services.source_of_truth.sync_runner import sync_sonarr_series_by_ids
+from services.source_of_truth.sync_runner import sync_sonarr_series_specials_season0_backfill
 
 # Bound work per lite run; full passes still cover anything missed.
 _LITE_RECON_PER_QUERY_CAP = 8000
@@ -198,20 +198,16 @@ def run_specials_backfill_if_pending(*, instances: list[dict]) -> dict:
                 sonarr_instance_keys.add(instance_key)
             try:
                 api_series = fetch_sonarr_series(inst["base_url"], inst["api_key"]) or []
-                series_ids = {
-                    int(s.get("id"))
-                    for s in api_series
-                    if isinstance(s, dict) and s.get("id") is not None
-                }
-                if not series_ids:
+                if not api_series:
                     continue
-                stats["series_requested"] += len(series_ids)
+                stats["series_requested"] += len(api_series)
                 logger.info(
-                    f"Startup lite · specials backfill · {instance_key}: syncing {len(series_ids)} series",
+                    f"Startup lite · specials backfill · {instance_key}: season 0 only for "
+                    f"{len(api_series)} series (lite snapshot reconciles other drift)",
                     extra={"emoji_type": "info"},
                 )
-                sync_stats = sync_sonarr_series_by_ids(
-                    series_ids,
+                sync_stats = sync_sonarr_series_specials_season0_backfill(
+                    api_series,
                     base_url=inst["base_url"],
                     api_key=inst["api_key"],
                     instance_key=instance_key,
