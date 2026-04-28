@@ -888,6 +888,8 @@ def sync_sonarr_series_specials_season0_backfill(
         "episodes_updated": 0,
         "episodes_marked_deleted": 0,
         "touched_episode_row_ids": [],
+        # Series where Sonarr returned at least one season-0 episode (for progress clarity).
+        "series_with_season0": 0,
     }
     if not items:
         return stats
@@ -927,10 +929,13 @@ def sync_sonarr_series_specials_season0_backfill(
 
             episodes = fetch_sonarr_episodes(int(sonarr_series_id), base_url, api_key, season_number=0)
             episodes_list = [e for e in (episodes or []) if isinstance(e, dict)]
+            if episodes_list:
+                stats["series_with_season0"] += 1
             if series_idx % 50 == 0 or series_idx == total_series:
                 logger.info(
-                    f"Specials backfill S0 progress: {series_idx}/{total_series} series "
-                    f"({stats['episodes_seen']} specials episodes so far)",
+                    f"Specials backfill S0 progress: {series_idx}/{total_series} series scanned "
+                    f"({stats['series_with_season0']} had specials in Sonarr, "
+                    f"{stats['episodes_seen']} season-0 episodes ingested)",
                     extra={"emoji_type": "info"},
                 )
 
