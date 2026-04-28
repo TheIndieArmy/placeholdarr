@@ -872,6 +872,16 @@ def _sonarr_catalog_total_and_season0_episodes(catalog: Any) -> Tuple[int, List[
     return n_all, s0
 
 
+def _log_specials_backfill_overall(series_idx: int, total_series: int, stats: Dict[str, Any]) -> None:
+    """INFO: aggregate counters only (no series titles)."""
+    logger.info(
+        f"Specials backfill S0 progress: {series_idx}/{total_series} series · "
+        f"{int(stats.get('episodes_seen', 0) or 0)} specials ingested · "
+        f"{int(stats.get('series_with_season0', 0) or 0)} series had specials",
+        extra={"emoji_type": "info"},
+    )
+
+
 def sync_sonarr_series_specials_season0_backfill(
     series_items: Iterable[dict],
     *,
@@ -931,6 +941,8 @@ def sync_sonarr_series_specials_season0_backfill(
                     f"{time.monotonic() - t_series:.1f}s",
                     extra={"emoji_type": "debug"},
                 )
+                if series_idx % 50 == 0 or series_idx == total_series:
+                    _log_specials_backfill_overall(series_idx, total_series, stats)
                 continue
 
             stats["series_seen"] += 1
@@ -1013,9 +1025,9 @@ def sync_sonarr_series_specials_season0_backfill(
                     or (now_mono - last_s0_log_mono) >= _s0_log_min_interval_s
                 ):
                     last_s0_log_mono = now_mono
-                    logger.info(
+                    logger.debug(
                         f"Specials backfill S0 {series_idx}/{total_series} — {label} — enriching {i}/{n_s0}…",
-                        extra={"emoji_type": "info"},
+                        extra={"emoji_type": "debug"},
                     )
 
             for season_number, srow in season_rows_by_number.items():
@@ -1031,13 +1043,13 @@ def sync_sonarr_series_specials_season0_backfill(
                 srow.is_deleted = False
                 session.add(srow)
 
+            logger.debug(
+                f"Specials backfill S0 — {label} — series done · catalog {n_catalog} episodes · "
+                f"{len(episodes_list)} special(s) · {time.monotonic() - t_series:.1f}s",
+                extra={"emoji_type": "debug"},
+            )
             if series_idx % 50 == 0 or series_idx == total_series:
-                logger.info(
-                    f"Specials backfill S0 summary: {series_idx}/{total_series} series · "
-                    f"{stats['series_with_season0']} with specials · "
-                    f"{stats['episodes_seen']} specials ingested",
-                    extra={"emoji_type": "info"},
-                )
+                _log_specials_backfill_overall(series_idx, total_series, stats)
 
         if pending_episode_rows:
             session.flush()
