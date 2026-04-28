@@ -882,6 +882,10 @@ def _log_specials_backfill_overall(series_idx: int, total_series: int, stats: Di
     )
 
 
+_SPECIALS_BACKFILL_OVERALL_EVERY_SERIES = 20
+_SPECIALS_BACKFILL_OVERALL_MIN_INTERVAL_S = 20.0
+
+
 def sync_sonarr_series_specials_season0_backfill(
     series_items: Iterable[dict],
     *,
@@ -929,6 +933,19 @@ def sync_sonarr_series_specials_season0_backfill(
     pending_episode_rows: List[Any] = []
     try:
         total_series = len(items)
+        last_overall_log_mono = time.monotonic()
+
+        def _maybe_specials_backfill_overall(si: int) -> None:
+            nonlocal last_overall_log_mono
+            now_o = time.monotonic()
+            if (
+                si % _SPECIALS_BACKFILL_OVERALL_EVERY_SERIES == 0
+                or si == total_series
+                or (now_o - last_overall_log_mono) >= _SPECIALS_BACKFILL_OVERALL_MIN_INTERVAL_S
+            ):
+                _log_specials_backfill_overall(si, total_series, stats)
+                last_overall_log_mono = now_o
+
         for series_idx, series_entry in enumerate(items, start=1):
             t_series = time.monotonic()
             sonarr_series_id = series_entry.get("id")
@@ -941,8 +958,7 @@ def sync_sonarr_series_specials_season0_backfill(
                     f"{time.monotonic() - t_series:.1f}s",
                     extra={"emoji_type": "debug"},
                 )
-                if series_idx % 50 == 0 or series_idx == total_series:
-                    _log_specials_backfill_overall(series_idx, total_series, stats)
+                _maybe_specials_backfill_overall(series_idx)
                 continue
 
             stats["series_seen"] += 1
@@ -1048,8 +1064,7 @@ def sync_sonarr_series_specials_season0_backfill(
                 f"{len(episodes_list)} special(s) · {time.monotonic() - t_series:.1f}s",
                 extra={"emoji_type": "debug"},
             )
-            if series_idx % 50 == 0 or series_idx == total_series:
-                _log_specials_backfill_overall(series_idx, total_series, stats)
+            _maybe_specials_backfill_overall(series_idx)
 
         if pending_episode_rows:
             session.flush()
