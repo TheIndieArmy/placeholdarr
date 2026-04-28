@@ -2088,7 +2088,6 @@ function ActivityPanel(props: {
                                                       <button
                                                         type="button"
                                                         className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300/90 bg-slate-600/40 text-[10px] font-bold leading-none text-white hover:bg-slate-500/60 focus:outline-none focus:ring-1 focus:ring-slate-200/70"
-                                                        title={metricTooltip}
                                                         aria-label={`Info: ${metricLabel}`}
                                                       >
                                                         ?
