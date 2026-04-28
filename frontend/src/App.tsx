@@ -2056,7 +2056,7 @@ function ActivityPanel(props: {
                                 {isExpanded ? "Hide details" : "Show details"}
                               </button>
                               {isExpanded && hasSectionProgress && (
-                                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                                <div className="mt-2 mx-auto w-full max-w-[1100px] grid gap-2 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
                                   {progressSections.map((section: any, sidx: number) => {
                                     const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
                                     const sectionStatus = String(section?.status || "pending").toLowerCase();
@@ -2071,24 +2071,40 @@ function ActivityPanel(props: {
                                         </div>
                                         <div className="space-y-0.5 text-[11px] text-slate-400">
                                           {showMetrics ? (
-                                            metrics.map((metric: any, midx: number) => (
+                                            metrics.map((metric: any, midx: number) => {
+                                              const metricLabel = String(metric?.label || "Metric");
+                                              const metricTooltip =
+                                                (typeof metric?.tooltip === "string" && metric.tooltip.trim())
+                                                  ? String(metric.tooltip)
+                                                  : (metricLabel.toLowerCase() === "air date unknown"
+                                                      ? "If Sonarr has no date for an episode, Placeholdarr checks later episodes. If all later dated episodes are still in the future, this episode is treated as not yet aired."
+                                                      : "");
+                                              return (
                                               <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
                                                 <span className="inline-flex items-center gap-1">
-                                                  <span>{String(metric?.label || "Metric")}</span>
-                                                  {metric?.tooltip ? (
-                                                    <button
-                                                      type="button"
-                                                      className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-slate-500/60 text-[9px] font-semibold leading-none text-slate-300 hover:bg-slate-600/20"
-                                                      title={String(metric.tooltip)}
-                                                      aria-label={`Info: ${String(metric?.label || "Metric")}`}
-                                                    >
-                                                      ?
-                                                    </button>
+                                                  <span>{metricLabel}</span>
+                                                  {metricTooltip ? (
+                                                    <span className="relative inline-flex items-center group">
+                                                      <button
+                                                        type="button"
+                                                        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300/90 bg-slate-600/40 text-[10px] font-bold leading-none text-white hover:bg-slate-500/60 focus:outline-none focus:ring-1 focus:ring-slate-200/70"
+                                                        title={metricTooltip}
+                                                        aria-label={`Info: ${metricLabel}`}
+                                                      >
+                                                        ?
+                                                      </button>
+                                                      <span
+                                                        role="tooltip"
+                                                        className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 hidden w-72 -translate-x-1/2 rounded border border-slate-500/70 bg-[#0f172a] px-2 py-1.5 text-[10px] leading-snug text-slate-100 shadow-lg group-hover:block group-focus-within:block"
+                                                      >
+                                                        {metricTooltip}
+                                                      </span>
+                                                    </span>
                                                   ) : null}
                                                 </span>
                                                 <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
                                               </div>
-                                            ))
+                                            )})
                                           ) : (
                                             <div className="text-sky-300/80">
                                               {sectionStatus === "working" ? "Running..." : "Waiting to start..."}
