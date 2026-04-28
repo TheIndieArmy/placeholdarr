@@ -1200,9 +1200,17 @@ def sync_sonarr_series_by_ids(
 
             last_ep_log_mono = time.monotonic()
             series_episodes_done = 0
+            seen_episode_sonarr_ids: set[int] = set()
             for ep in episodes_list:
                 if not isinstance(ep, dict):
                     continue
+                ep_sonarr_id_raw = ep.get('id')
+                try:
+                    ep_sonarr_id = int(ep_sonarr_id_raw) if ep_sonarr_id_raw is not None else None
+                except Exception:
+                    ep_sonarr_id = None
+                if ep_sonarr_id is not None:
+                    seen_episode_sonarr_ids.add(ep_sonarr_id)
                 season_number = int(ep.get('seasonNumber') or 0)
                 season_row, season_created = _upsert_season(session, series_row, season_number)
                 season_rows_by_number[season_number] = season_row
@@ -1270,6 +1278,30 @@ def sync_sonarr_series_by_ids(
                     season_row.sonarr_season_overview = season_overview_by_number[season_number]
                 season_row.is_deleted = False
                 session.add(season_row)
+
+            # Reconcile episodes that no longer exist in Sonarr for this series.
+            # Keep behavior aligned with Sonarr as source-of-truth, even for catalog churn.
+            stale_episode_rows = (
+                session.query(Episode.id)
+                .join(Season, Episode.season_id == Season.id)
+                .filter(
+                    Season.series_id == int(series_row.id),
+                    Episode.is_deleted == False,  # noqa: E712
+                    Episode.sonarrid.isnot(None),
+                    Episode.sonarrid.notin_(list(seen_episode_sonarr_ids)) if seen_episode_sonarr_ids else True,
+                )
+                .all()
+            )
+            stale_episode_ids = [int(r[0]) for r in stale_episode_rows if r and r[0] is not None]
+            if stale_episode_ids:
+                marked_missing = (
+                    session.query(Episode)
+                    .filter(Episode.id.in_(stale_episode_ids))
+                    .update({'is_deleted': True}, synchronize_session=False)
+                )
+                stats['episodes_marked_deleted'] += int(marked_missing or 0)
+                for eid in stale_episode_ids:
+                    touched_episode_ids.add(int(eid))
 
             if series_created or series_changed:
                 for (eid,) in (
