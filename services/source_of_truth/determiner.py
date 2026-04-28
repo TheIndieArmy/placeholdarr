@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func
 
@@ -123,12 +123,29 @@ def _resolve_episode_determination(
     placeholders_enabled: bool,
     lookahead_days: int,
     now_date: date,
+    episode_order_meta: tuple[int, int, int] | None = None,
+    series_max_known_order_within_horizon: dict[int, tuple[int, int]] | None = None,
 ) -> tuple[str, bool]:
+    target_date = getattr(episode, 'air_date', None)
+    if (
+        target_date is None
+        and placeholders_enabled
+        and lookahead_days >= 0
+        and episode_order_meta is not None
+        and series_max_known_order_within_horizon
+    ):
+        # Unknown-air-date episodes in the middle of a run can be safely treated as
+        # in-window once we already know a later episode date inside lookahead.
+        series_id, season_number, episode_number = episode_order_meta
+        max_known_order = series_max_known_order_within_horizon.get(int(series_id))
+        if max_known_order is not None and max_known_order > (int(season_number), int(episode_number)):
+            target_date = now_date
+
     base = _compute_determination(
         bool(getattr(episode, 'has_placeholder', False)),
         bool(getattr(episode, 'has_file', False)),
         bool(getattr(episode, 'is_deleted', False)),
-        target_date=getattr(episode, 'air_date', None),
+        target_date=target_date,
         lookahead_days=lookahead_days,
         placeholders_enabled=placeholders_enabled,
         now_date=now_date,
@@ -550,6 +567,20 @@ def _compute_determination(
     return DETERMINATION_NEEDS
 
 
+def _classify_episode_not_needed_bucket(episode: Episode, *, now_date: date) -> str | None:
+    """Classify user-facing not_needed buckets for episode rows."""
+    has_file = bool(getattr(episode, 'has_file', False))
+    is_deleted = bool(getattr(episode, 'is_deleted', False))
+    if has_file or is_deleted:
+        return None
+    target_date = getattr(episode, 'air_date', None)
+    if target_date is None:
+        return 'not_needed_air_date_unknown'
+    if target_date > now_date:
+        return 'not_needed_not_yet_aired'
+    return None
+
+
 def run_determination_pass() -> dict:
     """Compute and persist determinations for movies and episodes.
 
@@ -566,6 +597,8 @@ def run_determination_pass() -> dict:
         'not_needed': 0,
         'placeholder_exists': 0,
         'needs_placeholder': 0,
+        'not_needed_not_yet_aired': 0,
+        'not_needed_air_date_unknown': 0,
         'path_drift_movies': 0,
         'path_drift_episodes': 0,
     }
@@ -622,12 +655,59 @@ def run_determination_pass() -> dict:
             f"Determination · full_scan · episodes: {len(episodes)} rows to check",
             extra={'emoji_type': 'info'},
         )
+        episode_ids = [int(getattr(ep, "id")) for ep in episodes if getattr(ep, "id", None) is not None]
+        season_rows = (
+            session.query(Episode.id, Season.series_id, Season.season_number, Episode.episode_number)
+            .join(Season, Episode.season_id == Season.id)
+            .filter(Episode.id.in_(episode_ids))
+            .all()
+            if episode_ids
+            else []
+        )
+        episode_order_meta_by_id: dict[int, tuple[int, int, int]] = {}
+        series_ids: set[int] = set()
+        for eid, series_id, season_number, episode_number in season_rows:
+            if eid is None or series_id is None:
+                continue
+            ep_meta = (
+                int(series_id),
+                int(season_number or 0),
+                int(episode_number or 0),
+            )
+            episode_order_meta_by_id[int(eid)] = ep_meta
+            series_ids.add(int(series_id))
+
+        horizon = now_date + timedelta(days=int(lookahead_days)) if int(lookahead_days) >= 0 else None
+        known_rows = (
+            session.query(Season.series_id, Season.season_number, Episode.episode_number)
+            .join(Season, Episode.season_id == Season.id)
+            .filter(
+                Season.series_id.in_(list(series_ids)),
+                Episode.air_date.isnot(None),
+                Episode.is_deleted == False,  # noqa: E712
+            )
+            .filter(Episode.air_date <= horizon if horizon is not None else True)
+            .all()
+            if series_ids
+            else []
+        )
+        series_max_known_order_within_horizon: dict[int, tuple[int, int]] = {}
+        for series_id, season_number, episode_number in known_rows:
+            if series_id is None:
+                continue
+            order = (int(season_number or 0), int(episode_number or 0))
+            sid = int(series_id)
+            prev = series_max_known_order_within_horizon.get(sid)
+            if prev is None or order > prev:
+                series_max_known_order_within_horizon[sid] = order
+
         last_log_episodes[0] = time.monotonic()
         for idx, episode in enumerate(episodes, start=1):
-            season = session.query(Season).filter(Season.id == episode.season_id).first()
+            episode_meta = episode_order_meta_by_id.get(int(episode.id)) if getattr(episode, "id", None) is not None else None
+            season_number = int(episode_meta[1]) if episode_meta is not None else -1
             # Treat season 0 episodes as not_needed when specials are disabled
             if not include_specials:
-                if season and int(getattr(season, 'season_number', -1)) == 0:
+                if season_number == 0:
                     value = DETERMINATION_NOT_NEEDED
                     stats[value] += 1
                     if getattr(episode, 'determination', None) != value:
@@ -652,6 +732,8 @@ def run_determination_pass() -> dict:
                 placeholders_enabled=placeholders_enabled,
                 lookahead_days=lookahead_days,
                 now_date=now_date,
+                episode_order_meta=episode_meta,
+                series_max_known_order_within_horizon=series_max_known_order_within_horizon,
             )
             if path_drift:
                 stats['path_drift_episodes'] += 1
@@ -672,6 +754,10 @@ def run_determination_pass() -> dict:
                     extra={'emoji_type': 'debug'},
                 )
             stats[value] += 1
+            if value == DETERMINATION_NOT_NEEDED:
+                bucket = _classify_episode_not_needed_bucket(episode, now_date=now_date)
+                if bucket:
+                    stats[bucket] += 1
             if getattr(episode, 'determination', None) != value:
                 episode.determination = value
                 episode.determination_updated_at = func.now()
@@ -746,6 +832,8 @@ def run_determination_for_entities_in_session(
         'not_needed': 0,
         'placeholder_exists': 0,
         'needs_placeholder': 0,
+        'not_needed_not_yet_aired': 0,
+        'not_needed_air_date_unknown': 0,
         'path_drift_movies': 0,
         'path_drift_episodes': 0,
     }
@@ -812,10 +900,57 @@ def run_determination_for_entities_in_session(
         )
         last_log_episodes[0] = time.monotonic()
 
+    scoped_episode_ids = [int(getattr(ep, "id")) for ep in episodes if getattr(ep, "id", None) is not None]
+    scoped_season_rows = (
+        session.query(Episode.id, Season.series_id, Season.season_number, Episode.episode_number)
+        .join(Season, Episode.season_id == Season.id)
+        .filter(Episode.id.in_(scoped_episode_ids))
+        .all()
+        if scoped_episode_ids
+        else []
+    )
+    episode_order_meta_by_id: dict[int, tuple[int, int, int]] = {}
+    series_ids: set[int] = set()
+    for eid, series_id, season_number, episode_number in scoped_season_rows:
+        if eid is None or series_id is None:
+            continue
+        ep_meta = (
+            int(series_id),
+            int(season_number or 0),
+            int(episode_number or 0),
+        )
+        episode_order_meta_by_id[int(eid)] = ep_meta
+        series_ids.add(int(series_id))
+
+    horizon = now_date + timedelta(days=int(lookahead_days)) if int(lookahead_days) >= 0 else None
+    known_rows = (
+        session.query(Season.series_id, Season.season_number, Episode.episode_number)
+        .join(Season, Episode.season_id == Season.id)
+        .filter(
+            Season.series_id.in_(list(series_ids)),
+            Episode.air_date.isnot(None),
+            Episode.is_deleted == False,  # noqa: E712
+        )
+        .filter(Episode.air_date <= horizon if horizon is not None else True)
+        .all()
+        if series_ids
+        else []
+    )
+    series_max_known_order_within_horizon: dict[int, tuple[int, int]] = {}
+    for series_id, season_number, episode_number in known_rows:
+        if series_id is None:
+            continue
+        order = (int(season_number or 0), int(episode_number or 0))
+        sid = int(series_id)
+        prev = series_max_known_order_within_horizon.get(sid)
+        if prev is None or order > prev:
+            series_max_known_order_within_horizon[sid] = order
+
     for idx, episode in enumerate(episodes, start=1):
+        episode_meta = episode_order_meta_by_id.get(int(episode.id)) if getattr(episode, "id", None) is not None else None
+        season_number = int(episode_meta[1]) if episode_meta is not None else -1
         if not include_specials:
-            season = session.query(Season).filter(Season.id == episode.season_id).first()
-            if season and int(getattr(season, 'season_number', -1)) == 0:
+            if season_number == 0:
                 value = DETERMINATION_NOT_NEEDED
                 stats[value] += 1
                 if getattr(episode, 'determination', None) != value:
@@ -841,10 +976,16 @@ def run_determination_for_entities_in_session(
             placeholders_enabled=placeholders_enabled,
             lookahead_days=lookahead_days,
             now_date=now_date,
+            episode_order_meta=episode_meta,
+            series_max_known_order_within_horizon=series_max_known_order_within_horizon,
         )
         if path_drift:
             stats['path_drift_episodes'] += 1
         stats[value] += 1
+        if value == DETERMINATION_NOT_NEEDED:
+            bucket = _classify_episode_not_needed_bucket(episode, now_date=now_date)
+            if bucket:
+                stats[bucket] += 1
         if getattr(episode, 'determination', None) != value:
             episode.determination = value
             episode.determination_updated_at = func.now()

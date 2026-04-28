@@ -159,7 +159,7 @@ const BEHAVIOR_WIZARD_SECTIONS = [
 
 /** Shared onboarding section heading (behavior wizard, paths). */
 const ONBOARDING_SECTION_TITLE_CLASS =
-  "mb-3 pb-2 border-b border-[#424753]/40 text-base font-headline font-bold uppercase tracking-wide text-white";
+  "mb-3 pb-2 border-b border-[#424753]/40 text-[18px] font-headline font-bold uppercase tracking-wide text-white";
 
 /**
  * Grouped settings / onboarding section surface: raised slate panel with a brand accent3 rail on all sides.
@@ -307,7 +307,7 @@ function SetupBootShell(props: {
       <div className="setup-boot-shell__content flex w-full max-w-[min(92vw,22rem)] flex-col items-center gap-7">
         <div className="flex flex-col items-center gap-3 opacity-90">
           <BrandLogo brand={props.brand} accentHex={props.accentHex} className="h-14 w-auto max-w-[11rem] object-contain" />
-          <div className="text-center text-[11px] font-headline font-bold uppercase tracking-[0.22em] text-slate-500">
+          <div className="text-center text-[13px] font-headline font-bold uppercase tracking-[0.22em] text-slate-500">
             {props.appLabel}
           </div>
         </div>
@@ -317,11 +317,11 @@ function SetupBootShell(props: {
           <div className="setup-boot-shell__bar setup-boot-shell__bar--sm" />
         </div>
         {err ? (
-          <p className="max-w-full text-center text-xs leading-relaxed text-red-400/95" role="alert">
+          <p className="max-w-full text-center text-[14px] leading-relaxed text-red-400/95" role="alert">
             {err}
           </p>
         ) : (
-          <div className="flex items-center gap-2 text-[11px] font-headline uppercase tracking-widest text-slate-500">
+          <div className="flex items-center gap-2 text-[13px] font-headline uppercase tracking-widest text-slate-500">
             <span className="material-symbols-outlined animate-spin text-slate-500" style={{ fontSize: 16 }}>
               progress_activity
             </span>
@@ -1143,7 +1143,7 @@ export function App() {
     if (loading && currentTab !== "settings") {
       return (
         <div
-          className={`min-h-[40vh] flex items-center justify-center text-sm font-headline uppercase tracking-widest ${
+          className={`min-h-[40vh] flex items-center justify-center text-[16px] font-headline uppercase tracking-widest ${
             themeMode === "light" ? "text-slate-600" : "text-slate-400"
           }`}
         >
@@ -1309,7 +1309,7 @@ export function App() {
 
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
-    const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-sm font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
+    const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
     if (setupStatus?.setup_complete) {
       return <Navigate to="/activity" replace />;
     }
@@ -1416,9 +1416,9 @@ export function App() {
           <nav className="flex-1 space-y-1 font-brand-label pt-4">
             {(() => {
               const navActiveClass =
-                "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-sm uppercase tracking-widest transition-all duration-200 border-l-4";
+                "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200 border-l-4";
               const navInactiveClass =
-                "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-sm uppercase tracking-widest group " +
+                "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-[16px] uppercase tracking-widest group " +
                 (isStudioGlass
                   ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
                   : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
@@ -1442,7 +1442,7 @@ export function App() {
                 location.pathname.startsWith("/library/movie/");
               const tvSubActive = location.pathname === LIBRARY_TV_PATH || location.pathname.startsWith("/library/series/");
               const subBase =
-                "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ";
+                "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
               const subActiveClass = isStudioGlass
                 ? "bg-[#1e2430] text-slate-100"
                 : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
@@ -1531,7 +1531,7 @@ export function App() {
                       key={name}
                       type="button"
                       onClick={() => tryNavigate(subPath)}
-                      className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[11px] font-headline uppercase tracking-wider transition-colors ${
+                      className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ${
                         isStudioGlass
                           ? isSubActive
                             ? "bg-[#1e2430] text-slate-100"
@@ -1568,7 +1568,7 @@ export function App() {
                   window.setTimeout(() => setTitleSearchOpen(false), 120);
                 }}
               >
-                <span className={`material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-lg pointer-events-none ${isStudioGlass ? "text-slate-400" : "text-slate-400"}`}>search</span>
+                <span className={`material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[20px] pointer-events-none ${isStudioGlass ? "text-slate-400" : "text-slate-400"}`}>search</span>
                 <input
                   value={titleSearch}
                   onChange={(e) => {
@@ -1600,7 +1600,7 @@ export function App() {
                       setTitleSearchOpen(false);
                     }
                   }}
-                  className={`w-full rounded-lg py-2 pl-10 pr-4 text-sm border focus:outline-none placeholder-slate-500 ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-slate-100 ${getBrandFocusClass(brand, themeMode)}` : `bg-white text-slate-900 border-[#cddbeb] ${getBrandFocusClass(brand, themeMode)}`}`}
+                  className={`w-full rounded-lg py-2 pl-10 pr-4 text-[16px] border focus:outline-none placeholder-slate-500 ${isStudioGlass ? `border-[#2a3444] bg-[#1e2430] text-slate-100 ${getBrandFocusClass(brand, themeMode)}` : `bg-white text-slate-900 border-[#cddbeb] ${getBrandFocusClass(brand, themeMode)}`}`}
                   placeholder="Search titles, series, and movies..."
                 />
                 {titleSearchOpen && titleSearch.trim() ? (
@@ -1621,14 +1621,14 @@ export function App() {
                               {item.poster_url ? (
                                 <img src={item.poster_url} alt="" className="h-full w-full object-cover" />
                               ) : (
-                                <div className="flex h-full w-full items-center justify-center text-[10px] font-headline uppercase text-slate-500">
+                                <div className="flex h-full w-full items-center justify-center text-[12px] font-headline uppercase text-slate-500">
                                   {item.type === "movie" ? "MOV" : "SER"}
                                 </div>
                               )}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className={`truncate text-sm font-semibold ${isStudioGlass ? "text-white" : "text-slate-900"}`}>{item.title}</div>
-                              <div className={`mt-0.5 flex items-center gap-2 text-[11px] ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>
+                              <div className={`truncate text-[16px] font-semibold ${isStudioGlass ? "text-white" : "text-slate-900"}`}>{item.title}</div>
+                              <div className={`mt-0.5 flex items-center gap-2 text-[13px] ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>
                                 <span className="font-headline uppercase tracking-wider">{item.type}</span>
                                 <span>{item.year || "--"}</span>
                                 {item.has_placeholder ? <span className="text-teal-300">Placeholder</span> : null}
@@ -1640,7 +1640,7 @@ export function App() {
                         ))}
                       </div>
                     ) : (
-                      <div className="px-4 py-3 text-sm text-slate-500">No matching titles found.</div>
+                      <div className="px-4 py-3 text-[16px] text-slate-500">No matching titles found.</div>
                     )}
                   </div>
                 ) : null}
@@ -1648,7 +1648,7 @@ export function App() {
             </div>
             <div className="flex min-w-0 flex-1 items-center justify-end gap-3 ml-4">
               <div
-                className={`hidden min-w-0 truncate text-right text-[10px] font-headline uppercase tracking-widest sm:block ${isStudioGlass ? "text-slate-500" : "text-slate-500"}`}
+                className={`hidden min-w-0 truncate text-right text-[12px] font-headline uppercase tracking-widest sm:block ${isStudioGlass ? "text-slate-500" : "text-slate-500"}`}
                 title="Dashboard poll status (slower when the tab is in the background)"
                 aria-live="polite"
               >
@@ -1684,7 +1684,7 @@ export function App() {
 
           {/* Setup banner */}
           {!setupStatus?.setup_complete && !showReconnectPanel ? (
-            <div className="border-b border-l-4 px-6 py-3 text-sm"
+            <div className="border-b border-l-4 px-6 py-3 text-[16px]"
               style={{
                 backgroundColor: alphaColor(brandSemantic.accent2, isStudioGlass ? 0.14 : 0.1),
                 borderColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.38 : 0.28),
@@ -1723,8 +1723,8 @@ export function App() {
                       }`}
                     />
                   </div>
-                  <h2 className="text-xl font-semibold md:text-2xl">Reconnecting to Placeholdarr</h2>
-                  <p className={`mt-3 max-w-2xl text-sm md:text-base ${isStudioGlass ? "text-slate-300" : "text-slate-700"}`}>
+                  <h2 className="text-[22px] font-semibold md:text-[26px]">Reconnecting to Placeholdarr</h2>
+                  <p className={`mt-3 max-w-2xl text-[16px] md:text-[18px] ${isStudioGlass ? "text-slate-300" : "text-slate-700"}`}>
                     Live dashboard data is temporarily unavailable. We are automatically retrying the API connection.
                   </p>
                   <div className="mt-6 flex items-center gap-2">
@@ -1732,7 +1732,7 @@ export function App() {
                     <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse [animation-delay:150ms] ${isStudioGlass ? "bg-cyan-300/80" : "bg-cyan-600/80"}`} />
                     <span className={`inline-block h-2.5 w-2.5 rounded-full animate-pulse [animation-delay:300ms] ${isStudioGlass ? "bg-cyan-300/60" : "bg-cyan-600/60"}`} />
                   </div>
-                  <p className={`mt-6 text-xs ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>
+                  <p className={`mt-6 text-[14px] ${isStudioGlass ? "text-slate-400" : "text-slate-500"}`}>
                     This panel will close automatically once the connection is restored.
                   </p>
                 </div>
@@ -1744,7 +1744,7 @@ export function App() {
 
           {errorMessage && !showReconnectPanel ? (
             <div
-              className={`mx-6 mb-4 rounded-lg border p-3 text-sm ${
+              className={`mx-6 mb-4 rounded-lg border p-3 text-[16px] ${
                 isStudioGlass
                   ? "border-red-500/40 bg-red-900/30 text-red-300"
                   : "border-red-200 bg-red-50 text-red-800"
@@ -1879,7 +1879,7 @@ function ActivityPanel(props: {
       {/* Status pill */}
       <div className="flex items-center gap-2 mb-4">
         <div className={`w-2 h-2 rounded-full ${tab === "system" && hasFailures ? "bg-red-500" : "bg-green-500"}`} />
-        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
           {tab === "system"
             ? hasFailures
               ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
@@ -1894,8 +1894,8 @@ function ActivityPanel(props: {
           <div className="flex items-start gap-3">
             <span className="material-symbols-outlined text-red-400 flex-shrink-0" style={{ fontSize: 20 }}>error</span>
             <div>
-              <div className="font-headline text-sm font-bold text-red-300">Recent Failures Detected</div>
-              <div className="text-xs text-red-200/80 mt-1">Check the list below or view logs for details.</div>
+              <div className="font-headline text-[16px] font-bold text-red-300">Recent Failures Detected</div>
+              <div className="text-[14px] text-red-200/80 mt-1">Check the list below or view logs for details.</div>
             </div>
           </div>
         </div>
@@ -1925,7 +1925,7 @@ function ActivityPanel(props: {
         <button
           type="button"
           onClick={() => props.onActivityTabChange?.("system")}
-          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-xs font-headline uppercase tracking-wider transition-colors ${
+          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-[14px] font-headline uppercase tracking-wider transition-colors ${
             tab === "system"
               ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
               : isLight
@@ -1946,7 +1946,7 @@ function ActivityPanel(props: {
         <button
           type="button"
           onClick={() => props.onActivityTabChange?.("placeholders")}
-          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-xs font-headline uppercase tracking-wider transition-colors ${
+          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-[14px] font-headline uppercase tracking-wider transition-colors ${
             tab === "placeholders"
               ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
               : isLight
@@ -1974,12 +1974,12 @@ function ActivityPanel(props: {
         >
           <div className="flex justify-between items-start px-4 py-3 border-b border-[#424753]/30">
             <div>
-              <h2 className="text-lg font-bold text-white font-headline">Recent Operations</h2>
-              <p className="text-[11px] text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
+              <h2 className="text-[20px] font-bold text-white font-headline">Recent Operations</h2>
+              <p className="text-[13px] text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
             </div>
           </div>
           {!props.rows.length ? (
-            <div className="p-10 text-center text-slate-500 text-sm">No recent activity.</div>
+            <div className="p-10 text-center text-slate-500 text-[16px]">No recent activity.</div>
           ) : (
             <>
               <div className="overflow-x-auto">
@@ -1994,7 +1994,7 @@ function ActivityPanel(props: {
                     {["When", "Operation", "Status"].map(h => (
                       <th
                         key={h}
-                        className={`px-3 py-2 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
+                        className={`px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
                       >
                         {h}
                       </th>
@@ -2040,23 +2040,23 @@ function ActivityPanel(props: {
 
                     return (
                       <tr key={key} className="hover:bg-[#1e2430]/40 transition-colors">
-                        <td className="px-3 py-2 text-xs text-slate-400 whitespace-nowrap align-top">{timeAgo(row.time || null)}</td>
-                        <td className="px-3 py-2 text-xs text-slate-300 min-w-0 align-top">
+                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap align-top">{timeAgo(row.time || null)}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-300 min-w-0 align-top">
                           <span className="font-medium line-clamp-2">{displayName}</span>
                           {detailLine && <div className="ui-field-description-compact mt-0.5 line-clamp-2">{detailLine}</div>}
-                          {errorMessage && <span className="text-[11px] text-red-300/70">{errorMessage}</span>}
+                          {errorMessage && <span className="text-[13px] text-red-300/70">{errorMessage}</span>}
                           {hasExpandable && (
                             <div className="mt-2">
                               <button
                                 type="button"
                                 onClick={toggleProgress}
-                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
+                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-1.5 py-0.5 text-[11px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
                               >
                                 <span className="material-symbols-outlined" style={{ fontSize: 13 }}>{isExpanded ? "expand_less" : "expand_more"}</span>
                                 {isExpanded ? "Hide details" : "Show details"}
                               </button>
                               {isExpanded && hasSectionProgress && (
-                                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                                <div className="mt-2 mx-auto w-full max-w-[1100px] grid gap-2 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
                                   {progressSections.map((section: any, sidx: number) => {
                                     const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
                                     const sectionStatus = String(section?.status || "pending").toLowerCase();
@@ -2064,19 +2064,46 @@ function ActivityPanel(props: {
                                     return (
                                       <div key={`${key}-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
                                         <div className="mb-1 flex items-center justify-between">
-                                          <span className="text-[10px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
-                                          <span className={`rounded border px-1.5 py-0.5 text-[9px] font-headline uppercase tracking-wider ${statusTokenClass(String(section?.status || "pending"))}`}>
+                                          <span className="text-[12px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
+                                          <span className={`rounded border px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider ${statusTokenClass(String(section?.status || "pending"))}`}>
                                             {String(section?.status || "pending")}
                                           </span>
                                         </div>
-                                        <div className="space-y-0.5 text-[11px] text-slate-400">
+                                        <div className="space-y-0.5 text-[13px] text-slate-400">
                                           {showMetrics ? (
-                                            metrics.map((metric: any, midx: number) => (
+                                            metrics.map((metric: any, midx: number) => {
+                                              const metricLabel = String(metric?.label || "Metric");
+                                              const metricTooltip =
+                                                (typeof metric?.tooltip === "string" && metric.tooltip.trim())
+                                                  ? String(metric.tooltip)
+                                                  : (metricLabel.toLowerCase() === "air date unknown"
+                                                      ? "If Sonarr has no date for an episode, Placeholdarr checks later episodes. If all later dated episodes are still in the future, this episode is treated as not yet aired."
+                                                      : "");
+                                              return (
                                               <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
-                                                <span>{String(metric?.label || "Metric")}</span>
+                                                <span className="inline-flex items-center gap-1">
+                                                  <span>{metricLabel}</span>
+                                                  {metricTooltip ? (
+                                                    <span className="relative inline-flex items-center group">
+                                                      <button
+                                                        type="button"
+                                                        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300/90 bg-slate-600/40 text-[12px] font-bold leading-none text-white hover:bg-slate-500/60 focus:outline-none focus:ring-1 focus:ring-slate-200/70"
+                                                        aria-label={`Info: ${metricLabel}`}
+                                                      >
+                                                        ?
+                                                      </button>
+                                                      <span
+                                                        role="tooltip"
+                                                        className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 hidden w-72 -translate-x-1/2 rounded border border-slate-500/70 bg-[#0f172a] px-2 py-1.5 text-[12px] leading-snug text-slate-100 shadow-lg group-hover:block group-focus-within:block"
+                                                      >
+                                                        {metricTooltip}
+                                                      </span>
+                                                    </span>
+                                                  ) : null}
+                                                </span>
                                                 <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
                                               </div>
-                                            ))
+                                            )})
                                           ) : (
                                             <div className="text-sky-300/80">
                                               {sectionStatus === "working" ? "Running..." : "Waiting to start..."}
@@ -2091,14 +2118,14 @@ function ActivityPanel(props: {
                               {isExpanded && hasQueueBatchDetails && (
                                 <div className="mt-2 space-y-2">
                                   {queueItems.length === 0 ? (
-                                    <div className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px] text-slate-400">
+                                    <div className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[13px] text-slate-400">
                                       No per-title rows in this batch yet (Arr queue may be empty while search runs).
                                     </div>
                                   ) : (
                                     queueItems.map((it: any, qix: number) => (
                                       <div
                                         key={`${key}-q-${qix}`}
-                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px]"
+                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[13px]"
                                       >
                                         <div className="flex flex-wrap items-baseline justify-between gap-2">
                                           <span className="font-medium text-slate-200">
@@ -2108,7 +2135,7 @@ function ActivityPanel(props: {
                                             ) : null}
                                           </span>
                                           {it?.instance ? (
-                                            <span className="text-[9px] font-headline uppercase tracking-wider text-slate-500">{String(it.instance)}</span>
+                                            <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">{String(it.instance)}</span>
                                           ) : null}
                                         </div>
                                         <div className="text-slate-400 mt-0.5">{String(it?.line || "—")}</div>
@@ -2130,11 +2157,11 @@ function ActivityPanel(props: {
                                     return (
                                       <div
                                         key={`${key}-ge-${gix}`}
-                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[11px]"
+                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[13px]"
                                       >
                                         <div className="flex flex-wrap items-center justify-between gap-2">
                                           <span className="font-medium text-slate-200">{String(ev?.display_name || "Event")}</span>
-                                          <span className={`text-[10px] font-headline uppercase tracking-wider ${evStatusColor}`}>
+                                          <span className={`text-[12px] font-headline uppercase tracking-wider ${evStatusColor}`}>
                                             {evStatus || "done"}
                                           </span>
                                         </div>
@@ -2156,7 +2183,7 @@ function ActivityPanel(props: {
                         <td className="px-3 py-2 align-top">
                           <div className="flex items-center gap-1.5 justify-end sm:justify-start">
                             <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                            <span className={`text-[10px] font-medium font-headline uppercase tracking-wider ${statusColor}`}>
+                            <span className={`text-[12px] font-medium font-headline uppercase tracking-wider ${statusColor}`}>
                               {status === "done" || status === "success" ? "Complete" : status === "failed" ? "Failed" : "Running"}
                             </span>
                           </div>
@@ -2167,7 +2194,7 @@ function ActivityPanel(props: {
                 </tbody>
               </table>
               </div>
-              <div className="px-4 py-2 border-t border-[#424753]/20 text-[10px] text-slate-500 font-headline uppercase tracking-widest">
+              <div className="px-4 py-2 border-t border-[#424753]/20 text-[12px] text-slate-500 font-headline uppercase tracking-widest">
                 Showing {props.rows.length} items
               </div>
             </>
@@ -2188,12 +2215,12 @@ function ActivityPanel(props: {
             className={`flex justify-between items-start px-5 py-4 border-b ${isLight ? "border-slate-200/80" : "border-[#424753]/30"}`}
           >
             <div>
-              <h2 className={`text-xl font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>Placeholder History</h2>
-              <p className={`text-xs mt-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>{placeholderRows.length} recent placeholder changes</p>
+              <h2 className={`text-[22px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>Placeholder History</h2>
+              <p className={`text-[14px] mt-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>{placeholderRows.length} recent placeholder changes</p>
             </div>
           </div>
           {!placeholderRows.length ? (
-            <div className={`p-10 text-center text-sm ${isLight ? "text-slate-500" : "text-slate-500"}`}>No placeholder history yet.</div>
+            <div className={`p-10 text-center text-[16px] ${isLight ? "text-slate-500" : "text-slate-500"}`}>No placeholder history yet.</div>
           ) : (
             <>
               <div className="overflow-hidden">
@@ -2209,7 +2236,7 @@ function ActivityPanel(props: {
                     {["When", "Content", "Action", "Reason"].map(h => (
                       <th
                         key={h}
-                        className={`px-2 sm:px-3 py-3 text-left text-[10px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
+                        className={`px-2 sm:px-3 py-3 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
                       >
                         {h}
                       </th>
@@ -2265,12 +2292,12 @@ function ActivityPanel(props: {
                           }
                         >
                           <td
-                            className={`px-2 sm:px-3 py-4 text-xs sm:text-sm whitespace-nowrap truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}
+                            className={`px-2 sm:px-3 py-4 text-[14px] sm:text-[16px] whitespace-nowrap truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}
                             title={timeAgo(row.time || null)}
                           >
                             {timeAgo(row.time || null)}
                           </td>
-                          <td className={`px-2 sm:px-3 py-4 text-xs sm:text-sm min-w-0 ${isLight ? "text-slate-800" : "text-slate-300"}`}>
+                          <td className={`px-2 sm:px-3 py-4 text-[14px] sm:text-[16px] min-w-0 ${isLight ? "text-slate-800" : "text-slate-300"}`}>
                             <div className="flex items-start gap-1.5 min-w-0">
                               {isBatch ? (
                                 <span
@@ -2287,7 +2314,7 @@ function ActivityPanel(props: {
                                 </span>
                                 {row.path ? (
                                   <div
-                                    className={`text-[10px] mt-0.5 truncate hidden lg:block ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                    className={`text-[12px] mt-0.5 truncate hidden lg:block ${isLight ? "text-slate-500" : "text-slate-500"}`}
                                     title={row.path}
                                   >
                                     {row.path}
@@ -2298,7 +2325,7 @@ function ActivityPanel(props: {
                           </td>
                           <td className="px-2 sm:px-3 py-4">
                             <span
-                              className={`inline-flex items-center px-2 py-1 rounded text-[10px] sm:text-xs font-medium font-headline uppercase tracking-wider whitespace-nowrap ${
+                              className={`inline-flex items-center px-2 py-1 rounded text-[12px] sm:text-[14px] font-medium font-headline uppercase tracking-wider whitespace-nowrap ${
                                 isLight ? `${actionColorLight} ${actionBgLight}` : `${actionColor} ${actionBg}`
                               }`}
                             >
@@ -2306,7 +2333,7 @@ function ActivityPanel(props: {
                             </span>
                           </td>
                           <td
-                            className={`px-2 sm:px-3 py-4 text-xs sm:text-sm truncate ${isLight ? "text-slate-600" : "text-slate-400"}`}
+                            className={`px-2 sm:px-3 py-4 text-[14px] sm:text-[16px] truncate ${isLight ? "text-slate-600" : "text-slate-400"}`}
                             title={row.reason || undefined}
                           >
                             {row.reason}
@@ -2338,20 +2365,20 @@ function ActivityPanel(props: {
                                     >
                                       <div className="flex items-start justify-between gap-3 min-w-0">
                                         <div
-                                          className={`text-xs sm:text-sm font-medium truncate min-w-0 flex-1 ${isLight ? "text-slate-900" : "text-slate-100"}`}
+                                          className={`text-[14px] sm:text-[16px] font-medium truncate min-w-0 flex-1 ${isLight ? "text-slate-900" : "text-slate-100"}`}
                                           title={childContent}
                                         >
                                           {childContent}
                                         </div>
                                         <div className="flex-none flex flex-col items-end gap-1 text-right shrink-0 max-w-[min(12.5rem,46%)] sm:max-w-[14rem]">
                                           <span
-                                            className="text-[9px] font-headline uppercase tracking-wider leading-tight"
+                                            className="text-[11px] font-headline uppercase tracking-wider leading-tight"
                                             style={{ color: semantic.fgMuted }}
                                           >
                                             Status updated to
                                           </span>
                                           <span
-                                            className="text-[11px] sm:text-xs font-headline font-semibold uppercase tracking-wide px-2.5 py-1 rounded-md border"
+                                            className="text-[13px] sm:text-[14px] font-headline font-semibold uppercase tracking-wide px-2.5 py-1 rounded-md border"
                                             style={{
                                               color: isLight ? semantic.fgOnAccent : semantic.accent,
                                               backgroundColor: isLight
@@ -2368,7 +2395,7 @@ function ActivityPanel(props: {
                                       </div>
                                       {child.path ? (
                                         <div
-                                          className={`text-[10px] mt-1.5 truncate font-mono ${isLight ? "text-slate-500" : "text-slate-500"}`}
+                                          className={`text-[12px] mt-1.5 truncate font-mono ${isLight ? "text-slate-500" : "text-slate-500"}`}
                                           title={child.path}
                                         >
                                           {child.path}
@@ -2388,7 +2415,7 @@ function ActivityPanel(props: {
               </table>
               </div>
               <div
-                className={`px-5 py-3 border-t text-[10px] font-headline uppercase tracking-widest ${isLight ? "border-slate-200/90 text-slate-500" : "border-[#424753]/20 text-slate-500"}`}
+                className={`px-5 py-3 border-t text-[12px] font-headline uppercase tracking-widest ${isLight ? "border-slate-200/90 text-slate-500" : "border-[#424753]/20 text-slate-500"}`}
               >
                 Showing {placeholderRows.length} items
               </div>
@@ -2401,11 +2428,11 @@ function ActivityPanel(props: {
       {tab === "system" && (
         <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
           <div className="mb-4">
-            <span className="font-headline text-xs font-bold text-white uppercase tracking-widest">Storage Progress</span>
+            <span className="font-headline text-[14px] font-bold text-white uppercase tracking-widest">Storage Progress</span>
           </div>
           <div className="space-y-4">
             <div>
-              <div className="flex justify-between text-[10px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
+              <div className="flex justify-between text-[12px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
                 <span>Movies on Disk</span><span>{s?.movies.downloaded ?? "--"} / {s?.movies.total ?? "--"}</span>
               </div>
               <div className="h-1.5 bg-[#252e3a] rounded-full">
@@ -2413,7 +2440,7 @@ function ActivityPanel(props: {
               </div>
             </div>
             <div>
-              <div className="flex justify-between text-[10px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
+              <div className="flex justify-between text-[12px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
                 <span>Episodes on Disk</span><span>{s?.episodes.downloaded ?? "--"} / {s?.episodes.total ?? "--"}</span>
               </div>
               <div className="h-1.5 bg-[#252e3a] rounded-full">
@@ -2464,7 +2491,7 @@ function LibraryPanel(props: {
     if (item.has_missing) {
       return (
         <span
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
             isLight ? "bg-red-50 text-red-800 border-red-200" : "bg-red-600 text-white border-transparent"
           }`}
         >
@@ -2475,7 +2502,7 @@ function LibraryPanel(props: {
     if (item.has_placeholder) {
       return (
         <span
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
             isLight ? "bg-teal-50 text-teal-900 border-teal-200" : "bg-teal-700 text-white border-transparent"
           }`}
         >
@@ -2486,7 +2513,7 @@ function LibraryPanel(props: {
     if (item.is_future) {
       return (
         <span
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
             isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-600 text-white border-transparent"
           }`}
         >
@@ -2497,7 +2524,7 @@ function LibraryPanel(props: {
     if (item.has_file) {
       return (
         <span
-          className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider border ${
+          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
             isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-500 text-white border-transparent"
           }`}
         >
@@ -2513,8 +2540,8 @@ function LibraryPanel(props: {
       {/* Header + filter tabs */}
       <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
         <div>
-          <h2 className={`text-3xl font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
-          <p className={`text-sm mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
+          <h2 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
+          <p className={`text-[16px] mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
         </div>
         <div
           className={`flex flex-wrap gap-1 p-1 rounded-lg border ${
@@ -2523,7 +2550,7 @@ function LibraryPanel(props: {
         >
           {filters.map(f => (
             <button key={f.id} type="button" onClick={() => props.onFilterChange(f.id)}
-              className={`px-4 py-1.5 rounded-md text-xs font-headline uppercase tracking-wider transition-colors ${
+              className={`px-4 py-1.5 rounded-md text-[14px] font-headline uppercase tracking-wider transition-colors ${
                 f.id === props.activeFilter
                   ? isLight
                     ? "text-slate-900 font-semibold"
@@ -2553,7 +2580,7 @@ function LibraryPanel(props: {
                 style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
               >
                 <div
-                  className={`mb-3 text-xs font-headline uppercase tracking-widest border-b pb-2 ${
+                  className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
                     isLight ? "text-slate-700 border-slate-200" : "text-slate-500 border-[#424753]/25"
                   }`}
                 >
@@ -2590,10 +2617,10 @@ function LibraryPanel(props: {
                       />
                       <div className="absolute top-2 left-2">{statusBadge(item)}</div>
                       <div className={`absolute bottom-0 left-0 right-0 flex flex-col gap-1 px-3 ${isLight ? "pb-3 pt-12" : "pb-3 pt-8"}`}>
-                        <div className="text-xs font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
+                        <div className="text-[14px] font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
                           {item.year || "—"}
                         </div>
-                        <div className={`font-bold text-sm leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
+                        <div className={`font-bold text-[16px] leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
                       </div>
                     </button>
                   ))}
@@ -2611,7 +2638,7 @@ function LibraryPanel(props: {
                 key={`alpha-${letter}`}
                 type="button"
                 onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                className={`w-6 h-6 rounded text-[10px] font-headline font-bold transition-colors ${
+                className={`w-6 h-6 rounded text-[12px] font-headline font-bold transition-colors ${
                   isLight
                     ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
                     : "text-slate-400 hover:text-white hover:bg-[#293346]"
@@ -2633,10 +2660,10 @@ function LibraryPanel(props: {
           }`}
         >
           <div className="flex justify-between items-start">
-            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Total Items</div>
+            <div className={`text-[12px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Total Items</div>
             <span className={`material-symbols-outlined ${isLight ? "text-slate-400" : "text-slate-600"}`} style={{ fontSize: 18 }}>storage</span>
           </div>
-          <div className={`text-3xl font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.items.length}</div>
+          <div className={`text-[32px] font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.items.length}</div>
         </div>
         <div
           className={`rounded-xl border p-5 ${
@@ -2644,13 +2671,13 @@ function LibraryPanel(props: {
           }`}
         >
           <div className="flex justify-between items-start">
-            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Missing Assets</div>
+            <div className={`text-[12px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Missing Assets</div>
             <span className="material-symbols-outlined text-yellow-500" style={{ fontSize: 18 }}>warning</span>
           </div>
-          <div className={`text-3xl font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{totalMissing}</div>
+          <div className={`text-[32px] font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{totalMissing}</div>
           {totalMissing > 0 && (
             <button type="button" onClick={() => props.onFilterChange("missing")}
-              className="mt-3 text-xs font-headline uppercase tracking-wider flex items-center gap-1" style={{ color: accent.icon }}>
+              className="mt-3 text-[14px] font-headline uppercase tracking-wider flex items-center gap-1" style={{ color: accent.icon }}>
               View Errors <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_forward</span>
             </button>
           )}
@@ -2661,14 +2688,14 @@ function LibraryPanel(props: {
           }`}
         >
           <div className="flex justify-between items-start">
-            <div className={`text-[10px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Sync Status</div>
+            <div className={`text-[12px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Sync Status</div>
             <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.hex }}>sync</span>
           </div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className={`font-bold font-headline text-sm ${isLight ? "text-slate-900" : "text-white"}`}>Active</span>
+            <span className={`font-bold font-headline text-[16px] ${isLight ? "text-slate-900" : "text-white"}`}>Active</span>
           </div>
-          <div className={`text-xs ${isLight ? "text-slate-600" : "text-slate-400"}`}>Library indexed</div>
+          <div className={`text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>Library indexed</div>
         </div>
       </div>
     </div>
@@ -2754,12 +2781,12 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
           sessionStorage.setItem("libraryScrollRestorePending", "1");
           navigate(-1);
         }}
-          className={`flex items-center gap-1.5 text-xs font-headline uppercase tracking-wider transition-colors ${isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"}`}>
+          className={`flex items-center gap-1.5 text-[14px] font-headline uppercase tracking-wider transition-colors ${isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"}`}>
           <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_back</span>
           Library
         </button>
         <span className={isLight ? "text-slate-400" : "text-slate-600"}>/</span>
-        <span className={`text-xs font-headline uppercase tracking-wider ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+        <span className={`text-[14px] font-headline uppercase tracking-wider ${isLight ? "text-slate-700" : "text-slate-300"}`}>
           {loading ? "Loading..." : payload?.title || "Detail"}
         </span>
       </div>
@@ -2767,13 +2794,13 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
         <div className="flex items-center justify-center h-64">
           <div className="flex items-center gap-3 text-slate-400">
             <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className="text-sm font-headline uppercase tracking-widest">Loading detail...</span>
+            <span className="text-[16px] font-headline uppercase tracking-widest">Loading detail...</span>
           </div>
         </div>
       ) : null}
       {error ? (
         <div
-          className={`mx-6 mt-4 rounded-xl border p-4 text-sm ${
+          className={`mx-6 mt-4 rounded-xl border p-4 text-[16px] ${
             isLight ? "border-red-200 bg-red-50 text-red-800" : "border-red-500/30 bg-red-600/15 text-red-300"
           }`}
         >
@@ -2914,8 +2941,8 @@ function MovieFileStateSection(props: {
               className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
             />
           </div>
-          <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{brandLabel}</div>
-          <div className="movie-file-state-tile-status text-lg font-bold font-headline tabular-nums leading-none">
+          <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{brandLabel}</div>
+          <div className="movie-file-state-tile-status text-[20px] font-bold font-headline tabular-nums leading-none">
             {placeholderOnDisk ? "Yes" : "No"}
           </div>
         </div>
@@ -2936,8 +2963,8 @@ function MovieFileStateSection(props: {
               >
                 <img src={props.radarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
               </div>
-              <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{row.label}</div>
-              <div className="movie-file-state-tile-status text-lg font-bold font-headline tabular-nums leading-none">{status}</div>
+              <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{row.label}</div>
+              <div className="movie-file-state-tile-status text-[20px] font-bold font-headline tabular-nums leading-none">{status}</div>
             </a>
           );
         })}
@@ -3012,9 +3039,9 @@ function SeriesFileStateSection(props: {
               className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
             />
           </div>
-          <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{brandLabel}</div>
-          <div className="movie-file-state-tile-status text-2xl font-black font-headline tabular-nums leading-none">{phTotalStr}</div>
-          <div className="movie-file-state-tile-caption mt-0.5 text-[10px] font-headline font-medium uppercase tracking-wider">Episodes</div>
+          <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{brandLabel}</div>
+          <div className="movie-file-state-tile-status text-[26px] font-black font-headline tabular-nums leading-none">{phTotalStr}</div>
+          <div className="movie-file-state-tile-caption mt-0.5 text-[12px] font-headline font-medium uppercase tracking-wider">Episodes</div>
         </div>
         {linkRows.map((row, idx) => {
           const totalStr = seriesFileStateSonarrFileTotal(row.present, row.episode_files);
@@ -3033,9 +3060,9 @@ function SeriesFileStateSection(props: {
               >
                 <img src={props.sonarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
               </div>
-              <div className="movie-file-state-tile-title text-sm font-semibold font-headline leading-tight">{row.label}</div>
-              <div className="movie-file-state-tile-status text-2xl font-black font-headline tabular-nums leading-none">{totalStr}</div>
-              <div className="movie-file-state-tile-caption mt-0.5 text-[10px] font-headline font-medium uppercase tracking-wider">Episodes</div>
+              <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{row.label}</div>
+              <div className="movie-file-state-tile-status text-[26px] font-black font-headline tabular-nums leading-none">{totalStr}</div>
+              <div className="movie-file-state-tile-caption mt-0.5 text-[12px] font-headline font-medium uppercase tracking-wider">Episodes</div>
             </a>
           );
         })}
@@ -3053,7 +3080,7 @@ function DetailArrLaunchBar(props: {
   if (!props.links.length) return null;
   return (
     <div className={`rounded-xl border p-5 md:p-6 ${props.isLight ? "bg-white border-[#d7e2f0] shadow-sm" : "bg-[#171c22] border-[#424753]/40"}`}>
-      <h3 className={`text-[11px] font-headline uppercase tracking-widest ${props.isLight ? "text-slate-500" : "text-slate-400"}`}>{props.heading}</h3>
+      <h3 className={`text-[13px] font-headline uppercase tracking-widest ${props.isLight ? "text-slate-500" : "text-slate-400"}`}>{props.heading}</h3>
       <div className="mt-4 flex flex-wrap gap-3">
         {props.links.map((lnk) => (
           <a
@@ -3064,7 +3091,7 @@ function DetailArrLaunchBar(props: {
             className="detail-arr-instance-launch group inline-flex min-w-[12.5rem] flex-1 items-center gap-3 rounded-xl border border-[#424753]/50 px-4 py-3 transition-colors hover:border-[#424753] sm:max-w-sm sm:flex-none"
           >
             <img src={props.iconSrc} alt="" className="h-9 w-9 shrink-0 object-contain" decoding="async" />
-            <span className="detail-arr-instance-launch__label min-w-0 flex-1 font-headline text-sm font-semibold leading-tight text-slate-100">{lnk.label}</span>
+            <span className="detail-arr-instance-launch__label min-w-0 flex-1 font-headline text-[16px] font-semibold leading-tight text-slate-100">{lnk.label}</span>
             <span className="material-symbols-outlined shrink-0 text-slate-500 transition-colors group-hover:text-slate-300" style={{ fontSize: 18 }}>
               open_in_new
             </span>
@@ -3102,7 +3129,7 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           </div>
           <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
             {payload.year ? (
-              <div className="text-xl font-semibold tabular-nums md:text-2xl" style={{ color: accent.icon }}>
+              <div className="text-[22px] font-semibold tabular-nums md:text-[26px]" style={{ color: accent.icon }}>
                 {payload.year}
               </div>
             ) : null}
@@ -3110,7 +3137,7 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
           </div>
         </div>
 
-        {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
+        {payload.overview && <p className={`text-[20px] leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
         <MovieFileStateSection
           links={payload.arr_instance_links}
@@ -3132,8 +3159,8 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
             { label: "Physical", value: payload.physical_release_date },
           ].filter(m => m.value).map(m => (
             <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-              <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className={`text-base font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
+              <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
+              <div className={`text-[18px] font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
             </div>
           ))}
         </div>
@@ -3174,7 +3201,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           </div>
           <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
             {payload.year ? (
-              <div className="text-xl font-semibold tabular-nums md:text-2xl" style={{ color: accent.icon }}>
+              <div className="text-[22px] font-semibold tabular-nums md:text-[26px]" style={{ color: accent.icon }}>
                 {payload.year}
               </div>
             ) : null}
@@ -3182,7 +3209,7 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           </div>
         </div>
 
-        {payload.overview && <p className={`text-lg leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
+        {payload.overview && <p className={`text-[20px] leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
 
         <SeriesFileStateSection
           seasons={payload.seasons || []}
@@ -3203,14 +3230,14 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
             .filter((m) => m.value != null && String(m.value).length > 0)
             .map((m) => (
               <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-                <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-                <div className={`text-base font-semibold tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
+                <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
+                <div className={`text-[18px] font-semibold tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
               </div>
             ))}
         </div>
 
         <div className="mb-4">
-          <h3 className="text-xs font-headline uppercase tracking-widest text-slate-500 mb-3">Seasons &amp; Episodes</h3>
+          <h3 className="text-[14px] font-headline uppercase tracking-widest text-slate-500 mb-3">Seasons &amp; Episodes</h3>
         </div>
         <div className="space-y-2">
           {seasonsDesc.map(season => {
@@ -3221,11 +3248,11 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                   className={`w-full flex items-center justify-between px-5 py-4 text-left transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-[#1e2430]/50"}`}>
                   <div className="flex items-center gap-3">
                     <span className="material-symbols-outlined text-slate-500 transition-transform" style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>chevron_right</span>
-                    <span className={`text-sm font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+                    <span className={`text-[16px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
                       {season.season_number === 0 ? "Specials" : `Season ${season.season_number}`}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2 text-xs font-headline uppercase tracking-wider">
+                  <div className="flex items-center gap-2 text-[14px] font-headline uppercase tracking-wider">
                     <span className="text-slate-500">{season.episode_total} episodes</span>
                     <span className="px-2 py-0.5 rounded bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder {season.episode_placeholders}</span>
                     <span className="px-2 py-0.5 rounded bg-green-600/20 border border-green-500/30 text-green-300">Downloaded {season.episode_files}</span>
@@ -3235,17 +3262,17 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                   <div className={`border-t divide-y ${isLight ? "border-slate-200 divide-slate-200" : "border-[#424753]/30 divide-[#424753]/15"}`}>
                     {season.episodes.map(ep => (
                       <div key={ep.id} className={`flex items-start gap-4 px-5 py-3 transition-colors ${isLight ? "hover:bg-slate-50" : "hover:bg-[#1e2430]/30"}`}>
-                        <span className="flex-none w-10 text-xs text-slate-500 font-mono pt-0.5">E{String(ep.episode_number).padStart(2, "0")}</span>
+                        <span className="flex-none w-10 text-[14px] text-slate-500 font-mono pt-0.5">E{String(ep.episode_number).padStart(2, "0")}</span>
                         <div className="flex-1 min-w-0">
-                          <div className={`text-sm font-medium ${isLight ? "text-slate-900" : "text-white"}`}>{ep.title || `Episode ${ep.episode_number}`}</div>
+                          <div className={`text-[16px] font-medium ${isLight ? "text-slate-900" : "text-white"}`}>{ep.title || `Episode ${ep.episode_number}`}</div>
                           <div className="ui-field-description-compact mt-0.5">{ep.air_date || "No air date"}</div>
                         </div>
                         <div className="flex-none">
                           {ep.has_placeholder
-                            ? <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder</span>
+                            ? <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder</span>
                             : ep.has_file
-                              ? <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
-                              : <span className="px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
+                              ? <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
+                              : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
                           }
                         </div>
                       </div>
@@ -3395,7 +3422,7 @@ function CalendarPanel(props: {
       <div className="flex items-center justify-center h-64">
         <div className="flex items-center gap-3 text-slate-400">
           <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-          <span className="text-sm font-headline uppercase tracking-widest">Loading calendar...</span>
+          <span className="text-[16px] font-headline uppercase tracking-widest">Loading calendar...</span>
         </div>
       </div>
     );
@@ -3443,22 +3470,22 @@ function CalendarPanel(props: {
       {/* Header */}
       <div className="flex items-center gap-2 mb-1">
         <div className="w-2 h-2 rounded-full" style={{ backgroundColor: accent.hex }} />
-        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">Upcoming Releases</span>
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Upcoming Releases</span>
       </div>
       <div className="flex justify-between items-center mb-5">
-        <h1 className="text-3xl font-black text-white tracking-tight font-headline">Release Calendar</h1>
+        <h1 className="text-[32px] font-black text-white tracking-tight font-headline">Release Calendar</h1>
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => shiftMonth(-1)}
             className="w-8 h-8 flex items-center justify-center bg-[#1e2430] border border-[#424753]/40 rounded-lg text-slate-400 hover:text-white hover:border-slate-400 transition-colors">
             <span className="material-symbols-outlined" style={{ fontSize: 18 }}>chevron_left</span>
           </button>
-          <span className="text-sm font-bold text-white font-headline px-3 min-w-36 text-center">{payload.month_label}</span>
+          <span className="text-[16px] font-bold text-white font-headline px-3 min-w-36 text-center">{payload.month_label}</span>
           <button type="button" onClick={() => shiftMonth(1)}
             className="w-8 h-8 flex items-center justify-center bg-[#1e2430] border border-[#424753]/40 rounded-lg text-slate-400 hover:text-white hover:border-slate-400 transition-colors">
             <span className="material-symbols-outlined" style={{ fontSize: 18 }}>chevron_right</span>
           </button>
           <button type="button" onClick={() => props.onMonthChange(getCurrentMonthToken())}
-            className="ml-1 px-3 py-1.5 bg-[#1e2430] border border-[#424753]/40 rounded-lg text-xs text-slate-400 hover:text-white font-headline uppercase tracking-wider transition-colors">
+            className="ml-1 px-3 py-1.5 bg-[#1e2430] border border-[#424753]/40 rounded-lg text-[14px] text-slate-400 hover:text-white font-headline uppercase tracking-wider transition-colors">
             Today
           </button>
         </div>
@@ -3466,13 +3493,13 @@ function CalendarPanel(props: {
 
       {/* Filter legend */}
       <div className="flex flex-wrap gap-2 mb-5 p-3 bg-[#171c22] border border-[#424753]/40 rounded-xl">
-        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500 self-center mr-2">Filter by</span>
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500 self-center mr-2">Filter by</span>
         {payload.legend.media_types.map(item => {
           const active = props.filters.mediaTypes[item.key] !== false;
           const mediaIcon = item.key === "movie" ? "movie" : "tv";
           return (
             <button key={`media-${item.key}`} type="button" onClick={() => props.onToggleFilter("mediaTypes", item.key)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-headline uppercase tracking-wider border transition-colors ${active ? "" : "bg-[#252e3a] border-[#424753]/40 text-slate-500 hover:text-slate-300"}`}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[14px] font-headline uppercase tracking-wider border transition-colors ${active ? "" : "bg-[#252e3a] border-[#424753]/40 text-slate-500 hover:text-slate-300"}`}
               style={active ? { backgroundColor: alphaColor(accent.hex, 0.18), borderColor: alphaColor(accent.hex, 0.45), color: accent.text } : undefined}>
               <span className="material-symbols-outlined" style={{ fontSize: 14 }}>{mediaIcon}</span>
               {item.label}
@@ -3483,7 +3510,7 @@ function CalendarPanel(props: {
           <button
             type="button"
             onClick={() => setReleaseMenuOpen((prev) => !prev)}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-headline uppercase tracking-wider border transition-colors ${releaseMenuOpen ? "bg-teal-600/20 border-teal-500/50 text-teal-300" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[14px] font-headline uppercase tracking-wider border transition-colors ${releaseMenuOpen ? "bg-teal-600/20 border-teal-500/50 text-teal-300" : "bg-[#252e3a] border-[#424753]/40 text-slate-300 hover:text-white"}`}
           >
             <span className="material-symbols-outlined" style={{ fontSize: 14 }}>tune</span>
             Movie release types
@@ -3496,7 +3523,7 @@ function CalendarPanel(props: {
                 return (
                   <label
                     key={`rel-menu-${item.key}`}
-                    className="flex items-center gap-2 px-2 py-2 rounded-md text-xs text-slate-300 hover:bg-[#1b2433] cursor-pointer"
+                    className="flex items-center gap-2 px-2 py-2 rounded-md text-[14px] text-slate-300 hover:bg-[#1b2433] cursor-pointer"
                   >
                     <input
                       type="checkbox"
@@ -3511,15 +3538,15 @@ function CalendarPanel(props: {
             </div>
           ) : null}
         </div>
-        <span className="ml-auto text-[10px] font-headline text-slate-500 self-center">
+        <span className="ml-auto text-[12px] font-headline text-slate-500 self-center">
           {props.summary.movieCount} movies · {props.summary.episodeCount} TV episodes
         </span>
       </div>
 
       <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-[#424753]/40 bg-[#171c22] px-4 py-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500">Calendar Health</div>
-          <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-300">
+          <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Calendar Health</div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-[16px] text-slate-300">
             <span><span className="text-white font-semibold">{totalVisible}</span> visible releases</span>
             <span><span className="text-white font-semibold">{props.summary.inWindowCount}</span> in lookahead</span>
             <span><span className="text-white font-semibold">{activeMediaFilters}</span> media filters active</span>
@@ -3535,7 +3562,7 @@ function CalendarPanel(props: {
           <div className="min-w-[980px] overflow-hidden rounded-xl">
             <div className="grid grid-cols-7 border-b border-[#424753]/30">
               {payload.weekday_labels.map(w => (
-                <div key={w} className="px-3 py-3 text-center text-[10px] font-headline uppercase tracking-widest text-slate-500">{w}</div>
+                <div key={w} className="px-3 py-3 text-center text-[12px] font-headline uppercase tracking-widest text-slate-500">{w}</div>
               ))}
             </div>
             {payload.weeks.map((week, idx) => (
@@ -3600,10 +3627,10 @@ function CalendarPanel(props: {
                     className="absolute top-3 left-3 z-[2] flex w-[3.25rem] flex-col items-center rounded-lg border border-white/25 bg-black/60 px-1.5 py-2 shadow-lg backdrop-blur-sm"
                     aria-hidden
                   >
-                    <span className="text-[9px] font-headline font-bold uppercase tracking-[0.12em] text-orange-100/90">
+                    <span className="text-[11px] font-headline font-bold uppercase tracking-[0.12em] text-orange-100/90">
                       {heroDateParts.month}
                     </span>
-                    <span className="mt-0.5 text-[1.65rem] font-black leading-none text-white font-headline tabular-nums">
+                    <span className="mt-0.5 text-[1.775rem] font-black leading-none text-white font-headline tabular-nums">
                       {heroDateParts.day}
                     </span>
                   </div>
@@ -3622,7 +3649,7 @@ function CalendarPanel(props: {
                       {spotlightPoster ? (
                         <img src={spotlightPoster} alt="" className="h-full w-full object-cover" />
                       ) : (
-                        <div className="h-full w-full flex items-center justify-center text-slate-500 font-headline text-xs uppercase">
+                        <div className="h-full w-full flex items-center justify-center text-slate-500 font-headline text-[14px] uppercase">
                           {props.selectedItem.media_type === "movie" ? "MOV" : "TV"}
                         </div>
                       )}
@@ -3632,14 +3659,14 @@ function CalendarPanel(props: {
                         <span
                           className={
                             props.selectedItem.media_type === "movie"
-                              ? "rounded border border-teal-500/40 bg-teal-600/25 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-teal-100"
-                              : "rounded border border-orange-500/40 bg-orange-600/25 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-orange-100"
+                              ? "rounded border border-teal-500/40 bg-teal-600/25 px-2.5 py-1 text-[12px] font-bold font-headline uppercase tracking-wider text-teal-100"
+                              : "rounded border border-orange-500/40 bg-orange-600/25 px-2.5 py-1 text-[12px] font-bold font-headline uppercase tracking-wider text-orange-100"
                           }
                         >
                           {props.selectedItem.media_type === "movie" ? "Movie" : "TV"}
                         </span>
                         {props.selectedItem.release_type_label ? (
-                          <span className="rounded border border-teal-500/30 bg-teal-600/20 px-2.5 py-1 text-[10px] font-bold font-headline uppercase tracking-wider text-teal-200">
+                          <span className="rounded border border-teal-500/30 bg-teal-600/20 px-2.5 py-1 text-[12px] font-bold font-headline uppercase tracking-wider text-teal-200">
                             {props.selectedItem.release_type_label}
                           </span>
                         ) : null}
@@ -3648,7 +3675,7 @@ function CalendarPanel(props: {
                         {props.selectedItem.title}
                       </h3>
                       {props.selectedItem.media_type === "movie" && props.selectedItem.subtitle ? (
-                        <p className="mt-1 text-sm text-slate-300 truncate">{props.selectedItem.subtitle}</p>
+                        <p className="mt-1 text-[16px] text-slate-300 truncate">{props.selectedItem.subtitle}</p>
                       ) : null}
                     </div>
                   </div>
@@ -3657,13 +3684,13 @@ function CalendarPanel(props: {
 
               {/* Body */}
               <div className="space-y-5 p-5 md:p-6">
-                <p className="text-base leading-relaxed text-slate-200">
+                <p className="text-[18px] leading-relaxed text-slate-200">
                   {spotlightDescription}
                 </p>
 
                 {props.selectedItem.media_type === "episode" ? (
                   props.spotlightLoading ? (
-                    <div className="text-sm text-slate-500">Loading episodes…</div>
+                    <div className="text-[16px] text-slate-500">Loading episodes…</div>
                   ) : calendarSpotlightEpisodeRows.length ? (
                     <div className="overflow-hidden rounded-xl border border-[#424753]/30 bg-black/25">
                       {calendarSpotlightEpisodeRows.map((ep, idx) => {
@@ -3684,8 +3711,8 @@ function CalendarPanel(props: {
                               }}
                               className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.04]"
                             >
-                              <span className="flex-none font-mono text-[11px] font-semibold text-orange-200/95">{code}</span>
-                              <span className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-slate-100">{epTitle}</span>
+                              <span className="flex-none font-mono text-[13px] font-semibold text-orange-200/95">{code}</span>
+                              <span className="min-w-0 flex-1 text-[15px] font-medium leading-snug text-slate-100">{epTitle}</span>
                               <span
                                 className={`material-symbols-outlined flex-none text-slate-500 transition-transform ${expanded ? "rotate-180" : ""}`}
                                 style={{ fontSize: 20 }}
@@ -3704,7 +3731,7 @@ function CalendarPanel(props: {
                                     />
                                   </div>
                                 ) : null}
-                                <p className="text-sm leading-relaxed text-slate-300">
+                                <p className="text-[16px] leading-relaxed text-slate-300">
                                   {ep.overview?.trim() || "No episode synopsis available."}
                                 </p>
                               </div>
@@ -3714,14 +3741,14 @@ function CalendarPanel(props: {
                       })}
                     </div>
                   ) : (
-                    <div className="text-sm text-slate-500">Episode details not available.</div>
+                    <div className="text-[16px] text-slate-500">Episode details not available.</div>
                   )
                 ) : null}
 
                 {spotlightMeta.length ? (
                   <div className="grid grid-cols-2 gap-2 rounded-xl border border-[#424753]/30 bg-black/30 p-3 calendar-spotlight-meta">
                     {spotlightMeta.map((bit) => (
-                      <div key={bit.label} className="text-xs">
+                      <div key={bit.label} className="text-[14px]">
                         <div className="font-headline uppercase tracking-widest text-slate-500 mb-0.5">{bit.label}</div>
                         <div className="text-slate-300">{bit.value}</div>
                       </div>
@@ -3733,7 +3760,7 @@ function CalendarPanel(props: {
                   <button
                     type="button"
                     onClick={() => { closeOverlay(); props.onOpenSpotlightDetail(props.selectedItem!); }}
-                    className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-headline uppercase tracking-wider text-white transition-colors"
+                    className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-white transition-colors"
                     style={{ backgroundColor: accent.hex }}
                   >
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
@@ -3745,7 +3772,7 @@ function CalendarPanel(props: {
                       href={lnk.url}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/40 bg-[#1e2430] px-4 py-2 text-xs font-headline uppercase tracking-wider text-slate-300 transition-colors hover:text-white"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/40 bg-[#1e2430] px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-slate-300 transition-colors hover:text-white"
                     >
                       <span className="material-symbols-outlined" style={{ fontSize: 14 }}>north_east</span>
                       {lnk.label}
@@ -3783,8 +3810,8 @@ function CalendarDayCell(props: {
     } ${day.is_today ? "" : "hover:bg-[#1e2430]/50"}`} style={dayCellStyle}>
       {/* Day number */}
       <div className="flex items-center justify-between mb-1">
-        <span className={`text-xs font-bold font-headline leading-none ${
-          day.is_today ? "w-5 h-5 flex items-center justify-center rounded-full text-white text-[10px]" : "text-slate-400"
+        <span className={`text-[14px] font-bold font-headline leading-none ${
+          day.is_today ? "w-5 h-5 flex items-center justify-center rounded-full text-white text-[12px]" : "text-slate-400"
         }`} style={day.is_today ? { backgroundColor: accent.hex } : undefined}>
           {day.day_number}
         </span>
@@ -3809,25 +3836,25 @@ function CalendarDayCell(props: {
             >
               <div className="flex items-start gap-1.5">
                 <span
-                  className={`material-symbols-outlined mt-0.5 text-[12px] ${
+                  className={`material-symbols-outlined mt-0.5 text-[14px] ${
                     item.media_type === "movie" ? "text-teal-400" : "text-orange-300"
                   }`}
                 >
                   {item.media_type === "movie" ? "movie" : "tv"}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <div className="text-[11.5px] font-semibold leading-snug text-white" title={item.title}>{item.title}</div>
+                  <div className="text-[13.5px] font-semibold leading-snug text-white" title={item.title}>{item.title}</div>
                   {item.media_type === "episode" && item.subtitle ? (
-                    <div className="mt-0.5 text-[10px] leading-snug text-slate-400">{item.subtitle}</div>
+                    <div className="mt-0.5 text-[12px] leading-snug text-slate-400">{item.subtitle}</div>
                   ) : null}
-                  {metaBits.length ? <div className="mt-0.5 text-[10px] leading-snug text-slate-500">{metaBits.map((bit) => bit.value).join(" • ")}</div> : null}
+                  {metaBits.length ? <div className="mt-0.5 text-[12px] leading-snug text-slate-500">{metaBits.map((bit) => bit.value).join(" • ")}</div> : null}
                 </div>
               </div>
             </button>
           );
         })}
         {day.item_count > visibleItems.length ? (
-          <div className="px-1 text-[10px] text-slate-500">+{day.item_count - visibleItems.length} hidden by filters</div>
+          <div className="px-1 text-[12px] text-slate-500">+{day.item_count - visibleItems.length} hidden by filters</div>
         ) : null}
       </div>
     </div>
@@ -3850,15 +3877,15 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
       {/* Status bar */}
       <div className="flex items-center gap-2 mb-1">
         <div className="w-2 h-2 rounded-full bg-green-500" />
-        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">System Online</span>
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">System Online</span>
       </div>
 
       {/* Title row */}
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-black text-white tracking-tight font-headline">Diagnostics</h1>
+        <h1 className="text-[32px] font-black text-white tracking-tight font-headline">Diagnostics</h1>
         <div className="flex bg-[#1e2430] rounded-lg border border-[#424753]/40 p-0.5">
-          <button type="button" className="px-4 py-1.5 rounded-md bg-[#252e3a] text-white text-xs font-headline uppercase tracking-wider">Errors</button>
-          <button type="button" className="px-4 py-1.5 text-slate-400 hover:text-slate-200 text-xs font-headline uppercase tracking-wider transition-colors">Logs</button>
+          <button type="button" className="px-4 py-1.5 rounded-md bg-[#252e3a] text-white text-[14px] font-headline uppercase tracking-wider">Errors</button>
+          <button type="button" className="px-4 py-1.5 text-slate-400 hover:text-slate-200 text-[14px] font-headline uppercase tracking-wider transition-colors">Logs</button>
         </div>
       </div>
 
@@ -3866,11 +3893,11 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
       <div className="flex gap-3 mb-4 flex-wrap">
         <div className="flex-1 min-w-48 relative">
           <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>filter_list</span>
-          <input className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+          <input className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-[16px] text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
             placeholder="Filter by source or message keyword..." />
         </div>
         <div className="relative">
-          <select className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-sm text-slate-300 outline-none">
+          <select className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-[16px] text-slate-300 outline-none">
             <option>All Severities</option>
             <option>Critical</option>
             <option>Warning</option>
@@ -3878,7 +3905,7 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
           <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>expand_more</span>
         </div>
         <div className="relative">
-          <select className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-sm text-slate-300 outline-none">
+          <select className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-[16px] text-slate-300 outline-none">
             <option>Last 60 Minutes</option>
             <option>Last 24 Hours</option>
             <option>Last 7 Days</option>
@@ -3890,13 +3917,13 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
       {/* Error table */}
       <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-4">
         {!props.rows.length ? (
-          <div className="p-10 text-center text-slate-500 text-sm">No errors found.</div>
+          <div className="p-10 text-center text-slate-500 text-[16px]">No errors found.</div>
         ) : (
           <table className="w-full">
             <thead>
               <tr className="border-b border-[#424753]/30">
                 {["Timestamp", "Source", "Label", "Message", "Action"].map(h => (
-                  <th key={h} className="px-5 py-3 text-left text-[10px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
+                  <th key={h} className="px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -3906,14 +3933,14 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
                 const badgeClass = severityColor[labelKey] || "bg-slate-600 text-white";
                 return (
                   <tr key={`${row.source}-${idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
-                    <td className="px-5 py-4 text-sm text-slate-400 font-mono whitespace-nowrap">{row.time || "--"}</td>
-                    <td className="px-5 py-4 text-sm text-slate-300">{row.source}</td>
+                    <td className="px-5 py-4 text-[16px] text-slate-400 font-mono whitespace-nowrap">{row.time || "--"}</td>
+                    <td className="px-5 py-4 text-[16px] text-slate-300">{row.source}</td>
                     <td className="px-5 py-4">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-headline uppercase tracking-wider ${badgeClass}`}>{row.label}</span>
+                      <span className={`px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider ${badgeClass}`}>{row.label}</span>
                     </td>
-                    <td className="px-5 py-4 text-sm text-slate-400 max-w-xs truncate" title={row.error}>{row.error}</td>
+                    <td className="px-5 py-4 text-[16px] text-slate-400 max-w-xs truncate" title={row.error}>{row.error}</td>
                     <td className="px-5 py-4">
-                      <button type="button" className="text-[10px] font-headline uppercase tracking-widest text-slate-400 hover:text-slate-200 transition-colors">Details</button>
+                      <button type="button" className="text-[12px] font-headline uppercase tracking-widest text-slate-400 hover:text-slate-200 transition-colors">Details</button>
                     </td>
                   </tr>
                 );
@@ -3928,11 +3955,11 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
         <div className="flex justify-between items-center mb-3">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-red-500" />
-            <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">Live Log Stream</span>
+            <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Live Log Stream</span>
           </div>
-          <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500">Status: Monitoring</span>
+          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Status: Monitoring</span>
         </div>
-        <div className="font-mono text-xs space-y-1.5 text-slate-400 max-h-32 overflow-y-auto">
+        <div className="font-mono text-[14px] space-y-1.5 text-slate-400 max-h-32 overflow-y-auto">
           <div><span style={{ color: accent.icon }}>[INFO]</span> System polling active</div>
           <div><span className="text-green-400">[SUCCESS]</span> Handshake established. Protocol V4.</div>
           <div><span style={{ color: accent.icon }}>[INFO]</span> Checking database consistency...</div>
@@ -3946,24 +3973,24 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Errors (24h)</div>
+            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-3">Errors (24h)</div>
             <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 18 }}>trending_up</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{props.rows.length}</div>
+          <div className="text-[32px] font-black text-white font-headline">{props.rows.length}</div>
         </div>
         <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Health Score</div>
+            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-3">Health Score</div>
             <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.icon }}>verified_user</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{props.rows.length === 0 ? "100%" : `${Math.max(0, 100 - props.rows.length * 2).toFixed(1)}%`}</div>
+          <div className="text-[32px] font-black text-white font-headline">{props.rows.length === 0 ? "100%" : `${Math.max(0, 100 - props.rows.length * 2).toFixed(1)}%`}</div>
         </div>
         <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
           <div className="flex justify-between items-start">
-            <div className="text-[10px] font-headline uppercase tracking-widest text-slate-400 mb-3">Log Volume</div>
+            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-3">Log Volume</div>
             <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 18 }}>bar_chart</span>
           </div>
-          <div className="text-3xl font-black text-white font-headline">{props.rows.length} entries</div>
+          <div className="text-[32px] font-black text-white font-headline">{props.rows.length} entries</div>
         </div>
       </div>
     </div>
@@ -4004,14 +4031,14 @@ function LogsPanel(props: {
       {/* Title row */}
       <div className="flex items-center gap-2 mb-1">
         <div className="w-2 h-2 rounded-full" style={{ backgroundColor: accent.hex }} />
-        <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">Live</span>
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Live</span>
       </div>
       <div className="flex justify-between items-center mb-5">
-        <h1 className="text-3xl font-black text-white tracking-tight font-headline">System Logs</h1>
-        <span className="text-xs text-slate-500 font-mono">{props.logFile}</span>
+        <h1 className="text-[32px] font-black text-white tracking-tight font-headline">System Logs</h1>
+        <span className="text-[14px] text-slate-500 font-mono">{props.logFile}</span>
       </div>
 
-      <p className="text-xs text-slate-500 mb-4 leading-relaxed max-w-3xl">
+      <p className="text-[14px] text-slate-500 mb-4 leading-relaxed max-w-3xl">
         Log files record <span className="text-slate-400">everything</span>
         {props.captureLevel ? (
           <>
@@ -4028,13 +4055,13 @@ function LogsPanel(props: {
         <div className="flex-1 min-w-48 relative">
           <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>search</span>
           <input value={props.logFilter} onChange={e => props.onFilterChange(e.target.value)}
-            className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+            className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-[16px] text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
             placeholder="Search log output..." />
         </div>
         <div className="relative flex items-center gap-2">
-          <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500 whitespace-nowrap">Display filter</span>
+          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500 whitespace-nowrap">Display filter</span>
           <select value={props.logLevel} onChange={e => props.onLevelChange(e.target.value as "all" | "debug" | "info" | "warn" | "error" | "critical")}
-            className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-sm text-slate-300 outline-none">
+            className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-[16px] text-slate-300 outline-none">
             <option value="all">All captured levels</option>
             <option value="debug">Debug + Above</option>
             <option value="info">Info + Above</option>
@@ -4051,14 +4078,14 @@ function LogsPanel(props: {
         <div className="flex justify-between items-center pb-3 mb-3 border-b border-[#424753]/30">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-slate-500" style={{ fontSize: 18 }}>terminal</span>
-            <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">Output Stream</span>
+            <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Output Stream</span>
           </div>
-          <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500">{props.lines.length} lines</span>
+          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">{props.lines.length} lines</span>
         </div>
         <div
           ref={streamRef}
           onScroll={handleStreamScroll}
-          className="font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto"
+          className="font-mono text-[14px] space-y-1 max-h-[60vh] overflow-y-auto"
         >
           {!props.lines.length && <div className="text-slate-600 p-2">No log lines to display.</div>}
           {props.lines.map((line, idx) => {
@@ -4679,7 +4706,7 @@ function ArrInstancesEditor(props: {
           <div className="flex items-center justify-between gap-2">
             <div className="flex-1">
               <input
-                className="bg-transparent text-sm font-semibold text-white font-headline outline-none w-full"
+                className="bg-transparent text-[16px] font-semibold text-white font-headline outline-none w-full"
                 value={item.label}
                 onChange={(e) => {
                   const value = e.target.value;
@@ -4688,14 +4715,14 @@ function ArrInstancesEditor(props: {
                 placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
                 disabled={isDisabled}
               />
-              <div className="text-[11px] text-slate-400 mt-1">
+              <div className="text-[13px] text-slate-400 mt-1">
                 {item.arr_type.toUpperCase()} {required ? "• Primary" : "• Secondary"}
               </div>
               {opts?.statusHint ? <div className="ui-field-description-compact mt-1">{opts.statusHint}</div> : null}
             </div>
             {opts?.showToggle ? (
               <label className={`flex items-center gap-2 select-none shrink-0 ${opts.toggleDisabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
-                <span className="text-[11px] text-slate-300">Enabled</span>
+                <span className="text-[13px] text-slate-300">Enabled</span>
                 <div
                   className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${isEnabled ? "" : "bg-[#252e3a]"}`}
                   style={isEnabled ? { backgroundColor: props.accent.hex } : undefined}
@@ -4711,22 +4738,22 @@ function ArrInstancesEditor(props: {
           </div>
           {opts?.toggleHint && opts.toggleDisabled ? <div className="ui-field-description-compact">{opts.toggleHint}</div> : null}
           <div>
-            <label className="block text-[11px] font-semibold text-slate-400 mb-1">URL &amp; port</label>
+            <label className="block text-[13px] font-semibold text-slate-400 mb-1">URL &amp; port</label>
             <input
-              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
+              className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
               value={item.url}
               onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
               placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
               disabled={isDisabled}
             />
             {dupPeer && !isDisabled ? (
-              <p className="mt-1.5 text-xs text-red-400">
+              <p className="mt-1.5 text-[14px] text-red-400">
                 Same address as &quot;{dupPeer.label}&quot; ({dupPeer.arr_type}). Use a distinct URL for each instance.
               </p>
             ) : null}
           </div>
           <input
-            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-xs text-slate-200"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
             value={item.api_key}
             onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
             placeholder="API key"
@@ -4737,13 +4764,13 @@ function ArrInstancesEditor(props: {
             <button
               type="button"
               onClick={() => void runTest(item, arrType, slotIndex)}
-              className="px-3 py-1.5 rounded-md text-xs bg-[#252e3a] border border-[#424753]/40 text-slate-300"
+              className="px-3 py-1.5 rounded-md text-[14px] bg-[#252e3a] border border-[#424753]/40 text-slate-300"
               disabled={isDisabled || Boolean(dupPeer)}
             >
               Test
             </button>
           </div>
-          <div className="min-h-[2.25rem] text-xs" aria-live="polite">
+          <div className="min-h-[2.25rem] text-[14px]" aria-live="polite">
             {status && status.message !== "Testing..." ? (
               <div className={`mt-1.5 ${status.ok ? "text-green-400" : "text-red-400"}`}>{status.message}</div>
             ) : status && status.message === "Testing..." ? (
@@ -4797,13 +4824,13 @@ function ArrInstancesEditor(props: {
   return (
     <div className="space-y-5">
       {instanceKeyConflict ? (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{instanceKeyConflict}</div>
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-[16px] text-red-200">{instanceKeyConflict}</div>
       ) : null}
       {disconnectDialog ? (
         <div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#0f1419]/80 backdrop-blur-sm p-6">
           <div className="w-full max-w-md rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-            <h3 className="text-lg font-headline font-bold text-white">Disconnect this instance?</h3>
-            <p className="text-sm text-slate-300 leading-relaxed">
+            <h3 className="text-[20px] font-headline font-bold text-white">Disconnect this instance?</h3>
+            <p className="text-[16px] text-slate-300 leading-relaxed">
               This removes &quot;{disconnectDialog.label}&quot; from Placeholdarr. When you save settings, movies or
               shows that were tracked only on this instance will be marked removed and their placeholders cleaned up.
               If another configured {disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists
@@ -4812,14 +4839,14 @@ function ArrInstancesEditor(props: {
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
+                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
                 onClick={() => setDisconnectDialog(null)}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80"
+                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80"
                 onClick={confirmDisconnectInstance}
               >
                 Disconnect
@@ -4837,17 +4864,17 @@ function ArrInstancesEditor(props: {
         return (
           <div className="fixed inset-0 z-[80] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
             <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-              <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {serviceLabel}</h3>
-              <p className="text-sm text-slate-300">
+              <h3 className="text-[20px] font-headline font-bold text-white">Configure webhooks in {serviceLabel}</h3>
+              <p className="text-[16px] text-slate-300">
                 {serviceLabel} must call Placeholdarr using this URL so imports, deletes, and searches stay in sync
                 {wh.label ? ` (${wh.label})` : ""}.
               </p>
-              <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
+              <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
                 <li>Go to Settings → Webhooks → Add (+)</li>
                 <li>
                   <span className="text-slate-200">Webhook URL</span>
                   <div className="mt-1 flex items-start gap-2 pl-0">
-                    <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                    <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
                     <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${serviceLabel} webhook URL`} className="mt-0.5 shrink-0" />
                   </div>
                 </li>
@@ -4857,7 +4884,7 @@ function ArrInstancesEditor(props: {
                 {(service?.triggers || [])
                   .filter((t) => t.required)
                   .map((trigger) => (
-                    <div key={`wh-${wh.instance_id}-${trigger.event}`} className="text-xs text-slate-300">
+                    <div key={`wh-${wh.instance_id}-${trigger.event}`} className="text-[14px] text-slate-300">
                       {trigger.displayName}
                     </div>
                   ))}
@@ -4865,7 +4892,7 @@ function ArrInstancesEditor(props: {
               <div className="flex justify-end pt-2">
                 <button
                   type="button"
-                  className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+                  className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
                   style={{ backgroundColor: props.accent.hex }}
                   onClick={() => setWebhookSetupDialog(null)}
                 >
@@ -4895,11 +4922,11 @@ function ArrInstancesEditor(props: {
                   >
                     <img src={av.iconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
                   </div>
-                  <h3 className="text-lg font-bold tracking-tight text-white font-headline">{serviceName}</h3>
+                  <h3 className="text-[20px] font-bold tracking-tight text-white font-headline">{serviceName}</h3>
                 </div>
                 <div className="flex min-h-0 flex-col gap-3">
                   <div className="flex min-h-0 flex-col">
-                    <div className="mb-2 text-[10px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 1 · Primary</div>
+                    <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 1 · Primary</div>
                     {!primaryEnabled[arrType] ? (
                       <button
                         type="button"
@@ -4910,15 +4937,15 @@ function ArrInstancesEditor(props: {
                         className="flex min-h-[132px] flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-4 text-center text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
                       >
                         <span className="material-symbols-outlined" style={{ fontSize: 28 }}>add</span>
-                        <span className="text-sm font-headline tracking-wide">Connect {serviceName}</span>
+                        <span className="text-[16px] font-headline tracking-wide">Connect {serviceName}</span>
                       </button>
                     ) : (
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
-                          <div className="text-sm font-semibold text-white font-headline truncate">{primaryItem.label}</div>
-                          <div className="truncate font-mono text-[11px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
+                          <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
+                          <div className="truncate font-mono text-[13px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
                           {testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
-                            <div className="mt-1 text-xs text-red-400">{testState[primaryItem.id].message}</div>
+                            <div className="mt-1 text-[14px] text-red-400">{testState[primaryItem.id].message}</div>
                           ) : null}
                         </div>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -4926,7 +4953,7 @@ function ArrInstancesEditor(props: {
                             <button
                               type="button"
                               onClick={() => openSlotPanel({ arrType, slotIndex: 0, isNew: false })}
-                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
                             >
                               Configure
                             </button>
@@ -4940,7 +4967,7 @@ function ArrInstancesEditor(props: {
                                   label: String(primaryItem.label || ""),
                                 });
                               }}
-                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                             >
                               Webhook URL
                             </button>
@@ -4954,7 +4981,7 @@ function ArrInstancesEditor(props: {
                                 label: String(primaryItem.label || arrType),
                               })
                             }
-                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-medium text-red-400 transition hover:text-red-300"
+                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
                           >
                             Remove
                           </button>
@@ -4963,7 +4990,7 @@ function ArrInstancesEditor(props: {
                     )}
                   </div>
                   <div className="flex min-h-0 flex-col">
-                    <div className="mb-2 text-[10px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 2 · Secondary</div>
+                    <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 2 · Secondary</div>
                     {!secondaryEnabled[arrType] ? (
                       <div
                         className={`flex min-h-[132px] flex-1 flex-col items-center justify-center rounded-xl border border-dashed px-3 py-4 text-center transition-colors ${
@@ -4993,17 +5020,17 @@ function ArrInstancesEditor(props: {
                             className="flex w-full flex-col items-center justify-center gap-2 py-2"
                           >
                             <span className="material-symbols-outlined" style={{ fontSize: 26 }}>add</span>
-                            <span className="text-sm font-headline tracking-wide">Secondary instance</span>
+                            <span className="text-[16px] font-headline tracking-wide">Secondary instance</span>
                           </button>
                         )}
                       </div>
                     ) : (
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
-                          <div className="text-sm font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
-                          <div className="truncate font-mono text-[11px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
+                          <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
+                          <div className="truncate font-mono text-[13px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
                           {testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
-                            <div className="mt-1 text-xs text-red-400">{testState[secondaryItem.id].message}</div>
+                            <div className="mt-1 text-[14px] text-red-400">{testState[secondaryItem.id].message}</div>
                           ) : null}
                         </div>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -5011,7 +5038,7 @@ function ArrInstancesEditor(props: {
                             <button
                               type="button"
                               onClick={() => openSlotPanel({ arrType, slotIndex: 1, isNew: false })}
-                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
                             >
                               Configure
                             </button>
@@ -5025,7 +5052,7 @@ function ArrInstancesEditor(props: {
                                   label: String(secondaryItem.label || ""),
                                 });
                               }}
-                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[11px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                             >
                               Webhook URL
                             </button>
@@ -5039,7 +5066,7 @@ function ArrInstancesEditor(props: {
                                 label: String(secondaryItem.label || arrType),
                               })
                             }
-                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-medium text-red-400 transition hover:text-red-300"
+                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
                           >
                             Remove
                           </button>
@@ -5080,8 +5107,8 @@ function ArrInstancesEditor(props: {
                 >
                   <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
                     <div>
-                      <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500">ARR server</div>
-                      <h2 className="text-lg font-headline font-bold text-white mt-0.5" style={{ color: props.accent.text }}>
+                      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">ARR server</div>
+                      <h2 className="text-[20px] font-headline font-bold text-white mt-0.5" style={{ color: props.accent.text }}>
                         {serviceLabel} · {roleLabel}
                       </h2>
                     </div>
@@ -5096,32 +5123,32 @@ function ArrInstancesEditor(props: {
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">Server name</label>
+                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">Server name</label>
                       <input
-                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.label}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { label: e.target.value })}
                         placeholder="Instance name (e.g. Radarr 4K)"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">URL &amp; port</label>
+                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">URL &amp; port</label>
                       <input
-                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.url}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
                         placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
                       />
                       {slotPanelDupPeer ? (
-                        <p className="mt-2 text-xs text-red-400">
+                        <p className="mt-2 text-[14px] text-red-400">
                           Same address as &quot;{slotPanelDupPeer.label}&quot; ({slotPanelDupPeer.arr_type}). Each instance must use a distinct URL and port.
                         </p>
                       ) : null}
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">API key</label>
+                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">API key</label>
                       <input
-                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
+                        className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.api_key}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
                         placeholder="API key"
@@ -5131,7 +5158,7 @@ function ArrInstancesEditor(props: {
                   </div>
                   <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
                     <div
-                      className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-xs text-red-400"
+                      className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-[14px] text-red-400"
                       aria-live="polite"
                     >
                       {status && !slotFooterTestBusy && status.message !== "Testing..." && !status.ok ? (
@@ -5145,7 +5172,7 @@ function ArrInstancesEditor(props: {
                     <button
                       type="button"
                       onClick={handleSlotPanelCancel}
-                      className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
+                      className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
                     >
                       Cancel
                     </button>
@@ -5165,7 +5192,7 @@ function ArrInstancesEditor(props: {
                           setSlotFooterTestBusy(false);
                         })();
                       }}
-                      className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
+                      className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
                         status?.ok && !slotFooterTestBusy && status.message !== "Testing..."
                           ? "border-emerald-500/70 bg-emerald-600/15 text-emerald-300 hover:border-emerald-400/90 hover:bg-emerald-600/25"
                           : "border-amber-400/80 bg-amber-500 text-slate-900 hover:bg-amber-400 disabled:hover:bg-amber-500"
@@ -5194,7 +5221,7 @@ function ArrInstancesEditor(props: {
                       disabled={saveDisabled}
                       onClick={onSlotPanelSaveClick}
                       aria-label={slotCommitLabel}
-                      className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {slotCommitLabel}
                     </button>
@@ -5210,7 +5237,7 @@ function ArrInstancesEditor(props: {
         {(["radarr", "sonarr"] as const).map((arrType) => (
           <div key={arrType} className="min-w-0">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-semibold text-white font-headline">{arrType === "radarr" ? "Radarr Settings" : "Sonarr Settings"}</h3>
+              <h3 className="text-[16px] font-semibold text-white font-headline">{arrType === "radarr" ? "Radarr Settings" : "Sonarr Settings"}</h3>
 
             </div>
             <div className="flex flex-col gap-3">
@@ -5272,7 +5299,7 @@ function LibraryPathsForm(props: {
         >
           <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${v ? "translate-x-5" : "translate-x-0"}`} />
         </div>
-        <span className={compact ? "text-xs text-slate-400" : "text-sm text-slate-300"}>{v ? "Enabled" : "Disabled"}</span>
+        <span className={compact ? "text-[14px] text-slate-400" : "text-[16px] text-slate-300"}>{v ? "Enabled" : "Disabled"}</span>
       </label>
     );
   }
@@ -5282,7 +5309,7 @@ function LibraryPathsForm(props: {
     const ph = field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`;
     return (
       <input
-        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-xs py-1.5" : ""}`}
+        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""}`}
         type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
         value={String(props.values[field.key] ?? "")}
         placeholder={ph}
@@ -5295,7 +5322,7 @@ function LibraryPathsForm(props: {
     const border = opts?.muted ? "border-[#424753]/25" : "border-[#424753]/40";
     return (
       <select
-        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus} ${opts?.compact ? "text-xs py-1.5" : ""}`}
+        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""}`}
         value={String(props.values[field.key] ?? field.options?.[0]?.value ?? "")}
         onChange={(e) => props.onValueChange(field.key, e.target.value)}
       >
@@ -5315,12 +5342,12 @@ function LibraryPathsForm(props: {
         <div className="flex items-start gap-3 mb-2">
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-semibold text-white font-headline">{field.label}</span>
+              <span className="text-[16px] font-semibold text-white font-headline">{field.label}</span>
               {field.required && (
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(props.accent.hex, 0.3), color: props.accent.text }}>Required</span>
+                <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(props.accent.hex, 0.3), color: props.accent.text }}>Required</span>
               )}
-              {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
-              {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
+              {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
+              {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
             {field.description && <p className="ui-field-description mt-1">{field.description}</p>}
             {getPlexLibraryIdNote(field.key) ? <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
@@ -5330,7 +5357,7 @@ function LibraryPathsForm(props: {
           renderBool(field)
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus}`}
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus}`}
             value={String(value ?? field.options[0]?.value ?? "")}
             onChange={(e) => props.onValueChange(field.key, e.target.value)}
           >
@@ -5341,7 +5368,7 @@ function LibraryPathsForm(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
@@ -5349,7 +5376,7 @@ function LibraryPathsForm(props: {
             />
             {testTarget && props.runTest && (
               <button type="button" onClick={() => props.runTest!(field)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
+                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
                 Test
               </button>
@@ -5358,7 +5385,7 @@ function LibraryPathsForm(props: {
         )}
         {testTarget ? (
           <div
-            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-xs ${
+            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-[14px] ${
               test && test.message !== "Testing..." ? (test.ok ? "text-green-400" : "text-red-400") : "text-slate-400"
             }`}
             aria-live="polite"
@@ -5394,7 +5421,7 @@ function LibraryPathsForm(props: {
       className={props.layout === "wizard" ? undefined : rootCardClass}
       style={props.layout === "wizard" ? undefined : rootCardStyle}
     >
-      <label className="block text-sm font-semibold text-white font-headline mb-1">{root.label}</label>
+      <label className="block text-[16px] font-semibold text-white font-headline mb-1">{root.label}</label>
       {root.description && <p className="ui-field-description mb-3 leading-relaxed">{root.description}</p>}
       {root.type === "bool" ? renderBool(root) : renderTextInput(root)}
     </div>
@@ -5402,13 +5429,13 @@ function LibraryPathsForm(props: {
 
   const profileBlock = profiles.length ? (
     <div className={`${UI_SECTION_FRAME_CLASS} px-4 py-4`}>
-      <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
+      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {profiles.map((field) => (
           <div key={field.key} className="rounded-lg border border-[#424753]/35 bg-[#0b111b] px-3 py-2">
-            <div className="text-xs text-slate-300 font-medium mb-2">{field.label}</div>
+            <div className="text-[14px] text-slate-300 font-medium mb-2">{field.label}</div>
             {field.key === "ENABLE_STANDARD_PROFILE" ? (
-              <span className="text-xs text-emerald-300">Always enabled</span>
+              <span className="text-[14px] text-emerald-300">Always enabled</span>
             ) : renderBool(field, true)}
             {field.description ? <p className="ui-field-description-compact mt-2">{field.description}</p> : null}
           </div>
@@ -5425,8 +5452,8 @@ function LibraryPathsForm(props: {
         className="flex w-full items-start justify-between gap-3 text-left rounded-md outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#171c22] focus-visible:ring-emerald-500/40"
       >
         <div className="min-w-0">
-          <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500 mb-0.5">Optional overrides</div>
-          <div className="text-sm font-medium text-slate-400 font-headline">Custom folder per library</div>
+          <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-0.5">Optional overrides</div>
+          <div className="text-[16px] font-medium text-slate-400 font-headline">Custom folder per library</div>
           <p className="ui-field-description mt-1">
             Use when a library path is not under Library Root (or you use no root and set each path manually).
           </p>
@@ -5442,7 +5469,7 @@ function LibraryPathsForm(props: {
         <div className="mt-4 ml-1 space-y-4 pl-4 border-l-2 border-[#424753]/60">
           {overrides.map((field) => (
             <div key={field.key}>
-              <label className="block text-xs font-medium text-slate-400 font-headline mb-1">{field.label}</label>
+              <label className="block text-[14px] font-medium text-slate-400 font-headline mb-1">{field.label}</label>
               {field.description && <p className="ui-field-description-compact mb-2">{field.description}</p>}
               {field.type === "bool" ? renderBool(field, true) : field.type === "choice" ? renderChoice(field, { compact: true, muted: true }) : renderTextInput(field, { compact: true, muted: true })}
             </div>
@@ -5463,7 +5490,7 @@ function LibraryPathsForm(props: {
             {overridesBlock}
             {rest.map((field) => (
               <div key={field.key}>
-                <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
+                <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>
                 {field.description && <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>}
                 {field.type === "bool" ? renderBool(field) : field.type === "choice" ? renderChoice(field) : renderTextInput(field)}
               </div>
@@ -5509,7 +5536,7 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
         <span className="font-medium text-slate-200">Search Mode</span> determines the scope of what gets monitored and
         searched each time you play something:
       </p>
-      <ul className="mt-3 list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed">
+      <ul className="mt-3 list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
         <li>
           <span className="font-medium text-slate-200">Series</span>
           {" — "}The entire series is monitored and searched. This mirrors default Sonarr behavior.
@@ -5560,7 +5587,7 @@ function StatusUpdatesSectionIntro(props: { variant: StatusUpdatesIntroVariant; 
 function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
-    <ul className={`list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed ${top}`}>
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
       <li>
         <span className="font-medium text-slate-200">All</span>
         {" — "}When a placeholder plays, show search and download progress in the player.
@@ -5581,7 +5608,7 @@ function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wiz
 function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
-    <ul className={`list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed ${top}`}>
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
       <li>
         <span className="font-medium text-slate-200">Enabled</span>
         {" — "}Placeholders show a countdown until release (for example, &quot;Airing in 12 days&quot;).
@@ -5602,7 +5629,7 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
       <p className="ui-field-description text-slate-300 leading-relaxed">
         Controls how Placeholdarr refreshes from Radarr and Sonarr during startup.
       </p>
-      <ul className="list-disc space-y-2 pl-5 text-xs text-slate-400 leading-relaxed">
+      <ul className="list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
         <li>
           <span className="font-medium text-slate-200">Full sync</span>
           {" "}
@@ -5690,7 +5717,7 @@ function SettingsPanel(props: {
       <div className="flex items-center justify-center h-64">
         <div className="flex items-center gap-3 text-slate-400">
           <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-          <span className="text-sm font-headline uppercase tracking-widest">Loading settings...</span>
+          <span className="text-[16px] font-headline uppercase tracking-widest">Loading settings...</span>
         </div>
       </div>
     );
@@ -5700,10 +5727,10 @@ function SettingsPanel(props: {
   if (!payload.sections?.length) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 min-h-[40vh] px-6 text-center">
-        <p className={`text-sm font-headline uppercase tracking-widest ${props.themeMode === "light" ? "text-slate-600" : "text-slate-400"}`}>
+        <p className={`text-[16px] font-headline uppercase tracking-widest ${props.themeMode === "light" ? "text-slate-600" : "text-slate-400"}`}>
           No settings sections were returned from the API.
         </p>
-        <p className={`text-xs max-w-md ${props.themeMode === "light" ? "text-slate-500" : "text-slate-500"}`}>
+        <p className={`text-[14px] max-w-md ${props.themeMode === "light" ? "text-slate-500" : "text-slate-500"}`}>
           Refresh the page or check server logs. If the problem persists, verify `/api/settings/current` returns a non-empty `sections` list.
         </p>
       </div>
@@ -5740,10 +5767,10 @@ function SettingsPanel(props: {
         <div className="flex items-start gap-3 mb-2">
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-semibold text-white font-headline">{field.label}</span>
-              {field.required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.3), color: accent.text }}>Required</span>}
-              {field.secret && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
-              {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
+              <span className="text-[16px] font-semibold text-white font-headline">{field.label}</span>
+              {field.required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.3), color: accent.text }}>Required</span>}
+              {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
+              {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
             {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
               (field.key === "STARTUP_SYNC_MODE" ? (
@@ -5770,11 +5797,11 @@ function SettingsPanel(props: {
               onClick={() => props.onValueChange(field.key, !Boolean(value))}>
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className="text-sm text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+            <span className="text-[16px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
             disabled={projectionFieldLocked}
             value={(() => {
               const raw = String(value ?? field.options[0]?.value ?? "");
@@ -5790,7 +5817,7 @@ function SettingsPanel(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
               disabled={lookaheadRangeLocked}
               value={String(value ?? "")}
@@ -5799,7 +5826,7 @@ function SettingsPanel(props: {
             />
             {testTarget && (
               <button type="button" onClick={() => runTest(field)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
+                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap">
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
                 Test
               </button>
@@ -5809,7 +5836,7 @@ function SettingsPanel(props: {
 
         {testTarget ? (
           <div
-            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-xs ${
+            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-[14px] ${
               test && test.message !== "Testing..." ? (test.ok ? "text-green-400" : "text-red-400") : "text-slate-400"
             }`}
             aria-live="polite"
@@ -5850,24 +5877,24 @@ function SettingsPanel(props: {
         <div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: accent.hex }} />
-            <span className="text-[10px] font-headline uppercase tracking-widest text-slate-400">Configuration</span>
+            <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Configuration</span>
           </div>
-          <h1 className="text-3xl font-black text-white tracking-tight font-headline">Settings</h1>
+          <h1 className="text-[32px] font-black text-white tracking-tight font-headline">Settings</h1>
         </div>
         <div className="flex items-center gap-3">
           {props.hasUnsavedChanges && (
-            <span className="flex items-center gap-1.5 text-xs text-yellow-400 font-headline uppercase tracking-wider">
+            <span className="flex items-center gap-1.5 text-[14px] text-yellow-400 font-headline uppercase tracking-wider">
               <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
               Unsaved changes
             </span>
           )}
           {props.feedback && (
-            <span className={`text-xs font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
+            <span className={`text-[14px] font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
               {props.feedback}
             </span>
           )}
           <button type="button" onClick={() => props.onSave()}
-            className="flex items-center gap-2 px-5 py-2 text-white text-xs font-headline uppercase tracking-wider rounded-lg transition-colors"
+            className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors"
             style={{ backgroundColor: accent.hex }}>
             <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
             Save Settings
@@ -5880,7 +5907,7 @@ function SettingsPanel(props: {
         <div className="w-full min-w-0">
           <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden">
             <div className="px-6 py-4 border-b border-[#424753]/30">
-              <h2 className="text-base font-bold text-white font-headline">{active.name}</h2>
+              <h2 className="text-[18px] font-bold text-white font-headline">{active.name}</h2>
             </div>
             <div className="divide-y divide-[#424753]/20">
               {active.name === "Paths" ? (
@@ -5919,7 +5946,7 @@ function SettingsPanel(props: {
                                     <div className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-fit shrink-0 ${MEDIA_PLEX_PAIR_LOGO_INSET}`} style={vis.well}>
                                       <img src={plexIcon} alt="" decoding="async" className="h-8 w-auto max-h-8 shrink-0 object-contain" aria-hidden />
                                     </div>
-                                    <span className="select-none text-xl font-extralight leading-none text-white/85" aria-hidden>×</span>
+                                    <span className="select-none text-[22px] font-extralight leading-none text-white/85" aria-hidden>×</span>
                                     <div className={`${MEDIA_PLEX_PAIR_WELL_FRAME} h-16 w-16 shrink-0`} style={vis.well}>
                                       <img src={tautulliIcon} alt="" decoding="async" className="h-8 w-8 shrink-0 object-contain" aria-hidden />
                                     </div>
@@ -5930,7 +5957,7 @@ function SettingsPanel(props: {
                                   </div>
                                 )}
                               </div>
-                              <h4 className="mt-5 w-full text-center text-lg font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                              <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
                               {!enabled ? (
                                 <button
                                   type="button"
@@ -5938,14 +5965,14 @@ function SettingsPanel(props: {
                                     props.onValueChange(card.enabledKey, true);
                                     setMediaPanel(card.id);
                                   }}
-                                  className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-sm font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09]"
+                                  className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[16px] font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09]"
                                 >
                                   Connect
                                 </button>
                               ) : (
                                 <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
                                   {card.id === "plex" && "note" in card && card.note ? <p className="ui-field-description-compact mb-2">{card.note}</p> : null}
-                                  <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-snug">
+                                  <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
                                     <div className="flex min-w-0 gap-2">
                                       <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
                                       <dd className="truncate font-mono text-slate-200" title={address || undefined}>{address || "—"}</dd>
@@ -5963,14 +5990,14 @@ function SettingsPanel(props: {
                                       </>
                                     ) : null}
                                   </dl>
-                                  <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-xs">
+                                  <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {urlTest && !urlTest.ok ? <p className="text-red-400">{urlTest.message}</p> : !mediaDetailsComplete ? <p className="ui-field-description">Add URL and credentials in Configure.</p> : null}
                                   </div>
                                   <div className="mt-auto flex flex-col gap-2 pt-4">
                                     <button
                                       type="button"
                                       onClick={() => setMediaPanel(card.id)}
-                                      className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
+                                      className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
                                     >
                                       Configure
                                     </button>
@@ -5984,7 +6011,7 @@ function SettingsPanel(props: {
                                             String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
                                           setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
                                         }}
-                                        className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                        className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                                       >
                                         Webhook URL
                                       </button>
@@ -5995,7 +6022,7 @@ function SettingsPanel(props: {
                                         props.onValueChange(card.enabledKey, false);
                                         setMediaPanel((p) => (p === card.id ? null : p));
                                       }}
-                                      className="text-center text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
+                                      className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
                                     >
                                       Remove connection
                                     </button>
@@ -6013,7 +6040,7 @@ function SettingsPanel(props: {
                         return (
                           <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
                             <div className="px-6 py-4 border-b border-[#424753]/30">
-                              <h3 className="text-base font-bold text-white font-headline">{card.title} Configuration</h3>
+                              <h3 className="text-[18px] font-bold text-white font-headline">{card.title} Configuration</h3>
                             </div>
                             {panelFields.map((field) => renderStandardField(field))}
                           </div>
@@ -6038,7 +6065,7 @@ function SettingsPanel(props: {
                     .map((field) => renderStandardField(field))}
                   <div className="px-6 py-5">
                     <div className="mb-3">
-                      <h3 className="text-base font-bold text-white font-headline">ARR Instances</h3>
+                      <h3 className="text-[18px] font-bold text-white font-headline">ARR Instances</h3>
                       <p className="ui-field-description mt-1">Configure up to 2 Radarr and 2 Sonarr instances. These entries power webhook labels and instance-aware routing.</p>
                     </div>
                     <ArrInstancesEditor
@@ -6056,14 +6083,14 @@ function SettingsPanel(props: {
                   <div className="px-6 pb-5">
                     <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
-                        <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
+                        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
                         <p className="ui-field-description mx-auto max-w-2xl">When a placeholder plays, Placeholdarr triggers a search in the corresponding ARR app. Choose which instance to search.</p>
                       </div>
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
                         <div className="min-w-0">
-                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                           <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
                             onChange={(e) => props.onValueChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                             disabled={!canUseRadarrSecondaryBehavior}
@@ -6085,9 +6112,9 @@ function SettingsPanel(props: {
                           </p>
                         </div>
                         <div className="min-w-0">
-                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                           <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : "na"}
                             onChange={(e) => props.onValueChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                             disabled={!canUseSonarrSecondaryBehavior}
@@ -6112,14 +6139,14 @@ function SettingsPanel(props: {
                     </div>
                     <div className={`mt-3 ${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
-                        <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
+                        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
                         <p className="ui-field-description mx-auto max-w-2xl">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
                       </div>
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
                         <div className="min-w-0">
-                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                           <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                             onChange={(e) => props.onValueChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
                             disabled={!canUseRadarrSecondaryBehavior}
@@ -6142,9 +6169,9 @@ function SettingsPanel(props: {
                           </p>
                         </div>
                         <div className="min-w-0">
-                          <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                          <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                           <select
-                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                            className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                             value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                             onChange={(e) => props.onValueChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
                             disabled={!canUseSonarrSecondaryBehavior}
@@ -6170,7 +6197,7 @@ function SettingsPanel(props: {
                       <div className="border-t border-[#424753]/20 pt-4">
                         <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
                           <div>
-                            <div className="text-xs font-semibold text-slate-300">Fallback search</div>
+                            <div className="text-[14px] font-semibold text-slate-300">Fallback search</div>
                             <div className="ui-field-description mt-1">
                               {fallbackUnnecessaryBecauseAllBoth ? (
                                 "Fallback is not needed because every unlocked search behavior already searches both instances."
@@ -6197,7 +6224,7 @@ function SettingsPanel(props: {
                             >
                               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
                             </div>
-                            <span className="text-sm text-slate-300">
+                            <span className="text-[16px] text-slate-300">
                               {fallbackUnnecessaryBecauseAllBoth
                                 ? "Not needed"
                                 : canUseAnySecondaryBehavior
@@ -6206,10 +6233,10 @@ function SettingsPanel(props: {
                             </span>
                           </label>
                           <div className="text-center">
-                            <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                            <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
                             {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
                               <input
-                                className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-sm tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                                className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-[16px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
                                 type="text"
                                 inputMode="numeric"
                                 maxLength={3}
@@ -6227,21 +6254,21 @@ function SettingsPanel(props: {
                               />
                             ) : fallbackUnnecessaryBecauseAllBoth ? (
                               <input
-                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
                                 type="text"
                                 value="Not needed because all unlocked behaviors already search both instances."
                                 disabled
                               />
                             ) : canUseAnySecondaryBehavior ? (
                               <input
-                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
                                 type="text"
                                 value="Enable fallback search."
                                 disabled
                               />
                             ) : (
                               <input
-                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                                className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
                                 type="text"
                                 value="Not applicable, no second instance set up."
                                 disabled
@@ -6464,13 +6491,13 @@ function PlaybackWebhookSetupModal(props: {
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
       <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-        <h3 className="text-lg font-headline font-bold text-white">Configure webhooks in {name}</h3>
-        <p className="text-sm text-slate-300">
+        <h3 className="text-[20px] font-headline font-bold text-white">Configure webhooks in {name}</h3>
+        <p className="text-[16px] text-slate-300">
           {pb.serviceId === "tautulli"
             ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
             : `${name} can send playback events to Placeholdarr using this URL.`}
         </p>
-        <ol className="ui-field-description space-y-2 list-decimal list-inside text-sm text-slate-300">
+        <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
           {pb.serviceId === "tautulli" ? (
             <>
               <li>Open Tautulli and go to Settings → Notification Agents.</li>
@@ -6479,7 +6506,7 @@ function PlaybackWebhookSetupModal(props: {
               <li>
                 <span className="text-slate-200">Webhook URL</span>
                 <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
                   <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
                 </div>
               </li>
@@ -6493,7 +6520,7 @@ function PlaybackWebhookSetupModal(props: {
               <li>
                 <span className="text-slate-200">Webhook URL</span>
                 <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
                   <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
                 </div>
               </li>
@@ -6506,7 +6533,7 @@ function PlaybackWebhookSetupModal(props: {
               <li>
                 <span className="text-slate-200">Webhook URL</span>
                 <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[12px] leading-snug text-slate-300">{webhookUrl}</span>
+                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
                   <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
                 </div>
               </li>
@@ -6516,28 +6543,28 @@ function PlaybackWebhookSetupModal(props: {
         </ol>
         {svcMeta && svcMeta.triggers.length ? (
           <div>
-            <div className="text-xs font-semibold text-slate-400 mb-1.5">Suggested events</div>
+            <div className="text-[14px] font-semibold text-slate-400 mb-1.5">Suggested events</div>
             <div className="ml-1 space-y-1">
               {svcMeta.triggers.map((t) => (
-                <div key={t.event} className="text-xs text-slate-300">
+                <div key={t.event} className="text-[14px] text-slate-300">
                   {t.displayName}
                 </div>
               ))}
             </div>
-            <p className="mt-2 text-[11px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
+            <p className="mt-2 text-[13px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
           </div>
         ) : null}
         {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <div className="text-[10px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
+              <div className="text-[12px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
               <WebhookStepCopyButton
                 text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
                 ariaLabel={`Copy ${name} JSON payload template`}
                 variant="header"
               />
             </div>
-            <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[11px] font-mono leading-relaxed text-slate-300">
+            <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[13px] font-mono leading-relaxed text-slate-300">
               <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
             </pre>
           </div>
@@ -6545,7 +6572,7 @@ function PlaybackWebhookSetupModal(props: {
         <div className="flex justify-end pt-2">
           <button
             type="button"
-            className="px-5 py-2 rounded-lg text-xs font-headline uppercase tracking-wider text-white"
+            className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
             style={{ backgroundColor: props.accent.hex }}
             onClick={props.onClose}
           >
@@ -6735,7 +6762,7 @@ function OnboardingWizardHeroBanner(props: { footerBlendHex: string }) {
             )}
           </div>
           <span
-            className={`font-headline text-2xl font-black tracking-tight sm:text-3xl [paint-order:stroke_fill] ${
+            className={`font-headline text-[26px] font-black tracking-tight sm:text-[32px] [paint-order:stroke_fill] ${
               isYellow
                 ? "drop-shadow-[0_2px_6px_rgba(0,0,0,0.35)]"
                 : "[-webkit-text-stroke:1.25px_rgba(15,23,42,0.55)] sm:[-webkit-text-stroke:1.5px_rgba(15,23,42,0.58)] drop-shadow-[0_1px_3px_rgba(0,0,0,0.45)]"
@@ -6954,7 +6981,7 @@ function OnboardingWizard(props: {
     const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
     return (
       <div key={field.key} className={rowMuted ? "opacity-50" : undefined}>
-        <label className="block text-sm font-semibold text-white font-headline mb-1">{field.label}</label>
+        <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
           (field.key === "STARTUP_SYNC_MODE" ? (
             <StartupSyncModeDescription spacing="wizard" />
@@ -6977,11 +7004,11 @@ function OnboardingWizard(props: {
               onClick={() => props.onChange(field.key, !Boolean(props.values[field.key]))}>
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values[field.key]) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className="text-sm text-slate-300">{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
+            <span className="text-[16px] text-slate-300">{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${focus} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
+            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
             disabled={projectionFieldLocked}
             value={(() => {
               const raw = String(props.values[field.key] ?? field.options[0]?.value ?? "");
@@ -6997,7 +7024,7 @@ function OnboardingWizard(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
+              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
               disabled={lookaheadRangeLocked}
               value={String(props.values[field.key] ?? "")}
@@ -7006,7 +7033,7 @@ function OnboardingWizard(props: {
             />
             {testTarget && (
               <button type="button" onClick={() => runTest(field)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-xs text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap shrink-0">
+                className="flex items-center gap-1.5 px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-headline uppercase tracking-wider transition-colors whitespace-nowrap shrink-0">
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>wifi</span>
                 Test
               </button>
@@ -7015,7 +7042,7 @@ function OnboardingWizard(props: {
         )}
         {testTarget ? (
           <div
-            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-xs ${
+            className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-[14px] ${
               test && test.message !== "Testing..." ? (test.ok ? "text-green-400" : "text-red-400") : "text-slate-400"
             }`}
             aria-live="polite"
@@ -7055,11 +7082,11 @@ function OnboardingWizard(props: {
               return (
                 <div key={s.key} className="flex items-center flex-1 last:flex-none">
                   <div className={`flex flex-col items-center gap-1 min-w-max ${active ? "" : done ? "text-green-400" : "text-slate-600"}`} style={active ? { color: accent.icon } : undefined}>
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold font-headline border-2 transition-colors ${active ? "text-white" : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? "text-white" : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
                       style={active ? { backgroundColor: accent.hex, borderColor: accent.hex } : undefined}>
                       {done ? <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check</span> : i + 1}
                     </div>
-                    <span className="text-[10px] font-headline uppercase tracking-wider">{s.name}</span>
+                    <span className="text-[12px] font-headline uppercase tracking-wider">{s.name}</span>
                   </div>
                   {i < WIZARD_STEPS.length - 1 && (
                     <div className={`flex-1 h-0.5 mx-3 mb-4 rounded-full transition-colors ${done ? "bg-green-500" : "bg-[#252e3a]"}`} />
@@ -7114,7 +7141,7 @@ function OnboardingWizard(props: {
                               >
                                 <img src={plexIcon} alt="" decoding="async" className="h-8 w-auto max-h-8 shrink-0 object-contain" aria-hidden />
                               </div>
-                              <span className="select-none text-xl font-extralight leading-none text-white/85" aria-hidden>
+                              <span className="select-none text-[22px] font-extralight leading-none text-white/85" aria-hidden>
                                 ×
                               </span>
                               <div
@@ -7133,7 +7160,7 @@ function OnboardingWizard(props: {
                             </div>
                           )}
                         </div>
-                        <h4 className="mt-5 w-full text-center text-lg font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                        <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
 
                         {!enabled ? (
                           <button
@@ -7150,7 +7177,7 @@ function OnboardingWizard(props: {
                               setMediaPanelTestPassed(false);
                               setMediaPanel(card.id);
                             }}
-                            className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-sm font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09] active:scale-[0.99]"
+                            className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[16px] font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09] active:scale-[0.99]"
                           >
                             Connect
                           </button>
@@ -7159,7 +7186,7 @@ function OnboardingWizard(props: {
                             {card.id === "plex" && "note" in card && card.note ? (
                               <p className="ui-field-description-compact mb-2">{card.note}</p>
                             ) : null}
-                            <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-snug">
+                            <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
                               <div className="flex min-w-0 gap-2">
                                 <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">Address</dt>
                                 <dd className="truncate font-mono text-slate-200" title={address || undefined}>
@@ -7183,7 +7210,7 @@ function OnboardingWizard(props: {
                                 </>
                               ) : null}
                             </dl>
-                            <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-xs">
+                            <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                               {urlTest && !urlTest.ok ? (
                                 <p className="text-red-400">{urlTest.message}</p>
                               ) : !mediaDetailsComplete ? (
@@ -7205,7 +7232,7 @@ function OnboardingWizard(props: {
                                   setMediaPanelTestPassed(Boolean(ready && uk && testResults[uk]?.ok));
                                   setMediaPanel(card.id);
                                 }}
-                                className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
+                                className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
                               >
                                 Configure
                               </button>
@@ -7219,7 +7246,7 @@ function OnboardingWizard(props: {
                                       String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
                                     setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
                                   }}
-                                  className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-xs font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                  className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                                 >
                                   Webhook URL
                                 </button>
@@ -7230,7 +7257,7 @@ function OnboardingWizard(props: {
                                   props.onChange(card.enabledKey, false);
                                   setMediaPanel((p) => (p === card.id ? null : p));
                                 }}
-                                className="text-center text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
+                                className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
                               >
                                 Remove connection
                               </button>
@@ -7258,14 +7285,14 @@ function OnboardingWizard(props: {
               />
               <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                 <div className="text-center">
-                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
-                  <p className="mx-auto max-w-2xl text-xs text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
+                  <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
+                  <p className="mx-auto max-w-2xl text-[14px] text-slate-400">Choose which ARR instance to search when a placeholder is played.</p>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
                   <div className="min-w-0">
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
                       onChange={(e) => props.onChange("MOVIE_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                       disabled={!canUseRadarrSecondaryBehavior}
@@ -7282,9 +7309,9 @@ function OnboardingWizard(props: {
                     </select>
                   </div>
                   <div className="min-w-0">
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "primary") : "na"}
                       onChange={(e) => props.onChange("TV_PLACEHOLDER_SEARCH_MODE", e.target.value)}
                       disabled={!canUseSonarrSecondaryBehavior}
@@ -7304,14 +7331,14 @@ function OnboardingWizard(props: {
               </div>
               <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                 <div className="text-center">
-                  <h3 className="text-xs font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
-                  <p className="mx-auto max-w-2xl text-xs text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
+                  <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
+                  <p className="mx-auto max-w-2xl text-[14px] text-slate-400">When a real media file is played, choose how Placeholdarr routes ARR searches.</p>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
                   <div className="min-w-0">
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
+                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Movies (Radarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseRadarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                       onChange={(e) => props.onChange("MOVIE_PLAYBACK_INSTANCE_MODE", e.target.value)}
                       disabled={!canUseRadarrSecondaryBehavior}
@@ -7329,9 +7356,9 @@ function OnboardingWizard(props: {
                     </select>
                   </div>
                   <div className="min-w-0">
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
+                    <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">TV Shows (Sonarr)</label>
                     <select
-                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
+                      className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)} ${canUseSonarrSecondaryBehavior ? "" : "opacity-60 cursor-not-allowed"}`}
                       value={canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : "na"}
                       onChange={(e) => props.onChange("TV_PLAYBACK_INSTANCE_MODE", e.target.value)}
                       disabled={!canUseSonarrSecondaryBehavior}
@@ -7352,7 +7379,7 @@ function OnboardingWizard(props: {
                 <div className="border-t border-[#424753]/20 pt-4">
                   <div className="mx-auto flex max-w-lg flex-col items-center gap-4 text-center">
                     <div>
-                      <div className="text-xs font-semibold text-slate-300">Fallback search</div>
+                      <div className="text-[14px] font-semibold text-slate-300">Fallback search</div>
                       <div className="ui-field-description mt-1">
                         {fallbackUnnecessaryBecauseAllBoth ? (
                           "Fallback is not needed because every unlocked search behavior already searches both instances."
@@ -7379,7 +7406,7 @@ function OnboardingWizard(props: {
                       >
                         <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
                       </div>
-                      <span className="text-sm text-slate-300">
+                      <span className="text-[16px] text-slate-300">
                         {fallbackUnnecessaryBecauseAllBoth
                           ? "Not needed"
                           : canUseAnySecondaryBehavior
@@ -7388,10 +7415,10 @@ function OnboardingWizard(props: {
                       </span>
                     </label>
                     <div className="text-center">
-                      <label className="block text-xs font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
+                      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">Fallback timeout (minutes)</label>
                       {canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? (
                         <input
-                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-sm tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)}`}
+                          className={`mx-auto mt-0.5 block w-[4.25rem] bg-[#0b111b] border border-[#424753]/40 rounded-lg px-2 py-2 text-center text-[16px] tabular-nums tracking-tight text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, wizardUiTheme)}`}
                           type="text"
                           inputMode="numeric"
                           maxLength={3}
@@ -7409,21 +7436,21 @@ function OnboardingWizard(props: {
                         />
                       ) : fallbackUnnecessaryBecauseAllBoth ? (
                         <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
                           type="text"
                           value="Not needed because all unlocked behaviors already search both instances."
                           disabled
                         />
                       ) : canUseAnySecondaryBehavior ? (
                         <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
                           type="text"
                           value="Enable fallback search."
                           disabled
                         />
                       ) : (
                         <input
-                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-500 opacity-60 cursor-not-allowed"
+                          className="mx-auto mt-0.5 block w-full max-w-md bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-500 opacity-60 cursor-not-allowed"
                           type="text"
                           value="Not applicable, no second instance set up."
                           disabled
@@ -7435,7 +7462,7 @@ function OnboardingWizard(props: {
               </div>
             </div>
           ) : !fields.length ? (
-            <div className="text-center text-slate-500 text-sm py-8">No fields for this step.</div>
+            <div className="text-center text-slate-500 text-[16px] py-8">No fields for this step.</div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
@@ -7474,12 +7501,12 @@ function OnboardingWizard(props: {
             type="button"
             disabled={props.stepIndex <= 0}
             onClick={() => props.onBack()}
-            className="px-4 py-2 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] hover:border-[#424753]/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] hover:border-[#424753]/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
           >
             Back
           </button>
           <div className="flex items-center gap-3">
-            {props.hasUnsavedChanges && <span className="text-xs text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
+            {props.hasUnsavedChanges && <span className="text-[14px] text-yellow-400 font-headline uppercase tracking-wider">Unsaved changes</span>}
             {props.stepIndex < WIZARD_STEPS.length - 1 ? (
               <button
                 type="button"
@@ -7517,7 +7544,7 @@ function OnboardingWizard(props: {
                     setStepError(err instanceof Error ? err.message : String(err));
                   }
                 }}
-                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-xs font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ backgroundColor: accent.hex }}
                 >
                 {keys.length ? (stepSaving ? "Saving..." : "Save & Continue") : "Continue"}
@@ -7525,7 +7552,7 @@ function OnboardingWizard(props: {
               </button>
             ) : (
               <button type="button" onClick={() => props.onSave()}
-                className="flex items-center gap-2 px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-xs font-headline uppercase tracking-wider transition-colors">
+                className="flex items-center gap-2 px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors">
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check_circle</span>
                 Save &amp; Finish
               </button>
@@ -7533,7 +7560,7 @@ function OnboardingWizard(props: {
           </div>
         </div>
         {stepError ? (
-          <div className="px-8 pb-4 text-sm text-red-400">{stepError}</div>
+          <div className="px-8 pb-4 text-[16px] text-red-400">{stepError}</div>
         ) : null}
           </div>
         </div>
@@ -7577,8 +7604,8 @@ function OnboardingWizard(props: {
             >
               <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
                 <div>
-                  <div className="text-[10px] font-headline uppercase tracking-widest text-slate-500">Media server</div>
-                  <h2 className="text-lg font-headline font-bold text-white mt-0.5" style={{ color: accent.text }}>
+                  <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Media server</div>
+                  <h2 className="text-[20px] font-headline font-bold text-white mt-0.5" style={{ color: accent.text }}>
                     {card.title}
                   </h2>
                 </div>
@@ -7597,8 +7624,8 @@ function OnboardingWizard(props: {
                   const value = props.values[field.key];
                   return (
                     <div key={field.key}>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1">{field.label}</label>
-                      {getPlexLibraryIdNote(field.key) ? <p className="text-[11px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
+                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">{field.label}</label>
+                      {getPlexLibraryIdNote(field.key) ? <p className="text-[13px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
                       {field.type === "bool" ? (
                         <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
                           <div
@@ -7608,12 +7635,12 @@ function OnboardingWizard(props: {
                           >
                             <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
                           </div>
-                          <span className="text-xs text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+                          <span className="text-[14px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
                         </label>
                       ) : (
                         <div className="flex gap-2">
                           <input
-                            className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
+                            className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
                             type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
                             value={String(value ?? "")}
                             placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
@@ -7627,7 +7654,7 @@ function OnboardingWizard(props: {
               </div>
               <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
                 <div
-                  className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-xs text-red-400"
+                  className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-[14px] text-red-400"
                   aria-live="polite"
                 >
                   {urlTestFailed && urlConnTest ? (
@@ -7641,7 +7668,7 @@ function OnboardingWizard(props: {
                 <button
                   type="button"
                   onClick={handleMediaPanelCancel}
-                  className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
+                  className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
                 >
                   Cancel
                 </button>
@@ -7662,7 +7689,7 @@ function OnboardingWizard(props: {
                       setMediaPanelTestPassed(Boolean(result?.ok));
                     })();
                   }}
-                  className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
+                  className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
                     urlTestSucceeded
                       ? "border-emerald-500/70 bg-emerald-600/15 text-emerald-300 hover:border-emerald-400/90 hover:bg-emerald-600/25"
                       : "border-amber-400/80 bg-amber-500 text-slate-900 hover:bg-amber-400 disabled:hover:bg-amber-500"
@@ -7708,7 +7735,7 @@ function OnboardingWizard(props: {
                     }
                   }}
                   aria-label={addMediaLabel}
-                  className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-xs font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {addMediaLabel}
                 </button>

@@ -81,12 +81,20 @@ def _build_startup_sync_row(
         failed=materialization_failed,
     )
 
-    movies_discovered = _to_int(startup_sync_stats.get("movies_seen"), _to_int(determination_stats.get("movies_total"), 0))
-    series_discovered = _to_int(startup_sync_stats.get("series_seen"), 0)
-    episodes_discovered = _to_int(startup_sync_stats.get("episodes_seen"), _to_int(determination_stats.get("episodes_total"), 0))
+    movies_seen_catalog = _to_int(startup_sync_stats.get("movies_seen"), 0)
+    series_seen_catalog = _to_int(startup_sync_stats.get("series_seen"), 0)
+    episodes_seen_catalog = _to_int(startup_sync_stats.get("episodes_seen"), 0)
+    movies_checked_determination = _to_int(determination_stats.get("movies_total"), 0)
+    episodes_checked_determination = _to_int(determination_stats.get("episodes_total"), 0)
+
+    # "Scope Checked" should reflect rows actually evaluated during this run.
+    # Catalog-diff counters can legitimately be zero while scoped determination
+    # still evaluates rows selected by lite reconciliation.
+    movies_discovered = max(movies_seen_catalog, movies_checked_determination)
+    series_discovered = series_seen_catalog
+    episodes_discovered = max(episodes_seen_catalog, episodes_checked_determination)
     created_n = _to_int(materialization_stats.get("created"), 0)
     deleted_n = _to_int(materialization_stats.get("deleted"), 0)
-    files_deleted_n = _to_int(materialization_stats.get("files_deleted"), 0)
     noop_n = _to_int(materialization_stats.get("noop"), 0)
     if running and str(current_phase) == "fs_scan":
         details = (
@@ -96,13 +104,12 @@ def _build_startup_sync_row(
         )
     elif bool(materialization_stats) and created_n == 0 and noop_n > 0:
         details = (
-            f"Materialization: {noop_n} item(s) already had a placeholder file on disk • "
-            f"{created_n} new file(s) written • "
-            f"{deleted_n} placeholder(s) removed • Mode {display_mode}"
+            f"Everything already up to date ({noop_n} items already had placeholders) • "
+            f"Created {created_n} placeholders • Removed {deleted_n} placeholders • Mode {display_mode}"
         )
     else:
         details = (
-            f"Materialization created {created_n} placeholders • "
+            f"Created {created_n} placeholders • "
             f"removed {deleted_n} placeholders • "
             f"Mode {display_mode}"
         )
@@ -111,70 +118,80 @@ def _build_startup_sync_row(
 
     sections: list[dict[str, Any]] = [
         {
-            "name": "Discovery",
+            "name": "Scope Checked",
             "status": discovery_status,
             "metrics": [
-                {"label": "Movies discovered", "value": movies_discovered if bool(startup_sync_stats) else "--"},
-                {"label": "Series discovered", "value": series_discovered if bool(startup_sync_stats) else "--"},
-                {"label": "Episodes discovered", "value": episodes_discovered if bool(startup_sync_stats) else "--"},
+                {"label": "Movies checked", "value": movies_discovered if bool(startup_sync_stats) else "--"},
+                {"label": "Series checked", "value": series_discovered if bool(startup_sync_stats) else "--"},
+                {"label": "Episodes checked", "value": episodes_discovered if bool(startup_sync_stats) else "--"},
             ],
         },
         {
-            "name": "Determination",
+            "name": "What Changed",
+            "status": materialization_status,
+            "metrics": [
+                {
+                    "label": "Placeholders created",
+                    "value": _to_int(materialization_stats.get("created"), 0) if bool(materialization_stats) else "--",
+                },
+                {
+                    "label": "Placeholders removed",
+                    "value": _to_int(materialization_stats.get("deleted"), 0) if bool(materialization_stats) else "--",
+                },
+                {
+                    "label": "Already up to date",
+                    "value": _to_int(materialization_stats.get("noop"), 0) if bool(materialization_stats) else "--",
+                },
+            ],
+        },
+        {
+            "name": "Why Items Were Skipped",
             "status": determination_status,
             "metrics": [
                 {
-                    "label": "Needs placeholder",
-                    "value": _to_int(determination_stats.get("needs_placeholder"), 0) if bool(determination_stats) else "--",
-                },
-                {
-                    "label": "Placeholder on disk OK",
+                    "label": "Already has placeholder",
                     "value": _to_int(determination_stats.get("placeholder_exists"), 0) if bool(determination_stats) else "--",
                 },
                 {
-                    "label": "No placeholder (file, deleted, or rules)",
-                    "value": _to_int(determination_stats.get("not_needed"), 0) if bool(determination_stats) else "--",
-                },
-                {
-                    "label": "Remove stale placeholder",
-                    "value": _to_int(determination_stats.get("obsolete_placeholder"), 0) if bool(determination_stats) else "--",
-                },
-                {
-                    "label": "Path corrected",
-                    "value": (
-                        _to_int(determination_stats.get("path_drift_movies"), 0)
-                        + _to_int(determination_stats.get("path_drift_episodes"), 0)
+                    "label": "Not yet aired",
+                    "value": _to_int(
+                        determination_stats.get("not_needed_not_yet_aired"),
+                        _to_int(determination_stats.get("not_needed"), 0) if bool(determination_stats) else 0,
                     )
                     if bool(determination_stats)
                     else "--",
                 },
                 {
-                    "label": "Rows updated (DB)",
-                    "value": (
-                        _to_int(determination_stats.get("movies_changed"), 0)
-                        + _to_int(determination_stats.get("episodes_changed"), 0)
-                    )
-                    if bool(determination_stats)
-                    else "--",
+                    "label": "Air date unknown",
+                    "value": _to_int(determination_stats.get("not_needed_air_date_unknown"), 0) if bool(determination_stats) else "--",
+                    "tooltip": (
+                        "If Sonarr has no date for an episode, Placeholdarr checks later episodes. "
+                        "If all later dated episodes are still in the future, this episode is treated as not yet aired."
+                    ),
                 },
-            ],
-        },
-        {
-            "name": "Materialization",
-            "status": materialization_status,
-            "metrics": [
-                {"label": "Created", "value": _to_int(materialization_stats.get("created"), 0) if bool(materialization_stats) else "--"},
-                {"label": "Deleted", "value": _to_int(materialization_stats.get("deleted"), 0) if bool(materialization_stats) else "--"},
-                {
-                    "label": "Already on disk",
-                    "value": _to_int(materialization_stats.get("noop"), 0) if bool(materialization_stats) else "--",
-                },
-                {"label": "Files created", "value": _to_int(materialization_stats.get("files_created"), 0) if bool(materialization_stats) else "--"},
-                {"label": "Files deleted", "value": files_deleted_n if bool(materialization_stats) else "--"},
-                {"label": "NFO written", "value": _to_int(materialization_stats.get("nfo_written"), 0) if bool(materialization_stats) else "--"},
             ],
         },
     ]
+
+    startup_failures = _to_int(startup_sync_stats.get("instances_failed"), 0)
+    materialization_errors = _to_int(materialization_stats.get("errors"), 0)
+    if failed or materialization_errors > 0 or startup_failures > 0 or error_message:
+        issues: list[dict[str, Any]] = []
+        if startup_failures > 0:
+            issues.append({"label": "Source/API issues", "value": startup_failures})
+        if materialization_errors > 0:
+            issues.append({"label": "Write or cleanup errors", "value": materialization_errors})
+        if error_message:
+            issues.append({"label": "Last error", "value": str(error_message)})
+        if not issues:
+            issues.append({"label": "Status", "value": "Needs attention"})
+        sections.append(
+            {
+                "name": "Issues & Alerts",
+                "status": "failed" if failed or materialization_errors > 0 else "working",
+                "metrics": issues,
+            }
+        )
 
     run_id = f"startup-sync-{display_mode}-{int(_utc(started_at).timestamp())}"
     return {

@@ -7,6 +7,53 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-04-29
+
+### Summary
+
+- Lite startup activity is now easier to read at a glance, with user-focused sections (`Scope Checked`, `What Changed`, `Why Items Were Skipped`) and less technical noise.
+- Skipped placeholder reasons are clearer, with separate buckets for `Not yet aired` and `Air date unknown`, plus tooltip context explaining the Sonarr-based future assumption behavior.
+- Missing-air-date episode handling is more practical: null-date “middle” episodes can now become eligible when later episodes in the same series have known dates inside the lookahead window.
+- Targeted Sonarr sync now reconciles episodes removed upstream by soft-deleting missing DB episode rows, preventing repeated “changed series” churn from episode-count mismatch drift.
+- Dashboard and shared UI text are slightly larger for readability; primary movie/series hero titles and the calendar spotlight headline keep their previous display scale.
+
+### Changed
+
+- **Startup lite activity card UX (user-focused)**
+  - Reworked startup activity sections from technical pipeline labels to user-facing summaries:
+    - `Scope Checked`
+    - `What Changed`
+    - `Why Items Were Skipped`
+    - conditional `Issues & Alerts`
+  - Updated summary copy to emphasize outcomes (created/removed/up-to-date) instead of internals.
+  - Removed file-level counters from the lite sync activity card details (kept for placeholder history workflows).
+  - “Scope Checked” counts now use the larger of catalog-seen totals and determination totals so scoped lite runs do not show zero scope when skip-reason metrics are non-zero.
+- **Skipped-reason clarity for lite sync**
+  - Split skipped not-needed counts into separate buckets:
+    - `Not yet aired`
+    - `Air date unknown`
+  - Added tooltip support for activity metrics (custom “?” control; avoids duplicate native browser tooltips) and included non-technical context for unknown air dates:
+    - “If Sonarr has no date for an episode, Placeholdarr checks later episodes. If all later dated episodes are still in the future, this episode is treated as not yet aired.”
+- **Lite sync activity layout**
+  - Progress detail grid uses responsive columns with a sensible max width so cards use wide screens better without overstretching.
+- **Missing-air-date determination refinement**
+  - Added a “middle episode” heuristic for episodes with no air date: if a later episode in the same series has a known date within the configured lookahead horizon, the null-date episode is treated as in-window for placeholder lifecycle decisions.
+  - Applied this behavior in both full-scan and scoped determination paths.
+- **Startup/worker logging clarity**
+  - Materialization now emits user-facing INFO lines for actual placeholder creation events.
+  - NFO follow-up processing logs were downgraded from prominent INFO phrasing to technical DEBUG phrasing to reduce operator confusion during create-heavy runs.
+  - End-of-batch materialization INFO summary text now prioritizes user outcomes (`placeholders_created`, `already_present`, `deleted`, `errors`).
+- **Dashboard typography**
+  - Increased typical UI text sizes by 2px across the dashboard (Tailwind utilities and shared CSS helpers such as `ui-field-description`), excluding primary detail-page hero titles (`h1` on movie/series) and the calendar spotlight title so large display type stays unchanged.
+
+### Fixed
+
+- **Targeted Sonarr sync now reconciles removed episodes**
+  - During `sync_sonarr_series_by_ids`, episodes that remain active in DB but are missing from Sonarr’s current episode list for that series are now soft-deleted (`is_deleted=true`).
+  - This resolves repeated lite startup recataloging of unchanged series caused by persistent `total_episodes_vs_DB` mismatches after upstream Sonarr/TVDB episode-list churn.
+- **npm audit (frontend)**
+  - Addressed the moderate-severity `postcss` advisory by updating the dashboard dependency pin (`frontend/package.json` / lockfile).
+
 ## [0.9.7] - 2026-04-28
 
 ### Summary for users
@@ -55,48 +102,48 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
 - **Dashboard library IA**: Sidebar **Library** opens **Movies** at `/library`; **TV** lives at `/library/tv` with nested nav (same pattern as Settings). Per-shelf filters persist in `sessionStorage` (`placeholdarr:library-shelf-filter:movies` / `:tv`); legacy `placeholdarr:library-filter` is migrated once on load.
-- **Detail ARR deep links**: Movie and series detail APIs include **`arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). **`arr_instance_links`** now also carries **`has_file` / `has_placeholder`** per movie row and **`episode_files` / `episode_placeholders`** per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
+- **Detail ARR deep links**: Movie and series detail APIs include `**arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). `**arr_instance_links**` now also carries `**has_file` / `has_placeholder**` per movie row and `**episode_files` / `episode_placeholders**` per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
 - **Settings → Media Integrations**: **Webhook URL** on each connected Plex/Jellyfin/Emby card opens the same playback webhook setup modal as onboarding (shared `PlaybackWebhookSetupModal`).
 - **Lite sync catalog tombstones**: Startup lite compares DB rows to the live Radarr/Sonarr catalogs and targets IDs missing from the API for tombstoning (`movies_catalog_removed` / `series_catalog_removed`), alongside path-drift discovery.
 - **Series tombstone bulk cleanup path**: Deleted Sonarr series use a series-level placeholder cleanup routine with progress logs, safe full-tree deletion checks, and aggregate history metadata for grouped placeholder activity UI rows.
 - **Webhook placeholder activity outcomes**: Radarr/Sonarr webhook handlers append `PlaceholderActivityHistory` rows for series add, movie/episode import (grace scheduling), movie file delete, movie delete, and episode file delete (with aggregate materialization stats), alongside the existing movie-add outcome row. Series delete webhooks continue to rely on the materializer’s aggregate bulk-delete history row to avoid duplicates. Import grace **finalize** jobs record one outcome row per movie/episode after deferred materialization.
-- **Lite pre-discovery reconciliation** (`lite_reconcile.py`): Bounded DB queries seed scoped determination/materialization for placeholder/path mismatches and triple-false rows before ARR catalog work; counts surface on ``startup_sync_stats.lite_reconciliation_pre``.
+- **Lite pre-discovery reconciliation** (`lite_reconcile.py`): Bounded DB queries seed scoped determination/materialization for placeholder/path mismatches and triple-false rows before ARR catalog work; counts surface on `startup_sync_stats.lite_reconciliation_pre`.
 - **Specials retroactive backfill trigger**: When `INCLUDE_SPECIALS` is enabled, settings persist a one-time startup marker so the next startup lite run can refresh specials broadly and seed scoped determination for season 0.
 
 ### Changed
 
 - **Startup lite is catalog-diff + targeted sync (less churn, faster restarts).**
-  - Per-instance snapshot diff against live Radarr/Sonarr (`/movie` + `/series`) vs DB; targeted ``sync_radarr_movies_by_ids`` / ``sync_sonarr_series_by_ids`` for changed IDs only.
+  - Per-instance snapshot diff against live Radarr/Sonarr (`/movie` + `/series`) vs DB; targeted `sync_radarr_movies_by_ids` / `sync_sonarr_series_by_ids` for changed IDs only.
   - Lite mode skips full filesystem scan and global placeholder reconcile; runs per-entity placeholder truth refresh before scoped determination.
-  - Targeted sync returns ``touched_movie_row_ids`` / ``touched_episode_row_ids`` merged with reconciliation seeds; upsert helpers return created/changed signals to avoid no-op churn.
+  - Targeted sync returns `touched_movie_row_ids` / `touched_episode_row_ids` merged with reconciliation seeds; upsert helpers return created/changed signals to avoid no-op churn.
 - **Startup and activity progress UX**
-  - Early ``system_activity_history`` snapshots during lite discovery; richer catalog logs (title groupings + refresh summaries); Sonarr targeted sync logs ``Series i/N`` with episode counters and elapsed time.
-  - Determination completion anchors standardized to ``Determination · full_scan · complete`` / ``Determination · scoped · complete``; dashboard determination metrics clarified.
+  - Early `system_activity_history` snapshots during lite discovery; richer catalog logs (title groupings + refresh summaries); Sonarr targeted sync logs `Series i/N` with episode counters and elapsed time.
+  - Determination completion anchors standardized to `Determination · full_scan · complete` / `Determination · scoped · complete`; dashboard determination metrics clarified.
   - Startup sync mode copy describes catalog diff + targeted sync; activity feed collapses duplicate startup progress snapshots per run.
-  - Startup snapshots include explicit ``fs_scan`` and pre-determination phases where applicable; determination logs steady progress; lite/full materialization rows show deleted/files_deleted; calendar sync activity uses persisted marker snapshots only; startup marker payloads slimmed for dashboard backfill when logs truncate.
+  - Startup snapshots include explicit `fs_scan` and pre-determination phases where applicable; determination logs steady progress; lite/full materialization rows show deleted/files_deleted; calendar sync activity uses persisted marker snapshots only; startup marker payloads slimmed for dashboard backfill when logs truncate.
 - **Series tombstone cleanup**: Prefer safe whole-folder removal when checks pass; per-file/prune fallback when not.
-- **Specials model**: Sonarr sync/events always ingest season 0 episode rows; ``INCLUDE_SPECIALS`` gates determination/materialization, not capture.
-- **Movie & series detail API**: When **ARR_INSTANCES_JSON** lists Radarr / Sonarr instances, ``arr_instance_links`` includes **every configured slot** for that type in priority order; absent slots use ``present: false`` and a **base ARR UI** URL so the dashboard can show **"-"**. **Movies** pad Radarr; **series** pad Sonarr and add ``episode_total`` per row. Rows match slots by **instance_key**, **instance_id**, and **instance_key_aliases**; extra local rows for the same TMDB/TVDB are **appended** when not already emitted.
+- **Specials model**: Sonarr sync/events always ingest season 0 episode rows; `INCLUDE_SPECIALS` gates determination/materialization, not capture.
+- **Movie & series detail API**: When **ARR_INSTANCES_JSON** lists Radarr / Sonarr instances, `arr_instance_links` includes **every configured slot** for that type in priority order; absent slots use `present: false` and a **base ARR UI** URL so the dashboard can show **"-"**. **Movies** pad Radarr; **series** pad Sonarr and add `episode_total` per row. Rows match slots by **instance_key**, **instance_id**, and **instance_key_aliases**; extra local rows for the same TMDB/TVDB are **appended** when not already emitted.
 - **Dashboard polling**: Slower polling in background tabs, refetch on focus, `/api/stats` only on Activity tab, **summary** library payloads by default, debounced full library fetch when header search may match overview text.
 - **Detail ARR instance buttons**: Dedicated surface so light mode keeps a **deep navy** fill on instance chips.
-- **Library API & grid**: `/api/library` merges rows sharing the same **TMDB** (movies) or **TVDB** (series) across instances; **`instance_label`** cleared on list rows; grid styling updates (year accent, no type pill, no instance badges in grid).
-- **Movie & series detail (dashboard)**: Hero refresh (year accent, stronger fade), navy instance tiles with per-slot Radarr/Sonarr counts, redundant stat tiles removed, ``arr_instance_links`` always returned as an array (no silent fallback to a single ``arr_link``).
+- **Library API & grid**: `/api/library` merges rows sharing the same **TMDB** (movies) or **TVDB** (series) across instances; `**instance_label`** cleared on list rows; grid styling updates (year accent, no type pill, no instance badges in grid).
+- **Movie & series detail (dashboard)**: Hero refresh (year accent, stronger fade), navy instance tiles with per-slot Radarr/Sonarr counts, redundant stat tiles removed, `arr_instance_links` always returned as an array (no silent fallback to a single `arr_link`).
 - **API-offline UX**: Full-body reconnect panel while API is unreachable.
 
 ### Fixed
 
-- **Lite Sonarr catalog diff**: Compare DB episode totals to Sonarr ``statistics.totalEpisodeCount``; exclude ``Episode.is_deleted`` from aggregate counts; fix ArrState variable shadowing so ``last_history_checked_at`` persists after catalog diagnostics; reduce season 0 triple-flag reconciliation noise when ``INCLUDE_SPECIALS`` is disabled.
-- **Settings first paint**: Fetch ``/api/settings/current`` immediately; show explicit empty-state when ``sections`` is empty.
-- **ARR file-delete webhooks**: On ``movie_file_deleted`` / ``episode_file_deleted``, clear denormalized ``has_placeholder`` / ``placeholder_filepath`` and mark linked ``Placeholder`` rows inactive before determination so materialization can recreate dummies when needed.
-- **Lite Sonarr delete convergence**: Targeted ``sync_sonarr_series_by_ids`` cascades not-found tombstones to seasons/episodes (parity with full sync).
-- **Placeholder reconcile path drift**: ``canonical_path_realigned`` realignment to reduce obsolete/needs churn after folder moves.
+- **Lite Sonarr catalog diff**: Compare DB episode totals to Sonarr `statistics.totalEpisodeCount`; exclude `Episode.is_deleted` from aggregate counts; fix ArrState variable shadowing so `last_history_checked_at` persists after catalog diagnostics; reduce season 0 triple-flag reconciliation noise when `INCLUDE_SPECIALS` is disabled.
+- **Settings first paint**: Fetch `/api/settings/current` immediately; show explicit empty-state when `sections` is empty.
+- **ARR file-delete webhooks**: On `movie_file_deleted` / `episode_file_deleted`, clear denormalized `has_placeholder` / `placeholder_filepath` and mark linked `Placeholder` rows inactive before determination so materialization can recreate dummies when needed.
+- **Lite Sonarr delete convergence**: Targeted `sync_sonarr_series_by_ids` cascades not-found tombstones to seasons/episodes (parity with full sync).
+- **Placeholder reconcile path drift**: `canonical_path_realigned` realignment to reduce obsolete/needs churn after folder moves.
 - **Materializer path-row ownership**: Avoid stealing path rows across instances (same-path contention).
 - **FS startup scan**: Incremental scan with canonical remap safeguards so path-only rows are not mass-marked missing during startup lite.
 
 ### Removed
 
-- Unused ARR history pagination helpers in ``arr_api.py`` (startup lite no longer reads ``/history`` for discovery).
-- Obsolete dashboard log scrapers for deprecated ``Startup lite targeted …`` JSON progress lines.
+- Unused ARR history pagination helpers in `arr_api.py` (startup lite no longer reads `/history` for discovery).
+- Obsolete dashboard log scrapers for deprecated `Startup lite targeted …` JSON progress lines.
 
 ## [0.9.5] - 2026-04-21
 
@@ -108,22 +155,22 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Changed
 
 - **Placeholdarr studio shell (dashboard)**: Refined **light** chrome as the deliberate inverse of dark mode—navy sidebar brand row with yellow mark, **blue → yellow** main header band, and a header **theme toggle** that sits flush on the yellow band (no separate white chip or sky “rail”).
-- **Settings navigation & layout**: Settings live under **`/settings/<slug>`** with redirect from `/settings` to the first section; the old in-page settings sidebar was removed in favor of **nested entries in the main app sidebar** while on settings routes.
+- **Settings navigation & layout**: Settings live under `**/settings/<slug>`** with redirect from `/settings` to the first section; the old in-page settings sidebar was removed in favor of **nested entries in the main app sidebar** while on settings routes.
 - **Settings vs onboarding parity**: **Media Integrations** and **ARR Integrations** reuse the same **card / slot grid** patterns as onboarding; other sections use the same framed, onboarding-style section treatment where appropriate.
 - **Integration logo tiles**: Plex/Jellyfin/Emby and Radarr/Sonarr icon wells use a **solid studio navy** (`#1e2430`) in both themes so tiles match the intended dark-blue look instead of washed translucent fills.
-- **Brand logo rendering**: Sidebar mark uses a single **`BrandLogo`** path with a **`variant`** switch (blue vs yellow asset) so light and dark placement stay consistent.
+- **Brand logo rendering**: Sidebar mark uses a single `**BrandLogo`** path with a `**variant**` switch (blue vs yellow asset) so light and dark placement stay consistent.
 - **Dashboard document title**: Browser tab title is now **Placeholdarr** instead of “Placeholdarr Dashboard Next.”
-- **Branding type surface**: The TypeScript **`Brand`** union is now **Placeholdarr-only**, matching the shipped Studio product chrome.
-- **Semantic / global CSS**: `brandSemanticTheme.ts`, `styles.css`, and Tailwind font-map comments were tightened so new UI prefers **`--brand-*` tokens** over legacy hard-coded slate aliases.
+- **Branding type surface**: The TypeScript `**Brand`** union is now **Placeholdarr-only**, matching the shipped Studio product chrome.
+- **Semantic / global CSS**: `brandSemanticTheme.ts`, `styles.css`, and Tailwind font-map comments were tightened so new UI prefers `**--brand-*` tokens** over legacy hard-coded slate aliases.
 
 ### Fixed
 
 - **Light-mode main header**: The top bar now applies the intended **blue → yellow gradient** in light mode as well (it was only wired for dark mode before, so the strip read as a flat pastel).
-- **Settings routing guard**: Settings URL normalization waits on **`settingsPayload`** instead of an empty derived section list, avoiding edge cases where `/settings` would not redirect after load.
+- **Settings routing guard**: Settings URL normalization waits on `**settingsPayload`** instead of an empty derived section list, avoiding edge cases where `/settings` would not redirect after load.
 
 ### Dependencies
 
-- **SQLAlchemy**: Declared as **`sqlalchemy>=2.0.44`** in `requirements.txt` for consistent installs across environments.
+- **SQLAlchemy**: Declared as `**sqlalchemy>=2.0.44`** in `requirements.txt` for consistent installs across environments.
 
 ## [0.9.4.1] - 2026-04-21 [HOTFIX]
 
@@ -400,3 +447,4 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - Prevented internal playback ranking/fallback implementation fields from leaking as raw JSON or low-level fields in UI flows.
 - Ensured production compose path stays image-based unless an explicit dev compose merge is used.
+

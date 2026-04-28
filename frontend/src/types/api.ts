@@ -41,7 +41,7 @@ export interface ActivityRow {
     sections?: Array<{
       name: string;
       status: "pending" | "working" | "done" | "failed" | "skipped" | string;
-      metrics?: Array<{ label: string; value: string | number | null | undefined }>;
+      metrics?: Array<{ label: string; value: string | number | null | undefined; tooltip?: string }>;
     }>;
     log_file?: string;
     /** Batched queue-monitor titles (Radarr/Sonarr download emulation). */

@@ -861,6 +861,11 @@ def _run_materialization_for_ids(
                 stats["created"] += 1
             else:
                 stats["noop"] += 1
+            if result.get("created"):
+                logger.info(
+                    f"Placeholder created for movie_id={movie_id}",
+                    extra={"emoji_type": "create"},
+                )
             logger.debug(
                 f"Placeholder materialized for movie_id={movie_id}: "
                 f"state={'created' if result.get('created') else 'already_present'} "
@@ -984,6 +989,11 @@ def _run_materialization_for_ids(
                 stats["created"] += 1
             else:
                 stats["noop"] += 1
+            if result.get("created"):
+                logger.info(
+                    f"Placeholder created for episode_id={episode_id}",
+                    extra={"emoji_type": "create"},
+                )
             logger.debug(
                 f"Placeholder materialized for episode_id={episode_id}: "
                 f"state={'created' if result.get('created') else 'already_present'} "
@@ -1164,9 +1174,12 @@ def _run_materialization_for_ids(
         _emit_overlap_checkpoint("final_loop_flush", force=True)
 
     logger.info(
-        "Materialization batch summary: "
-        f"created={stats['created']} deleted={stats['deleted']} noop={stats['noop']} errors={stats['errors']} "
-        f"files_created={stats['files_created']} files_deleted={stats['files_deleted']} nfo_written={stats['nfo_written']}",
+        "Placeholder creation summary: "
+        f"placeholders_created={stats['created']} "
+        f"already_present={stats['noop']} "
+        f"deleted={stats['deleted']} "
+        f"errors={stats['errors']} "
+        f"nfo_written={stats['nfo_written']}",
         extra={"emoji_type": "success"},
     )
 
