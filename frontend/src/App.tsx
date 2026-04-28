@@ -2076,13 +2076,14 @@ function ActivityPanel(props: {
                                                 <span className="inline-flex items-center gap-1">
                                                   <span>{String(metric?.label || "Metric")}</span>
                                                   {metric?.tooltip ? (
-                                                    <span
-                                                      className="material-symbols-outlined text-slate-500"
-                                                      style={{ fontSize: 12 }}
+                                                    <button
+                                                      type="button"
+                                                      className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-slate-500/60 text-[9px] font-semibold leading-none text-slate-300 hover:bg-slate-600/20"
                                                       title={String(metric.tooltip)}
+                                                      aria-label={`Info: ${String(metric?.label || "Metric")}`}
                                                     >
-                                                      info
-                                                    </span>
+                                                      ?
+                                                    </button>
                                                   ) : null}
                                                 </span>
                                                 <span className="text-slate-200">{String(metric?.value ?? "--")}</span>

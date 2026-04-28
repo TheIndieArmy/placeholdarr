@@ -81,9 +81,18 @@ def _build_startup_sync_row(
         failed=materialization_failed,
     )
 
-    movies_discovered = _to_int(startup_sync_stats.get("movies_seen"), _to_int(determination_stats.get("movies_total"), 0))
-    series_discovered = _to_int(startup_sync_stats.get("series_seen"), 0)
-    episodes_discovered = _to_int(startup_sync_stats.get("episodes_seen"), _to_int(determination_stats.get("episodes_total"), 0))
+    movies_seen_catalog = _to_int(startup_sync_stats.get("movies_seen"), 0)
+    series_seen_catalog = _to_int(startup_sync_stats.get("series_seen"), 0)
+    episodes_seen_catalog = _to_int(startup_sync_stats.get("episodes_seen"), 0)
+    movies_checked_determination = _to_int(determination_stats.get("movies_total"), 0)
+    episodes_checked_determination = _to_int(determination_stats.get("episodes_total"), 0)
+
+    # "Scope Checked" should reflect rows actually evaluated during this run.
+    # Catalog-diff counters can legitimately be zero while scoped determination
+    # still evaluates rows selected by lite reconciliation.
+    movies_discovered = max(movies_seen_catalog, movies_checked_determination)
+    series_discovered = series_seen_catalog
+    episodes_discovered = max(episodes_seen_catalog, episodes_checked_determination)
     created_n = _to_int(materialization_stats.get("created"), 0)
     deleted_n = _to_int(materialization_stats.get("deleted"), 0)
     noop_n = _to_int(materialization_stats.get("noop"), 0)
