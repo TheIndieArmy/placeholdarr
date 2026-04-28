@@ -926,10 +926,10 @@ def sync_sonarr_series_specials_season0_backfill(
             s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)
             s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
             if not s_fields["tvdbid"]:
-                logger.info(
+                logger.debug(
                     f"Specials backfill S0 {series_idx}/{total_series} — {label} — skipped (no TVDB id) · "
                     f"{time.monotonic() - t_series:.1f}s",
-                    extra={"emoji_type": "info"},
+                    extra={"emoji_type": "debug"},
                 )
                 continue
 
@@ -940,18 +940,18 @@ def sync_sonarr_series_specials_season0_backfill(
             else:
                 stats["series_updated"] += 1
 
-            logger.info(
+            logger.debug(
                 f"Specials backfill S0 {series_idx}/{total_series} — {label} — fetching episode catalog…",
-                extra={"emoji_type": "info"},
+                extra={"emoji_type": "debug"},
             )
             catalog = fetch_sonarr_episodes(int(sonarr_series_id), base_url, api_key)
             n_catalog, episodes_list = _sonarr_catalog_total_and_season0_episodes(catalog)
             if episodes_list:
                 stats["series_with_season0"] += 1
-            logger.info(
+            logger.debug(
                 f"Specials backfill S0 {series_idx}/{total_series} — {label} — "
                 f"catalog {n_catalog} episodes · {len(episodes_list)} special(s); enriching…",
-                extra={"emoji_type": "info"},
+                extra={"emoji_type": "debug"},
             )
 
             season_rows_by_number: Dict[int, Season] = {}
@@ -959,7 +959,7 @@ def sync_sonarr_series_specials_season0_backfill(
             season_overview_by_number: Dict[int, str] = {}
 
             n_s0 = len(episodes_list)
-            _s0_log_every = 10
+            _s0_log_every = 50
             _s0_log_min_interval_s = 20.0
             last_s0_log_mono = time.monotonic()
             for i, ep in enumerate(episodes_list, start=1):
@@ -1007,13 +1007,10 @@ def sync_sonarr_series_specials_season0_backfill(
                         pending_episode_rows.append(ep_row)
 
                 now_mono = time.monotonic()
-                if (
-                    n_s0 > 1
-                    and i < n_s0
-                    and (
-                        i % _s0_log_every == 0
-                        or (now_mono - last_s0_log_mono) >= _s0_log_min_interval_s
-                    )
+                if n_s0 > 0 and (
+                    i == n_s0
+                    or i % _s0_log_every == 0
+                    or (now_mono - last_s0_log_mono) >= _s0_log_min_interval_s
                 ):
                     last_s0_log_mono = now_mono
                     logger.info(
