@@ -270,6 +270,8 @@ export interface ErrorRow {
 export interface LogsResponse {
   lines: string[];
   file?: string | null;
+  /** Log files capture full verbosity (VERBOSE/DEBUG and above); console stays INFO-only. */
+  capture_level?: string | null;
 }
 
 export interface CalendarLegendItem {

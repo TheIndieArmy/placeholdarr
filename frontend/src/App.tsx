@@ -429,6 +429,7 @@ export function App() {
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [logFile, setLogFile] = useState<string>("");
+  const [logCaptureLevel, setLogCaptureLevel] = useState<string>("");
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
@@ -682,6 +683,7 @@ export function App() {
           if (!stopped) {
             setLogs(payload.lines || []);
             setLogFile(payload.file || "");
+            setLogCaptureLevel(payload.capture_level ?? "");
           }
         } else if (currentTab === "settings") {
           // Avoid clobbering in-progress edits from the periodic refresh loop.
@@ -1234,6 +1236,7 @@ export function App() {
         <LogsPanel
           lines={visibleLogs}
           logFile={logFile}
+          captureLevel={logCaptureLevel}
           logLevel={logLevel}
           logFilter={logFilter}
           brand={brand}
@@ -3970,6 +3973,7 @@ function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMo
 function LogsPanel(props: {
   lines: string[];
   logFile: string;
+  captureLevel?: string;
   logLevel: "all" | "debug" | "info" | "warn" | "error" | "critical";
   logFilter: string;
   brand: Brand;
@@ -4007,6 +4011,18 @@ function LogsPanel(props: {
         <span className="text-xs text-slate-500 font-mono">{props.logFile}</span>
       </div>
 
+      <p className="text-xs text-slate-500 mb-4 leading-relaxed max-w-3xl">
+        Log files record <span className="text-slate-400">everything</span>
+        {props.captureLevel ? (
+          <>
+            {" "}
+            (<span className="font-mono text-slate-300">{props.captureLevel}</span>)
+          </>
+        ) : null}
+        . The dropdown below only narrows what you browse;{" "}
+        <span className="text-slate-400">&quot;All captured levels&quot;</span> shows the full tail from disk. Container stdout stays INFO-only.
+      </p>
+
       {/* Filter bar */}
       <div className="flex gap-3 mb-4 flex-wrap">
         <div className="flex-1 min-w-48 relative">
@@ -4015,10 +4031,11 @@ function LogsPanel(props: {
             className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
             placeholder="Search log output..." />
         </div>
-        <div className="relative">
+        <div className="relative flex items-center gap-2">
+          <span className="text-[10px] font-headline uppercase tracking-widest text-slate-500 whitespace-nowrap">Display filter</span>
           <select value={props.logLevel} onChange={e => props.onLevelChange(e.target.value as "all" | "debug" | "info" | "warn" | "error" | "critical")}
             className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-sm text-slate-300 outline-none">
-            <option value="all">All Levels</option>
+            <option value="all">All captured levels</option>
             <option value="debug">Debug + Above</option>
             <option value="info">Info + Above</option>
             <option value="warn">Warnings + Above</option>

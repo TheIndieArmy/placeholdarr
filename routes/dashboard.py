@@ -3350,4 +3350,5 @@ async def logs(
     return {
         "lines": [l.rstrip("\n") for l in lines],
         "file": os.path.basename(log_file),
+        "capture_level": "FULL",
     }
