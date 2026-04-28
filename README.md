@@ -50,5 +50,5 @@ Placeholdarr is onboarding-first: most behavior is configured in the WebUI.
 ## Troubleshooting
 
 - Check logs in `/config/logs/` for startup, webhook, and sync details.
-- For deeper diagnostics, enable `DEBUG` log level in Settings or set `PLACEHOLDARR_LOG_LEVEL=DEBUG`.
+- Log files under `/config/logs/` capture full detail (VERBOSE/DEBUG and above). Use the System Logs tab display filter to narrow what you read.
 

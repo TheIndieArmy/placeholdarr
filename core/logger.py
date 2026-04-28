@@ -121,11 +121,9 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
         return formatted
 
 logger = logging.getLogger(__name__)
-log_level = getattr(settings, 'LOG_LEVEL', 'INFO').upper()
-if log_level == 'VERBOSE':
-    logger.setLevel(VERBOSE_LEVEL_NUM)
-else:
-    logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+# Emit VERBOSE/custom + DEBUG/INFO/… for file handlers; console filters below.
+logger.setLevel(VERBOSE_LEVEL_NUM)
 
 logger.propagate = False
 
@@ -181,6 +179,7 @@ def _cleanup_old_log_files(log_dir: str, max_files: int) -> None:
                 print(f"Failed to delete old log file {old_file}: {e}", file=sys.stderr)
 
 console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 log_dir = _resolve_log_dir()
@@ -195,6 +194,7 @@ file_handler = logging.FileHandler(
     log_file_path,
     encoding='utf-8',
 )
+file_handler.setLevel(logging.NOTSET)
 file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 workspace_log_path = _get_workspace_log_filename()
@@ -206,6 +206,7 @@ if os.path.abspath(workspace_log_path) != os.path.abspath(log_file_path):
         mode='a',  # keep a continuous workspace mirror; run-rotation is handled by timestamped files
         encoding='utf-8',
     )
+    workspace_file_handler.setLevel(logging.NOTSET)
     workspace_file_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 logger.addHandler(console_handler)

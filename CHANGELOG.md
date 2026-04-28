@@ -7,6 +7,31 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-04-28
+
+### Summary for users
+
+- **Startup lite logs are clearer at high row counts.** Reconciliation output now calls out capped query behavior and gives better visibility into what was actually selected.
+- **Specials backfill is more efficient and less noisy.** Sonarr episode fetch/filtering for season 0 backfill was tightened, and progress logging was tuned for long runs.
+- **Operational logging controls were refined.** Logging configuration and capture behavior were updated to improve diagnostics.
+
+### Changed
+
+- **Specials backfill Sonarr fetch path**
+  - Season-scoped Sonarr episode fetching/filtering for specials backfill was improved to reduce unnecessary episode processing.
+  - Backfill sync stats now include clearer season 0 progress accounting.
+- **Specials backfill logging cadence**
+  - Progress logging for long specials backfill runs was reworked (including interval-based/conditional progress output) to reduce log spam while keeping useful checkpoints.
+- **Lite reconciliation observability**
+  - Startup lite reconciliation logs now include better capped-row messaging and summary detail when per-query limits are reached.
+- **Logging/config capture updates**
+  - Logging-related config and capture surfaces were refined (`core/logger.py`, `core/config.py`, dashboard log API/types, and related startup/runtime logging touchpoints).
+
+### Fixed
+
+- **Specials backfill progress signal quality**
+  - Reduced misleading or overly chatty progress lines during long season 0 backfill operations, making run state easier to interpret.
+
 ## [0.9.6.1] - 2026-04-27 [HOTFIX]
 
 ### Summary for users

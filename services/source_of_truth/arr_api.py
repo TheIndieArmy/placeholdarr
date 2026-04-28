@@ -212,19 +212,65 @@ def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key:
     return None
 
 
-def fetch_sonarr_episodes(series_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
+def fetch_sonarr_episodes(
+    series_id: int,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    season_number: Optional[int] = None,
+) -> List[Dict]:
+    """Fetch Sonarr episodes for a series.
+
+    ``season_number=None`` returns every episode (one ``seriesId`` request).
+
+    For **season 0 (specials)** we intentionally do **not** pass ``seasonNumber=0``
+    to Sonarr: many stacks omit ``0`` from the query string (treated as empty),
+    reverse proxies drop it, or older Sonarr builds respond with ``[]``. Instead
+    we reuse the same full list as a normal sync and filter to ``seasonNumber==0``
+    in Python — same network cost as one unfiltered call, correct results.
+
+    For any **other** explicit season, we still pass Sonarr's ``seasonNumber``
+    query param and trim client-side.
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
         return []
 
     endpoint = _build_endpoint(url, 'episode')
-    cache_key = f'sonarr_episodes:{endpoint}:{series_id}'
+    base_params: Dict = {'apikey': api_key, 'seriesId': series_id}
+
+    # Specials: never rely on ?seasonNumber=0 — fetch full list, filter locally.
+    if season_number is not None and int(season_number) == 0:
+        cache_all_key = f'sonarr_episodes:{endpoint}:{series_id}:all'
+        cached_all = _cache_get(cache_all_key)
+        if cached_all is not None:
+            all_rows = cached_all
+        else:
+            raw = _get_json(endpoint, base_params)
+            all_rows = raw if isinstance(raw, list) else []
+            _cache_set(cache_all_key, all_rows)
+        return [
+            x
+            for x in all_rows
+            if isinstance(x, dict) and int(x.get('seasonNumber') if x.get('seasonNumber') is not None else -1) == 0
+        ]
+
+    cache_scope = 'all' if season_number is None else str(int(season_number))
+    cache_key = f'sonarr_episodes:{endpoint}:{series_id}:{cache_scope}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    data = _get_json(endpoint, {'apikey': api_key, 'seriesId': series_id}) or []
+    params = dict(base_params)
+    if season_number is not None:
+        params['seasonNumber'] = int(season_number)
+
+    raw = _get_json(endpoint, params)
+    data = raw if isinstance(raw, list) else []
+    if season_number is not None:
+        want = int(season_number)
+        data = [x for x in data if isinstance(x, dict) and int(x.get('seasonNumber') if x.get('seasonNumber') is not None else -1) == want]
     _cache_set(cache_key, data)
     return data
 

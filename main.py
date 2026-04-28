@@ -493,18 +493,5 @@ if __name__ == '__main__':
         )
         sys.exit(1)
 
-    # uvicorn expects standard log levels; map custom values (e.g. VERBOSE) to a safe default
-    raw_level = getattr(settings, 'LOG_LEVEL', 'info')
-    try:
-        uvicorn_level = str(raw_level).lower()
-    except Exception:
-        uvicorn_level = 'info'
-
-    # Treat non-standard/extra verbose level as info to avoid KeyError in uvicorn
-    if uvicorn_level not in ('critical', 'error', 'warning', 'info', 'debug', 'trace'):
-        if uvicorn_level == 'verbose':
-            uvicorn_level = 'info'
-        else:
-            uvicorn_level = 'info'
-
-    uvicorn.run(app, host=host, port=port, log_level=uvicorn_level)
+    # Access log verbosity only; Placeholdarr app logs go through core.logger (full capture to files).
+    uvicorn.run(app, host=host, port=port, log_level="info")

@@ -135,7 +135,6 @@ else:
     logger.info(f"No .env file at {dotenv_path}, using process environment")
 
 class Settings(BaseSettings):
-    LOG_LEVEL: str = os.getenv("PLACEHOLDARR_LOG_LEVEL", "INFO")
     APPDATA_PATH: str = os.getenv("APPDATA_PATH", "/config").split('#')[0].strip()
     LOG_DIR: str = os.getenv("LOG_DIR", "").split('#')[0].strip()
     LOG_FILE: str = os.getenv("LOG_FILE", "").split('#')[0].strip()
