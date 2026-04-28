@@ -22,6 +22,67 @@ def _job_debounce_seconds() -> float:
     return max(0.0, float(getattr(settings, "STATUS_JOB_DEBOUNCE_SECONDS", 0.5) or 0.5))
 
 
+def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> str:
+    """Short human-readable line for logs (movies / series+episode)."""
+    if not placeholders:
+        return ""
+    mids = [int(ph.movie_id) for ph in placeholders if getattr(ph, "movie_id", None)]
+    eids = [int(ph.episode_id) for ph in placeholders if getattr(ph, "episode_id", None)]
+    movie_title: dict[int, str] = {}
+    if mids:
+        for m in session.query(Movie).filter(Movie.id.in_(mids)).all():
+            t = str(getattr(m, "title", "") or "").strip()
+            movie_title[int(m.id)] = t or f"movie id {m.id}"
+    ep_label: dict[int, str] = {}
+    if eids:
+        rows = (
+            session.query(Episode, Season, Series)
+            .join(Season, Episode.season_id == Season.id)
+            .join(Series, Season.series_id == Series.id)
+            .filter(Episode.id.in_(eids))
+            .all()
+        )
+        for ep, season, series in rows:
+            sn = int(season.season_number)
+            en = int(ep.episode_number)
+            st = str(getattr(series, "title", "") or "").strip() or "Series"
+            et = str(getattr(ep, "title", "") or "").strip()
+            base = f"{st} S{sn:02d}E{en:02d}"
+            if et:
+                base += f' — "{et}"'
+            ep_label[int(ep.id)] = base
+
+    per_row: list[str] = []
+    for ph in placeholders:
+        if ph.movie_id and int(ph.movie_id) in movie_title:
+            per_row.append(movie_title[int(ph.movie_id)])
+        elif ph.episode_id and int(ph.episode_id) in ep_label:
+            per_row.append(ep_label[int(ph.episode_id)])
+        else:
+            per_row.append(f"placeholder id {int(ph.id)}")
+
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for label in per_row:
+        if label not in seen:
+            seen.add(label)
+            uniq.append(label)
+
+    if len(uniq) == 1:
+        if len(per_row) > 1:
+            return f'{len(per_row)} rows · "{uniq[0]}"'
+        return f'"{uniq[0]}"'
+
+    head = uniq[:4]
+    tail_ct = len(uniq) - len(head)
+    text = "; ".join(f'"{u}"' for u in head)
+    if tail_ct > 0:
+        text += f" (+{tail_ct} more titles)"
+    if len(per_row) > len(uniq):
+        text += f" · {len(per_row)} placeholder rows"
+    return text
+
+
 def _normalize_placeholder_ids(placeholder_ids: list[int] | tuple[int, ...] | None) -> list[int]:
     seen: set[int] = set()
     normalized: list[int] = []
@@ -236,8 +297,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
 
     do_player = _job_player_metadata_refresh(job)
+    subject = _nfo_refresh_subject_summary(session, placeholders)
+    subj_part = f" · {subject}" if subject else ""
     logger.info(
-        f"NFO refresh job processed placeholder_ids={len(ids)} refreshed={refreshed} player_metadata_refresh={do_player}",
+        f"NFO refresh job processed · {len(ids)} id(s){subj_part} · refreshed={refreshed} · player_metadata_refresh={do_player}",
         extra={"emoji_type": "info"},
     )
 
@@ -255,8 +318,10 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             unique_for_projection.append(placeholder)
         try:
             push_placeholder_batch_player_metadata(session, unique_for_projection)
+            proj_subject = _nfo_refresh_subject_summary(session, unique_for_projection)
+            ps = f" · {proj_subject}" if proj_subject else ""
             logger.info(
-                f"Direct player projection attempted for placeholders={len(unique_for_projection)}",
+                f"Direct player projection attempted · {len(unique_for_projection)} placeholder(s){ps}",
                 extra={"emoji_type": "info"},
             )
         except Exception as ex:

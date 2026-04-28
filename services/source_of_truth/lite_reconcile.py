@@ -116,13 +116,28 @@ def run_lite_startup_reconciliation_pre_discovery() -> tuple[list[int], list[int
         stats["episodes_baseline_flags"] = len(e_triple_ids)
         episode_ids.update(e_triple_ids)
 
+        cap = _LITE_RECON_PER_QUERY_CAP
+        capped = (
+            len(movie_ids) >= cap
+            or len(episode_ids) >= cap
+            or stats["movies_placeholder_path_mismatch"] >= cap
+            or stats["episodes_placeholder_path_mismatch"] >= cap
+            or stats["movies_baseline_flags"] >= cap
+            or stats["episodes_baseline_flags"] >= cap
+        )
+        cap_note = (
+            f" · note: each DB subquery is capped at {cap} rows; counts can sit at ~{cap} while more rows still match"
+            if capped
+            else ""
+        )
         logger.info(
             "Startup lite · reconciliation (pre-discovery): "
             f"movies={len(movie_ids)} episodes={len(episode_ids)} "
             f"(placeholder_path_mismatch: movies={stats['movies_placeholder_path_mismatch']} "
             f"episodes={stats['episodes_placeholder_path_mismatch']}; "
             f"has_file/has_placeholder/is_deleted all false: movies={stats['movies_baseline_flags']} "
-            f"episodes={stats['episodes_baseline_flags']})",
+            f"episodes={stats['episodes_baseline_flags']})"
+            f"{cap_note}",
             extra={"emoji_type": "info"},
         )
         return sorted(movie_ids), sorted(episode_ids), stats
