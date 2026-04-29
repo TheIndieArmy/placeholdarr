@@ -4150,6 +4150,19 @@ function stableArrInstanceId(arrType: "radarr" | "sonarr", slotRole: "primary" |
   return `${arrType}_${slotRole}`;
 }
 
+/**
+ * Resolve the origin used in webhook setup instructions.
+ * Prefers the user-configured WEBHOOK_BASE_URL (when ARR/Tautulli/etc. reach
+ * Placeholdarr at a different address than the dashboard origin — e.g. an
+ * internal Docker name behind a public reverse proxy), otherwise falls back
+ * to the current window origin.
+ */
+function resolveWebhookDisplayOrigin(values: FieldValueMap): string {
+  const override = String(values.WEBHOOK_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (override) return override;
+  return typeof window !== "undefined" ? window.location.origin : "";
+}
+
 function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string) {
   const id = String(instance_id || "").trim().toLowerCase();
   const key = normalizeInstanceKey(String(instance_key || ""));
@@ -4580,7 +4593,7 @@ function ArrInstancesEditor(props: {
   }
 
   function instanceWebhookUrls(instance_id: string, instance_key: string) {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const origin = resolveWebhookDisplayOrigin(props.values);
     return buildArrInstanceWebhookUrls(origin, instance_id, instance_key);
   }
 
@@ -6303,6 +6316,7 @@ function SettingsPanel(props: {
         dialog={playbackWebhookDialog}
         onClose={() => setPlaybackWebhookDialog(null)}
         accent={accent}
+        displayOrigin={resolveWebhookDisplayOrigin(props.values)}
       />
     ) : null}
     </>
@@ -6482,10 +6496,10 @@ function PlaybackWebhookSetupModal(props: {
   dialog: { serviceId: PlaybackWebhookServiceId; instanceParam: string };
   onClose: () => void;
   accent: { hex: string };
+  displayOrigin: string;
 }) {
   const pb = props.dialog;
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const webhookUrl = `${origin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
+  const webhookUrl = `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
   const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
   const name = svcMeta?.name ?? pb.serviceId;
   return (
@@ -7750,6 +7764,7 @@ function OnboardingWizard(props: {
           dialog={playbackWebhookDialog}
           onClose={() => setPlaybackWebhookDialog(null)}
           accent={accent}
+          displayOrigin={resolveWebhookDisplayOrigin(props.values)}
         />
       ) : null}
     </>
