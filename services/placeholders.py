@@ -467,12 +467,14 @@ def _movie_nfo_xml(movie: Any) -> str:
     raw_title = str(getattr(movie, "title", "") or "")
     title = escape(project_title(raw_title, status))
     year = getattr(movie, "year", None)
-    overview = escape(project_summary(str(getattr(movie, "radarr_overview", "") or ""), status))
+    runtime = _to_int(getattr(movie, "radarr_runtime", None))
+    overview = escape(
+        project_summary(str(getattr(movie, "radarr_overview", "") or ""), status, runtime_minutes=runtime)
+    )
     tmdbid = getattr(movie, "tmdbid", None)
     imdbid = getattr(movie, "imdbid", None)
     poster_url = escape(str(getattr(movie, "remote_poster", "") or ""))
     fanart_url = escape(str(getattr(movie, "remote_fanart", "") or ""))
-    runtime = _to_int(getattr(movie, "radarr_runtime", None))
     certification = str(getattr(movie, "radarr_certification", "") or "").strip()
     genres = _to_list(getattr(movie, "radarr_genres", None))
     studio = str(getattr(movie, "radarr_studio", "") or "").strip()
@@ -498,7 +500,7 @@ def _movie_nfo_xml(movie: Any) -> str:
     if overview:
         lines.append(f"  <plot>{overview}</plot>")
     else:
-        lines.append(f"  <plot>{escape(project_summary('', status))}</plot>")
+        lines.append(f"  <plot>{escape(project_summary('', status, runtime_minutes=runtime))}</plot>")
     if ratings:
         lines.append("  <ratings>")
         for name, value_text, votes_text, is_default in ratings:
@@ -573,7 +575,14 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     status = str(getattr(episode, "placeholder_status", "") or "REQUEST")
     raw_episode_title = str(getattr(episode, "title", "") or "")
     episode_title = escape(project_title(raw_episode_title, status))
-    plot = escape(project_summary(str(getattr(episode, "sonarr_episode_overview", "") or ""), status))
+    runtime = _to_int(getattr(episode, "sonarr_runtime", None)) or _to_int(getattr(series, "sonarr_runtime", None))
+    plot = escape(
+        project_summary(
+            str(getattr(episode, "sonarr_episode_overview", "") or ""),
+            status,
+            runtime_minutes=runtime,
+        )
+    )
     season_number = int(getattr(season, "season_number", 0) or 0)
     episode_number = int(getattr(episode, "episode_number", 0) or 0)
     aired = getattr(episode, "air_date", None)
@@ -583,7 +592,6 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     still_url = escape(str(getattr(episode, "sonarr_episode_still", "") or ""))
     if not still_url:
         still_url = escape(str(getattr(series, "remote_fanart", "") or ""))
-    runtime = _to_int(getattr(episode, "sonarr_runtime", None))
     certification = str(getattr(series, "sonarr_certification", "") or "").strip()
     network = str(getattr(series, "sonarr_network", "") or "").strip()
     directors = getattr(episode, "sonarr_episode_directors", None)
@@ -604,7 +612,7 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     if plot:
         lines.append(f"  <plot>{plot}</plot>")
     else:
-        lines.append(f"  <plot>{escape(project_summary('', status))}</plot>")
+        lines.append(f"  <plot>{escape(project_summary('', status, runtime_minutes=runtime))}</plot>")
     if tvdbid:
         lines.append(f"  <tvdbid>{escape(str(tvdbid))}</tvdbid>")
         # uniqueid lets Emby/Jellyfin match this episode to their databases

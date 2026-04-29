@@ -418,6 +418,25 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "WEBHOOK_BASE_URL",
+            {
+                "section": "Advanced",
+                "label": "Webhook base URL",
+                "description": (
+                    "Optional. The URL that ARR, Tautulli, Jellyfin, and Emby should use to call "
+                    "Placeholdarr. When set, this replaces the dashboard origin in the webhook "
+                    "setup instructions. Use this when the address those services should reach "
+                    "Placeholdarr at is different from the URL you use to view the dashboard — "
+                    "for example, an internal Docker/Kubernetes service name when the dashboard "
+                    "is reached through a public reverse proxy. Leave blank to use the dashboard's "
+                    "own URL. Format: http(s)://host[:port] (no trailing slash)."
+                ),
+                "type": "url",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
             "PLACEHOLDER_STRATEGY",
             {
                 "section": "Advanced",

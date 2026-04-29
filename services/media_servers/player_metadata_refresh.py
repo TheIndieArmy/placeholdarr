@@ -378,8 +378,37 @@ def _projected_display_status(placeholder: Placeholder) -> str:
     return status or "REQUEST"
 
 
-def _project_text(base_title: str | None, base_summary: str | None, status: str) -> tuple[str, str]:
-    return project_title(base_title or "", status), project_summary(base_summary or "", status)
+def _runtime_minutes_movie(movie: Movie) -> int | None:
+    v = getattr(movie, "radarr_runtime", None)
+    try:
+        n = int(v) if v is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _runtime_minutes_episode(episode: Episode, series: Series) -> int | None:
+    for src in (episode, series):
+        v = getattr(src, "sonarr_runtime", None)
+        try:
+            n = int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
+
+
+def _project_text(
+    base_title: str | None,
+    base_summary: str | None,
+    status: str,
+    *,
+    runtime_minutes: int | None = None,
+) -> tuple[str, str]:
+    return project_title(base_title or "", status), project_summary(
+        base_summary or "", status, runtime_minutes=runtime_minutes
+    )
 
 
 @dataclass
@@ -460,10 +489,12 @@ def _push_movie(
     summary: ProjectionBatchSummary,
 ) -> None:
     status = _projected_display_status(placeholder)
+    runtime_minutes = _runtime_minutes_movie(movie) if status.strip().upper() == "REQUEST" else None
     projected_title, projected_summary = _project_text(
         getattr(movie, "title", None),
         getattr(movie, "radarr_overview", None),
         status,
+        runtime_minutes=runtime_minutes,
     )
 
     if getattr(settings, "jellyfin_enabled", False):
@@ -595,10 +626,14 @@ def _push_episode(
         return
 
     status = _projected_display_status(placeholder)
+    runtime_minutes = (
+        _runtime_minutes_episode(episode, series) if status.strip().upper() == "REQUEST" else None
+    )
     projected_ep_title, projected_ep_summary = _project_text(
         getattr(episode, "title", None),
         getattr(episode, "sonarr_episode_overview", None),
         status,
+        runtime_minutes=runtime_minutes,
     )
     if getattr(settings, "jellyfin_enabled", False):
         jf_ep = _find_jellyfin_episode_item_id(series, season, episode)

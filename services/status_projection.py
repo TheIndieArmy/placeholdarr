@@ -49,8 +49,45 @@ def strip_status_from_title(title: str | None) -> str:
 
 
 def strip_status_from_summary(summary: str | None) -> str:
+    """Remove optional REQUEST runtime leader and leading projected status bracket."""
     text = str(summary or "")
-    return re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+    # Legacy: "~45m · " before "[REQUEST]" (older NFO / summaries)
+    text = re.sub(r"^~(?:\d+h(?:\s+\d+m)?|\d+m)\s*·\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+    return text
+
+
+def _rounded_minutes(value: int | float | str | None) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        return max(0, int(round(float(value))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def format_duration_label(minutes: int) -> str:
+    """Human-readable duration from whole minutes (e.g. 45m, 1h, 1h 5m)."""
+    if minutes <= 0:
+        return ""
+    if minutes < 60:
+        return f"{minutes}m"
+    h, m = divmod(minutes, 60)
+    if m == 0:
+        return f"{h}h"
+    return f"{h}h {m}m"
+
+
+def _summary_status_bracket(clean_status: str, runtime_minutes: int | None) -> str:
+    """Build [REQUEST] or [1h 5m · REQUEST] when runtime is known (REQUEST only)."""
+    status_upper = clean_status.upper()
+    if status_upper == "REQUEST" and runtime_minutes is not None:
+        rm = _rounded_minutes(runtime_minutes)
+        if rm > 0:
+            dur = format_duration_label(rm)
+            if dur:
+                return f"[{dur} · {clean_status}]"
+    return f"[{clean_status}]"
 
 
 def project_title(title: str | None, status: str | None) -> str:
@@ -61,9 +98,15 @@ def project_title(title: str | None, status: str | None) -> str:
     return f"{clean_title} - [{clean_status}]".strip()
 
 
-def project_summary(summary: str | None, status: str | None) -> str:
+def project_summary(
+    summary: str | None,
+    status: str | None,
+    *,
+    runtime_minutes: int | None = None,
+) -> str:
     clean_summary = strip_status_from_summary(summary)
     clean_status = str(status or "").strip()
     if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"summary", "both"}:
         return clean_summary
-    return f"[{clean_status}] {clean_summary}".strip()
+    bracket = _summary_status_bracket(clean_status, runtime_minutes)
+    return f"{bracket} {clean_summary}".strip()

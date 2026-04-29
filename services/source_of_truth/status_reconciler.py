@@ -6,12 +6,15 @@ from datetime import datetime, timezone, timedelta
 from core.config import settings
 from core.logger import logger
 from services.placeholders import ensure_episode_nfo, ensure_movie_nfo, ensure_series_nfo
+from sqlalchemy import func
+
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Movie, Placeholder, Job, Season, Series
+from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
 
 
 NFO_REFRESH_JOB_TYPE = "nfo_refresh"
+_REQUEST_NFO_BACKFILL_DONE_KEY = "REQUEST_STATUS_NFO_BACKFILL_DONE"
 
 
 def _job_batch_size() -> int:
@@ -368,3 +371,77 @@ def enqueue_nfo_refresh(
         if owns_session:
             session.close()
 
+
+def enqueue_request_status_nfo_backfill(session=None) -> dict:
+    """One-time startup backfill for REQUEST placeholder NFO text projection.
+
+    Runs once when REQUEST placeholders exist, then marks completion in ``app_config`` so
+    subsequent startups skip it (similar to specials backfill behavior).
+    """
+    owns_session = session is None
+    session = session or get_session()
+
+    try:
+        done_row = session.query(AppConfig).filter(AppConfig.key == _REQUEST_NFO_BACKFILL_DONE_KEY).first()
+        if done_row and bool(done_row.value):
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "already_done",
+                "placeholder_count": 0,
+                "done": True,
+            }
+
+        ids = [
+            int(r[0])
+            for r in (
+                session.query(Placeholder.id)
+                .filter(
+                    Placeholder.has_placeholder == True,  # noqa: E712
+                    func.upper(func.trim(Placeholder.display_status)) == "REQUEST",
+                )
+                .order_by(Placeholder.id.asc())
+                .all()
+            )
+        ]
+        if not ids:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_matching_request_placeholders",
+                "placeholder_count": 0,
+                "done": False,
+            }
+
+        out = enqueue_nfo_refresh(ids, session=session, player_metadata_refresh=None)
+        if not isinstance(out, dict) or not out.get("ok"):
+            return out if isinstance(out, dict) else {"ok": False, "reason": "enqueue_return"}
+
+        if done_row:
+            done_row.value = True
+            done_row.value_type = "bool"
+            session.add(done_row)
+        else:
+            session.add(
+                AppConfig(
+                    key=_REQUEST_NFO_BACKFILL_DONE_KEY,
+                    value=True,
+                    value_type="bool",
+                    restart_required=False,
+                    description="Internal flag: one-time REQUEST status NFO backfill has completed.",
+                )
+            )
+        session.commit()
+        out["placeholder_count"] = len(ids)
+        out["done"] = True
+        return out
+    except Exception as e:
+        logger.warning(f"REQUEST NFO backfill enqueue failed: {e}", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "reason": str(e), "placeholder_count": 0}
+    finally:
+        if owns_session:
+            session.close()

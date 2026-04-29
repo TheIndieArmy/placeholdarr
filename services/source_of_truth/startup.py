@@ -1130,6 +1130,43 @@ def run_startup_source_of_truth() -> dict:
             f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
         )
+
+        request_nfo_backfill_stats: dict[str, object] = {"skipped": True, "reason": "not_run"}
+        try:
+            from services.source_of_truth.status_reconciler import enqueue_request_status_nfo_backfill
+
+            request_nfo_backfill_stats = enqueue_request_status_nfo_backfill()
+            if request_nfo_backfill_stats.get("skipped"):
+                logger.debug(
+                    f"REQUEST NFO backfill skipped: {request_nfo_backfill_stats.get('reason', '')}",
+                    extra={"emoji_type": "debug"},
+                )
+            elif request_nfo_backfill_stats.get("ok") and int(request_nfo_backfill_stats.get("placeholder_count") or 0) > 0:
+                logger.info(
+                    "Startup · REQUEST status NFO backfill queued · "
+                    f"placeholders={request_nfo_backfill_stats.get('placeholder_count')} · "
+                    f"jobs_created={request_nfo_backfill_stats.get('jobs_created', 0)} · "
+                    f"jobs_updated={request_nfo_backfill_stats.get('jobs_updated', 0)}",
+                    extra={"emoji_type": "info"},
+                )
+            elif request_nfo_backfill_stats.get("ok"):
+                logger.debug(
+                    "Startup · REQUEST status NFO backfill: no matching placeholders",
+                    extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    f"Startup · REQUEST status NFO backfill enqueue issue: {request_nfo_backfill_stats}",
+                    extra={"emoji_type": "warning"},
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Startup · REQUEST status NFO backfill failed (non-fatal): {exc}",
+                extra={"emoji_type": "warning"},
+                exc_info=True,
+            )
+            request_nfo_backfill_stats = {"ok": False, "error": str(exc)}
+
         record_startup_sync_progress(
             mode=selected_mode,
             started_at=started_at,
@@ -1171,6 +1208,7 @@ def run_startup_source_of_truth() -> dict:
             'calendar': calendar_stats,
             'orphan_placeholders': orphan_placeholder_stats,
             'status_reconcile': status_reconcile_stats,
+            'request_nfo_backfill': request_nfo_backfill_stats,
         }
         try:
             from services.activity_markers import record_startup_source_of_truth_activity
