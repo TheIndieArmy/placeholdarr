@@ -169,6 +169,11 @@ class Settings(BaseSettings):
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
     EMBY_INSTANCE_KEY: str = os.getenv("EMBY_INSTANCE_KEY", "emby").split('#')[0].strip().lower()
+    # Optional override for the URL displayed in webhook setup instructions.
+    # Set when Placeholdarr is reachable from ARR/Tautulli/etc. at a different
+    # address than the dashboard origin — e.g. an internal Docker/Kubernetes
+    # service name when the dashboard is reached via a public reverse proxy.
+    WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "").split('#')[0].strip().rstrip("/")
 
     # Startup sync mode:
     # - auto: first successful ARR startup run is full, then lite on later startups
