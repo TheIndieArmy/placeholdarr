@@ -7,6 +7,16 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+
+- **REQUEST status NFO backfill on startup**
+  - After materialization, the app can run a one-time backfill (tracked in `app_config`) that enqueues `nfo_refresh` jobs for active placeholders with `display_status` = `REQUEST`. Once successfully queued, it marks complete and does not rerun on later startups. This refreshes sidecar NFOs to pick up new summary/runtime wording without waiting for a status transition.
+
+### Changed
+
+- **REQUEST placeholder summaries show duration in the status bracket**
+  - For `REQUEST` only, the summary prefix includes rounded runtime from Radarr/Sonarr minutes inside the same brackets, e.g. `[1h 5m · REQUEST] …`. Legacy `~45m · [REQUEST]` and `[1h 5m - REQUEST]` text is still stripped when re-projecting. Plex/Jellyfin/Emby direct projection uses the same rule when the projected status is `REQUEST`. Episodes fall back to series runtime when episode runtime is missing.
+
 ## [0.9.8] - 2026-04-29
 
 ### Summary
@@ -102,7 +112,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
 - **Dashboard library IA**: Sidebar **Library** opens **Movies** at `/library`; **TV** lives at `/library/tv` with nested nav (same pattern as Settings). Per-shelf filters persist in `sessionStorage` (`placeholdarr:library-shelf-filter:movies` / `:tv`); legacy `placeholdarr:library-filter` is migrated once on load.
-- **Detail ARR deep links**: Movie and series detail APIs include `**arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). `**arr_instance_links**` now also carries `**has_file` / `has_placeholder**` per movie row and `**episode_files` / `episode_placeholders**` per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
+- **Detail ARR deep links**: Movie and series detail APIs include `**arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). `**arr_instance_links`** now also carries `**has_file` / `has_placeholder**` per movie row and `**episode_files` / `episode_placeholders**` per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
 - **Settings → Media Integrations**: **Webhook URL** on each connected Plex/Jellyfin/Emby card opens the same playback webhook setup modal as onboarding (shared `PlaybackWebhookSetupModal`).
 - **Lite sync catalog tombstones**: Startup lite compares DB rows to the live Radarr/Sonarr catalogs and targets IDs missing from the API for tombstoning (`movies_catalog_removed` / `series_catalog_removed`), alongside path-drift discovery.
 - **Series tombstone bulk cleanup path**: Deleted Sonarr series use a series-level placeholder cleanup routine with progress logs, safe full-tree deletion checks, and aggregate history metadata for grouped placeholder activity UI rows.
@@ -158,7 +168,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Settings navigation & layout**: Settings live under `**/settings/<slug>`** with redirect from `/settings` to the first section; the old in-page settings sidebar was removed in favor of **nested entries in the main app sidebar** while on settings routes.
 - **Settings vs onboarding parity**: **Media Integrations** and **ARR Integrations** reuse the same **card / slot grid** patterns as onboarding; other sections use the same framed, onboarding-style section treatment where appropriate.
 - **Integration logo tiles**: Plex/Jellyfin/Emby and Radarr/Sonarr icon wells use a **solid studio navy** (`#1e2430`) in both themes so tiles match the intended dark-blue look instead of washed translucent fills.
-- **Brand logo rendering**: Sidebar mark uses a single `**BrandLogo`** path with a `**variant**` switch (blue vs yellow asset) so light and dark placement stay consistent.
+- **Brand logo rendering**: Sidebar mark uses a single `**BrandLogo`** path with a `**variant`** switch (blue vs yellow asset) so light and dark placement stay consistent.
 - **Dashboard document title**: Browser tab title is now **Placeholdarr** instead of “Placeholdarr Dashboard Next.”
 - **Branding type surface**: The TypeScript `**Brand`** union is now **Placeholdarr-only**, matching the shipped Studio product chrome.
 - **Semantic / global CSS**: `brandSemanticTheme.ts`, `styles.css`, and Tailwind font-map comments were tightened so new UI prefers `**--brand-*` tokens** over legacy hard-coded slate aliases.
