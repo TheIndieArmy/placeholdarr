@@ -90,6 +90,39 @@ def _summary_status_bracket(clean_status: str, runtime_minutes: int | None) -> s
     return f"[{clean_status}]"
 
 
+def projected_status_display(
+    status: str | None,
+    *,
+    reason: str | None = None,
+    runtime_minutes: int | None = None,
+) -> str | None:
+    """Return persisted user-facing status label for display surfaces."""
+    raw_status = str(status or "").strip()
+    if not raw_status:
+        return None
+    raw_reason = str(reason or "").strip()
+    upper = raw_status.upper()
+    effective = raw_status
+    if upper in {
+        "COMING_SOON",
+        "COMING_SOON_30",
+        "COMING_SOON_14",
+        "COMING_SOON_7",
+        "COMING_SOON_1",
+        "COMING_SOON_TODAY",
+    } and raw_reason:
+        effective = raw_reason
+    elif upper == "DOWNLOADING" and raw_reason:
+        effective = raw_reason
+    elif upper == "SEARCHING" and raw_reason.lower() == "queued":
+        effective = raw_reason
+
+    eff_upper = str(effective).strip().upper()
+    if eff_upper == "REQUEST":
+        return _summary_status_bracket("REQUEST", runtime_minutes)
+    return str(effective).strip() or None
+
+
 def project_title(title: str | None, status: str | None) -> str:
     clean_title = strip_status_from_title(title)
     clean_status = str(status or "").strip()

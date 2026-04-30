@@ -142,6 +142,7 @@ class Placeholder(Base):
     has_placeholder = Column(Boolean, default=False)
     lifecycle_status = Column(String, nullable=True)
     display_status = Column(String, nullable=True)
+    display_status_projected = Column(String, nullable=True)
     display_progress = Column(Integer, nullable=True)
     display_reason = Column(String, nullable=True)
     format_hint = Column(String, nullable=True)

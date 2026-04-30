@@ -15,6 +15,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
   - Backfill jobs are tagged with a run id; when the last job in that run completes, the app triggers a single section refresh (`movies + episodes`) so players pick up updated NFO text in one pass.
 - **Backfill queue isolation**
   - REQUEST backfill enqueues with pending-job merge disabled to avoid inheriting older mixed payloads and to keep backfill behavior deterministic.
+- **Persisted projected display status in DB**
+  - Added `placeholder.display_status_projected` so the user-facing status text is stored persistently (including REQUEST runtime bracket text like `[1h 43m · REQUEST]`) whenever status is written by orchestrator/materializer/import-grace paths.
 
 ## [0.9.9] - 2026-04-30
 
