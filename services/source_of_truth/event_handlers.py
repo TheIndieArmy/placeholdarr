@@ -44,6 +44,44 @@ from services.source_of_truth.sync_runner import (
 )
 
 
+def _sync_linked_placeholder_presence(
+    session,
+    *,
+    movie_id: int | None = None,
+    episode_id: int | None = None,
+    exists_on_disk: bool,
+    expected_path: str | None,
+) -> int:
+    """Mirror entity-level placeholder presence onto linked Placeholder rows."""
+    if movie_id is None and episode_id is None:
+        return 0
+    query = session.query(Placeholder)
+    if movie_id is not None:
+        query = query.filter(Placeholder.movie_id == int(movie_id))
+    if episode_id is not None:
+        query = query.filter(Placeholder.episode_id == int(episode_id))
+    rows = query.all()
+    normalized_path = str(expected_path or "").strip()
+    changed = 0
+    for row in rows:
+        row_changed = False
+        if bool(getattr(row, "has_placeholder", False)) != bool(exists_on_disk):
+            row.has_placeholder = bool(exists_on_disk)
+            row_changed = True
+        if exists_on_disk and normalized_path and str(getattr(row, "path", "") or "").strip() != normalized_path:
+            row.path = normalized_path
+            row_changed = True
+        if exists_on_disk and hasattr(row, "lifecycle_status") and str(getattr(row, "lifecycle_status", "") or "").upper() == "MISSING":
+            row.lifecycle_status = None
+            row_changed = True
+        if row_changed:
+            row.last_observed_at = func.now()
+            row.updated_at = func.now()
+            session.add(row)
+            changed += 1
+    return changed
+
+
 def _resolve_arr_context(content_type: str, instance: str | None = None) -> dict[str, Any]:
     """Resolve ARR instance routing context for webhook event handlers.
 
@@ -249,6 +287,12 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             exists_on_disk = os.path.isfile(expected_path)
             ep_row.has_placeholder = bool(exists_on_disk)
             ep_row.placeholder_filepath = expected_path if exists_on_disk else None
+            _sync_linked_placeholder_presence(
+                session,
+                episode_id=int(ep_row.id),
+                exists_on_disk=bool(exists_on_disk),
+                expected_path=expected_path,
+            )
             if not exists_on_disk:
                 missing_placeholder_episode_rows.append(ep_row)
 
@@ -394,6 +438,12 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
         exists_on_disk = os.path.isfile(expected_path)
         movie_row.has_placeholder = bool(exists_on_disk)
         movie_row.placeholder_filepath = expected_path if exists_on_disk else None
+        _sync_linked_placeholder_presence(
+            session,
+            movie_id=int(movie_row.id),
+            exists_on_disk=bool(exists_on_disk),
+            expected_path=expected_path,
+        )
         if not exists_on_disk:
             stale_rows = (
                 session.query(Placeholder)
