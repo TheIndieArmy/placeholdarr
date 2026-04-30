@@ -7,8 +7,19 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-04-30
+
+### Summary
+
+- REQUEST placeholders now have a one-time startup NFO refresh backfill so summary/runtime projection catches up without waiting for status transitions.
+- REQUEST summary projection now includes duration in the same status bracket for clearer at-a-glance metadata. Done through a one-time startup NFO refresh backfill to add runtime to all "[REQUEST]" status summaries.
+- Placeholder presence drift between `Episode`/`Movie` and linked `Placeholder` rows is now corrected in runtime refresh paths, preventing large libraries from being skipped by NFO refresh jobs.
+- Webhook setup instructions can now be forced to a specific externally reachable base URL.
+
 ### Added
 
+- **Webhook base URL override for setup instructions**
+  - Added `WEBHOOK_BASE_URL` support so generated webhook guidance can use a fixed external URL instead of relying only on request-origin inference.
 - **REQUEST status NFO backfill on startup**
   - After materialization, the app can run a one-time backfill (tracked in `app_config`) that enqueues `nfo_refresh` jobs for active placeholders with `display_status` = `REQUEST`. Once successfully queued, it marks complete and does not rerun on later startups. This refreshes sidecar NFOs to pick up new summary/runtime wording without waiting for a status transition.
 
@@ -16,6 +27,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **REQUEST placeholder summaries show duration in the status bracket**
   - For `REQUEST` only, the summary prefix includes rounded runtime from Radarr/Sonarr minutes inside the same brackets, e.g. `[1h 5m · REQUEST] …`. Legacy `~45m · [REQUEST]` and `[1h 5m - REQUEST]` text is still stripped when re-projecting. Plex/Jellyfin/Emby direct projection uses the same rule when the projected status is `REQUEST`. Episodes fall back to series runtime when episode runtime is missing.
+
+### Fixed
+
+- **Placeholder presence drift that could skip TV NFO refreshes**
+  - Presence-refresh paths now mirror canonical `Episode`/`Movie` placeholder truth back into linked `Placeholder` rows (including path realignment), reducing long-lived drift where episodes existed on disk but `Placeholder.has_placeholder` stayed false.
+  - NFO refresh processing now self-heals presence drift by honoring linked entity placeholder truth when deciding whether a queued placeholder should be refreshed.
 
 ## [0.9.8] - 2026-04-29
 
