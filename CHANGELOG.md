@@ -17,6 +17,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
   - REQUEST backfill enqueues with pending-job merge disabled to avoid inheriting older mixed payloads and to keep backfill behavior deterministic.
 - **Persisted projected display status in DB**
   - Added `placeholder.display_status_projected` so the user-facing status text is stored persistently (including REQUEST runtime bracket text like `[1h 43m · REQUEST]`) whenever status is written by orchestrator/materializer/import-grace paths.
+- **Plex force metadata refresh for REQUEST backfill completion**
+  - The one-time REQUEST NFO backfill completion refresh now calls Plex section refresh with `force=1` so existing library items are re-read for metadata changes from NFOs; normal status update paths continue to use direct projection behavior.
 
 ## [0.9.9] - 2026-04-30
 

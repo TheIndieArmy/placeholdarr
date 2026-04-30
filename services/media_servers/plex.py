@@ -252,7 +252,11 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
         return "failed"
 
 
-def refresh_plex_section_ids(section_ids: list[int] | set[int]) -> dict[str, int]:
+def refresh_plex_section_ids(
+    section_ids: list[int] | set[int],
+    *,
+    force_refresh_metadata: bool = False,
+) -> dict[str, int]:
     """Trigger full refresh for explicit Plex section ids."""
     if not getattr(settings, "plex_enabled", False):
         return {"refreshed": 0, "failed": 0}
@@ -266,10 +270,12 @@ def refresh_plex_section_ids(section_ids: list[int] | set[int]) -> dict[str, int
     for section_id in sorted({int(x) for x in (section_ids or [])}):
         try:
             url = f"{plex_url}/library/sections/{section_id}/refresh"
+            if force_refresh_metadata:
+                url = f"{url}?force=1"
             response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
             response.raise_for_status()
             logger.info(
-                f"Triggered full Plex section refresh: section_id={section_id}",
+                f"Triggered full Plex section refresh: section_id={section_id} force={int(force_refresh_metadata)}",
                 extra={"emoji_type": "info"},
             )
             refreshed += 1
@@ -362,7 +368,12 @@ def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict
     return {"refreshed": refreshed, "failed": failed}
 
 
-def refresh_plex_sections(has_movies: bool, has_episodes: bool) -> dict[str, int]:
+def refresh_plex_sections(
+    has_movies: bool,
+    has_episodes: bool,
+    *,
+    force_refresh_metadata: bool = False,
+) -> dict[str, int]:
     """Send a single full-section refresh per affected Plex library."""
     if not getattr(settings, "plex_enabled", False):
         return {"refreshed": 0, "failed": 0}
@@ -381,4 +392,4 @@ def refresh_plex_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
         if sid:
             section_ids.append(int(sid))
 
-    return refresh_plex_section_ids(section_ids)
+    return refresh_plex_section_ids(section_ids, force_refresh_metadata=force_refresh_metadata)

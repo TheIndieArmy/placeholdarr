@@ -370,7 +370,11 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         )
         if not pending_same_run:
             try:
-                refresh_stats = refresh_all_sections(has_movies=True, has_episodes=True)
+                refresh_stats = refresh_all_sections(
+                    has_movies=True,
+                    has_episodes=True,
+                    plex_force_metadata_refresh=True,
+                )
                 logger.info(
                     "REQUEST NFO backfill run complete; triggered one library section refresh "
                     f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
