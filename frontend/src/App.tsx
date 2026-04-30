@@ -4191,8 +4191,14 @@ function deriveIs4kFromRole(role: string) {
 }
 
 function getPlexLibraryIdNote(fieldKey: string) {
-  if (fieldKey === "PLEX_MOVIE_SECTION_ID") return "Use the Plex library ID for the placeholder movie library that points at your derived `movies` path.";
-  if (fieldKey === "PLEX_TV_SECTION_ID") return "Use the Plex library ID for the placeholder TV library that points at your derived `tv` path.";
+  const shared =
+    "For best request clarity and fewer scanner/trash cleanup issues, keep placeholders in separate Plex libraries from real media. Required when Plex is enabled.";
+  if (fieldKey === "PLEX_MOVIE_SECTION_ID") {
+    return `Use the Plex library ID for the placeholder movie library that points at your derived \`movies\` path. ${shared}`;
+  }
+  if (fieldKey === "PLEX_TV_SECTION_ID") {
+    return `Use the Plex library ID for the placeholder TV library that points at your derived \`tv\` path. ${shared}`;
+  }
   return null;
 }
 
@@ -4241,6 +4247,10 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
     }
   }
   return [];
+}
+
+function isPlexSectionIdField(fieldKey: string) {
+  return fieldKey === "PLEX_MOVIE_SECTION_ID" || fieldKey === "PLEX_TV_SECTION_ID";
 }
 
 function serializeArrInstances(instances: ArrInstanceDraft[]) {
@@ -5362,7 +5372,9 @@ function LibraryPathsForm(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
-            {field.description && <p className="ui-field-description mt-1">{field.description}</p>}
+            {field.description && !isPlexSectionIdField(field.key) ? (
+              <p className="ui-field-description mt-1">{field.description}</p>
+            ) : null}
             {getPlexLibraryIdNote(field.key) ? <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
           </div>
         </div>
@@ -5792,9 +5804,12 @@ function SettingsPanel(props: {
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
-              ) : field.description ? (
+              ) : field.description && !isPlexSectionIdField(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
+            {getPlexLibraryIdNote(field.key) ? (
+              <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p>
+            ) : null}
             {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
               <p className="ui-field-description ui-field-description-accent3 mt-2 leading-relaxed">
                 If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.

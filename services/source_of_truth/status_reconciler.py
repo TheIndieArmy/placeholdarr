@@ -286,11 +286,21 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     # (Placeholder row, entity dedupe key) for rows whose NFO was rewritten this run
     refreshed_for_player_push: list[tuple[Placeholder, tuple[str, int]]] = []
     for placeholder in placeholders:
-        if not getattr(placeholder, "has_placeholder", False):
-            continue
-
         movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
         episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+        effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
+        if movie and bool(getattr(movie, "has_placeholder", False)):
+            effective_has_placeholder = True
+        if episode and bool(getattr(episode, "has_placeholder", False)):
+            effective_has_placeholder = True
+        if effective_has_placeholder and not bool(getattr(placeholder, "has_placeholder", False)):
+            # Self-heal drift so follow-up jobs do not keep skipping valid placeholders.
+            placeholder.has_placeholder = True
+            placeholder.updated_at = datetime.now(timezone.utc)
+            session.add(placeholder)
+        if not effective_has_placeholder:
+            continue
+
         if movie and _refresh_movie_nfo(placeholder, movie):
             refreshed += 1
             refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))

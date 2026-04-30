@@ -10,7 +10,7 @@ from core.config import settings
 from core.logger import logger
 from services.postgres.db import get_session
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
-from services.postgres.models import ArrState, Episode, Movie, Season, Series
+from services.postgres.models import ArrState, Episode, Movie, Placeholder, Season, Series
 from services.source_of_truth.arr_api import (
     fetch_radarr_movies,
     fetch_sonarr_series,
@@ -410,6 +410,8 @@ def _refresh_placeholder_presence_for_entities(*, movie_row_ids: list[int], epis
         "movies_updated": 0,
         "episodes_checked": 0,
         "episodes_updated": 0,
+        "movie_placeholders_synced": 0,
+        "episode_placeholders_synced": 0,
     }
     if not movie_row_ids and not episode_row_ids:
         return stats
@@ -431,6 +433,23 @@ def _refresh_placeholder_presence_for_entities(*, movie_row_ids: list[int], epis
                     movie.updated_at = func.now()
                     session.add(movie)
                     stats["movies_updated"] += 1
+                linked_rows = session.query(Placeholder).filter(Placeholder.movie_id == int(movie.id)).all()
+                for row in linked_rows:
+                    row_changed = False
+                    if bool(getattr(row, "has_placeholder", False)) != exists:
+                        row.has_placeholder = exists
+                        row_changed = True
+                    if exists and new_path and _normalize_path(getattr(row, "path", None)) != _normalize_path(new_path):
+                        row.path = new_path
+                        row_changed = True
+                    if exists and hasattr(row, "lifecycle_status") and str(getattr(row, "lifecycle_status", "") or "").upper() == "MISSING":
+                        row.lifecycle_status = None
+                        row_changed = True
+                    if row_changed:
+                        row.last_observed_at = func.now()
+                        row.updated_at = func.now()
+                        session.add(row)
+                        stats["movie_placeholders_synced"] += 1
 
         if episode_row_ids:
             rows = (
@@ -453,6 +472,23 @@ def _refresh_placeholder_presence_for_entities(*, movie_row_ids: list[int], epis
                     episode.updated_at = func.now()
                     session.add(episode)
                     stats["episodes_updated"] += 1
+                linked_rows = session.query(Placeholder).filter(Placeholder.episode_id == int(episode.id)).all()
+                for row in linked_rows:
+                    row_changed = False
+                    if bool(getattr(row, "has_placeholder", False)) != exists:
+                        row.has_placeholder = exists
+                        row_changed = True
+                    if exists and new_path and _normalize_path(getattr(row, "path", None)) != _normalize_path(new_path):
+                        row.path = new_path
+                        row_changed = True
+                    if exists and hasattr(row, "lifecycle_status") and str(getattr(row, "lifecycle_status", "") or "").upper() == "MISSING":
+                        row.lifecycle_status = None
+                        row_changed = True
+                    if row_changed:
+                        row.last_observed_at = func.now()
+                        row.updated_at = func.now()
+                        session.add(row)
+                        stats["episode_placeholders_synced"] += 1
 
         session.commit()
         return stats
