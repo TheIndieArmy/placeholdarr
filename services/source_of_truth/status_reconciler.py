@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timezone, timedelta
+from typing import Any
 
 from core.config import settings
 from core.logger import logger
@@ -11,6 +13,7 @@ from sqlalchemy import func
 from services.postgres.db import get_session
 from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
+from services.media_servers.refresh import refresh_all_sections
 
 
 NFO_REFRESH_JOB_TYPE = "nfo_refresh"
@@ -128,6 +131,8 @@ def _enqueue_batched_placeholder_job(
     session,
     *,
     player_metadata_refresh_by_id: dict[int, bool] | None = None,
+    merge_into_pending: bool = True,
+    payload_extras: dict[str, Any] | None = None,
 ) -> dict:
     ids_remaining = _normalize_placeholder_ids(placeholder_ids)
     if not ids_remaining:
@@ -142,13 +147,15 @@ def _enqueue_batched_placeholder_job(
     created_jobs = 0
     updated_jobs = 0
 
-    pending_jobs = (
-        session.query(Job)
-        .filter(Job.job_type == job_type, Job.status == "PENDING")
-        .order_by(Job.run_after.asc().nullsfirst(), Job.id.asc())
-        .with_for_update(skip_locked=True)
-        .all()
-    )
+    pending_jobs: list[Job] = []
+    if merge_into_pending:
+        pending_jobs = (
+            session.query(Job)
+            .filter(Job.job_type == job_type, Job.status == "PENDING")
+            .order_by(Job.run_after.asc().nullsfirst(), Job.id.asc())
+            .with_for_update(skip_locked=True)
+            .all()
+        )
 
     for job in pending_jobs:
         if not ids_remaining:
@@ -177,6 +184,8 @@ def _enqueue_batched_placeholder_job(
         _set_job_placeholder_ids(job, existing_ids + additions)
         payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
         payload["player_metadata_refresh"] = merged_flag
+        if payload_extras:
+            payload.update(payload_extras)
         job.payload = payload
         job.updated_at = now
         session.add(job)
@@ -191,7 +200,11 @@ def _enqueue_batched_placeholder_job(
         chunk_player_flag = _placeholder_player_merge_flag(chunk, player_metadata_refresh_by_id)
         job = Job(
             job_type=job_type,
-            payload={"placeholder_ids": chunk, "player_metadata_refresh": chunk_player_flag},
+            payload={
+                "placeholder_ids": chunk,
+                "player_metadata_refresh": chunk_player_flag,
+                **(payload_extras or {}),
+            },
             status="PENDING",
             run_after=run_after,
         )
@@ -310,6 +323,8 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
 
     do_player = _job_player_metadata_refresh(job)
+    run_id = str(payload.get("request_backfill_run_id") or "").strip()
+    completion_refresh = bool(payload.get("request_backfill_refresh_on_completion"))
     subject = _nfo_refresh_subject_summary(session, placeholders)
     subj_part = f" · {subject}" if subject else ""
     logger.debug(
@@ -342,6 +357,31 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                 f"Player metadata refresh after NFO failed for placeholder batch size={len(unique_for_projection)}: {ex}",
                 extra={"emoji_type": "warning"},
             )
+    elif completion_refresh and run_id:
+        pending_same_run = (
+            session.query(Job.id)
+            .filter(
+                Job.job_type == NFO_REFRESH_JOB_TYPE,
+                Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
+                Job.id != job.id,
+                Job.payload["request_backfill_run_id"].astext == run_id,
+            )
+            .first()
+        )
+        if not pending_same_run:
+            try:
+                refresh_stats = refresh_all_sections(has_movies=True, has_episodes=True)
+                logger.info(
+                    "REQUEST NFO backfill run complete; triggered one library section refresh "
+                    f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
+                    f"failed={int(refresh_stats.get('failed', 0) or 0)}",
+                    extra={"emoji_type": "success"},
+                )
+            except Exception as ex:
+                logger.warning(
+                    f"REQUEST NFO backfill completion refresh failed run_id={run_id}: {ex}",
+                    extra={"emoji_type": "warning"},
+                )
 
     return {
         "ok": True,
@@ -357,6 +397,8 @@ def enqueue_nfo_refresh(
     session=None,
     *,
     player_metadata_refresh: dict[int, bool] | None = None,
+    merge_into_pending: bool = True,
+    payload_extras: dict[str, Any] | None = None,
 ) -> dict:
     """Enqueue a durable NFO refresh job for placeholders whose projected status changed."""
     owns_session = session is None
@@ -372,6 +414,8 @@ def enqueue_nfo_refresh(
             normalized_ids,
             session,
             player_metadata_refresh_by_id=player_metadata_refresh,
+            merge_into_pending=merge_into_pending,
+            payload_extras=payload_extras,
         )
     except Exception as e:
         logger.error(f"Failed to enqueue NFO refresh job: {e}", exc_info=True)
@@ -423,7 +467,17 @@ def enqueue_request_status_nfo_backfill(session=None) -> dict:
                 "done": False,
             }
 
-        out = enqueue_nfo_refresh(ids, session=session, player_metadata_refresh=None)
+        run_id = uuid.uuid4().hex
+        out = enqueue_nfo_refresh(
+            ids,
+            session=session,
+            player_metadata_refresh={int(pid): False for pid in ids},
+            merge_into_pending=False,
+            payload_extras={
+                "request_backfill_run_id": run_id,
+                "request_backfill_refresh_on_completion": True,
+            },
+        )
         if not isinstance(out, dict) or not out.get("ok"):
             return out if isinstance(out, dict) else {"ok": False, "reason": "enqueue_return"}
 
