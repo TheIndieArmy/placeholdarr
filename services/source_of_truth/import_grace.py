@@ -312,8 +312,9 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             )
             if ctx:
                 ep, season, series = ctx
-                sn = int(season.season_number)
-                ep_label = f"S{sn:02d}E{int(ep.episode_number):02d} - {ep.title}"
+                sn = int(season.season_number or 0)
+                en = int(ep.episode_number or 0)
+                ep_label = f"S{sn:02d}E{en:02d} - {ep.title}"
                 result_path = str(getattr(ep, "placeholder_filepath", "") or "").strip() or episode_placeholder_path(
                     ep, season, series
                 )

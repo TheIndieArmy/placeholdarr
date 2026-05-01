@@ -49,8 +49,8 @@ def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> st
             .all()
         )
         for ep, season, series in rows:
-            sn = int(season.season_number)
-            en = int(ep.episode_number)
+            sn = int(season.season_number or 0)
+            en = int(ep.episode_number or 0)
             st = str(getattr(series, "title", "") or "").strip() or "Series"
             et = str(getattr(ep, "title", "") or "").strip()
             base = f"{st} S{sn:02d}E{en:02d}"

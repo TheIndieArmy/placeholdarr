@@ -15,8 +15,10 @@ from services.postgres.models import (
     Job,
     Movie,
     Placeholder,
+    Season,
     Series,
 )
+from services.library_future_semantics import sql_episode_future_outside_lookahead, sql_movie_future_outside_lookahead
 
 _hooks_registered = False
 _DIRTY_KEY = "dashboard_stats_snapshot_dirty"
@@ -37,9 +39,7 @@ def build_dashboard_stats_payload(session: Session, *, include_internal: bool = 
     ).scalar() or 0
     movies_future_outside_lookahead = session.query(func.count(Movie.id)).filter(
         Movie.is_deleted == False,
-        func.coalesce(Movie.has_file, False) == False,
-        func.coalesce(Movie.has_placeholder, False) == False,
-        Movie.determination == "not_needed",
+        sql_movie_future_outside_lookahead(Movie),
     ).scalar() or 0
 
     total_series = session.query(func.count(Series.id)).filter(Series.is_deleted == False).scalar() or 0
@@ -51,12 +51,17 @@ def build_dashboard_stats_payload(session: Session, *, include_internal: bool = 
     episodes_with_file = session.query(func.count(Episode.id)).filter(
         Episode.is_deleted == False, Episode.has_file == True
     ).scalar() or 0
-    episodes_future_outside_lookahead = session.query(func.count(Episode.id)).filter(
-        Episode.is_deleted == False,
-        func.coalesce(Episode.has_file, False) == False,
-        func.coalesce(Episode.has_placeholder, False) == False,
-        Episode.determination == "not_needed",
-    ).scalar() or 0
+    episodes_future_outside_lookahead = (
+        session.query(func.count(Episode.id))
+        .select_from(Episode)
+        .join(Season, Episode.season_id == Season.id)
+        .filter(
+            Episode.is_deleted == False,
+            sql_episode_future_outside_lookahead(Episode, Season),
+        )
+        .scalar()
+        or 0
+    )
 
     placeholders_on_disk = session.query(func.count(Placeholder.id)).filter(
         Placeholder.has_placeholder == True

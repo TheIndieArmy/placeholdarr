@@ -38,6 +38,7 @@ from services.postgres.models import (
     Job,
     EventLog,
 )
+from services.library_future_semantics import movie_row_is_future_outside_lookahead, sql_episode_future_outside_lookahead
 from services.source_of_truth.status_intent import StatusSource
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
@@ -2512,11 +2513,7 @@ def _episode_stats_for_series(session, series_id: int) -> dict[str, int]:
             func.sum(
                 case(
                     (
-                        and_(
-                            func.coalesce(Episode.has_file, False) == False,
-                            func.coalesce(Episode.has_placeholder, False) == False,
-                            Episode.determination == "not_needed",
-                        ),
+                        sql_episode_future_outside_lookahead(Episode, Season),
                         1,
                     ),
                     else_=0,
@@ -2702,11 +2699,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
                 func.sum(
                     case(
                         (
-                            and_(
-                                func.coalesce(Episode.has_file, False) == False,
-                                func.coalesce(Episode.has_placeholder, False) == False,
-                                Episode.determination == "not_needed",
-                            ),
+                            sql_episode_future_outside_lookahead(Episode, Season),
                             1,
                         ),
                         else_=0,
@@ -2743,7 +2736,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
         for movie in movies:
             instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
             movie_unresolved = (not bool(movie.has_file)) and (not bool(movie.has_placeholder))
-            movie_is_future = movie_unresolved and movie.determination == "not_needed"
+            movie_is_future = movie_unresolved and movie_row_is_future_outside_lookahead(movie)
             movie_has_missing = movie_unresolved and not movie_is_future
             arr_link = _arr_item_link(
                 item_type="movie",

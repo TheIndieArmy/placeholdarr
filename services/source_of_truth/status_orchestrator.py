@@ -642,6 +642,8 @@ class StatusOrchestrator:
             for intent in intents:
                 if not intent.trigger_nfo_refresh:
                     continue
+                if intent.placeholder_id is None:
+                    continue
                 pid = int(intent.placeholder_id)
                 want = intent.wants_player_metadata_refresh_after_nfo()
                 player_refresh[pid] = player_refresh.get(pid, False) or want

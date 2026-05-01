@@ -525,14 +525,17 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
     if not movie_id:
         raise ValueError("movieimport_missing_movie_id")
 
-    inferred_is_4k = _infer_is_4k_from_instance(instance)
-    resolved_instance_key = _resolve_instance_key('movie', instance, inferred_is_4k)
+    # Match process_movie_add_event: same ARR context + instance_key as upsert path.
+    ctx = _resolve_arr_context("movie", instance=instance)
+    inferred_is_4k = bool(ctx["is_4k"])
+    resolved_instance_key = str(ctx["instance_key"])
+    base_url, api_key = str(ctx["base_url"]), str(ctx["api_key"])
     movie_file = payload.get("movieFile", {}) if isinstance(payload.get("movieFile"), dict) else {}
     file_path = movie_file.get("path") if movie_file else None
 
     session = get_session()
     try:
-        # Strict match: radarrid + is_4k
+        # Strict match: radarrid + instance_key
         movie_row = session.query(Movie).filter(
             Movie.radarrid == movie_id,
             Movie.instance_key == resolved_instance_key,
@@ -543,6 +546,19 @@ def process_movie_imported_event(payload: dict[str, Any], instance: str | None =
             movie_row = session.query(Movie).filter(
                 Movie.radarrid == movie_id
             ).first()
+
+        # Self-heal: if MovieAdded failed or was skipped, ingest from Radarr like movie add.
+        if not movie_row and base_url and api_key:
+            movie_entry = fetch_radarr_movie(movie_id, base_url, api_key)
+            if not isinstance(movie_entry, dict):
+                movie_entry = payload.get("movie") if isinstance(payload.get("movie"), dict) else None
+            if isinstance(movie_entry, dict):
+                fields = _movie_fields(movie_entry, inferred_is_4k, resolved_instance_key)
+                if fields.get("tmdbid"):
+                    movie_row, _, _ = _upsert_movie(session, fields)
+                    movie_row.last_found_in_radarr = datetime.now(timezone.utc)
+                    session.add(movie_row)
+                    session.flush()
 
         if not movie_row:
             raise ValueError(f"movieimport_not_found:radarrid={movie_id}")
@@ -712,7 +728,9 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
                     f"({active_n} received countdown status)."
                 )
                 status_label = "Grace Scheduled"
-            ep_label = f"S{int(season.season_number):02d}E{int(ep.episode_number):02d} - {ep.title}"
+            sn = int(season.season_number or 0)
+            en = int(ep.episode_number or 0)
+            ep_label = f"S{sn:02d}E{en:02d} - {ep.title}"
             result_path = (
                 str(getattr(ep, "placeholder_filepath", "") or "").strip()
                 or episode_placeholder_path(ep, season, series)
@@ -724,7 +742,7 @@ def process_episode_imported_event(payload: dict[str, Any], instance: str | None
                 episode_id=eid,
                 series_id=int(series.id),
                 season_id=int(season.id),
-                season_number=int(season.season_number),
+                season_number=sn,
                 instance_key=getattr(series, "instance_key", None),
                 instance_id=getattr(series, "instance_id", None),
                 event_type="placeholder_event_episode_import_result",
@@ -1099,8 +1117,9 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
         if ctx:
             ep, season, series = ctx
             season_id_val = int(season.id)
-            season_num_val = int(season.season_number)
-            item_title = f"S{season_num_val:02d}E{int(ep.episode_number):02d} - {ep.title}"
+            season_num_val = int(season.season_number or 0)
+            en = int(ep.episode_number or 0)
+            item_title = f"S{season_num_val:02d}E{en:02d} - {ep.title}"
             if n_eps > 1:
                 item_title = f"{n_eps} episodes (first: {item_title})"
             path_val = str(getattr(ep, "placeholder_filepath", "") or "").strip() or episode_placeholder_path(ep, season, series)
