@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     LOG_DIR: str = os.getenv("LOG_DIR", "").split('#')[0].strip()
     LOG_FILE: str = os.getenv("LOG_FILE", "").split('#')[0].strip()
     LOG_MAX_RUN_FILES: int = int(os.getenv("LOG_MAX_RUN_FILES", "10").split('#')[0].strip())
+    # Stall / liveness ticks (VERBOSE). Interval only; does not promote them to INFO.
+    STALL_HEARTBEAT_INTERVAL_SEC: float = float(os.getenv("STALL_HEARTBEAT_INTERVAL_SEC", "10").split('#')[0].strip())
     WORKER_COUNT: int = 4
 
     # Plex
@@ -296,6 +298,38 @@ class Settings(BaseSettings):
     REFRESH_TRIGGER_SUPPRESSED: bool = False
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.
+
+    # LISTEN/NOTIFY feature flags. Each phase can be turned off with USE_*=false in the environment
+    # for rollback testing. Defaults run the full job-queue + NOTIFY stack.
+    # NOTIFY workers wake on Postgres NOTIFY (with safety polling); legacy mode uses interval polling only.
+    USE_NOTIFY_WORKER_LOOP: bool = os.getenv("USE_NOTIFY_WORKER_LOOP", "true").split('#')[0].strip().lower() == "true"
+    USE_JOB_DRIVEN_REFRESH: bool = os.getenv("USE_JOB_DRIVEN_REFRESH", "true").split('#')[0].strip().lower() == "true"
+    USE_JOB_DRIVEN_STARTUP_SYNC: bool = os.getenv("USE_JOB_DRIVEN_STARTUP_SYNC", "true").split('#')[0].strip().lower() == "true"
+    USE_NOTIFY_QUEUE_MONITOR: bool = os.getenv("USE_NOTIFY_QUEUE_MONITOR", "true").split('#')[0].strip().lower() == "true"
+    # Safety wake when using NOTIFY-driven queue monitor (missed NOTIFY recovery).
+    QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS: int = int(
+        os.getenv("QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS", "300").split('#')[0].strip() or "300"
+    )
+
+    # Worker NOTIFY-driven loop tuning. Safety poll is the maximum interval an
+    # executor sleeps between drain attempts when no NOTIFY arrives; it acts as
+    # a backstop against missed wakes. Stale-CLAIMED reaper requeues jobs that
+    # have been CLAIMED for too long (worker crashed mid-handler).
+    WORKER_SAFETY_POLL_SECONDS: int = int(
+        os.getenv("WORKER_SAFETY_POLL_SECONDS", "60").split('#')[0].strip() or "60"
+    )
+    WORKER_STALE_CLAIMED_RESET_SECONDS: int = int(
+        os.getenv("WORKER_STALE_CLAIMED_RESET_SECONDS", "1800").split('#')[0].strip() or "1800"
+    )
+    WORKER_STALE_CLAIMED_REAP_INTERVAL_SECONDS: int = int(
+        os.getenv("WORKER_STALE_CLAIMED_REAP_INTERVAL_SECONDS", "300").split('#')[0].strip() or "300"
+    )
+    # Per-job watchdog (FM-6): logs an ERROR if a handler runs longer than this.
+    # The thread is not killed; this is an observability hook so operators see
+    # hung handlers before the reaper requeues them.
+    JOB_HANDLER_TIMEOUT_SECONDS: int = int(
+        os.getenv("JOB_HANDLER_TIMEOUT_SECONDS", "600").split('#')[0].strip() or "600"
+    )
 
     # Add a method to clean string values
     @validator('*', pre=True)

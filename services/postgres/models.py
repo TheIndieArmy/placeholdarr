@@ -5,6 +5,8 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
 from datetime import datetime, timezone
 
+from core.config import settings
+
 
 def utcnow():
     """Return a timezone-aware UTC datetime for SQLAlchemy defaults."""
@@ -97,10 +99,20 @@ class Movie(Base):
 
     @hybrid_property
     def is_4k(self) -> bool:
-        """Compatibility shim derived from instance identity (no dedicated DB column)."""
+        """True when this row's Radarr instance is configured as the 4K/secondary library.
+
+        Uses ``ARR_INSTANCES_JSON`` (``is_4k`` on the matching ``instance_key``), not substring
+        heuristics — keys named ``4k`` still follow config (they may point at primary Radarr).
+        """
         key = str(getattr(self, 'instance_key', '') or '').strip().lower()
+        if not key:
+            return False
+        item = settings.resolve_arr_instance("radarr", instance_key=key)
+        if item is not None:
+            return bool(item.get("is_4k", False))
+        # Legacy rows / unknown keys: keep old heuristics
         instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
-        return ('4k' in key) or key.endswith('_secondary') or instance_id.endswith(':secondary')
+        return ("4k" in key) or key.endswith("_secondary") or instance_id.endswith(":secondary")
 
     def __repr__(self):
         return (
@@ -168,6 +180,10 @@ class Placeholder(Base):
     # canonical determination mirrored from decider
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # When True, the queue-monitor producer should actively poll ARR /queue for this
+    # placeholder (playback-initiated search flow). Cleared on terminal status.
+    queue_monitor_active = Column(Boolean, default=False, server_default=text('false'))
+    queue_monitor_active_set_at = Column(DateTime(timezone=True), nullable=True)
     # (placeholder) last-observed timestamp for the placeholder row
 
     def __repr__(self):
@@ -270,6 +286,9 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
     error_message = Column(String, nullable=True)
+    # Set when status=CLAIMED; cleared when PENDING/DONE/FAILED. Prevents a stale handler from
+    # committing after the stale-CLAIMED reaper requeues the job (NOTIFY worker parity).
+    claim_token = Column(String(36), nullable=True)
 
     __table_args__ = (
         # index to speed up claiming
@@ -432,10 +451,15 @@ class Series(Base):
 
     @hybrid_property
     def is_4k(self) -> bool:
-        """Compatibility shim derived from instance identity (no dedicated DB column)."""
+        """True when this row's Sonarr instance is configured as the 4K/secondary library."""
         key = str(getattr(self, 'instance_key', '') or '').strip().lower()
+        if not key:
+            return False
+        item = settings.resolve_arr_instance("sonarr", instance_key=key)
+        if item is not None:
+            return bool(item.get("is_4k", False))
         instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
-        return ('4k' in key) or key.endswith('_secondary') or instance_id.endswith(':secondary')
+        return ("4k" in key) or key.endswith("_secondary") or instance_id.endswith(":secondary")
 
     def __repr__(self):
         return (

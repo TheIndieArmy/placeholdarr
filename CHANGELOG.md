@@ -7,6 +7,17 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+
+- **Postgres LISTEN/NOTIFY infrastructure (phased rollout)**
+  - Dedicated `Notifier` service (`services/postgres/notifier.py`) with reconnect/backoff; triggers on `job` emit `NOTIFY placeholdarr_jobs` on insert and on update of `status`/`run_after`.
+  - Optional **NOTIFY-driven worker loop** (`USE_NOTIFY_WORKER_LOOP`, **default off**): listener + executor workers, 60s safety poll, min(`run_after`) aware wait, and a periodic stale-`CLAIMED` reaper. Set to `true` in the environment to enable NOTIFY wake; otherwise the legacy **2s poll loop** runs (recommended until NOTIFY hardening is validated).
+  - **`DisplayStatus.SEARCH_QUEUED`**: playback webhooks during the startup gate set a user-friendly “Search queued” status immediately; normal processing continues after the gate opens.
+  - **`media_refresh` jobs** (`USE_JOB_DRIVEN_REFRESH`, default on): materializer `threading.Timer` refresh call sites can enqueue durable jobs with the same delays. Set to `false` to use Timers only.
+  - **`startup_sync_runner` jobs** (`USE_JOB_DRIVEN_STARTUP_SYNC`, default on): dashboard-triggered post-onboarding sync and ARR endpoint-change full sync can run via the job queue with an advisory lock; app lifespan startup sync stays on a daemon thread to avoid a startup gate deadlock. Set to `false` for thread-only launchers.
+  - **Playback-scoped queue monitor** (`USE_NOTIFY_QUEUE_MONITOR`, default on): `placeholder.queue_monitor_active` (+ partial index), set after playback-initiated ARR search, NOTIFY `placeholdarr_queue_monitor_signal`, NOTIFY-driven idle loop with configurable safety poll (`QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS`). Set to `false` for the previous always-poll behavior.
+  - **30-minute startup gate watchdog** in lifespan so workers cannot stay blocked forever if startup sync stalls.
+
 ### Changed
 
 - **Radarr/Sonarr webhooks**: `Grab` is recognized as informational (`movie_grab` / `episode_grab`) and skipped without warnings; `movie_imported` uses the same ARR instance resolution as `movie_added` and can **self-heal** by upserting from the Radarr API when the DB row is missing (e.g. after a failed `MovieAdded` job).
@@ -25,6 +36,11 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Fixed
 
+- **Worker queue reliability (polling default + claim lease)**
+  - `USE_NOTIFY_WORKER_LOOP` defaults to **off** so production uses the proven **polling** executor; set `USE_NOTIFY_WORKER_LOOP=true` to re-enable NOTIFY wake.
+  - Each job **claim** assigns a `claim_token`; **`DONE` / failure transitions** use conditional `UPDATE`s so a **stale-CLAIMED reaper** reset cannot be overwritten by a late commit from a still-running handler (`StaleJobClaimError` rolls back that commit).
+  - Stale reaper `UPDATE` clears `claim_token` and still **`RETURNING id`** + **`_drain_event.set()`** to wake workers immediately.
+- **Plex projection**: skip expensive `find_movie_by_id` when the **expected placeholder media file is missing on disk** (avoids long library scans when the asset was deleted or never materialized).
 - **`movie_added` webhook crash on first-time movie ingest (`int(None)`)**
   - New `Movie` rows from `_upsert_movie` had no database primary key until a later `flush`, but `process_movie_add_event` called `_sync_linked_placeholder_presence(..., movie_id=int(movie_row.id), ...)` first — so brand-new titles (no prior DB row) raised `TypeError` and left `movie_imported` follow-ups without a catalog row.
   - `_upsert_movie` and `_upsert_episode` now `flush()` immediately after inserting a new row (aligned with `_upsert_series` / `_upsert_season`) so `.id` is valid before any code reads it.

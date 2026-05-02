@@ -546,6 +546,17 @@ class StatusOrchestrator:
                 ph.display_progress = None
             ph.updated_at = datetime.now(timezone.utc)
 
+            if getattr(ph, "queue_monitor_active", None):
+                terminal_clear = {
+                    DisplayStatus.AVAILABLE.value,
+                    DisplayStatus.NOT_FOUND.value,
+                    DisplayStatus.DELETED.value,
+                    DisplayStatus.ARCHIVED.value,
+                }
+                if str(intent.new_status or "").strip().upper() in terminal_clear:
+                    ph.queue_monitor_active = False
+                    ph.queue_monitor_active_set_at = None
+
             old_status_text = str(old_status or "")
             new_status_text = str(intent.new_status or "")
             source_text = str(intent.source.value)
@@ -579,7 +590,7 @@ class StatusOrchestrator:
             
             session.commit()
             
-            logger.info(
+            logger.debug(
                 f"Applied status intent: Placeholder[{intent.placeholder_id}] "
                 f"{old_status!r} -> {intent.new_status!r} "
                 f"(source={intent.source.value}, reason={intent.reason!r})"

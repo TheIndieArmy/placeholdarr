@@ -272,6 +272,86 @@ def init_db(engine=None, convert_ts: bool | None = None):
     created_tables = inspector.get_table_names()
     logger.info(f"Tables AFTER create_all(): {created_tables}", extra={'emoji_type': 'info'})
 
+    # Ensure NOTIFY triggers are installed on the job table so worker listeners
+    # are woken on every Job INSERT/UPDATE-to-PENDING. Idempotent (CREATE OR
+    # REPLACE / DROP IF EXISTS + CREATE). Safe to run on every startup.
+    try:
+        _ensure_job_notify_trigger(engine)
+    except Exception as ex:
+        logger.error(
+            f"Failed to ensure job NOTIFY trigger: {ex}",
+            extra={'emoji_type': 'error'},
+        )
+
+    try:
+        _ensure_placeholder_queue_monitor_index(engine)
+    except Exception as ex:
+        logger.debug(
+            f"Could not ensure placeholder queue_monitor_active partial index: {ex}",
+            extra={'emoji_type': 'debug'},
+        )
+
+
+def _ensure_placeholder_queue_monitor_index(engine):
+    """Partial index for playback-flagged placeholders tracked by the queue monitor."""
+    idx_sql = text(
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_placeholder_queue_monitor_active "
+        "ON placeholder (queue_monitor_active) WHERE queue_monitor_active = TRUE"
+    )
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+        conn.execute(idx_sql)
+
+
+def _ensure_job_notify_trigger(engine):
+    """Install Postgres triggers that emit NOTIFY 'placeholdarr_jobs' on job changes.
+
+    Statement-level (FOR EACH STATEMENT) so a multi-row INSERT or UPDATE produces
+    one NOTIFY rather than N. The listener drains all PENDING work on each wake,
+    so one wake-per-statement is enough.
+
+    Channel name is hard-coded to match `services.postgres.notifier.JOBS_CHANNEL`.
+    """
+    fn_sql = text(
+        """
+        CREATE OR REPLACE FUNCTION notify_jobs_change() RETURNS trigger AS $$
+        BEGIN
+            PERFORM pg_notify('placeholdarr_jobs', '');
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    drop_insert_sql = text("DROP TRIGGER IF EXISTS job_notify_insert ON job")
+    drop_update_sql = text("DROP TRIGGER IF EXISTS job_notify_update ON job")
+    create_insert_sql = text(
+        """
+        CREATE TRIGGER job_notify_insert
+        AFTER INSERT ON job
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION notify_jobs_change()
+        """
+    )
+    create_update_sql = text(
+        """
+        CREATE TRIGGER job_notify_update
+        AFTER UPDATE OF status, run_after ON job
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION notify_jobs_change()
+        """
+    )
+    with engine.connect() as conn:
+        conn.execute(fn_sql)
+        conn.execute(drop_insert_sql)
+        conn.execute(drop_update_sql)
+        conn.execute(create_insert_sql)
+        conn.execute(create_update_sql)
+        conn.commit()
+    logger.info(
+        "Installed NOTIFY triggers on job table (channel='placeholdarr_jobs')",
+        extra={'emoji_type': 'success'},
+    )
+
 
 def _migrate_instance_key_constraints(engine):
     """Drop legacy single-column unique constraints on tmdbid/tvdbid, backfill instance_key,

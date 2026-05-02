@@ -90,6 +90,18 @@ def start_runtime_background_services(reason: str = 'startup') -> bool:
             )
             return False
 
+        # Start the shared Postgres LISTEN/NOTIFY listener BEFORE workers so
+        # any registered channel callbacks (worker drain, queue-monitor wake)
+        # are wired up the moment the consumers attach to it.
+        try:
+            from services.postgres.notifier import start_shared_notifier
+            start_shared_notifier()
+        except Exception as e:
+            logger.error(
+                f'Failed to start shared notifier (NOTIFY/LISTEN); falling back to safety-poll mode: {e}',
+                extra={'emoji_type': 'error'},
+            )
+
         # --- Schedule all Radarr/Sonarr syncs (startup and cron) ---
         schedule_all_syncs()
 
@@ -314,11 +326,50 @@ async def lifespan(app: FastAPI):
         finally:
             session.close()
 
-        start_runtime_background_services(reason='lifespan_onboarding_complete')
+        # Start workers / notifier / queue monitor on a background thread so this lifespan
+        # can reach ``yield`` immediately. If anything in that chain blocks (locks, scheduler,
+        # DB), Uvicorn would otherwise never finish "application startup" and the UI/API would
+        # not accept connections — even though DB init already succeeded.
+        def _bootstrap_runtime_services():
+            try:
+                logger.info(
+                    "Runtime bootstrap thread: starting workers, notifier, schedulers, queue monitor…",
+                    extra={"emoji_type": "gear"},
+                )
+                start_runtime_background_services(reason="lifespan_onboarding_complete")
+                logger.info("Runtime bootstrap thread: finished (workers should be running).", extra={"emoji_type": "success"})
+            except Exception as exc:
+                logger.error(
+                    f"Runtime bootstrap thread failed (API is up but background jobs may be broken): {exc}",
+                    exc_info=True,
+                    extra={"emoji_type": "error"},
+                )
+
+        threading.Thread(
+            target=_bootstrap_runtime_services,
+            name="runtime-services-bootstrap",
+            daemon=True,
+        ).start()
+
+        async def _startup_gate_watchdog():
+            """FM-21: never leave workers wedged behind the gate if sync never finishes."""
+            await asyncio.sleep(1800)
+            if not startup_sync_complete.is_set():
+                startup_sync_complete.set()
+                logger.warning(
+                    'Startup sync watchdog fired after 30 minutes — forcing startup_sync_complete open '
+                    '(sync may not have completed).',
+                    extra={'emoji_type': 'warning'},
+                )
+
+        asyncio.create_task(_startup_gate_watchdog())
 
         # Execute startup source-of-truth orchestration in a background thread so
         # Uvicorn can start accepting webhook events immediately. Workers wait on
         # startup_sync_complete before processing any jobs.
+        #
+        # This must remain a thread (not a Job): workers are blocked on the gate
+        # until this finishes, so a startup_sync_runner Job would deadlock.
         def _run_startup_sync():
             try:
                 from services.source_of_truth.startup import run_startup_source_of_truth
@@ -381,8 +432,9 @@ async def lifespan(app: FastAPI):
     else:
         logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})
 
-    # Webhook Check Loop
-    import asyncio
+    # Webhook Check Loop (asyncio is imported at module level — do not re-import here:
+    # a nested ``import asyncio`` would shadow the module name for all of ``lifespan``
+    # and break earlier ``asyncio.create_task`` calls with UnboundLocalError.)
     # Use the new integrations checker if available; do not fall back to archived code
     try:
         from services.integrations import check_all_arr_webhooks
@@ -414,12 +466,30 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(arr_webhook_check_loop())
     else:
         logger.debug('No webhook checker available (services_old.integrations missing); skipping arr webhook loop', extra={'emoji_type': 'debug'})
+    logger.info(
+        'Lifespan startup complete — HTTP and /api routes are ready. '
+        '(Worker threads may still log "holding: waiting for startup sync" until the background sync thread finishes; '
+        'that does not block the dashboard.)',
+        extra={'emoji_type': 'success'},
+    )
     yield
 
     try:
         stop_queue_monitor_producer()
     except Exception as e:
         logger.warning(f'Failed to stop queue monitor producer cleanly: {e}', extra={'emoji_type': 'warning'})
+
+    try:
+        from services.worker import stop_worker_runtime
+        stop_worker_runtime()
+    except Exception as e:
+        logger.warning(f'Failed to stop worker runtime cleanly: {e}', extra={'emoji_type': 'warning'})
+
+    try:
+        from services.postgres.notifier import stop_shared_notifier
+        stop_shared_notifier()
+    except Exception as e:
+        logger.warning(f'Failed to stop shared notifier cleanly: {e}', extra={'emoji_type': 'warning'})
 
 app = FastAPI(lifespan=lifespan)
 

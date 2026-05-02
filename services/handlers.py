@@ -197,6 +197,28 @@ def validate_webhook_payload(
     return True, None, event_type, event_meta
 
 
+def _apply_gated_playback_search_queued(session, payload: Dict[str, Any]) -> int:
+    """When a playback_start arrives while the startup-sync gate is closed, set a
+    visible "Search queued" status on matching placeholders so users get immediate
+    feedback. Returns intents applied (0 if no matches or anything fails).
+
+    Best-effort: any exception is swallowed (logged at debug); the webhook itself
+    is still accepted and queued for processing once the gate opens.
+    """
+    try:
+        from services.startup_gate import startup_sync_complete
+        if startup_sync_complete.is_set():
+            return 0
+        from services.source_of_truth.event_playback import apply_search_queued_for_playback
+        return int(apply_search_queued_for_playback(session, payload))
+    except Exception as exc:
+        logger.debug(
+            f"Failed to apply gated SEARCH_QUEUED status: {exc}",
+            extra={'emoji_type': 'debug'},
+        )
+        return 0
+
+
 def handle_webhook(
     payload: Dict[str, Any],
     instance: str | None = None,
@@ -240,12 +262,28 @@ def handle_webhook(
         session.add(event)
         session.flush()
         _enqueue_event_job(session, event.id, event_type)
+
+        # If this is a playback_start event arriving while the startup-sync gate
+        # is closed, set an immediate "Search queued" status on matching
+        # placeholders so the user gets visible feedback right away. The worker
+        # will eventually process the queued Job and transition through the
+        # normal SEARCHING -> DOWNLOADING -> ... lifecycle once the gate opens.
+        gated_intents_applied = 0
+        if event_type == 'playback_start' and isinstance(payload, dict):
+            gated_intents_applied = _apply_gated_playback_search_queued(session, payload)
+
         session.commit()
         logger.info(
-            f'Accepted webhook event {event_type} as event_log_id={event.id} instance={instance} payload={_payload_preview(payload_to_store)}',
+            f'Accepted webhook event {event_type} as event_log_id={event.id} instance={instance} '
+            f'gated_search_queued={gated_intents_applied} payload={_payload_preview(payload_to_store)}',
             extra={'emoji_type': 'info'},
         )
-        return {'status': 'accepted', 'event_log_id': event.id, 'event_type': event_type}
+        return {
+            'status': 'accepted',
+            'event_log_id': event.id,
+            'event_type': event_type,
+            'gated_search_queued_intents': int(gated_intents_applied),
+        }
     except Exception as e:
         session.rollback()
         logger.error(f'Failed to persist webhook event: {e}', extra={'emoji_type': 'error'})

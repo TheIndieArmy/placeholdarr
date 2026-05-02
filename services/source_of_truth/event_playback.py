@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text
 
 from core.config import settings
 from core.logger import logger
@@ -1036,6 +1036,31 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
     return targets, metadata
 
 
+def _activate_queue_monitor_after_playback_search(
+    session,
+    intents: list[StatusIntent],
+    *,
+    search_triggered: bool,
+) -> None:
+    """Mark placeholders for NOTIFY-driven queue monitoring after a playback ARR search."""
+    if not search_triggered or not intents:
+        return
+    now = datetime.now(timezone.utc)
+    for intent in intents:
+        ph = session.query(Placeholder).filter(Placeholder.id == int(intent.placeholder_id)).first()
+        if ph:
+            ph.queue_monitor_active = True
+            ph.queue_monitor_active_set_at = now
+            session.add(ph)
+    try:
+        session.execute(text("NOTIFY placeholdarr_queue_monitor_signal, ''"))
+    except Exception as exc:
+        logger.debug(
+            f"NOTIFY placeholdarr_queue_monitor_signal failed (non-fatal): {exc}",
+            extra={"emoji_type": "debug"},
+        )
+
+
 def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row: Movie | None = None) -> list[StatusIntent]:
     intents: list[StatusIntent] = []
     rows: list[Placeholder] = []
@@ -1098,6 +1123,8 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
     intents = _placeholder_intents_for_targets(session, [], movie_row=movie_row)
     if intents:
         StatusOrchestrator(session=session).apply_and_project_statuses(intents)
+
+    _activate_queue_monitor_after_playback_search(session, intents, search_triggered=bool(search_triggered))
 
     return {
         'ok': True,
@@ -1173,6 +1200,8 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     intents = _placeholder_intents_for_targets(session, targets)
     if intents:
         StatusOrchestrator(session=session).apply_and_project_statuses(intents)
+
+    _activate_queue_monitor_after_playback_search(session, intents, search_triggered=bool(search_triggered))
 
     return {
         'ok': True,
@@ -1477,3 +1506,108 @@ def process_playback_start_event(payload: dict[str, Any], instance: str | None =
         raise
     finally:
         session.close()
+
+
+def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
+    """Apply DisplayStatus.SEARCH_QUEUED to placeholder(s) matching a playback payload.
+
+    Used by the webhook receiver when a playback_start event arrives while the
+    startup-sync gate is closed. Provides immediate UI feedback ("Search queued")
+    so the user knows their playback request was received and will be processed
+    once prerequisites finish.
+
+    Returns: number of intents successfully applied (0 if no matching placeholders).
+
+    Caller is responsible for owning the transaction. We DO NOT commit here.
+    """
+    try:
+        context = _resolve_playback_context(session, payload)
+    except Exception as exc:
+        logger.debug(
+            f"apply_search_queued_for_playback: context resolution failed: {exc}",
+            extra={'emoji_type': 'debug'},
+        )
+        return 0
+
+    media_type = str(context.get('media_type') or 'unknown')
+
+    intents: list[StatusIntent] = []
+
+    if media_type == 'movie':
+        movie_rows = _find_movie_rows(
+            session,
+            tmdb_id=context.get('tmdb_id'),
+            imdb_id=context.get('imdb_id'),
+            file_path=context.get('file_path'),
+        )
+        active_rows = _active_rows_by_instance(movie_rows)
+        for row in active_rows.values():
+            ph_rows = (
+                session.query(Placeholder)
+                .filter(
+                    Placeholder.movie_id == row.id,
+                    Placeholder.has_placeholder == True,  # noqa: E712
+                )
+                .all()
+            )
+            for ph in ph_rows:
+                intents.append(
+                    StatusIntent(
+                        placeholder_id=int(ph.id),
+                        new_status=DisplayStatus.SEARCH_QUEUED.value,
+                        reason='search_queued',
+                        source=StatusSource.EVENT_PLAYBACK_STARTED,
+                        trigger_nfo_refresh=True,
+                        metadata={'gated_playback': True},
+                    )
+                )
+    elif media_type == 'episode':
+        sonarr_id, _tvdb = _extract_series_ids(payload)
+        series_rows = _find_series_rows(
+            session,
+            sonarr_id=sonarr_id,
+            tvdb_id=context.get('tvdb_id'),
+            imdb_id=context.get('imdb_id'),
+            file_path=context.get('file_path'),
+        )
+        active_rows = _active_rows_by_instance(series_rows)
+        for series_row in active_rows.values():
+            try:
+                season_number, episode_number = _extract_season_episode(payload)
+                targets, _meta = _collect_episode_targets(session, series_row, season_number, episode_number)
+            except Exception:
+                targets = []
+            episode_ids = [int(ep.id) for ep in targets if getattr(ep, 'id', None)]
+            if not episode_ids:
+                continue
+            ph_rows = (
+                session.query(Placeholder)
+                .filter(
+                    Placeholder.episode_id.in_(episode_ids),
+                    Placeholder.has_placeholder == True,  # noqa: E712
+                )
+                .all()
+            )
+            for ph in ph_rows:
+                intents.append(
+                    StatusIntent(
+                        placeholder_id=int(ph.id),
+                        new_status=DisplayStatus.SEARCH_QUEUED.value,
+                        reason='search_queued',
+                        source=StatusSource.EVENT_PLAYBACK_STARTED,
+                        trigger_nfo_refresh=True,
+                        metadata={'gated_playback': True},
+                    )
+                )
+
+    if not intents:
+        return 0
+
+    try:
+        return int(StatusOrchestrator(session=session).apply_status_intents(intents))
+    except Exception as exc:
+        logger.warning(
+            f"apply_search_queued_for_playback: failed to apply intents: {exc}",
+            extra={'emoji_type': 'warning'},
+        )
+        return 0

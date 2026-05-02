@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -50,6 +50,25 @@ def _from_iso(value: Any) -> datetime | None:
         return None
 
 
+def _expire_stale_queue_monitor_flags(session) -> None:
+    """FM-15 mitigation: clear playback queue-monitor flags older than 24 hours."""
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        session.query(Placeholder).filter(
+            Placeholder.queue_monitor_active == True,  # noqa: E712
+            Placeholder.queue_monitor_active_set_at.isnot(None),
+            Placeholder.queue_monitor_active_set_at < cutoff,
+        ).update(
+            {
+                Placeholder.queue_monitor_active: False,
+                Placeholder.queue_monitor_active_set_at: None,
+            },
+            synchronize_session=False,
+        )
+    except Exception:
+        pass
+
+
 def _should_emit_wait_log(qm: dict[str, Any], key: str, now: datetime, *, period_seconds: int = 60) -> bool:
     """Rate-limit wait-state logs by storing last-emitted timestamp in placeholder.extra."""
     last = _from_iso(qm.get(key))
@@ -64,15 +83,19 @@ def _collect_queue_monitor_poll_context(session):
 
     Returns None when there is nothing to poll or nudge. Otherwise a dict with
     movie_targets, episode_targets, and per-instance needs_* flags.
+
+    When ``USE_NOTIFY_QUEUE_MONITOR`` is enabled, only placeholders with
+    ``queue_monitor_active`` set (playback-initiated ARR search) are considered —
+    the producer otherwise sleeps idle instead of polling every ``CHECK_INTERVAL``.
     """
-    placeholders = (
-        session.query(Placeholder)
-        .filter(
-            Placeholder.has_placeholder == True,  # noqa: E712
-            Placeholder.display_status.in_(ACTIVE_QUEUE_STATUSES),
-        )
-        .all()
+    q = session.query(Placeholder).filter(
+        Placeholder.has_placeholder == True,  # noqa: E712
+        Placeholder.display_status.in_(ACTIVE_QUEUE_STATUSES),
     )
+    if bool(getattr(settings, "USE_NOTIFY_QUEUE_MONITOR", False)):
+        q = q.filter(Placeholder.queue_monitor_active == True)  # noqa: E712
+
+    placeholders = q.all()
     if not placeholders:
         return None
 
@@ -275,6 +298,8 @@ class QueueMonitorProducer:
 
     def __init__(self) -> None:
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._qm_listen_registered = False
         self._thread: threading.Thread | None = None
         poll_override = int(getattr(settings, "QUEUE_MONITOR_POLL_INTERVAL_SECONDS", 0) or 0)
         self._poll_interval = max(
@@ -294,11 +319,33 @@ class QueueMonitorProducer:
             0,
             int(getattr(settings, "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS", 0) or 0),
         )
+        self._notify_safety_seconds = float(
+            max(30, int(getattr(settings, "QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS", 300) or 300))
+        )
+
+    def _on_queue_monitor_notify(self, _payload: Any) -> None:
+        self._wake_event.set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        if bool(getattr(settings, "USE_NOTIFY_QUEUE_MONITOR", False)):
+            try:
+                from services.postgres.notifier import QUEUE_MONITOR_CHANNEL, start_shared_notifier
+
+                notifier = start_shared_notifier()
+                notifier.listen(QUEUE_MONITOR_CHANNEL, self._on_queue_monitor_notify)
+                self._qm_listen_registered = True
+                logger.info(
+                    f"Queue monitor listening on NOTIFY channel '{QUEUE_MONITOR_CHANNEL}'",
+                    extra={"emoji_type": "gear"},
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Queue monitor could not register NOTIFY listener: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
         self._thread = threading.Thread(target=self._run_loop, name="queue-monitor-producer", daemon=True)
         self._thread.start()
         refresh_note = (
@@ -316,11 +363,25 @@ class QueueMonitorProducer:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._wake_event.set()
+        if self._qm_listen_registered:
+            try:
+                from services.postgres.notifier import QUEUE_MONITOR_CHANNEL, get_shared_notifier
+
+                get_shared_notifier().unlisten(QUEUE_MONITOR_CHANNEL)
+            except Exception:
+                pass
+            self._qm_listen_registered = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
         logger.info("Queue monitor producer stopped", extra={"emoji_type": "info"})
 
     def _run_loop(self) -> None:
+        use_notify = bool(getattr(settings, "USE_NOTIFY_QUEUE_MONITOR", False))
+        if use_notify:
+            self._run_loop_notify_mode()
+            return
+
         poll_iv = float(self._poll_interval)
         refresh_iv = float(max(0, int(self._arr_refresh_interval)))
         next_poll = time.monotonic()
@@ -349,6 +410,65 @@ class QueueMonitorProducer:
             delay = min(next_poll, next_refresh) - now
             self._stop_event.wait(max(0.25, delay))
 
+    def _run_loop_notify_mode(self) -> None:
+        """Idle until NOTIFY / safety timeout while no flagged placeholders; tight poll while active."""
+        poll_iv = float(self._poll_interval)
+        refresh_iv = float(max(0, int(self._arr_refresh_interval)))
+        safety = float(self._notify_safety_seconds)
+
+        while not self._stop_event.is_set():
+            probe = get_session()
+            try:
+                ctx = _collect_queue_monitor_poll_context(probe)
+            finally:
+                probe.close()
+
+            if ctx is None:
+                clear_queue_download_snapshot()
+                self._wake_event.clear()
+                self._wake_event.wait(timeout=safety)
+                continue
+
+            logger.debug(
+                "Queue monitor NOTIFY mode: active flagged placeholders — polling",
+                extra={"emoji_type": "debug"},
+            )
+
+            next_poll = time.monotonic()
+            next_refresh = time.monotonic() + self._arr_refresh_stagger if refresh_iv > 0 else float("inf")
+
+            while not self._stop_event.is_set():
+                now = time.monotonic()
+                if now >= next_poll:
+                    t0 = time.monotonic()
+                    try:
+                        self._poll_once()
+                    except Exception as e:
+                        logger.error(f"Queue monitor poll cycle failed: {e}", extra={"emoji_type": "error"})
+                    next_poll = t0 + poll_iv
+
+                now = time.monotonic()
+                if refresh_iv > 0 and now >= next_refresh:
+                    t1 = time.monotonic()
+                    try:
+                        self._nudge_arr_monitored_downloads()
+                    except Exception as e:
+                        logger.error(f"Queue monitor ARR refresh command failed: {e}", extra={"emoji_type": "error"})
+                    next_refresh = t1 + refresh_iv
+
+                probe = get_session()
+                try:
+                    still_active = _collect_queue_monitor_poll_context(probe) is not None
+                finally:
+                    probe.close()
+
+                if not still_active:
+                    break
+
+                now = time.monotonic()
+                delay = min(next_poll, next_refresh) - now
+                self._stop_event.wait(max(0.25, delay))
+
     def _nudge_arr_monitored_downloads(self) -> None:
         """POST RefreshMonitoredDownloads so Radarr/Sonarr pick up queue changes before our next /queue read."""
         session = get_session()
@@ -376,6 +496,7 @@ class QueueMonitorProducer:
     def _poll_once(self) -> None:
         session = get_session()
         try:
+            _expire_stale_queue_monitor_flags(session)
             ctx = _collect_queue_monitor_poll_context(session)
             if ctx is None:
                 clear_queue_download_snapshot()

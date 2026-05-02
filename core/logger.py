@@ -1,8 +1,9 @@
+import glob
 import logging
 import os
 import sys
+import threading
 import traceback
-import glob
 from datetime import datetime
 
 # Try to import settings; if pydantic validation fails (missing paths), print a friendly message and exit
@@ -122,7 +123,7 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
 
 logger = logging.getLogger(__name__)
 
-# Emit VERBOSE/custom + DEBUG/INFO/… for file handlers; console filters below.
+# Emit all levels (including VERBOSE); handlers do not filter by level — UI/log viewers filter display.
 logger.setLevel(VERBOSE_LEVEL_NUM)
 
 logger.propagate = False
@@ -179,7 +180,7 @@ def _cleanup_old_log_files(log_dir: str, max_files: int) -> None:
                 print(f"Failed to delete old log file {old_file}: {e}", file=sys.stderr)
 
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.NOTSET)
 console_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 log_dir = _resolve_log_dir()
@@ -216,3 +217,38 @@ if workspace_file_handler is not None:
 logger.debug(f"File logging initialized at {log_file_path} (keeping {max_run_files} run files)", extra={'emoji_type': 'debug'})
 if workspace_file_handler is not None:
     logger.debug(f"Workspace logging mirrored at {workspace_log_path}", extra={'emoji_type': 'debug'})
+
+
+def _stall_heartbeat_interval_sec() -> float:
+    try:
+        v = float(getattr(settings, "STALL_HEARTBEAT_INTERVAL_SEC", 10.0) or 10.0)
+    except Exception:
+        v = 10.0
+    return max(3.0, v)
+
+
+def start_verbose_stall_heartbeat(label: str, *, interval_sec: float | None = None) -> threading.Event:
+    """Emit ``logger.verbose`` stall/liveness lines until the returned event is ``set()``.
+
+    INFO stays for coarse progress only; stall lines are VERBOSE diagnostics. Handlers
+    record full levels; the app UI filters what operators see.
+    Interval: ``STALL_HEARTBEAT_INTERVAL_SEC``.
+    """
+    import time
+
+    stop = threading.Event()
+    if not logger.isEnabledFor(VERBOSE_LEVEL_NUM):
+        return stop
+    every = float(interval_sec) if interval_sec is not None else _stall_heartbeat_interval_sec()
+    started = time.monotonic()
+    safe_label = (label or "stall").replace("\n", " ")[:200]
+
+    def _run() -> None:
+        while not stop.wait(every):
+            logger.verbose(
+                f"Stall heartbeat [{safe_label}] elapsed_s={time.monotonic() - started:.1f}",
+                extra={"emoji_type": "processing"},
+            )
+
+    threading.Thread(target=_run, name=f"vstall-{safe_label[:24]}", daemon=True).start()
+    return stop

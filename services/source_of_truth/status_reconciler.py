@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -295,32 +297,58 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         return {"ok": False, "reason": "no_placeholder_ids"}
 
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
+    n_total = len(placeholders)
     refreshed = 0
     # (Placeholder row, entity dedupe key) for rows whose NFO was rewritten this run
     refreshed_for_player_push: list[tuple[Placeholder, tuple[str, int]]] = []
-    for placeholder in placeholders:
-        movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
-        episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
-        effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
-        if movie and bool(getattr(movie, "has_placeholder", False)):
-            effective_has_placeholder = True
-        if episode and bool(getattr(episode, "has_placeholder", False)):
-            effective_has_placeholder = True
-        if effective_has_placeholder and not bool(getattr(placeholder, "has_placeholder", False)):
-            # Self-heal drift so follow-up jobs do not keep skipping valid placeholders.
-            placeholder.has_placeholder = True
-            placeholder.updated_at = datetime.now(timezone.utc)
-            session.add(placeholder)
-        if not effective_has_placeholder:
-            continue
+    loop_pos = [0]
+    nfo_started = time.monotonic()
+    stop_nfo_hb = threading.Event()
 
-        if movie and _refresh_movie_nfo(placeholder, movie):
-            refreshed += 1
-            refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))
-            continue
-        if episode and _refresh_episode_nfo(session, placeholder, episode):
-            refreshed += 1
-            refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+    def _nfo_refresh_stall_heartbeat():
+        while not stop_nfo_hb.wait(10.0):
+            logger.verbose(
+                f"nfo_refresh job_id={job.id}: still running "
+                f"progress={loop_pos[0]}/{n_total} nfo_refreshed={refreshed} "
+                f"elapsed_s={time.monotonic() - nfo_started:.1f}",
+                extra={"emoji_type": "processing"},
+            )
+
+    _nfo_hb_t = None
+    if n_total:
+        _nfo_hb_t = threading.Thread(
+            target=_nfo_refresh_stall_heartbeat,
+            name=f"nfo-refresh-hb-{job.id}",
+            daemon=True,
+        )
+        _nfo_hb_t.start()
+    try:
+        for placeholder in placeholders:
+            loop_pos[0] += 1
+            movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
+            episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+            effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
+            if movie and bool(getattr(movie, "has_placeholder", False)):
+                effective_has_placeholder = True
+            if episode and bool(getattr(episode, "has_placeholder", False)):
+                effective_has_placeholder = True
+            if effective_has_placeholder and not bool(getattr(placeholder, "has_placeholder", False)):
+                # Self-heal drift so follow-up jobs do not keep skipping valid placeholders.
+                placeholder.has_placeholder = True
+                placeholder.updated_at = datetime.now(timezone.utc)
+                session.add(placeholder)
+            if not effective_has_placeholder:
+                continue
+
+            if movie and _refresh_movie_nfo(placeholder, movie):
+                refreshed += 1
+                refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))
+                continue
+            if episode and _refresh_episode_nfo(session, placeholder, episode):
+                refreshed += 1
+                refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+    finally:
+        stop_nfo_hb.set()
 
     do_player = _job_player_metadata_refresh(job)
     run_id = str(payload.get("request_backfill_run_id") or "").strip()

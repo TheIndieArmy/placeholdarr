@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
@@ -311,9 +312,27 @@ def run_calendar_phase() -> dict[str, Any]:
     try:
         placeholders = session.query(Placeholder).filter(Placeholder.has_placeholder == True).all()  # noqa: E712
         stats["scanned"] = len(placeholders)
+        logger.info(
+            f"Calendar phase: evaluating {len(placeholders)} on-disk placeholders for the release window "
+            f"(large libraries may sit here for several minutes while statuses are computed)…",
+            extra={"emoji_type": "info"},
+        )
+        scan_started = time.monotonic()
 
         intents: list[StatusIntent] = []
-        for placeholder in placeholders:
+        total_ph = len(placeholders)
+        last_heartbeat = scan_started
+        heartbeat_s = 10.0
+        for idx, placeholder in enumerate(placeholders, start=1):
+            now_m = time.monotonic()
+            if now_m - last_heartbeat >= heartbeat_s:
+                logger.info(
+                    f"Calendar phase: still running release-window scan "
+                    f"progress={idx}/{total_ph} elapsed_s={now_m - scan_started:.1f}",
+                    extra={"emoji_type": "info"},
+                )
+                last_heartbeat = now_m
+
             media_type, target_date, has_file, release_type, release_type_preferred = _placeholder_target(session, placeholder)
             if not media_type:
                 continue
@@ -369,9 +388,32 @@ def run_calendar_phase() -> dict[str, Any]:
             )
 
         stats["status_intents"] = len(intents)
+        logger.info(
+            "Calendar phase: release-window scan finished in "
+            f"{time.monotonic() - scan_started:.1f}s — "
+            f"{len(intents)} title(s) need a status or NFO update "
+            f"({stats['status_skipped']} already matched, {stats['variant_switched']} dummy variant switch(es)).",
+            extra={"emoji_type": "info"},
+        )
         if intents:
+            logger.info(
+                f"Calendar phase: applying {len(intents)} update(s), writing DB rows, and queueing NFO/player sync…",
+                extra={"emoji_type": "info"},
+            )
+            apply_started = time.monotonic()
             orchestrator = StatusOrchestrator(session=session)
             stats["status_applied"] = int(orchestrator.apply_and_project_statuses(intents) or 0)
+            logger.info(
+                "Calendar phase: apply and downstream queueing finished in "
+                f"{time.monotonic() - apply_started:.1f}s "
+                f"({stats['status_applied']} intent(s) applied).",
+                extra={"emoji_type": "info"},
+            )
+        else:
+            logger.info(
+                "Calendar phase: nothing to change for the current release window.",
+                extra={"emoji_type": "info"},
+            )
 
         session.commit()
     except Exception as exc:

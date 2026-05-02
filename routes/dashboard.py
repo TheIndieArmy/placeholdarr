@@ -46,6 +46,38 @@ router = APIRouter()
 
 
 def _launch_post_onboarding_startup_sync() -> None:
+    """First-run sync after onboarding completes.
+
+    Phase 4: enqueue ``startup_sync_runner`` Job when ``USE_JOB_DRIVEN_STARTUP_SYNC``
+    is enabled; otherwise preserve the legacy daemon-thread behaviour.
+    """
+    try:
+        from services.source_of_truth.startup_sync_job import (
+            enqueue_startup_sync_runner_job,
+            use_job_driven_startup_sync,
+        )
+
+        if use_job_driven_startup_sync():
+            session = get_session()
+            try:
+                enqueue_startup_sync_runner_job(session, reason="post_onboarding")
+                session.commit()
+                logger.info(
+                    "Enqueued post-onboarding startup_sync_runner job",
+                    extra={"emoji_type": "gear"},
+                )
+                return
+            except Exception as exc:
+                session.rollback()
+                logger.warning(
+                    f"Failed to enqueue post-onboarding startup job; falling back to thread: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+            finally:
+                session.close()
+    except Exception:
+        pass
+
     def _runner() -> None:
         from services.startup_gate import startup_sync_complete
         try:
@@ -160,6 +192,38 @@ def _arr_endpoint_fingerprint() -> dict[str, tuple[str, str]]:
 
 
 def _launch_arr_change_full_sync(reason: str) -> None:
+    """Run per-instance ``run_full_sync`` after ARR endpoints change.
+
+    Phase 4: enqueue ``startup_sync_runner`` with reason ``arr_endpoint_changed``
+    when job-driven startup sync is enabled.
+    """
+    try:
+        from services.source_of_truth.startup_sync_job import (
+            enqueue_startup_sync_runner_job,
+            use_job_driven_startup_sync,
+        )
+
+        if use_job_driven_startup_sync():
+            session = get_session()
+            try:
+                enqueue_startup_sync_runner_job(session, reason="arr_endpoint_changed")
+                session.commit()
+                logger.info(
+                    f"Enqueued ARR-change startup_sync_runner job reason={reason}",
+                    extra={"emoji_type": "gear"},
+                )
+                return
+            except Exception as exc:
+                session.rollback()
+                logger.warning(
+                    f"Failed to enqueue ARR-change startup job; falling back to thread: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+            finally:
+                session.close()
+    except Exception:
+        pass
+
     def _runner() -> None:
         try:
             from services.source_of_truth.sync_runner import run_full_sync
@@ -472,6 +536,26 @@ async def dashboard_next_assets(asset_path: str):
 # ---------------------------------------------------------------------------
 # JSON API endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.get("/api/health")
+async def api_health():
+    """Liveness probe: no database access. Use from the browser host to verify TCP/process."""
+    return JSONResponse({"ok": True})
+
+
+@router.get("/api/ready")
+async def api_ready():
+    """Readiness probe: includes whether the startup source-of-truth sync has released the worker gate."""
+    from services.startup_gate import startup_sync_complete
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "startup_sync_complete": startup_sync_complete.is_set(),
+        }
+    )
+
 
 @router.get("/api/stats")
 async def stats():
