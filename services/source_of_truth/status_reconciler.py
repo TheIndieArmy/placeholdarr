@@ -196,6 +196,9 @@ def _enqueue_batched_placeholder_job(
         added_set = set(additions)
         ids_remaining = [pid for pid in ids_remaining if pid not in added_set]
 
+    from services.source_of_truth.job_priority import default_priority_for
+
+    job_priority = default_priority_for(job_type)
     while ids_remaining:
         chunk = ids_remaining[:batch_size]
         ids_remaining = ids_remaining[batch_size:]
@@ -209,6 +212,7 @@ def _enqueue_batched_placeholder_job(
             },
             status="PENDING",
             run_after=run_after,
+            priority=job_priority,
         )
         session.add(job)
         session.flush()
@@ -289,12 +293,39 @@ def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) ->
 
 
 def process_nfo_refresh_job(session, job: Job) -> dict:
-    """Refresh placeholder sidecar NFO files for a scoped set of placeholders."""
+    """Refresh placeholder sidecar NFO files for a scoped set of placeholders.
+
+    Phase 4 idempotency: claim a per-job-id key BEFORE rewriting any NFO
+    file or triggering a Plex section refresh. A reaper-induced re-claim
+    sees the key and skips, avoiding duplicate disk writes / library
+    scans.
+    """
     payload = job.payload if isinstance(job.payload, dict) else {}
     placeholder_ids = payload.get("placeholder_ids") or []
     ids = [int(pid) for pid in placeholder_ids if pid is not None]
     if not ids:
         return {"ok": False, "reason": "no_placeholder_ids"}
+
+    try:
+        from services.source_of_truth.idempotency import (
+            nfo_refresh_idempotency_key,
+            try_claim_processed_key,
+        )
+
+        job_id_val = getattr(job, "id", None)
+        if isinstance(job_id_val, int):
+            idem_key = nfo_refresh_idempotency_key(job_id=int(job_id_val))
+            if not try_claim_processed_key(session, idem_key, job_type=NFO_REFRESH_JOB_TYPE):
+                logger.info(
+                    f"nfo_refresh job_id={job_id_val} skipped — idempotency key already claimed",
+                    extra={"emoji_type": "info"},
+                )
+                return {"ok": True, "skipped": "already_processed"}
+    except Exception as exc:
+        logger.debug(
+            f"nfo_refresh: idempotency claim skipped due to error: {exc}",
+            extra={"emoji_type": "debug"},
+        )
 
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     n_total = len(placeholders)
@@ -397,6 +428,17 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             .first()
         )
         if not pending_same_run:
+            # Phase 1 connection-lifecycle: ``refresh_all_sections`` is a
+            # multi-second Plex HTTP burst. Commit + close the worker's
+            # session so the pool slot returns BEFORE the HTTP runs.
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+            try:
+                session.close()
+            except Exception:
+                pass
             try:
                 refresh_stats = refresh_all_sections(
                     has_movies=True,

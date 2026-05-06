@@ -347,6 +347,19 @@ class Notifier:
             'thread_alive': self.is_alive(),
         }
 
+    def healthy(self) -> bool:
+        """Return True if the listener is connected and the supervisor thread is alive.
+
+        Phase 3 of the holistic NOTIFY audit: callers (and the diagnostics
+        endpoint) use this to decide whether NOTIFY-driven wakes are
+        currently working. A False here means the system is relying on the
+        worker safety-poll backstop rather than NOTIFY.
+        """
+        try:
+            return bool(self.stats.is_connected and self.is_alive())
+        except Exception:
+            return False
+
 
 # ----------------------------------------------------------------
 # Process-wide singleton accessors (one Notifier per process)
@@ -385,6 +398,23 @@ def stop_shared_notifier() -> None:
             _shared_notifier.stop()
         finally:
             _shared_notifier = None
+
+
+def get_shared_notifier_health() -> dict:
+    """Return a JSON-friendly health snapshot for the shared notifier.
+
+    Used by ``GET /api/diagnostics/db`` and any future health probes. Safe
+    to call when the notifier has not been started: returns
+    ``{"healthy": False, "started": False}`` instead of raising.
+    """
+    with _shared_notifier_lock:
+        notifier = _shared_notifier
+    if notifier is None:
+        return {"healthy": False, "started": False}
+    snapshot = notifier.snapshot_stats()
+    snapshot["healthy"] = bool(notifier.healthy())
+    snapshot["started"] = True
+    return snapshot
 
 
 JOBS_CHANNEL = 'placeholdarr_jobs'

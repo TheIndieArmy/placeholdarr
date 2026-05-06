@@ -1248,6 +1248,8 @@ def _enqueue_delayed_fallback(
     if timeout_minutes <= 0:
         return None
 
+    from services.source_of_truth.job_priority import default_priority_for
+
     job = Job(
         job_type=PLAYBACK_FALLBACK_JOB_TYPE,
         payload={
@@ -1260,6 +1262,7 @@ def _enqueue_delayed_fallback(
         status='PENDING',
         max_attempts=3,
         run_after=datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes),
+        priority=default_priority_for(PLAYBACK_FALLBACK_JOB_TYPE),
     )
     session.add(job)
     session.flush()

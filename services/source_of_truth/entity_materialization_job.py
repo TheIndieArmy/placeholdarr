@@ -45,11 +45,14 @@ def enqueue_entity_materialization_job(
         for k, v in payload_extras.items():
             body[str(k)] = v
 
+    from services.source_of_truth.job_priority import default_priority_for
+
     job = Job(
         job_type=ENTITY_MATERIALIZATION_JOB_TYPE,
         payload=body,
         status="PENDING",
         max_attempts=5,
+        priority=default_priority_for(ENTITY_MATERIALIZATION_JOB_TYPE),
     )
     session.add(job)
     return job

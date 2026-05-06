@@ -70,12 +70,15 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
 def _enqueue_nfo_refresh_job(session, placeholder_ids: list[int]) -> None:
     if not placeholder_ids:
         return
+    from services.source_of_truth.job_priority import default_priority_for
+
     session.add(
         Job(
             job_type=NFO_REFRESH_JOB_TYPE,
             payload={"placeholder_ids": placeholder_ids},
             status="PENDING",
             run_after=datetime.now(timezone.utc),
+            priority=default_priority_for(NFO_REFRESH_JOB_TYPE),
         )
     )
 
@@ -117,6 +120,9 @@ def _schedule_import_grace(
     active_ids = _set_countdown_status(session, placeholder_ids, initial_status)
     _enqueue_nfo_refresh_job(session, active_ids)
 
+    from services.source_of_truth.job_priority import default_priority_for
+
+    grace_priority = default_priority_for(IMPORT_GRACE_JOB_TYPE)
     for item in schedule[1:]:
         session.add(
             Job(
@@ -132,6 +138,7 @@ def _schedule_import_grace(
                 },
                 status="PENDING",
                 run_after=item["run_after"],
+                priority=grace_priority,
             )
         )
 

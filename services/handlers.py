@@ -150,12 +150,15 @@ def _infer_event_meta(payload: Dict[str, Any], instance: str | None = None) -> d
 
 
 def _enqueue_event_job(session, event_log_id: int, event_type: str):
+    from services.source_of_truth.job_priority import default_priority_for
+
     session.add(
         Job(
             job_type='webhook_event',
             payload={'event_log_id': event_log_id, 'event_type': event_type},
             status='PENDING',
             max_attempts=10,
+            priority=default_priority_for('webhook_event'),
         )
     )
 

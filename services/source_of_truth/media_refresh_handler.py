@@ -83,6 +83,8 @@ def enqueue_media_refresh_job(
                 continue
             job_payload[k] = v
 
+    from services.source_of_truth.job_priority import default_priority_for
+
     run_after = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(delay_seconds)))
     job = Job(
         job_type=MEDIA_REFRESH_JOB_TYPE,
@@ -91,6 +93,7 @@ def enqueue_media_refresh_job(
         run_after=run_after,
         max_attempts=int(max_attempts),
         group_id=group_id,
+        priority=default_priority_for(MEDIA_REFRESH_JOB_TYPE),
     )
     session.add(job)
     return job
@@ -131,10 +134,69 @@ def _reenqueue_with_delay(session, job: Job, *, delay_seconds: float, reason: st
 
 
 def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
-    """Worker entrypoint for media_refresh Jobs. Returns {ok, ...} contract."""
-    payload = job.payload or {}
-    if not isinstance(payload, dict):
+    """Worker entrypoint for media_refresh Jobs. Returns {ok, ...} contract.
+
+    Phase 1 connection-lifecycle: this handler does ZERO database work, only
+    media-server HTTP via ``refresh_selected_sections`` /
+    ``refresh_all_path_batches_with_section_fallback``. We snapshot the
+    payload + identity into plain values and CLOSE the session before the
+    HTTP work so the pool slot is released for the duration of the refresh
+    (which can take many seconds). The worker re-opens a fresh session for
+    the finish step.
+
+    Phase 4 idempotency: claim a per-job-id key before triggering the
+    refresh so a stale-CLAIMED reaper retry does not double-fire the same
+    library scan.
+    """
+    raw_payload = job.payload or {}
+    if not isinstance(raw_payload, dict):
         return {"ok": False, "reason": "invalid_payload"}
+    payload = dict(raw_payload)
+    job_id = getattr(job, "id", "?")
+
+    # Phase 4: claim idempotency key BEFORE releasing the session (the claim
+    # uses the worker's session, then commits). On duplicate-claim we skip
+    # the side effect entirely.
+    try:
+        from services.source_of_truth.idempotency import (
+            media_refresh_idempotency_key,
+            try_claim_processed_key,
+        )
+
+        idem_key = media_refresh_idempotency_key(job_id=int(job_id) if isinstance(job_id, int) else 0)
+        if isinstance(job_id, int) and not try_claim_processed_key(
+            session, idem_key, job_type=MEDIA_REFRESH_JOB_TYPE
+        ):
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+            try:
+                session.close()
+            except Exception:
+                pass
+            logger.info(
+                f"media_refresh job_id={job_id} skipped — idempotency key already claimed "
+                "(stale-CLAIMED reaper requeued or duplicate enqueue)",
+                extra={"emoji_type": "info"},
+            )
+            return {"ok": True, "skipped": "already_processed"}
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+    except Exception as exc:
+        logger.debug(
+            f"media_refresh: idempotency claim skipped due to error: {exc}",
+            extra={"emoji_type": "debug"},
+        )
+
+    # Release the worker's connection BEFORE any HTTP. This handler does not
+    # need DB after this line.
+    try:
+        session.close()
+    except Exception:
+        pass
 
     kind = str(payload.get("kind") or "").strip()
     if not kind:
@@ -147,7 +209,6 @@ def process_media_refresh_job(session, job: Job) -> dict[str, Any]:
     include_emby = _coerce_bool(payload.get("include_emby"), default=False)
     bypass_suppression = _coerce_bool(payload.get("bypass_suppression"), default=False)
 
-    job_id = getattr(job, "id", "?")
     log_prefix = f"media_refresh job_id={job_id} kind={kind}"
 
     stop_v = start_verbose_stall_heartbeat(log_prefix)

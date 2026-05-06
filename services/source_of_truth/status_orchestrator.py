@@ -92,9 +92,18 @@ class StatusOrchestrator:
         self.session = session
     
     def _get_session(self) -> Session:
-        """Get or create a DB session."""
+        """Get or create a DB session.
+
+        Phase 2 connection-lifecycle: the legacy ``get_session().__enter__()``
+        path was a session leak — ``__exit__`` was never called, so the
+        connection stayed checked out until garbage collection. All current
+        call sites construct ``StatusOrchestrator(session=...)`` so this
+        branch is unreachable, but we now return a freshly opened Session
+        directly. Callers that opt into ``self.session is None`` MUST close
+        it themselves.
+        """
         if self.session is None:
-            return get_session().__enter__()
+            return get_session()
         return self.session
 
     def _compute_initial_creation_status(

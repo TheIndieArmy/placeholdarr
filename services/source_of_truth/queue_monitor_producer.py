@@ -84,16 +84,14 @@ def _collect_queue_monitor_poll_context(session):
     Returns None when there is nothing to poll or nudge. Otherwise a dict with
     movie_targets, episode_targets, and per-instance needs_* flags.
 
-    When ``USE_NOTIFY_QUEUE_MONITOR`` is enabled, only placeholders with
-    ``queue_monitor_active`` set (playback-initiated ARR search) are considered —
-    the producer otherwise sleeps idle instead of polling every ``CHECK_INTERVAL``.
+    Only placeholders with ``queue_monitor_active`` set (playback-initiated ARR
+    search) are considered; the producer sleeps idle until NOTIFY otherwise.
     """
     q = session.query(Placeholder).filter(
         Placeholder.has_placeholder == True,  # noqa: E712
         Placeholder.display_status.in_(ACTIVE_QUEUE_STATUSES),
+        Placeholder.queue_monitor_active == True,  # noqa: E712
     )
-    if bool(getattr(settings, "USE_NOTIFY_QUEUE_MONITOR", False)):
-        q = q.filter(Placeholder.queue_monitor_active == True)  # noqa: E712
 
     placeholders = q.all()
     if not placeholders:
@@ -330,22 +328,21 @@ class QueueMonitorProducer:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
-        if bool(getattr(settings, "USE_NOTIFY_QUEUE_MONITOR", False)):
-            try:
-                from services.postgres.notifier import QUEUE_MONITOR_CHANNEL, start_shared_notifier
+        try:
+            from services.postgres.notifier import QUEUE_MONITOR_CHANNEL, start_shared_notifier
 
-                notifier = start_shared_notifier()
-                notifier.listen(QUEUE_MONITOR_CHANNEL, self._on_queue_monitor_notify)
-                self._qm_listen_registered = True
-                logger.info(
-                    f"Queue monitor listening on NOTIFY channel '{QUEUE_MONITOR_CHANNEL}'",
-                    extra={"emoji_type": "gear"},
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"Queue monitor could not register NOTIFY listener: {exc}",
-                    extra={"emoji_type": "warning"},
-                )
+            notifier = start_shared_notifier()
+            notifier.listen(QUEUE_MONITOR_CHANNEL, self._on_queue_monitor_notify)
+            self._qm_listen_registered = True
+            logger.info(
+                f"Queue monitor listening on NOTIFY channel '{QUEUE_MONITOR_CHANNEL}'",
+                extra={"emoji_type": "gear"},
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Queue monitor could not register NOTIFY listener: {exc}",
+                extra={"emoji_type": "warning"},
+            )
         self._thread = threading.Thread(target=self._run_loop, name="queue-monitor-producer", daemon=True)
         self._thread.start()
         refresh_note = (
@@ -377,40 +374,6 @@ class QueueMonitorProducer:
         logger.info("Queue monitor producer stopped", extra={"emoji_type": "info"})
 
     def _run_loop(self) -> None:
-        use_notify = bool(getattr(settings, "USE_NOTIFY_QUEUE_MONITOR", False))
-        if use_notify:
-            self._run_loop_notify_mode()
-            return
-
-        poll_iv = float(self._poll_interval)
-        refresh_iv = float(max(0, int(self._arr_refresh_interval)))
-        next_poll = time.monotonic()
-        next_refresh = time.monotonic() + self._arr_refresh_stagger if refresh_iv > 0 else float("inf")
-
-        while not self._stop_event.is_set():
-            now = time.monotonic()
-            if now >= next_poll:
-                t0 = time.monotonic()
-                try:
-                    self._poll_once()
-                except Exception as e:
-                    logger.error(f"Queue monitor poll cycle failed: {e}", extra={"emoji_type": "error"})
-                next_poll = t0 + poll_iv
-
-            now = time.monotonic()
-            if refresh_iv > 0 and now >= next_refresh:
-                t1 = time.monotonic()
-                try:
-                    self._nudge_arr_monitored_downloads()
-                except Exception as e:
-                    logger.error(f"Queue monitor ARR refresh command failed: {e}", extra={"emoji_type": "error"})
-                next_refresh = t1 + refresh_iv
-
-            now = time.monotonic()
-            delay = min(next_poll, next_refresh) - now
-            self._stop_event.wait(max(0.25, delay))
-
-    def _run_loop_notify_mode(self) -> None:
         """Idle until NOTIFY / safety timeout while no flagged placeholders; tight poll while active."""
         poll_iv = float(self._poll_interval)
         refresh_iv = float(max(0, int(self._arr_refresh_interval)))
@@ -494,28 +457,70 @@ class QueueMonitorProducer:
             session.close()
 
     def _poll_once(self) -> None:
-        session = get_session()
+        """One full poll cycle: scan -> ARR HTTP (no DB held) -> apply intents.
+
+        Phase 1 connection-lifecycle: this method previously held one DB
+        session across all four ARR HTTP calls (each up to 30s timeout).
+        Now we run in three short phases:
+
+        1. Read-only scan session: figure out which ARR endpoints we need
+           to poll. Closed before HTTP.
+        2. HTTP phase: poll Radarr/Sonarr without any DB connection held.
+        3. Apply session: re-collect targets, build intents, publish
+           snapshot, commit. Closed at the end.
+
+        Re-collecting targets in phase 3 keeps the apply step on fresh data
+        (a placeholder may have completed during the HTTP window).
+        """
+        # Phase 1: scan to determine which ARR endpoints need polling.
+        scan_session = get_session()
         try:
-            _expire_stale_queue_monitor_flags(session)
-            ctx = _collect_queue_monitor_poll_context(session)
-            if ctx is None:
+            _expire_stale_queue_monitor_flags(scan_session)
+            scan_ctx = _collect_queue_monitor_poll_context(scan_session)
+            if scan_ctx is None:
                 clear_queue_download_snapshot()
+                try:
+                    scan_session.commit()
+                except Exception:
+                    scan_session.rollback()
+                return
+            needs_radarr_std = bool(scan_ctx["needs_radarr_std"])
+            needs_radarr_4k = bool(scan_ctx["needs_radarr_4k"])
+            needs_sonarr_std = bool(scan_ctx["needs_sonarr_std"])
+            needs_sonarr_4k = bool(scan_ctx["needs_sonarr_4k"])
+            try:
+                scan_session.commit()
+            except Exception:
+                scan_session.rollback()
+        finally:
+            try:
+                scan_session.close()
+            except Exception:
+                pass
+
+        # Phase 2: ARR HTTP without holding any DB connection.
+        radarr_std_map = self._poll_radarr_queue(is_4k=False) if needs_radarr_std else {}
+        radarr_4k_map = self._poll_radarr_queue(is_4k=True) if needs_radarr_4k else {}
+        sonarr_std_map = self._poll_sonarr_queue(is_4k=False) if needs_sonarr_std else {}
+        sonarr_4k_map = self._poll_sonarr_queue(is_4k=True) if needs_sonarr_4k else {}
+
+        # Phase 3: re-collect on a fresh session and apply intents.
+        apply_session = get_session()
+        try:
+            ctx = _collect_queue_monitor_poll_context(apply_session)
+            if ctx is None:
+                # Nothing left to apply (placeholders cleared during HTTP window).
+                try:
+                    apply_session.commit()
+                except Exception:
+                    apply_session.rollback()
                 return
 
             movie_targets = ctx["movie_targets"]
             episode_targets = ctx["episode_targets"]
-            needs_radarr_std = ctx["needs_radarr_std"]
-            needs_radarr_4k = ctx["needs_radarr_4k"]
-            needs_sonarr_std = ctx["needs_sonarr_std"]
-            needs_sonarr_4k = ctx["needs_sonarr_4k"]
             placeholders = ctx["placeholders"]
 
-            radarr_std_map = self._poll_radarr_queue(is_4k=False) if needs_radarr_std else {}
-            radarr_4k_map = self._poll_radarr_queue(is_4k=True) if needs_radarr_4k else {}
-            sonarr_std_map = self._poll_sonarr_queue(is_4k=False) if needs_sonarr_std else {}
-            sonarr_4k_map = self._poll_sonarr_queue(is_4k=True) if needs_sonarr_4k else {}
-
-            orchestrator = StatusOrchestrator(session=session)
+            orchestrator = StatusOrchestrator(session=apply_session)
             intents: list[StatusIntent] = []
 
             for ph, movie, is_4k in movie_targets:
@@ -540,7 +545,7 @@ class QueueMonitorProducer:
                 )
 
             _publish_queue_activity_snapshot(
-                session,
+                apply_session,
                 movie_targets,
                 episode_targets,
                 radarr_std_map,
@@ -548,9 +553,12 @@ class QueueMonitorProducer:
                 sonarr_std_map,
                 sonarr_4k_map,
             )
-            session.commit()
+            apply_session.commit()
         finally:
-            session.close()
+            try:
+                apply_session.close()
+            except Exception:
+                pass
 
     def _poll_radarr_queue(self, is_4k: bool) -> dict[str, dict[str, Any]]:
         base_url, api_key = settings.resolve_arr_endpoint('radarr', is_4k=is_4k)

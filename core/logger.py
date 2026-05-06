@@ -227,28 +227,62 @@ def _stall_heartbeat_interval_sec() -> float:
     return max(3.0, v)
 
 
-def start_verbose_stall_heartbeat(label: str, *, interval_sec: float | None = None) -> threading.Event:
+def start_verbose_stall_heartbeat(
+    label: str,
+    *,
+    interval_sec: float | None = None,
+    escalate_after_sec: float | None = None,
+    escalate_message: str | None = None,
+) -> threading.Event:
     """Emit ``logger.verbose`` stall/liveness lines until the returned event is ``set()``.
 
     INFO stays for coarse progress only; stall lines are VERBOSE diagnostics. Handlers
     record full levels; the app UI filters what operators see.
     Interval: ``STALL_HEARTBEAT_INTERVAL_SEC``.
+
+    Optional escalation: when ``escalate_after_sec`` is set, the first heartbeat
+    tick at or beyond that elapsed-time threshold also emits a ``WARNING`` line
+    (using ``escalate_message`` if provided, otherwise a generic message). This
+    is used to surface DB lock contention on the worker job-claim commit path
+    so it is unambiguous in operator logs.
     """
     import time
 
     stop = threading.Event()
-    if not logger.isEnabledFor(VERBOSE_LEVEL_NUM):
-        return stop
     every = float(interval_sec) if interval_sec is not None else _stall_heartbeat_interval_sec()
     started = time.monotonic()
     safe_label = (label or "stall").replace("\n", " ")[:200]
+    escalate_threshold = (
+        float(escalate_after_sec) if escalate_after_sec is not None else None
+    )
+
+    # If VERBOSE is disabled and we have nothing to escalate, no thread needed.
+    verbose_enabled = logger.isEnabledFor(VERBOSE_LEVEL_NUM)
+    if not verbose_enabled and escalate_threshold is None:
+        return stop
 
     def _run() -> None:
+        warned = False
         while not stop.wait(every):
-            logger.verbose(
-                f"Stall heartbeat [{safe_label}] elapsed_s={time.monotonic() - started:.1f}",
-                extra={"emoji_type": "processing"},
-            )
+            elapsed = time.monotonic() - started
+            if verbose_enabled:
+                logger.verbose(
+                    f"Stall heartbeat [{safe_label}] elapsed_s={elapsed:.1f}",
+                    extra={"emoji_type": "processing"},
+                )
+            if (
+                not warned
+                and escalate_threshold is not None
+                and elapsed >= escalate_threshold
+            ):
+                msg = escalate_message or (
+                    f"Stall heartbeat [{safe_label}] blocked "
+                    f">{escalate_threshold:.0f}s — likely DB lock contention "
+                    "from a long-running transaction (calendar/sync), not "
+                    "external API"
+                )
+                logger.warning(msg, extra={"emoji_type": "warning"})
+                warned = True
 
     threading.Thread(target=_run, name=f"vstall-{safe_label[:24]}", daemon=True).start()
     return stop

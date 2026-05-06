@@ -7,43 +7,50 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-### Added
+### Summary
 
-- **Postgres LISTEN/NOTIFY infrastructure (phased rollout)**
-  - Dedicated `Notifier` service (`services/postgres/notifier.py`) with reconnect/backoff; triggers on `job` emit `NOTIFY placeholdarr_jobs` on insert and on update of `status`/`run_after`.
-  - Optional **NOTIFY-driven worker loop** (`USE_NOTIFY_WORKER_LOOP`, **default off**): listener + executor workers, 60s safety poll, min(`run_after`) aware wait, and a periodic stale-`CLAIMED` reaper. Set to `true` in the environment to enable NOTIFY wake; otherwise the legacy **2s poll loop** runs (recommended until NOTIFY hardening is validated).
-  - **`DisplayStatus.SEARCH_QUEUED`**: playback webhooks during the startup gate set a user-friendly “Search queued” status immediately; normal processing continues after the gate opens.
-  - **`media_refresh` jobs** (`USE_JOB_DRIVEN_REFRESH`, default on): materializer `threading.Timer` refresh call sites can enqueue durable jobs with the same delays. Set to `false` to use Timers only.
-  - **`startup_sync_runner` jobs** (`USE_JOB_DRIVEN_STARTUP_SYNC`, default on): dashboard-triggered post-onboarding sync and ARR endpoint-change full sync can run via the job queue with an advisory lock; app lifespan startup sync stays on a daemon thread to avoid a startup gate deadlock. Set to `false` for thread-only launchers.
-  - **Playback-scoped queue monitor** (`USE_NOTIFY_QUEUE_MONITOR`, default on): `placeholder.queue_monitor_active` (+ partial index), set after playback-initiated ARR search, NOTIFY `placeholdarr_queue_monitor_signal`, NOTIFY-driven idle loop with configurable safety poll (`QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS`). Set to `false` for the previous always-poll behavior.
-  - **30-minute startup gate watchdog** in lifespan so workers cannot stay blocked forever if startup sync stalls.
+Placeholdarr used to wake background workers on a fixed timer and ask the database “is there work?” over and over. That was simple and predictable, but under load it meant many threads hitting Postgres even when nothing had changed, and work could sit in the queue until the next poll interval.
 
-### Changed
+The app now uses Postgres **LISTEN / NOTIFY**: when a job is created or becomes runnable, the database signals the workers immediately so they **react as soon as something happens**—webhooks, refreshes, and queue activity feel snappier instead of waiting on a polling cadence. You should see **less idle database chatter** (fewer round-trips when the system is quiet) and **better responsiveness when many things happen at once**, because workers are napped until there is actually work.
 
-- **Radarr/Sonarr webhooks**: `Grab` is recognized as informational (`movie_grab` / `episode_grab`) and skipped without warnings; `movie_imported` uses the same ARR instance resolution as `movie_added` and can **self-heal** by upserting from the Radarr API when the DB row is missing (e.g. after a failed `MovieAdded` job).
-- **Library "Future" matches calendar lookahead (not plain `not_needed`)**
-  - Movies/TV library filters and `/api/stats` "future outside lookahead" use the same air/release date vs `CALENDAR_LOOKAHEAD_DAYS` rules as `_compute_determination`. Policy-only `not_needed` rows (e.g. season 0 specials when `INCLUDE_SPECIALS` is false) no longer count as Future.
-- **REQUEST NFO backfill now runs in bulk NFO-only mode**
-  - Startup REQUEST backfill enqueues `nfo_refresh` jobs with direct player projection disabled so large libraries are not bottlenecked by per-item Plex/Jellyfin/Emby metadata writes during catch-up.
-- **Backfill completion now triggers one library refresh**
-  - Backfill jobs are tagged with a run id; when the last job in that run completes, the app triggers a single section refresh (`movies + episodes`) so players pick up updated NFO text in one pass.
-- **Backfill queue isolation**
-  - REQUEST backfill enqueues with pending-job merge disabled to avoid inheriting older mixed payloads and to keep backfill behavior deterministic.
-- **Persisted projected display status in DB**
-  - Added `placeholder.display_status_projected` so the user-facing status text is stored persistently (including REQUEST runtime bracket text like `[1h 43m · REQUEST]`) whenever status is written by orchestrator/materializer/import-grace paths.
-- **Plex force metadata refresh for REQUEST backfill completion**
-  - The one-time REQUEST NFO backfill completion refresh now calls Plex section refresh with `force=1` so existing library items are re-read for metadata changes from NFOs; normal status update paths continue to use direct projection behavior.
+Alongside that switch, this release tightens **how long the app holds database connections** during slow steps (Plex, Radarr/Sonarr, disk). That reduces the “everyone waiting on everyone else” stalls and connection-pool exhaustion that showed up once NOTIFY made work arrive in bursts instead of dribbling in over time. Net effect: similar or lower steady-state DB load when idle, and **smoother behavior under spikes**—assuming Postgres is sized normally for your library.
 
-### Fixed
+Operators: job NOTIFY uses modern Postgres trigger syntax; **Postgres 11+** is recommended (older servers fall back automatically where possible). Details below for tuning and diagnostics.
 
-- **Worker queue reliability (polling default + claim lease)**
-  - `USE_NOTIFY_WORKER_LOOP` defaults to **off** so production uses the proven **polling** executor; set `USE_NOTIFY_WORKER_LOOP=true` to re-enable NOTIFY wake.
-  - Each job **claim** assigns a `claim_token`; **`DONE` / failure transitions** use conditional `UPDATE`s so a **stale-CLAIMED reaper** reset cannot be overwritten by a late commit from a still-running handler (`StaleJobClaimError` rolls back that commit).
-  - Stale reaper `UPDATE` clears `claim_token` and still **`RETURNING id`** + **`_drain_event.set()`** to wake workers immediately.
-- **Plex projection**: skip expensive `find_movie_by_id` when the **expected placeholder media file is missing on disk** (avoids long library scans when the asset was deleted or never materialized).
-- **`movie_added` webhook crash on first-time movie ingest (`int(None)`)**
-  - New `Movie` rows from `_upsert_movie` had no database primary key until a later `flush`, but `process_movie_add_event` called `_sync_linked_placeholder_presence(..., movie_id=int(movie_row.id), ...)` first — so brand-new titles (no prior DB row) raised `TypeError` and left `movie_imported` follow-ups without a catalog row.
-  - `_upsert_movie` and `_upsert_episode` now `flush()` immediately after inserting a new row (aligned with `_upsert_series` / `_upsert_season`) so `.id` is valid before any code reads it.
+### Job queue, NOTIFY, and workers
+
+- **Claim / finish model:** claim uses its own session and returns a detached `ClaimedJobDescriptor`; handlers no longer mark jobs DONE. Finish uses `_mark_descriptor_done` / `_mark_descriptor_failed` with conditional updates on `claim_token` (`StaleJobClaimError` on races). `WORKER_CLAIM_LOCK_TIMEOUT_SECONDS` and clearer stall heartbeats for lock contention on claim and finish.
+- **Reaper and wakeups:** `claim_token` on claims; reaper clears token and wakeups via `RETURNING` + `_drain_event.set()`. `WORKER_MAX_JOBS_PER_DRAIN` limits burst work per pass.
+- **NOTIFY behavior:** `_drain_event.clear()` before each drain. `WORKER_NOTIFY_ENABLED` and `WORKER_FALLBACK_POLL_SECONDS` to bypass LISTEN; `WORKER_SAFETY_POLL_SECONDS` (15) and `WORKER_STALE_CLAIMED_RESET_SECONDS` (900) as tighter defaults. Notifier `healthy()` / `get_shared_notifier_health()` for ops.
+- **Idempotency and priority:** `Job.priority` with `job_priority` defaults; `processed_job_key` and helpers for NFO / media side effects; `mark_claim_revoked` / `is_claim_revoked` for long handlers. `class_singleton` gate on `run_calendar_phase`.
+- **LISTEN/NOTIFY stack:** dedicated `Notifier` with DB triggers on `job`; worker threads + safety poll + stale-CLAIMED reaper. `DisplayStatus.SEARCH_QUEUED` during startup gate. Durable `media_refresh` and `startup_sync_runner` jobs (env to fall back to Timers / threads). Queue monitor uses `queue_monitor_active`, NOTIFY `placeholdarr_queue_monitor_signal`, and safety poll. Legacy interval-polling worker and `USE_NOTIFY_*` toggles removed. Lifespan startup-gate watchdog for wedged sync.
+- **Logging:** per-job `job_done … elapsed_s=…` and optional `queue_wait_s=…` when `enqueued_at` is present; removed redundant `job_slow` line.
+
+### Database, pool, and schema
+
+- **Pool env:** `DB_POOL_SIZE`, `DB_POOL_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` (replaces hardcoded pool in `db.py`). `session_scope()`; fix for `StatusOrchestrator._get_session` session leak.
+- **Ops:** `GET /api/diagnostics/db` (pool, `pg_stat_activity` / blockers, long xacts, notifier snapshot).
+- **Startup migrations:** blocking `pg_advisory_lock` with `lock_timeout` and `RUNTIME_SCHEMA_LOCK_WAIT_SECONDS` (replaces short `pg_try` retries and spurious warnings); unlock in `finally`. Engine log line uses real pool numbers (f-string). Job NOTIFY triggers: `EXECUTE FUNCTION` vs `EXECUTE PROCEDURE` by server version.
+
+### Handlers, sync, and long I/O
+
+- **Session boundaries:** `media_refresh` and NFO / `refresh_all_sections` paths release the DB before long HTTP; `queue_monitor_producer._poll_once` is scan → ARR HTTP → apply. `startup_sync_runner` uses a row `app_config` gate and heartbeat (not a long-held session advisory lock).
+
+### Calendar and status
+
+- **Scope:** `run_calendar_phase` uses a release-date window (with TBA / coming-soon handling) instead of scanning all on-disk placeholders; **`CALENDAR_PHASE_BATCH_SIZE`** commits per batch with per-chunk logging and `chunks_committed` in stats.
+- **Library “Future”:** filters and `/api/stats` align with `CALENDAR_LOOKAHEAD_DAYS` / determination; policy-only `not_needed` (e.g. filtered specials) no longer count as Future.
+
+### Webhooks, backfill, and projection
+
+- **Webhooks:** `Grab` treated as informational; `movie_imported` aligns with `movie_added` and can self-heal missing rows from Radarr.
+- **REQUEST backfill:** bulk NFO-only mode; run-tagged jobs; isolated enqueue; completion triggers one `movies + episodes` refresh; Plex `force=1` on that completion refresh.
+- **Display:** `placeholder.display_status_projected` for persisted user-facing status text (including REQUEST runtime-in-bracket formatting).
+
+### Reliability fixes
+
+- **Plex metadata:** skip heavy `find_movie_by_id` when the expected placeholder file is missing on disk.
+- **Webhooks:** `_upsert_movie` / `_upsert_episode` flush immediately after insert so `movie_id` is valid before `process_movie_add_event` uses it.
 
 ## [0.9.9] - 2026-04-30
 
