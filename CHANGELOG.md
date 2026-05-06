@@ -7,6 +7,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-05-05
+
 ### Changed
 
 - **Radarr/Sonarr webhooks**: `Grab` is recognized as informational (`movie_grab` / `episode_grab`) and skipped without warnings; `movie_imported` uses the same ARR instance resolution as `movie_added` and can **self-heal** by upserting from the Radarr API when the DB row is missing (e.g. after a failed `MovieAdded` job).
@@ -22,22 +24,17 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
   - Added `placeholder.display_status_projected` so the user-facing status text is stored persistently (including REQUEST runtime bracket text like `[1h 43m · REQUEST]`) whenever status is written by orchestrator/materializer/import-grace paths.
 - **Plex force metadata refresh for REQUEST backfill completion**
   - The one-time REQUEST NFO backfill completion refresh now calls Plex section refresh with `force=1` so existing library items are re-read for metadata changes from NFOs; normal status update paths continue to use direct projection behavior.
+- **Docker**: example compose sets `PUID`/`PGID` and bind mounts for appdata plus a placeholder/media root; startup entrypoint `chown`s `/config` and `/app`, then runs the app non-root via `setpriv`.
+
+### Documentation
+
+- **README**: Plex playback automation typically uses **Tautulli** (or similar) with Placeholdarr’s webhook URL.
 
 ### Fixed
 
 - **`movie_added` webhook crash on first-time movie ingest (`int(None)`)**
   - New `Movie` rows from `_upsert_movie` had no database primary key until a later `flush`, but `process_movie_add_event` called `_sync_linked_placeholder_presence(..., movie_id=int(movie_row.id), ...)` first — so brand-new titles (no prior DB row) raised `TypeError` and left `movie_imported` follow-ups without a catalog row.
   - `_upsert_movie` and `_upsert_episode` now `flush()` immediately after inserting a new row (aligned with `_upsert_series` / `_upsert_season`) so `.id` is valid before any code reads it.
-
-## [0.9.10] - 2026-05-05
-
-### Changed
-
-- **Docker**: example compose sets `PUID`/`PGID` and bind mounts for appdata plus a placeholder/media root; startup entrypoint `chown`s `/config` and `/app`, then runs the app non-root via `setpriv`.
-
-### Documentation
-
-- **README**: Plex playback automation typically uses **Tautulli** (or similar) with Placeholdarr’s webhook URL.
 
 ## [0.9.9] - 2026-04-30
 
