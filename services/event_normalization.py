@@ -87,6 +87,30 @@ def normalize_event_type(raw_event_type: str | None, instance: str | None = None
     if raw == "download":
         return _normalize_download_event(instance)
 
+    # Radarr/Sonarr notify on release grab (pre-import). Informational only — no DB work.
+    if raw == "grab":
+        normalized_instance = str(instance or "").strip().lower()
+        if normalized_instance.startswith("radarr"):
+            return NormalizedEventType(
+                raw_event_type=raw,
+                canonical_event_type="movie_grab",
+                matched_alias="grab",
+                is_known=True,
+            )
+        if normalized_instance.startswith("sonarr"):
+            return NormalizedEventType(
+                raw_event_type=raw,
+                canonical_event_type="episode_grab",
+                matched_alias="grab",
+                is_known=True,
+            )
+        return NormalizedEventType(
+            raw_event_type=raw,
+            canonical_event_type="unknown",
+            matched_alias=None,
+            is_known=False,
+        )
+
     for canonical, aliases in CANONICAL_EVENT_ALIASES.items():
         for alias in aliases:
             if raw == alias:

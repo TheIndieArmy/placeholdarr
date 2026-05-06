@@ -37,10 +37,46 @@ from services.source_of_truth.placeholder_cleanup import (
 )
 from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
+from services.status_projection import projected_status_display
 
 
 REQUEST_STATUS = "REQUEST"
 REQUEST_REASON = "placeholder_request"
+
+
+def _placeholder_runtime_minutes(
+    session,
+    *,
+    movie_id: int | None = None,
+    episode_id: int | None = None,
+) -> int | None:
+    if movie_id is not None:
+        movie = session.query(Movie).filter(Movie.id == int(movie_id)).first()
+        if movie:
+            try:
+                runtime = int(getattr(movie, "radarr_runtime", 0) or 0)
+                return runtime if runtime > 0 else None
+            except Exception:
+                return None
+    if episode_id is not None:
+        episode = session.query(Episode).filter(Episode.id == int(episode_id)).first()
+        if not episode:
+            return None
+        try:
+            runtime = int(getattr(episode, "sonarr_runtime", 0) or 0)
+            if runtime > 0:
+                return runtime
+        except Exception:
+            pass
+        season = session.query(Season).filter(Season.id == episode.season_id).first()
+        series = session.query(Series).filter(Series.id == season.series_id).first() if season else None
+        if series:
+            try:
+                runtime = int(getattr(series, "sonarr_runtime", 0) or 0)
+                return runtime if runtime > 0 else None
+            except Exception:
+                return None
+    return None
 
 
 def _materialization_overlap_enabled() -> bool:
@@ -281,6 +317,11 @@ def _mark_placeholder_row_active(
     row.lifecycle_status = "ACTIVE"
     row.display_status = REQUEST_STATUS
     row.display_reason = REQUEST_REASON
+    row.display_status_projected = projected_status_display(
+        REQUEST_STATUS,
+        reason=REQUEST_REASON,
+        runtime_minutes=_placeholder_runtime_minutes(session, movie_id=movie_id, episode_id=episode_id),
+    )
     row.display_progress = 0
     # Reset observation-tracking keys in extra so stale state from a previous
     # observation round cannot affect the new pass (e.g. plex_metadata_ready_seen).
@@ -319,6 +360,7 @@ def _mark_placeholder_rows_deleted(
         row.has_placeholder = False
         row.lifecycle_status = "DELETED"
         row.display_status = None
+        row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
         row.last_observed_at = func.now()
@@ -358,6 +400,7 @@ def _mark_placeholder_rows_deleted_for_episodes(
         row.has_placeholder = False
         row.lifecycle_status = "DELETED"
         row.display_status = None
+        row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
         row.last_observed_at = func.now()

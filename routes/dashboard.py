@@ -38,6 +38,7 @@ from services.postgres.models import (
     Job,
     EventLog,
 )
+from services.library_future_semantics import movie_row_is_future_outside_lookahead, sql_episode_future_outside_lookahead
 from services.source_of_truth.status_intent import StatusSource
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
@@ -375,11 +376,25 @@ def _dashboard_not_built_response() -> PlainTextResponse:
     )
 
 
-def _serve_dashboard_index() -> FileResponse | PlainTextResponse:
+_SETUP_PREVIEW_SNIPPET = "<script>window.__PLACEHOLDARR_SETUP_PREVIEW__=!0</script>"
+
+
+def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse | PlainTextResponse | HTMLResponse:
     index_path = _dashboard_dist_index_path()
     if not os.path.isfile(index_path):
         return _dashboard_not_built_response()
-    return FileResponse(index_path, media_type="text/html")
+    if not inject_setup_preview:
+        return FileResponse(index_path, media_type="text/html")
+    try:
+        with open(index_path, encoding="utf-8") as handle:
+            html = handle.read()
+    except OSError:
+        return FileResponse(index_path, media_type="text/html")
+    if "<head>" in html:
+        html = html.replace("<head>", "<head>" + _SETUP_PREVIEW_SNIPPET, 1)
+    else:
+        html = _SETUP_PREVIEW_SNIPPET + html
+    return HTMLResponse(content=html, media_type="text/html")
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -430,15 +445,17 @@ async def dashboard_settings_nested(path: str):
 
 
 @router.get("/setup", response_class=HTMLResponse)
-async def dashboard_setup_page():
+async def dashboard_setup_page(request: Request):
     """Serve SPA for onboarding wizard (client-side /setup route)."""
-    return _serve_dashboard_index()
+    inject = request.query_params.get("preview") == "1"
+    return _serve_dashboard_index(inject_setup_preview=inject)
 
 
 @router.get("/setup/{path:path}", response_class=HTMLResponse)
 async def dashboard_setup_nested(path: str):
     """Deep links under /setup still load the SPA shell."""
-    return _serve_dashboard_index()
+    inject = path == "preview" or path.startswith("preview/")
+    return _serve_dashboard_index(inject_setup_preview=inject)
 
 
 @router.get("/dashboard-next", response_class=HTMLResponse)
@@ -2512,11 +2529,7 @@ def _episode_stats_for_series(session, series_id: int) -> dict[str, int]:
             func.sum(
                 case(
                     (
-                        and_(
-                            func.coalesce(Episode.has_file, False) == False,
-                            func.coalesce(Episode.has_placeholder, False) == False,
-                            Episode.determination == "not_needed",
-                        ),
+                        sql_episode_future_outside_lookahead(Episode, Season),
                         1,
                     ),
                     else_=0,
@@ -2702,11 +2715,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
                 func.sum(
                     case(
                         (
-                            and_(
-                                func.coalesce(Episode.has_file, False) == False,
-                                func.coalesce(Episode.has_placeholder, False) == False,
-                                Episode.determination == "not_needed",
-                            ),
+                            sql_episode_future_outside_lookahead(Episode, Season),
                             1,
                         ),
                         else_=0,
@@ -2743,7 +2752,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
         for movie in movies:
             instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
             movie_unresolved = (not bool(movie.has_file)) and (not bool(movie.has_placeholder))
-            movie_is_future = movie_unresolved and movie.determination == "not_needed"
+            movie_is_future = movie_unresolved and movie_row_is_future_outside_lookahead(movie)
             movie_has_missing = movie_unresolved and not movie_is_future
             arr_link = _arr_item_link(
                 item_type="movie",

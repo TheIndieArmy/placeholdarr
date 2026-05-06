@@ -395,6 +395,8 @@ def _to_list(value: Any) -> list[Any]:
 
 
 def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
     try:
         return int(value)
     except Exception:
@@ -495,8 +497,9 @@ def _movie_nfo_xml(movie: Any) -> str:
         "  <tag>placeholder</tag>",
         f"  <tag>status:{escape(status)}</tag>",
     ]
-    if year:
-        lines.append(f"  <year>{int(year)}</year>")
+    yi = _to_int(year)
+    if yi and yi > 1800:
+        lines.append(f"  <year>{yi}</year>")
     if overview:
         lines.append(f"  <plot>{overview}</plot>")
     else:
@@ -672,8 +675,9 @@ def _series_nfo_xml(series: Any) -> str:
         "  <tag>placeholder</tag>",
     ]
     year = getattr(series, "year", None)
-    if year:
-        lines.append(f"  <year>{int(year)}</year>")
+    yi = _to_int(year)
+    if yi and yi > 1800:
+        lines.append(f"  <year>{yi}</year>")
     if ratings:
         top_rating = next((r for r in ratings if r[0] in ('tmdb', 'themoviedb')), ratings[0])
         if top_rating[1]:

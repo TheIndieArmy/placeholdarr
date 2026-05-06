@@ -42,7 +42,12 @@ def refresh_all_paths(
     return {"refreshed": total_refreshed, "failed": total_failed}
 
 
-def refresh_all_sections(has_movies: bool, has_episodes: bool) -> dict[str, int]:
+def refresh_all_sections(
+    has_movies: bool,
+    has_episodes: bool,
+    *,
+    plex_force_metadata_refresh: bool = False,
+) -> dict[str, int]:
     """Fan out library-level refresh to all enabled media servers."""
     return refresh_selected_sections(
         has_movies,
@@ -50,6 +55,7 @@ def refresh_all_sections(has_movies: bool, has_episodes: bool) -> dict[str, int]
         include_plex=True,
         include_jellyfin=True,
         include_emby=True,
+        plex_force_metadata_refresh=plex_force_metadata_refresh,
     )
 
 
@@ -61,6 +67,7 @@ def refresh_selected_sections(
     include_jellyfin: bool = True,
     include_emby: bool = True,
     bypass_suppression: bool = False,
+    plex_force_metadata_refresh: bool = False,
 ) -> dict[str, int]:
     """Fan out library-level refresh to selected media servers."""
     if not bypass_suppression and getattr(settings, "REFRESH_TRIGGER_SUPPRESSED", False):
@@ -72,7 +79,7 @@ def refresh_selected_sections(
 
     refreshers = []
     if include_plex:
-        refreshers.append(refresh_plex_sections)
+        refreshers.append(lambda hm, he: refresh_plex_sections(hm, he, force_refresh_metadata=plex_force_metadata_refresh))
     if include_jellyfin:
         refreshers.append(refresh_jellyfin_sections)
     if include_emby:

@@ -7,6 +7,35 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-05-05
+
+### Changed
+
+- **Radarr/Sonarr webhooks**: `Grab` is recognized as informational (`movie_grab` / `episode_grab`) and skipped without warnings; `movie_imported` uses the same ARR instance resolution as `movie_added` and can **self-heal** by upserting from the Radarr API when the DB row is missing (e.g. after a failed `MovieAdded` job).
+- **Library "Future" matches calendar lookahead (not plain `not_needed`)**
+  - Movies/TV library filters and `/api/stats` "future outside lookahead" use the same air/release date vs `CALENDAR_LOOKAHEAD_DAYS` rules as `_compute_determination`. Policy-only `not_needed` rows (e.g. season 0 specials when `INCLUDE_SPECIALS` is false) no longer count as Future.
+- **REQUEST NFO backfill now runs in bulk NFO-only mode**
+  - Startup REQUEST backfill enqueues `nfo_refresh` jobs with direct player projection disabled so large libraries are not bottlenecked by per-item Plex/Jellyfin/Emby metadata writes during catch-up.
+- **Backfill completion now triggers one library refresh**
+  - Backfill jobs are tagged with a run id; when the last job in that run completes, the app triggers a single section refresh (`movies + episodes`) so players pick up updated NFO text in one pass.
+- **Backfill queue isolation**
+  - REQUEST backfill enqueues with pending-job merge disabled to avoid inheriting older mixed payloads and to keep backfill behavior deterministic.
+- **Persisted projected display status in DB**
+  - Added `placeholder.display_status_projected` so the user-facing status text is stored persistently (including REQUEST runtime bracket text like `[1h 43m · REQUEST]`) whenever status is written by orchestrator/materializer/import-grace paths.
+- **Plex force metadata refresh for REQUEST backfill completion**
+  - The one-time REQUEST NFO backfill completion refresh now calls Plex section refresh with `force=1` so existing library items are re-read for metadata changes from NFOs; normal status update paths continue to use direct projection behavior.
+- **Docker**: example compose sets `PUID`/`PGID` and bind mounts for appdata plus a placeholder/media root; startup entrypoint `chown`s `/config` and `/app`, then runs the app non-root via `setpriv`.
+
+### Documentation
+
+- **README**: Plex playback automation typically uses **Tautulli** (or similar) with Placeholdarr’s webhook URL.
+
+### Fixed
+
+- **`movie_added` webhook crash on first-time movie ingest (`int(None)`)**
+  - New `Movie` rows from `_upsert_movie` had no database primary key until a later `flush`, but `process_movie_add_event` called `_sync_linked_placeholder_presence(..., movie_id=int(movie_row.id), ...)` first — so brand-new titles (no prior DB row) raised `TypeError` and left `movie_imported` follow-ups without a catalog row.
+  - `_upsert_movie` and `_upsert_episode` now `flush()` immediately after inserting a new row (aligned with `_upsert_series` / `_upsert_season`) so `.id` is valid before any code reads it.
+
 ## [0.9.9] - 2026-04-30
 
 ### Summary
@@ -129,7 +158,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Library list summary mode**: `GET /api/library` accepts `summary=true` to omit large `overview` and `backdrop_url` fields for smaller JSON on periodic refresh.
 - **Dashboard library IA**: Sidebar **Library** opens **Movies** at `/library`; **TV** lives at `/library/tv` with nested nav (same pattern as Settings). Per-shelf filters persist in `sessionStorage` (`placeholdarr:library-shelf-filter:movies` / `:tv`); legacy `placeholdarr:library-filter` is migrated once on load.
-- **Detail ARR deep links**: Movie and series detail APIs include `**arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). `**arr_instance_links`** now also carries `**has_file` / `has_placeholder**` per movie row and `**episode_files` / `episode_placeholders**` per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
+- **Detail ARR deep links**: Movie and series detail APIs include `**arr_instance_links`** (label + URL per Radarr/Sonarr instance that holds the same TMDB/TVDB title). `**arr_instance_links`** now also carries `**has_file` / `has_placeholder`** per movie row and `**episode_files` / `episode_placeholders**` per series row (Sonarr episode aggregates). The dashboard shows a bottom **launch row** with the service logo and configured instance name; the calendar spotlight can open multiple instance links when present.
 - **Settings → Media Integrations**: **Webhook URL** on each connected Plex/Jellyfin/Emby card opens the same playback webhook setup modal as onboarding (shared `PlaybackWebhookSetupModal`).
 - **Lite sync catalog tombstones**: Startup lite compares DB rows to the live Radarr/Sonarr catalogs and targets IDs missing from the API for tombstoning (`movies_catalog_removed` / `series_catalog_removed`), alongside path-drift discovery.
 - **Series tombstone bulk cleanup path**: Deleted Sonarr series use a series-level placeholder cleanup routine with progress logs, safe full-tree deletion checks, and aggregate history metadata for grouped placeholder activity UI rows.

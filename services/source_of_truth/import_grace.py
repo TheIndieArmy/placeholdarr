@@ -15,6 +15,7 @@ from services.source_of_truth.determiner import run_determination_for_entities_i
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
 from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE
+from services.status_projection import projected_status_display
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
@@ -96,6 +97,7 @@ def _set_countdown_status(session, placeholder_ids: list[int], status_text: str)
     for row in rows:
         row.display_status = status_text
         row.display_reason = IMPORT_GRACE_REASON
+        row.display_status_projected = projected_status_display(status_text, reason=IMPORT_GRACE_REASON)
         session.add(row)
         active_ids.append(int(row.id))
     return active_ids
@@ -310,8 +312,9 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             )
             if ctx:
                 ep, season, series = ctx
-                sn = int(season.season_number)
-                ep_label = f"S{sn:02d}E{int(ep.episode_number):02d} - {ep.title}"
+                sn = int(season.season_number or 0)
+                en = int(ep.episode_number or 0)
+                ep_label = f"S{sn:02d}E{en:02d} - {ep.title}"
                 result_path = str(getattr(ep, "placeholder_filepath", "") or "").strip() or episode_placeholder_path(
                     ep, season, series
                 )

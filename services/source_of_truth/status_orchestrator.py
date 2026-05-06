@@ -27,6 +27,7 @@ from core.config import settings
 from services.source_of_truth.status_intent import StatusIntent, StatusSource, DisplayStatus
 from services.postgres.models import Placeholder, Movie, Series, Season, Episode, EventLog
 from services.postgres.db import get_session
+from services.status_projection import projected_status_display
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,37 @@ def _should_persist_status_history_event(*, source: str, old_status: str, new_st
         return _is_coming_soon_status(old_status) and new_status == DisplayStatus.REQUEST.value
 
     return True
+
+
+def _runtime_minutes_for_placeholder(session: Session, placeholder: Placeholder) -> int | None:
+    movie_id = getattr(placeholder, "movie_id", None)
+    if movie_id is not None:
+        movie = session.query(Movie).filter(Movie.id == int(movie_id)).first()
+        if movie:
+            try:
+                runtime = int(getattr(movie, "radarr_runtime", 0) or 0)
+                return runtime if runtime > 0 else None
+            except Exception:
+                return None
+    episode_id = getattr(placeholder, "episode_id", None)
+    if episode_id is not None:
+        episode = session.query(Episode).filter(Episode.id == int(episode_id)).first()
+        if episode:
+            try:
+                runtime = int(getattr(episode, "sonarr_runtime", 0) or 0)
+                if runtime > 0:
+                    return runtime
+            except Exception:
+                pass
+            season = session.query(Season).filter(Season.id == episode.season_id).first()
+            series = session.query(Series).filter(Series.id == season.series_id).first() if season else None
+            if series:
+                try:
+                    runtime = int(getattr(series, "sonarr_runtime", 0) or 0)
+                    return runtime if runtime > 0 else None
+                except Exception:
+                    return None
+    return None
 
 
 class StatusOrchestrator:
@@ -500,6 +532,11 @@ class StatusOrchestrator:
             old_status = ph.display_status
             ph.display_status = intent.new_status
             ph.display_reason = intent.reason
+            ph.display_status_projected = projected_status_display(
+                intent.new_status,
+                reason=intent.reason,
+                runtime_minutes=_runtime_minutes_for_placeholder(session, ph),
+            )
             if intent.progress is not None:
                 try:
                     ph.display_progress = int(intent.progress)
@@ -604,6 +641,8 @@ class StatusOrchestrator:
             player_refresh: dict[int, bool] = {}
             for intent in intents:
                 if not intent.trigger_nfo_refresh:
+                    continue
+                if intent.placeholder_id is None:
                     continue
                 pid = int(intent.placeholder_id)
                 want = intent.wants_player_metadata_refresh_after_nfo()

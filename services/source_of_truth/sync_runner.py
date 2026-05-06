@@ -463,6 +463,7 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
         return existing, False, changed
     created = Movie(**fields)
     session.add(created)
+    session.flush()
     return created, True, True
 
 
@@ -555,6 +556,7 @@ def _upsert_episode(session, fields: Dict) -> Tuple[Any, bool, bool]:
         return existing, False, changed
     created = Episode(**fields)
     session.add(created)
+    session.flush()
     return created, True, True
 
 
