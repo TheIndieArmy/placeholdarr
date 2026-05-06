@@ -31,6 +31,10 @@ RUN mkdir -p /config \
 # Copy built frontend assets from the Node stage into the runtime image
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 EXPOSE 8000
 
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

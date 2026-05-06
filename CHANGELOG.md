@@ -29,6 +29,16 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
   - New `Movie` rows from `_upsert_movie` had no database primary key until a later `flush`, but `process_movie_add_event` called `_sync_linked_placeholder_presence(..., movie_id=int(movie_row.id), ...)` first — so brand-new titles (no prior DB row) raised `TypeError` and left `movie_imported` follow-ups without a catalog row.
   - `_upsert_movie` and `_upsert_episode` now `flush()` immediately after inserting a new row (aligned with `_upsert_series` / `_upsert_season`) so `.id` is valid before any code reads it.
 
+## [0.9.10] - 2026-05-05
+
+### Changed
+
+- **Docker**: example compose sets `PUID`/`PGID` and bind mounts for appdata plus a placeholder/media root; startup entrypoint `chown`s `/config` and `/app`, then runs the app non-root via `setpriv`.
+
+### Documentation
+
+- **README**: Plex playback automation typically uses **Tautulli** (or similar) with Placeholdarr’s webhook URL.
+
 ## [0.9.9] - 2026-04-30
 
 ### Summary
