@@ -8,4 +8,6 @@ mkdir -p /config/logs
 
 chown -R "${PUID}:${PGID}" /config /app
 
-exec setpriv --reuid="${PUID}" --regid="${PGID}" --clear-groups --init-groups -- "$@"
+# util-linux setpriv: --clear-groups and --init-groups are mutually exclusive (newer versions exit with an error).
+# Use --init-groups so supplementary groups match /etc/group for the dropped UID (typical PUID/PGID behavior).
+exec setpriv --reuid="${PUID}" --regid="${PGID}" --init-groups -- "$@"
