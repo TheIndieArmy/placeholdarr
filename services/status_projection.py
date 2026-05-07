@@ -1,11 +1,31 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from core.config import settings
 
+from services.source_of_truth.status_intent import DisplayStatus
+
 
 VALID_PROJECTION_MODES = {"summary", "title", "both"}
+
+# Canonical DB/display statuses whose bracket text should resolve via ``status.label.*``
+# (plus queue-monitor synthetic ``RETRYING``). Anything else is treated as free-form text.
+_CANONICAL_DISPLAY_STATUSES: frozenset[str] = frozenset(s.value for s in DisplayStatus) | {"RETRYING"}
+
+# Legacy override keys that, when present, indicate the user customized things in the pre-
+# situation-first model. Read-compat: until they save in the new UI, projection follows
+# the legacy bracket pipeline so their existing wording stays visible.
+_LEGACY_REQUEST_OVERRIDE_KEYS: tuple[str, ...] = (
+    "bracket.format",
+    "bracket.with_runtime",
+    "status.label.REQUEST",
+    "runtime.format.hm",
+    "runtime.format.h",
+    "runtime.format.m",
+)
+_LEGACY_REASON_OVERRIDE_KEYS: tuple[str, ...] = ("bracket.format",)
 
 
 def get_projection_mode() -> str:
@@ -70,24 +90,122 @@ def format_duration_label(minutes: int) -> str:
     """Human-readable duration from whole minutes (e.g. 45m, 1h, 1h 5m)."""
     if minutes <= 0:
         return ""
+
+    # Defer to the customizable template engine so users can localize duration formatting.
+    from services.messages import render
+
     if minutes < 60:
-        return f"{minutes}m"
+        return render("runtime.format.m", {"Minutes": str(minutes)})
     h, m = divmod(minutes, 60)
     if m == 0:
-        return f"{h}h"
-    return f"{h}h {m}m"
+        return render("runtime.format.h", {"Hours": str(h)})
+    return render("runtime.format.hm", {"Hours": str(h), "Minutes": str(m)})
+
+
+def _bracket_context_for_status(clean_status: str, runtime_minutes: int | None) -> dict[str, Any]:
+    """Context for legacy ``bracket.format`` / ``bracket.with_runtime`` rendering.
+
+    Canonical enum values use ``__status_enum__`` so ``{Status}`` resolves through the user's
+    ``status.label.<ENUM>`` templates. Free-form strings (import-grace lines, queue reason text)
+    pass ``Status`` literally.
+    """
+    text = str(clean_status or "").strip()
+    if not text:
+        return {}
+
+    upper = text.upper()
+    if upper not in _CANONICAL_DISPLAY_STATUSES:
+        return {"Status": text}
+
+    ctx: dict[str, Any] = {"__status_enum__": upper}
+
+    if upper == "REQUEST" and runtime_minutes is not None:
+        rm = _rounded_minutes(runtime_minutes)
+        if rm > 0:
+            duration = format_duration_label(rm)
+            if duration:
+                ctx["Runtime"] = duration
+
+    return ctx
+
+
+def _has_legacy_overrides(overrides: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    """True when at least one of ``keys`` has a non-empty saved override."""
+    if not isinstance(overrides, dict):
+        return False
+    for k in keys:
+        v = overrides.get(k)
+        if isinstance(v, str) and v.strip():
+            return True
+    return False
+
+
+def _request_inner_line(runtime_minutes: int | None) -> str:
+    """Render the situation-first ``line.request`` inner text for REQUEST placeholders."""
+    from services.messages import render
+
+    ctx: dict[str, Any] = {}
+    if runtime_minutes is not None:
+        rm = _rounded_minutes(runtime_minutes)
+        if rm > 0:
+            duration = format_duration_label(rm)
+            if duration:
+                ctx["Runtime"] = duration
+    return render("line.request", ctx)
 
 
 def _summary_status_bracket(clean_status: str, runtime_minutes: int | None) -> str:
-    """Build [REQUEST] or [1h 5m · REQUEST] when runtime is known (REQUEST only)."""
-    status_upper = clean_status.upper()
-    if status_upper == "REQUEST" and runtime_minutes is not None:
-        rm = _rounded_minutes(runtime_minutes)
-        if rm > 0:
-            dur = format_duration_label(rm)
-            if dur:
-                return f"[{dur} · {clean_status}]"
-    return f"[{clean_status}]"
+    """Build the wrapped status text shown in Plex/NFO summaries.
+
+    Pipeline (situation-first): render an inner line per situation, then apply the
+    global wrapper preset (``[ ]`` by default) post-render.
+
+    Read-compat: when the user customized the legacy bracket templates and has not yet
+    saved a value through the new UI, fall back to the legacy bracket renderer that
+    bakes its own brackets in via the saved override. ``status.label.*`` overrides
+    keep working for canonical non-REQUEST stages because they resolve via the
+    engine when we render the inner word.
+    """
+    from services.messages import apply_wrapper, render
+    from services.messages.store import get_overrides
+    from services.messages.template_engine import UnknownTemplateKeyError
+
+    text = str(clean_status or "").strip()
+    if not text:
+        return ""
+
+    upper = text.upper()
+    overrides = get_overrides()
+
+    if upper == "REQUEST":
+        if not overrides.get("line.request") and _has_legacy_overrides(overrides, _LEGACY_REQUEST_OVERRIDE_KEYS):
+            ctx = _bracket_context_for_status(text, runtime_minutes)
+            if ctx.get("Runtime"):
+                return render("bracket.with_runtime", ctx)
+            return render("bracket.format", ctx)
+        inner = _request_inner_line(runtime_minutes)
+        return apply_wrapper(inner)
+
+    if upper in _CANONICAL_DISPLAY_STATUSES:
+        # Legacy bracket override always wins (read-compat for users who customized shape).
+        if _has_legacy_overrides(overrides, _LEGACY_REASON_OVERRIDE_KEYS):
+            ctx = _bracket_context_for_status(text, runtime_minutes)
+            return render("bracket.format", ctx)
+        # New path: resolve the canonical word via ``status.label.*`` so hidden customizations
+        # (kept for read-compat) still affect on-screen text, then wrap globally.
+        try:
+            inner = render(f"status.label.{upper}", {})
+        except UnknownTemplateKeyError:
+            inner = text
+        return apply_wrapper(inner)
+
+    if _has_legacy_overrides(overrides, _LEGACY_REASON_OVERRIDE_KEYS):
+        ctx = _bracket_context_for_status(text, runtime_minutes)
+        if not ctx:
+            return ""
+        return render("bracket.format", ctx)
+
+    return apply_wrapper(text)
 
 
 def projected_status_display(
@@ -128,7 +246,14 @@ def project_title(title: str | None, status: str | None) -> str:
     clean_status = str(status or "").strip()
     if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"title", "both"}:
         return clean_title
-    return f"{clean_title} - [{clean_status}]".strip()
+
+    from services.messages import render
+
+    bracket = _summary_status_bracket(clean_status, None)
+    return render(
+        "title.suffix.format",
+        {"Title": clean_title, "Bracket": bracket},
+    ).strip()
 
 
 def project_summary(

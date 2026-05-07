@@ -11,6 +11,7 @@ from core.config import settings
 from core.logger import logger
 from sqlalchemy.orm.attributes import flag_modified
 
+from services.messages import render as render_message
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
@@ -509,36 +510,37 @@ class QueueMonitorProducer:
                 progress = self._extract_progress(queue_item)
                 if progress > 0:
                     target_status = DisplayStatus.DOWNLOADING.value
-                    target_reason = f"Downloading {progress}%"
+                    target_reason = render_message("queue.downloading", {"Progress": str(progress)})
                     target_progress = progress
                 else:
                     target_status = DisplayStatus.SEARCHING.value
-                    target_reason = "Queued"
+                    target_reason = render_message("queue.queued", {})
                     target_progress = None
             elif queue_status in {"queued", "delay", "paused"}:
                 target_status = DisplayStatus.SEARCHING.value
-                target_reason = "Queued"
+                target_reason = render_message("queue.queued", {})
                 target_progress = None
             elif queue_status == "completed":
                 # Completed means download is done; tracked import states add clarity.
                 target_status = DisplayStatus.IMPORT_IN_PROGRESS.value
                 if tracked_state == "importpending":
-                    target_reason = "Waiting to import"
+                    target_reason = render_message("queue.import.pending", {})
                 elif tracked_state == "importing":
-                    target_reason = "Importing"
+                    target_reason = render_message("queue.import.importing", {})
                 elif tracked_state == "importblocked":
-                    target_reason = "Import blocked"
+                    target_reason = render_message("queue.import.blocked", {})
                 elif tracked_state == "failedpending":
-                    target_reason = "Waiting for import retry"
+                    target_reason = render_message("queue.import.failed_pending", {})
                 else:
-                    target_reason = "Processing import"
+                    target_reason = render_message("queue.import.processing", {})
                 target_progress = None
             elif queue_status in {"warning", "error", "failed"}:
                 target_status = "RETRYING"
-                target_reason = "Retrying after queue failure"
+                target_reason = render_message("queue.retry.queue_failure", {})
                 target_progress = None
             else:
                 target_status = DisplayStatus.SEARCHING.value
+                # Operator-fallback line stays in English for diagnostics.
                 target_reason = f"Queue status: {queue_status or 'unknown'}"
                 target_progress = None
         else:
@@ -550,7 +552,7 @@ class QueueMonitorProducer:
                 elapsed = (now - left_queue_at).total_seconds() if left_queue_at else 0
                 if elapsed < self._retry_grace_seconds:
                     target_status = "RETRYING"
-                    target_reason = "Retrying; waiting for another qualifying release"
+                    target_reason = render_message("queue.retry.left_queue", {})
                     target_progress = None
                     if _should_emit_wait_log(qm, "left_queue_wait_last_log_at", now, period_seconds=60):
                         remaining = max(0, int(self._retry_grace_seconds - elapsed))
@@ -562,7 +564,7 @@ class QueueMonitorProducer:
                         )
                 else:
                     target_status = DisplayStatus.NOT_FOUND.value
-                    target_reason = "NO QUALIFYING RELEASE FOUND"
+                    target_reason = render_message("queue.not_found", {})
                     target_progress = None
                     qm["left_queue_wait_last_log_at"] = None
                     logger.info(
@@ -580,7 +582,7 @@ class QueueMonitorProducer:
                 elapsed_search = (now - search_start).total_seconds() if search_start else 0.0
                 if elapsed_search >= float(self._search_timeout_seconds):
                     target_status = DisplayStatus.NOT_FOUND.value
-                    target_reason = "NO QUALIFYING RELEASE FOUND"
+                    target_reason = render_message("queue.not_found", {})
                     qm["empty_queue_search_started_at"] = None
                     qm["search_wait_last_log_at"] = None
                     logger.info(
@@ -592,7 +594,7 @@ class QueueMonitorProducer:
                     )
                 else:
                     target_status = DisplayStatus.SEARCHING.value
-                    target_reason = "Searching for release"
+                    target_reason = render_message("queue.searching", {})
                     target_progress = None
                     if _should_emit_wait_log(qm, "search_wait_last_log_at", now, period_seconds=60):
                         remaining = max(0, int(float(self._search_timeout_seconds) - elapsed_search))

@@ -436,6 +436,10 @@ app = FastAPI(lifespan=lifespan)
 from routes.dashboard import router as dashboard_router
 app.include_router(dashboard_router)
 
+# Customizable status message templates
+from routes.messages import router as messages_router
+app.include_router(messages_router)
+
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:

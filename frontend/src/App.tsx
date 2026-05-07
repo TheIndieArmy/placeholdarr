@@ -1,4 +1,14 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
@@ -17,6 +27,7 @@ import {
   saveSettings,
   testIntegrationConnection,
 } from "./api/dashboard";
+import { fetchJson } from "./api/client";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
 import plexIcon from "./assets/services/plex.svg";
@@ -126,6 +137,7 @@ const SETTINGS_SECTION_ORDER = [
   "Calendar",
   "Lookahead",
   "Status Updates",
+  "Status Messages",
   "Advanced",
 ];
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
@@ -136,6 +148,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   "Calendar": "calendar_month",
   "Lookahead": "fast_forward",
   "Status Updates": "edit_notifications",
+  "Status Messages": "edit_note",
   "Advanced": "tune",
 };
 const SETTINGS_SECTION_SLUGS: Record<string, string> = {
@@ -146,8 +159,17 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   "Calendar": "calendar",
   "Lookahead": "lookahead",
   "Status Updates": "status-updates",
+  "Status Messages": "status-messages",
   "Advanced": "advanced",
 };
+
+/** Virtual settings sections backed by their own API endpoint, not `/api/settings/current`. */
+const VIRTUAL_SETTINGS_SECTIONS = new Set<string>(["Status Messages"]);
+
+function resolveSettingsSectionFromSlug(slug: string): string | undefined {
+  if (!slug.trim()) return undefined;
+  return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
+}
 const BEHAVIOR_WIZARD_SECTIONS = [
   "ARR Integrations",
   "Library sync",
@@ -560,13 +582,13 @@ export function App() {
       delete window.__PLACEHOLDARR_SETUP_PREVIEW__;
     }
   }, [location.pathname, location.search]);
-  const settingsSectionNames = useMemo(
-    () =>
-      settingsPayload
-        ? SETTINGS_SECTION_ORDER.filter((name) => settingsPayload.sections.some((s) => s.name === name))
-        : [],
-    [settingsPayload],
-  );
+  const settingsSectionNames = useMemo(() => {
+    if (!settingsPayload) return [];
+    const apiSections = settingsPayload.sections ?? [];
+    return SETTINGS_SECTION_ORDER.filter(
+      (name) => VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSections.some((s) => s.name === name),
+    );
+  }, [settingsPayload]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
   /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
@@ -1033,21 +1055,28 @@ export function App() {
 
   useEffect(() => {
     if (currentTab !== "settings") return;
-    if (!settingsPayload) return;
     if (location.pathname === "/settings" || location.pathname === "/settings/") {
       navigate(firstSettingsPath, { replace: true });
       return;
     }
     const slug = location.pathname.split("/")[2] || "";
-    const matched = settingsSectionNames.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
+    const matched = resolveSettingsSectionFromSlug(slug);
     if (!matched) {
       navigate(firstSettingsPath, { replace: true });
       return;
     }
-    if (matched !== activeSettingsSection) {
-      setActiveSettingsSection(matched);
+    if (VIRTUAL_SETTINGS_SECTIONS.has(matched)) {
+      if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
+      return;
     }
-  }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload, settingsSectionNames]);
+    if (!settingsPayload) return;
+    const apiSections = settingsPayload.sections ?? [];
+    if (!apiSections.some((s) => s.name === matched)) {
+      navigate(firstSettingsPath, { replace: true });
+      return;
+    }
+    if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
+  }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
   const libraryListShelf = getLibraryListShelf(location.pathname);
 
@@ -1112,11 +1141,16 @@ export function App() {
     setFieldValues(nextValues);
     setBaselineValues(nextValues);
 
-    const sections = SETTINGS_SECTION_ORDER.filter((name) => payload.sections.some((s) => s.name === name));
+    // Must match `settingsSectionNames`: include virtual tabs (e.g. Status Messages) that are not in `/api/settings/current`.
+    const apiSectionsForNav = payload.sections ?? [];
+    const sections = SETTINGS_SECTION_ORDER.filter(
+      (name) => VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSectionsForNav.some((s) => s.name === name),
+    );
     if (sections.length > 0 && !sections.includes(activeSettingsSection)) {
       const slug = location.pathname.split("/")[2] || "";
-      const matched = sections.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
-      setActiveSettingsSection(matched || sections[0]);
+      const slugMatch = resolveSettingsSectionFromSlug(slug);
+      const matched = slugMatch && sections.includes(slugMatch) ? slugMatch : sections[0];
+      setActiveSettingsSection(matched);
     }
   }
 
@@ -5844,7 +5878,9 @@ function SettingsPanel(props: {
   }
 
   const payload = props.payload;
-  if (!payload.sections?.length) {
+  const settingsApiSections = payload.sections ?? [];
+  const viewingVirtualSettings = VIRTUAL_SETTINGS_SECTIONS.has(props.activeSection);
+  if (!viewingVirtualSettings && settingsApiSections.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 min-h-[40vh] px-6 text-center">
         <p className={`text-[16px] font-headline uppercase tracking-widest ${props.themeMode === "light" ? "text-slate-600" : "text-slate-400"}`}>
@@ -5856,7 +5892,10 @@ function SettingsPanel(props: {
       </div>
     );
   }
-  const active = payload.sections.find((s) => s.name === props.activeSection) || payload.sections[0];
+  const isVirtualActive = viewingVirtualSettings;
+  const virtualActive = isVirtualActive ? { name: props.activeSection, fields: [] as SettingsField[] } : null;
+  const active =
+    virtualActive ?? settingsApiSections.find((s) => s.name === props.activeSection) ?? settingsApiSections[0];
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
 
   async function runTest(field: SettingsField) {
@@ -6005,23 +6044,25 @@ function SettingsPanel(props: {
           <h1 className="text-[32px] font-black text-white tracking-tight font-headline">Settings</h1>
         </div>
         <div className="flex items-center gap-3">
-          {props.hasUnsavedChanges && (
+          {props.hasUnsavedChanges && !isVirtualActive && (
             <span className="flex items-center gap-1.5 text-[14px] text-yellow-400 font-headline uppercase tracking-wider">
               <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
               Unsaved changes
             </span>
           )}
-          {props.feedback && (
+          {props.feedback && !isVirtualActive && (
             <span className={`text-[14px] font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
               {props.feedback}
             </span>
           )}
-          <button type="button" onClick={() => props.onSave()}
-            className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors"
-            style={{ backgroundColor: accent.hex }}>
-            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
-            Save Settings
-          </button>
+          {!isVirtualActive && (
+            <button type="button" onClick={() => props.onSave()}
+              className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors"
+              style={{ backgroundColor: accent.hex }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
+              Save Settings
+            </button>
+          )}
         </div>
       </div>
 
@@ -6411,6 +6452,8 @@ function SettingsPanel(props: {
                 renderOnboardingStyleSectionRows(active.fields, {
                   intro: <StatusUpdatesSectionIntro variant="onboarding" embedded />,
                 })
+              ) : active.name === "Status Messages" ? (
+                <StatusMessagesPanel brand={props.brand} themeMode={props.themeMode} />
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
               ) : (
@@ -6430,6 +6473,963 @@ function SettingsPanel(props: {
       />
     ) : null}
     </>
+  );
+}
+
+// ---------- Status Messages panel ----------
+
+type StatusMessageRow = {
+  key: string;
+  label: string;
+  group: string;
+  subgroup: string | null;
+  tooltip: string;
+  default: string;
+  value: string;
+  has_override: boolean;
+  allowed_tokens: string[];
+  sample_render: string;
+};
+
+type StatusMessageTokenSpec = {
+  name: string;
+  label: string;
+  group: string;
+  description: string;
+  sample: string;
+  placeholder: string;
+};
+
+type StatusMessageWrapperPreset = { value: string; label: string; open: string; close: string };
+
+type StatusMessagePayload = {
+  registry: StatusMessageRow[];
+  tokens: StatusMessageTokenSpec[];
+  separator: string;
+  case: string;
+  wrapper_preset: string;
+  wrapper_open: string;
+  wrapper_close: string;
+  overrides: Record<string, string>;
+  separator_presets: Array<{ value: string; label: string }>;
+  case_options: Array<{ value: string; label: string }>;
+  wrapper_presets: StatusMessageWrapperPreset[];
+  max_template_length: number;
+  pending_full_sync_backfill?: boolean;
+};
+
+type ApplyScope = "now" | "next_full_sync" | "future";
+
+const STATUS_MESSAGE_GROUP_ORDER = [
+  "Request",
+  "Title Suffix",
+  "Calendar Coming Soon",
+  "Queue Monitor",
+  "Import Grace",
+];
+
+/** Resolve the (open, close) chrome from a wrapper preset + custom open/close fallback. */
+function resolveWrapperPair(
+  preset: string,
+  open: string,
+  close: string,
+  presets: StatusMessageWrapperPreset[],
+): { open: string; close: string } {
+  const lower = (preset || "").trim().toLowerCase();
+  if (lower === "custom") return { open: open || "", close: close || "" };
+  for (const entry of presets) {
+    if (entry.value === lower) return { open: entry.open, close: entry.close };
+  }
+  return { open: "[", close: "]" };
+}
+
+/** Extract `{Token}` names without `String.prototype.matchAll` (older WebViews / browsers). */
+function collectStatusTemplateTokenNames(template: string): string[] {
+  const out: string[] = [];
+  const re = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+  const text = typeof template === "string" ? template : "";
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) out.push(m[1]);
+  return out;
+}
+
+function validateStatusMessageTemplate(
+  template: string,
+  rowKey: string,
+  allowedTokens: Set<string>,
+  knownTokens: Set<string>,
+  maxLength: number,
+): { error: string | null; warnings: string[] } {
+  if (template.length > maxLength) return { error: `Template exceeds ${maxLength} characters`, warnings: [] };
+  const stripped = template.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, "");
+  if (stripped.includes("{") || stripped.includes("}")) {
+    return { error: "Unbalanced or stray braces", warnings: [] };
+  }
+  const used = collectStatusTemplateTokenNames(template);
+  const unknown = used.filter((t) => !knownTokens.has(t));
+  const disallowed = used.filter((t) => knownTokens.has(t) && !allowedTokens.has(t));
+  if (unknown.length) return { error: `Unknown tokens: ${unknown.join(", ")}`, warnings: [] };
+  if (disallowed.length) return { error: `Tokens not allowed here: ${disallowed.join(", ")}`, warnings: [] };
+
+  const warnings: string[] = [];
+  if (rowKey.endsWith(".plural") && !template.includes("{DaysUntil}")) {
+    warnings.push("Consider including {DaysUntil} so users see the day count.");
+  }
+  if (rowKey === "queue.downloading" && !template.includes("{Progress}")) {
+    warnings.push("Consider including {Progress} so users see the download progress.");
+  }
+  if (rowKey === "import_grace.countdown" && !template.includes("{MinutesRemaining}")) {
+    warnings.push("Consider including {MinutesRemaining} so the countdown shows the remaining minutes.");
+  }
+  return { error: null, warnings };
+}
+
+function clientRenderStatusMessage(template: string, ctx: Record<string, string>, separator: string, caseMode: string, allTokenSamples: Record<string, string>): string {
+  const filled = template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
+    if (name === "Sep") return separator || "·";
+    if (name in ctx) return ctx[name] ?? "";
+    if (name in allTokenSamples) return allTokenSamples[name];
+    return "";
+  });
+  const collapsed = filled
+    .replace(/[ \t]+/g, " ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+  if (caseMode === "upper") return collapsed.toUpperCase();
+  if (caseMode === "lower") return collapsed.toLowerCase();
+  if (caseMode === "title") return collapsed.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+  return collapsed;
+}
+
+function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  const [payload, setPayload] = useState<StatusMessagePayload | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>("");
+  const [feedback, setFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [separator, setSeparator] = useState<string>("·");
+  const [caseMode, setCaseMode] = useState<string>("default");
+  const [wrapperPreset, setWrapperPreset] = useState<string>("brackets");
+  const [wrapperOpen, setWrapperOpen] = useState<string>("");
+  const [wrapperClose, setWrapperClose] = useState<string>("");
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [defaults, setDefaults] = useState<Record<string, string>>({});
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [tokenModal, setTokenModal] = useState<null | { rowKey: string }>(null);
+  const [scopeModal, setScopeModal] = useState<null | {
+    placeholderCount: number;
+    pending: boolean;
+  }>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await fetchJson<StatusMessagePayload>("/api/messages/templates", { credentials: "same-origin" });
+      if (!Array.isArray(data.registry) || !Array.isArray(data.tokens)) {
+        throw new Error("Invalid messages API response (missing registry or tokens)");
+      }
+      setPayload(data);
+      setSeparator(data.separator || "·");
+      setCaseMode(data.case || "default");
+      setWrapperPreset(data.wrapper_preset || "brackets");
+      setWrapperOpen(data.wrapper_open || "");
+      setWrapperClose(data.wrapper_close || "");
+      const next: Record<string, string> = {};
+      const def: Record<string, string> = {};
+      for (const row of data.registry) {
+        next[row.key] = row.has_override ? row.value : row.default;
+        def[row.key] = row.default;
+      }
+      setValues(next);
+      setDefaults(def);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load message templates");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const tokenSamplesByName = useMemo(() => {
+    const m: Record<string, string> = {};
+    if (!payload) return m;
+    for (const t of payload.tokens ?? []) m[t.name] = t.sample;
+    return m;
+  }, [payload]);
+
+  const knownTokenSet = useMemo(() => new Set((payload?.tokens ?? []).map((t) => t.name)), [payload]);
+
+  const orderedGroups = useMemo(() => {
+    if (!payload) return [] as Array<{ name: string; rows: StatusMessageRow[] }>;
+    const grouped = new Map<string, StatusMessageRow[]>();
+    for (const row of payload.registry ?? []) {
+      const arr = grouped.get(row.group) ?? [];
+      arr.push(row);
+      grouped.set(row.group, arr);
+    }
+    const orderedNames = [
+      ...STATUS_MESSAGE_GROUP_ORDER.filter((n) => grouped.has(n)),
+      ...Array.from(grouped.keys()).filter((n) => !STATUS_MESSAGE_GROUP_ORDER.includes(n)),
+    ];
+    return orderedNames.map((name) => ({ name, rows: grouped.get(name) ?? [] }));
+  }, [payload]);
+
+  const dirty = useMemo(() => {
+    if (!payload) return false;
+    if ((payload.separator || "·") !== separator) return true;
+    if ((payload.case || "default") !== caseMode) return true;
+    if ((payload.wrapper_preset || "brackets") !== wrapperPreset) return true;
+    if ((payload.wrapper_open ?? "") !== wrapperOpen) return true;
+    if ((payload.wrapper_close ?? "") !== wrapperClose) return true;
+    for (const row of payload.registry ?? []) {
+      const current = values[row.key] ?? "";
+      const initial = row.has_override ? row.value : row.default;
+      if (current !== initial) return true;
+    }
+    return false;
+  }, [payload, separator, caseMode, wrapperPreset, wrapperOpen, wrapperClose, values]);
+
+  const wrapperPair = useMemo(() => {
+    return resolveWrapperPair(wrapperPreset, wrapperOpen, wrapperClose, payload?.wrapper_presets ?? []);
+  }, [wrapperPreset, wrapperOpen, wrapperClose, payload]);
+
+  const hasValidationErrors = useMemo(() => {
+    if (!payload) return false;
+    for (const row of payload.registry ?? []) {
+      const value = values[row.key] ?? "";
+      if (!value.trim()) continue;
+      const result = validateStatusMessageTemplate(
+        value,
+        row.key,
+        new Set(row.allowed_tokens ?? []),
+        knownTokenSet,
+        payload.max_template_length ?? 400,
+      );
+      if (result.error) return true;
+    }
+    return false;
+  }, [payload, values, knownTokenSet]);
+
+  function setRowValue(key: string, value: string) {
+    setValues((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function resetRow(key: string) {
+    setValues((prev) => ({ ...prev, [key]: defaults[key] ?? "" }));
+  }
+
+  async function handleSavePressed() {
+    if (!payload || saving || !dirty || hasValidationErrors) return;
+    setFeedback(null);
+    try {
+      const data = await fetchJson<{ placeholder_count: number; pending_full_sync_backfill: boolean }>(
+        "/api/messages/templates/apply_estimate",
+        { credentials: "same-origin" },
+      );
+      setScopeModal({
+        placeholderCount: Number(data?.placeholder_count ?? 0),
+        pending: !!data?.pending_full_sync_backfill,
+      });
+    } catch {
+      setScopeModal({ placeholderCount: 0, pending: false });
+    }
+  }
+
+  async function handleSave(applyScope: ApplyScope) {
+    if (!payload) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const overrides: Record<string, string> = {};
+      for (const row of payload.registry ?? []) {
+        const v = values[row.key] ?? "";
+        if (v.trim() && v !== row.default) overrides[row.key] = v;
+      }
+      const resp = await fetch("/api/messages/templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          separator,
+          case: caseMode,
+          wrapper_preset: wrapperPreset,
+          wrapper_open: wrapperOpen,
+          wrapper_close: wrapperClose,
+          overrides,
+          apply_scope: applyScope,
+        }),
+      });
+      if (!resp.ok) {
+        let detail: unknown = null;
+        try {
+          detail = await resp.json();
+        } catch {
+          /* swallow */
+        }
+        const errors =
+          detail && typeof detail === "object" && "detail" in detail && typeof (detail as { detail?: unknown }).detail === "object"
+            ? ((detail as { detail: { errors?: Record<string, string> } }).detail.errors ?? {})
+            : {};
+        const firstKey = Object.keys(errors)[0];
+        const msg = firstKey ? `${firstKey}: ${errors[firstKey]}` : `Save failed (HTTP ${resp.status})`;
+        setFeedback({ kind: "error", message: msg });
+        return;
+      }
+      let savedMsg = "Status messages saved";
+      if (applyScope === "now") savedMsg = "Saved · backfill queued for the current library";
+      else if (applyScope === "next_full_sync") savedMsg = "Saved · backfill scheduled for the next full sync";
+      else savedMsg = "Saved · only future placeholders use the new templates";
+      setFeedback({ kind: "success", message: savedMsg });
+      setScopeModal(null);
+      await reload();
+    } catch (e: unknown) {
+      setFeedback({ kind: "error", message: e instanceof Error ? e.message : "Save failed" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleResetAll() {
+    if (!payload) return;
+    if (typeof window !== "undefined" && !window.confirm("Reset every status message to its default?")) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const resp = await fetch("/api/messages/templates/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ all: true }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setFeedback({ kind: "success", message: "All status messages reset to defaults" });
+      await reload();
+    } catch (e: unknown) {
+      setFeedback({ kind: "error", message: e instanceof Error ? e.message : "Reset failed" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-48">
+        <div className="flex items-center gap-3 text-slate-400">
+          <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
+          <span className="text-[16px] font-headline uppercase tracking-widest">Loading messages…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !payload) {
+    return (
+      <div className="px-6 py-5 text-[14px] text-red-300">{error || "Failed to load message templates."}</div>
+    );
+  }
+
+  return (
+    <div className="min-h-[40vh] px-6 py-5 space-y-5">
+      {/* Top toolbar: separator + case + actions */}
+      <div className={`${UI_SECTION_FRAME_CLASS} px-5 py-4`}>
+        <div className="flex flex-wrap items-end gap-4 justify-between">
+          <div className="flex flex-wrap items-end gap-4">
+            <div>
+              <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Separator</label>
+              <div className="flex items-center gap-2">
+                <select
+                  className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  value={payload.separator_presets.some((p) => p.value === separator) ? separator : "__custom__"}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom__") return;
+                    setSeparator(e.target.value);
+                  }}
+                >
+                  {payload.separator_presets.map((p) => (
+                    <option key={p.value} value={p.value}>{p.label}</option>
+                  ))}
+                  <option value="__custom__">Custom…</option>
+                </select>
+                <input
+                  className={`w-24 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  value={separator}
+                  onChange={(e) => setSeparator(e.target.value)}
+                  maxLength={6}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Default Case</label>
+              <select
+                className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                value={caseMode}
+                onChange={(e) => setCaseMode(e.target.value)}
+              >
+                {payload.case_options.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Wrapper</label>
+              <div className="flex items-center gap-2">
+                <select
+                  className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  value={wrapperPreset}
+                  onChange={(e) => setWrapperPreset(e.target.value)}
+                >
+                  {(payload.wrapper_presets ?? []).map((p) => (
+                    <option key={p.value} value={p.value}>{p.label}</option>
+                  ))}
+                </select>
+                {wrapperPreset === "custom" && (
+                  <>
+                    <input
+                      className={`w-16 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                      value={wrapperOpen}
+                      onChange={(e) => setWrapperOpen(e.target.value)}
+                      maxLength={8}
+                      placeholder="open"
+                      title="Custom open text"
+                    />
+                    <input
+                      className={`w-16 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                      value={wrapperClose}
+                      onChange={(e) => setWrapperClose(e.target.value)}
+                      maxLength={8}
+                      placeholder="close"
+                      title="Custom close text"
+                    />
+                  </>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1 font-mono">
+                Preview: {wrapperPair.open || ""}REQUEST{wrapperPair.close || ""}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {dirty && (
+              <span className="flex items-center gap-1.5 text-[14px] text-yellow-400 font-headline uppercase tracking-wider">
+                <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
+                Unsaved changes
+              </span>
+            )}
+            {payload.pending_full_sync_backfill && (
+              <span className="flex items-center gap-1.5 text-[13px] text-amber-300 font-headline uppercase tracking-wider" title="Earlier save chose Next full sync; the backfill runs at the next full sync.">
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>schedule</span>
+                Backfill pending
+              </span>
+            )}
+            {feedback && (
+              <span className={`text-[14px] font-headline uppercase tracking-wider ${feedback.kind === "success" ? "text-green-400" : "text-red-400"}`}>
+                {feedback.message}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleResetAll}
+              disabled={saving}
+              className="text-[13px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline disabled:opacity-50"
+            >
+              Reset all to defaults
+            </button>
+            <button
+              type="button"
+              onClick={handleSavePressed}
+              disabled={saving || !dirty || hasValidationErrors}
+              title={hasValidationErrors ? "Fix validation errors before saving" : ""}
+              className="flex items-center gap-2 px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50"
+              style={{ backgroundColor: accent.hex }}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
+              {saving ? "Saving…" : "Save Messages"}
+            </button>
+          </div>
+        </div>
+        <p className="ui-field-description mt-3">
+          Customize the lines Placeholdarr writes into NFOs / projects to your media player. Each row is the inner text; the global <span className="font-mono">Wrapper</span> applies <span className="font-mono">{wrapperPair.open || "·"}{wrapperPair.close || "·"}</span> around it. Missing tokens auto-collapse so optional metadata is safe to include. Click a row's <span className="font-mono">{`{ }`}</span> button to browse tokens.
+        </p>
+      </div>
+
+      {orderedGroups.map((group) => {
+        const collapsed = !!collapsedGroups[group.name];
+        // Order rows: stable, plus sub-grouping by `subgroup` if present.
+        const groupedBySubgroup = new Map<string, StatusMessageRow[]>();
+        for (const row of group.rows) {
+          const sub = row.subgroup || "";
+          const list = groupedBySubgroup.get(sub) ?? [];
+          list.push(row);
+          groupedBySubgroup.set(sub, list);
+        }
+        return (
+          <div key={group.name} className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
+            <button
+              type="button"
+              className="w-full flex items-center justify-between px-5 py-3 border-b border-[#424753]/30 text-left"
+              onClick={() => setCollapsedGroups((p) => ({ ...p, [group.name]: !p[group.name] }))}
+            >
+              <h3 className="text-[16px] font-bold text-white font-headline">{group.name}</h3>
+              <span className="material-symbols-outlined text-slate-400" style={{ fontSize: 18 }}>
+                {collapsed ? "expand_more" : "expand_less"}
+              </span>
+            </button>
+            {!collapsed && (
+              <div className="divide-y divide-[#424753]/20">
+                {Array.from(groupedBySubgroup.entries()).map(([sub, rows]) => (
+                  <div key={sub || "_"} className="px-5 py-4 space-y-4">
+                    {sub && <h4 className="text-[13px] font-headline uppercase tracking-wider text-slate-400">{sub}</h4>}
+                    {rows.map((row) => {
+                      const value = values[row.key] ?? "";
+                      const isOverride = value !== row.default;
+                      const sampleCtx: Record<string, string> = {};
+                      for (const t of row.allowed_tokens ?? []) {
+                        if (t in tokenSamplesByName) sampleCtx[t] = tokenSamplesByName[t];
+                      }
+                      const validation = validateStatusMessageTemplate(
+                        value,
+                        row.key,
+                        new Set(row.allowed_tokens ?? []),
+                        knownTokenSet,
+                        payload.max_template_length ?? 400,
+                      );
+                      const innerPreview = validation.error
+                        ? ""
+                        : clientRenderStatusMessage(value || row.default, sampleCtx, separator, caseMode, tokenSamplesByName);
+                      // Rows whose final Plex/NFO line is wrapped by the global preset show the wrapped form here too.
+                      const isWrappedSituation =
+                        row.key === "line.request" ||
+                        row.key.startsWith("queue.") ||
+                        row.key.startsWith("calendar.") ||
+                        row.key.startsWith("import_grace.");
+                      const preview = innerPreview && isWrappedSituation
+                        ? `${wrapperPair.open}${innerPreview}${wrapperPair.close}`
+                        : innerPreview;
+                      return (
+                        <div key={row.key} className="space-y-2">
+                          <div className="flex items-baseline gap-2 flex-wrap">
+                            <label className="text-[15px] font-semibold text-slate-100">{row.label}</label>
+                            {isOverride && (
+                              <span className="px-1.5 py-0.5 rounded text-[11px] font-bold font-headline uppercase" style={{ backgroundColor: alphaColor(accent.hex, 0.25), color: accent.text }}>
+                                Customized
+                              </span>
+                            )}
+                            <span title={row.tooltip} className="material-symbols-outlined text-slate-500 cursor-help" style={{ fontSize: 16 }}>info</span>
+                            <span className="ml-auto font-mono text-[12px] text-slate-500">{row.key}</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <input
+                              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                              value={value}
+                              maxLength={payload.max_template_length ?? 400}
+                              placeholder={row.default}
+                              onChange={(e) => setRowValue(row.key, e.target.value)}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setTokenModal({ rowKey: row.key })}
+                              className="px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-mono transition-colors"
+                              title="Insert a token"
+                            >
+                              {`{ }`}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => resetRow(row.key)}
+                              disabled={!isOverride}
+                              className="px-3 py-2 text-[13px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed"
+                              title="Reset to default"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-2 text-[13px]">
+                            <span className="text-slate-500 font-headline uppercase tracking-wider">Preview:</span>
+                            <span className="text-slate-200 font-mono">{preview || "—"}</span>
+                          </div>
+                          {validation.error && (
+                            <p className="text-[12px] text-red-400 flex items-center gap-1.5">
+                              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>error</span>
+                              {validation.error}
+                            </p>
+                          )}
+                          {!validation.error && validation.warnings.length > 0 && value.trim() && (
+                            <p className="text-[12px] text-amber-300 flex items-center gap-1.5">
+                              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>warning</span>
+                              {validation.warnings[0]}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {tokenModal && (
+        <StatusMessagesTokenModal
+          payload={payload}
+          rowKey={tokenModal.rowKey}
+          currentValue={values[tokenModal.rowKey] ?? ""}
+          separator={separator}
+          caseMode={caseMode}
+          tokenSamplesByName={tokenSamplesByName}
+          onClose={() => setTokenModal(null)}
+          onChangeValue={(v) => setRowValue(tokenModal.rowKey, v)}
+          onChangeSeparator={setSeparator}
+          onChangeCase={setCaseMode}
+          brand={props.brand}
+          themeMode={props.themeMode}
+        />
+      )}
+
+      {scopeModal && (
+        <StatusMessagesApplyScopeModal
+          placeholderCount={scopeModal.placeholderCount}
+          alreadyPending={scopeModal.pending}
+          saving={saving}
+          onCancel={() => setScopeModal(null)}
+          onConfirm={(scope) => handleSave(scope)}
+          brand={props.brand}
+          themeMode={props.themeMode}
+        />
+      )}
+    </div>
+  );
+}
+
+function StatusMessagesApplyScopeModal(props: {
+  placeholderCount: number;
+  alreadyPending: boolean;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: (scope: ApplyScope) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+}) {
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  const [scope, setScope] = useState<ApplyScope>("next_full_sync");
+  const count = props.placeholderCount;
+  const countLabel = count === 1 ? "1 placeholder" : `${count.toLocaleString()} placeholders`;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !props.saving) props.onCancel();
+      }}
+    >
+      <div className={`w-full max-w-xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] flex flex-col overflow-hidden`}>
+        <div className="px-5 py-4 border-b border-[#424753]/30">
+          <h3 className="text-[18px] font-bold text-white font-headline">Apply template changes</h3>
+          <p className="ui-field-description mt-1">
+            Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.
+          </p>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          {([
+            {
+              value: "now" as ApplyScope,
+              title: "Apply now",
+              body: `Rewrite NFOs and refresh player metadata for ${countLabel} immediately. Best when the library is small or you want to see changes right away.`,
+            },
+            {
+              value: "next_full_sync" as ApplyScope,
+              title: "Next full sync (recommended)",
+              body: props.alreadyPending
+                ? "Already queued. Saving here will keep the next full sync as the apply point."
+                : "Defer the rewrite to the next scheduled or manual full sync. Spreads media-server load and avoids a sudden refresh storm.",
+            },
+            {
+              value: "future" as ApplyScope,
+              title: "Future only",
+              body: "Don't touch existing placeholders. The new templates apply naturally as items move through their stages.",
+            },
+          ]).map((opt) => {
+            const selected = scope === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setScope(opt.value)}
+                className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+                  selected ? "" : "border-[#424753]/40 hover:border-[#5b6473]/60"
+                }`}
+                style={selected ? { borderColor: accent.hex, backgroundColor: alphaColor(accent.hex, 0.08) } : undefined}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className="w-3 h-3 rounded-full inline-block"
+                    style={{ backgroundColor: selected ? accent.hex : "#3b424d" }}
+                  />
+                  <span className="text-[15px] font-semibold text-slate-100">{opt.title}</span>
+                </div>
+                <p className="text-[13px] text-slate-400 mt-1">{opt.body}</p>
+              </button>
+            );
+          })}
+        </div>
+        <div className="px-5 py-3 border-t border-[#424753]/30 flex items-center justify-between gap-3">
+          <p className="text-[12px] text-slate-500">
+            Large libraries may take a while to finish backfill and media-server refresh.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={props.onCancel}
+              disabled={props.saving}
+              className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => props.onConfirm(scope)}
+              disabled={props.saving}
+              className="flex items-center gap-2 px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50"
+              style={{ backgroundColor: accent.hex }}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
+              {props.saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const STATUS_MESSAGE_TOKEN_GROUP_ORDER = [
+  "General",
+  "Status",
+  "Calendar",
+  "Queue",
+  "Import Grace",
+  "Media",
+  "Episode",
+];
+
+function StatusMessagesTokenModal(props: {
+  payload: StatusMessagePayload;
+  rowKey: string;
+  currentValue: string;
+  separator: string;
+  caseMode: string;
+  tokenSamplesByName: Record<string, string>;
+  onClose: () => void;
+  onChangeValue: (next: string) => void;
+  onChangeSeparator: (next: string) => void;
+  onChangeCase: (next: string) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+}) {
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  const row = (props.payload.registry ?? []).find((r) => r.key === props.rowKey);
+  const [draft, setDraft] = useState(props.currentValue);
+  const editorRef = useRef<HTMLInputElement | null>(null);
+  const cursorRef = useRef<number>(props.currentValue.length);
+
+  useEffect(() => {
+    setDraft(props.currentValue);
+    cursorRef.current = props.currentValue.length;
+  }, [props.currentValue, props.rowKey]);
+
+  if (!row) return null;
+
+  const allowed = new Set(row.allowed_tokens ?? []);
+  const groupedTokens = new Map<string, StatusMessageTokenSpec[]>();
+  for (const token of props.payload.tokens ?? []) {
+    const arr = groupedTokens.get(token.group) ?? [];
+    arr.push(token);
+    groupedTokens.set(token.group, arr);
+  }
+  const orderedTokenGroups = [
+    ...STATUS_MESSAGE_TOKEN_GROUP_ORDER.filter((g) => groupedTokens.has(g)),
+    ...Array.from(groupedTokens.keys()).filter((g) => !STATUS_MESSAGE_TOKEN_GROUP_ORDER.includes(g)),
+  ];
+
+  const sampleCtx: Record<string, string> = {};
+  for (const t of row.allowed_tokens ?? []) {
+    if (t in props.tokenSamplesByName) sampleCtx[t] = props.tokenSamplesByName[t];
+  }
+  const knownTokens = new Set((props.payload.tokens ?? []).map((t) => t.name));
+  const validation = validateStatusMessageTemplate(
+    draft,
+    row.key,
+    new Set(row.allowed_tokens ?? []),
+    knownTokens,
+    props.payload.max_template_length ?? 400,
+  );
+  const preview = validation.error
+    ? ""
+    : clientRenderStatusMessage(draft || row.default, sampleCtx, props.separator, props.caseMode, props.tokenSamplesByName);
+
+  function insert(placeholder: string) {
+    const cursor = cursorRef.current;
+    const next = draft.slice(0, cursor) + placeholder + draft.slice(cursor);
+    setDraft(next);
+    cursorRef.current = cursor + placeholder.length;
+    requestAnimationFrame(() => {
+      const el = editorRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(cursorRef.current, cursorRef.current);
+      }
+    });
+  }
+
+  function commitAndClose() {
+    props.onChangeValue(draft);
+    props.onClose();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) commitAndClose();
+      }}
+    >
+      <div className={`w-full max-w-3xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] max-h-[85vh] flex flex-col overflow-hidden`}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#424753]/30">
+          <div>
+            <h3 className="text-[18px] font-bold text-white font-headline">Status Message Tokens</h3>
+            <p className="ui-field-description mt-1">Editing <span className="text-slate-300">{row.label}</span> · <span className="font-mono text-[12px] text-slate-500">{row.key}</span></p>
+          </div>
+          <button type="button" onClick={commitAndClose} className="text-slate-400 hover:text-slate-100">
+            <span className="material-symbols-outlined" style={{ fontSize: 22 }}>close</span>
+          </button>
+        </div>
+
+        {/* Top controls: separator + case (mirrors section header) */}
+        <div className="flex flex-wrap items-end gap-4 px-5 py-3 border-b border-[#424753]/30">
+          <div>
+            <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Separator</label>
+            <input
+              className={`w-24 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+              value={props.separator}
+              onChange={(e) => props.onChangeSeparator(e.target.value)}
+              maxLength={6}
+            />
+          </div>
+          <div>
+            <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Default Case</label>
+            <select
+              className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+              value={props.caseMode}
+              onChange={(e) => props.onChangeCase(e.target.value)}
+            >
+              {props.payload.case_options.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Token grid */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {orderedTokenGroups.map((groupName) => {
+            const tokens = groupedTokens.get(groupName) ?? [];
+            return (
+              <div key={groupName}>
+                <h4 className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-2">{groupName}</h4>
+                <div className="flex flex-wrap gap-2">
+                  {tokens.map((token) => {
+                    const isAllowed = allowed.has(token.name);
+                    const tooltip = isAllowed ? token.description : `${token.description}\n\nNot available for this message.`;
+                    return (
+                      <button
+                        key={token.name}
+                        type="button"
+                        title={tooltip}
+                        disabled={!isAllowed}
+                        onClick={() => isAllowed && insert(token.placeholder)}
+                        className={`flex flex-col items-start gap-0.5 rounded-lg border px-3 py-1.5 text-left transition-colors ${
+                          isAllowed
+                            ? "border-[#424753]/60 bg-[#1e2430] hover:bg-[#252e3a] text-slate-100"
+                            : "border-[#424753]/30 bg-transparent text-slate-600 cursor-not-allowed"
+                        }`}
+                      >
+                        <span className="font-mono text-[13px]">{token.placeholder}</span>
+                        <span className="text-[11px] text-slate-500">{token.label} · {token.sample}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Footer: editable value + preview */}
+        <div className="px-5 py-4 border-t border-[#424753]/30 space-y-2">
+          <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Template</label>
+          <input
+            ref={editorRef}
+            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+            value={draft}
+            placeholder={row.default}
+            maxLength={props.payload.max_template_length ?? 400}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              cursorRef.current = e.target.selectionStart ?? e.target.value.length;
+            }}
+            onKeyUp={(e) => {
+              cursorRef.current = e.currentTarget.selectionStart ?? e.currentTarget.value.length;
+            }}
+            onClick={(e) => {
+              cursorRef.current = e.currentTarget.selectionStart ?? e.currentTarget.value.length;
+            }}
+          />
+          <div className="flex items-center gap-2 text-[13px]">
+            <span className="text-slate-500 font-headline uppercase tracking-wider">Preview:</span>
+            <span className="text-slate-200 font-mono">{preview || "—"}</span>
+          </div>
+          {validation.error && (
+            <p className="text-[12px] text-red-400 flex items-center gap-1.5">
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>error</span>
+              {validation.error}
+            </p>
+          )}
+          {!validation.error && validation.warnings.length > 0 && draft.trim() && (
+            <p className="text-[12px] text-amber-300 flex items-center gap-1.5">
+              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>warning</span>
+              {validation.warnings[0]}
+            </p>
+          )}
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
+              onClick={() => {
+                setDraft(row.default);
+                cursorRef.current = row.default.length;
+              }}
+            >
+              Reset to default
+            </button>
+            <button
+              type="button"
+              onClick={commitAndClose}
+              className="px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg"
+              style={{ backgroundColor: accent.hex }}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
