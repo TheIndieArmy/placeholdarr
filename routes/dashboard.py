@@ -50,6 +50,11 @@ def _launch_post_onboarding_startup_sync() -> None:
 
     Phase 4: enqueue ``startup_sync_runner`` Job when ``USE_JOB_DRIVEN_STARTUP_SYNC``
     is enabled; otherwise preserve the legacy daemon-thread behaviour.
+
+    When job-driven mode is on, workers are not started during lifespan if onboarding
+    was still incomplete at boot — start runtime services *before* enqueueing so a
+    worker can claim the job (the handler also calls ``start_runtime_background_services``
+    idempotently).
     """
     try:
         from services.source_of_truth.startup_sync_job import (
@@ -58,6 +63,15 @@ def _launch_post_onboarding_startup_sync() -> None:
         )
 
         if use_job_driven_startup_sync():
+            try:
+                from main import start_runtime_background_services
+
+                start_runtime_background_services(reason="post_onboarding_before_runner_job")
+            except Exception as exc:
+                logger.error(
+                    f"Failed to start runtime services before post-onboarding job: {exc}",
+                    extra={"emoji_type": "error"},
+                )
             session = get_session()
             try:
                 enqueue_startup_sync_runner_job(session, reason="post_onboarding")
@@ -196,6 +210,9 @@ def _launch_arr_change_full_sync(reason: str) -> None:
 
     Phase 4: enqueue ``startup_sync_runner`` with reason ``arr_endpoint_changed``
     when job-driven startup sync is enabled.
+
+    Same as post-onboarding: ensure workers/schedulers are up before enqueueing when
+    startup deferred them at boot (see ``_launch_post_onboarding_startup_sync``).
     """
     try:
         from services.source_of_truth.startup_sync_job import (
@@ -204,6 +221,15 @@ def _launch_arr_change_full_sync(reason: str) -> None:
         )
 
         if use_job_driven_startup_sync():
+            try:
+                from main import start_runtime_background_services
+
+                start_runtime_background_services(reason="arr_change_before_runner_job")
+            except Exception as exc:
+                logger.error(
+                    f"Failed to start runtime services before ARR-change startup job: {exc}",
+                    extra={"emoji_type": "error"},
+                )
             session = get_session()
             try:
                 enqueue_startup_sync_runner_job(session, reason="arr_endpoint_changed")
