@@ -173,7 +173,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Paths",
                 "label": "Library Root",
-                "description": "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root.",
+                "description": (
+                    "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root. "
+                    "Use a path separate from Radarr/Sonarr library roots to avoid potential issues with library management."
+                ),
                 "type": "path",
                 "required": False,
                 "restart_required": False,
