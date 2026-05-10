@@ -125,7 +125,6 @@ def _resolve_token(
     ctx: dict[str, Any],
     *,
     separator: str,
-    case_mode: str,
     nesting: tuple[str, ...],
 ) -> str:
     if name == "Sep":
@@ -215,14 +214,13 @@ def render(
             token_name,
             ctx,
             separator=sep,
-            case_mode=case,
             nesting=_nesting + (key,),
         )
 
     rendered = _TOKEN_PATTERN.sub(_replace, template)
     rendered = _collapse_separators(rendered, sep)
-
-    return _normalize_whitespace(rendered)
+    rendered = _normalize_whitespace(rendered)
+    return _apply_case(rendered, case)
 
 
 def render_template(
