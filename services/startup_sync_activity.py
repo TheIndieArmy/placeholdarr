@@ -194,6 +194,9 @@ def _build_startup_sync_row(
         )
 
     run_id = f"startup-sync-{display_mode}-{int(_utc(started_at).timestamp())}"
+    # Sort key for /api/activity: finished runs should rank by completion time, not run start
+    # (otherwise long lite sync + calendar can appear "below" unrelated rows from the same boot).
+    sort_anchor = completed_at if completed_at else started_at
     return {
         "id": run_id,
         "type": "job",
@@ -202,7 +205,7 @@ def _build_startup_sync_row(
         "status": overall_status,
         "details": details,
         "error": error_message,
-        "time": _utc(started_at).isoformat(),
+        "time": _utc(sort_anchor).isoformat(),
         "progress": {
             "running": running,
             "sections": sections,

@@ -1,15 +1,12 @@
 # Placeholdarr
 
-**Placeholdarr** keeps titles visible in Plex, Jellyfin, or Emby without requiring everything to stay downloaded. It is AI-developed, maintained by TheIndieArmy, and inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary) and [Chronicle](https://github.com/iwouldratherbeatthebeach/chronicle).
+**Placeholdarr** keeps titles visible in Plex\*, Jellyfin, or Emby without requiring everything to stay downloaded. It is AI-developed, maintained by TheIndieArmy, and inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary) and [Chronicle](https://github.com/iwouldratherbeatthebeach/chronicle).
 
-## Credits
-
-- **Jellyfin support integration:** Thanks to [Priky-one](https://github.com/Priky-one) for implementing Jellyfin support.
-- **GHCR Docker workflow support:** Thanks to [aves-omni](https://github.com/aves-omni) for GitHub Container Registry workflow integration.
+\***Placeholdarr** with **Plex** requires **Tautulli** to function properly.
 
 ## Overview
 
-Placeholdarr allows you to maintain a comprehensive **Plex, Jellyfin, or Emby** library without the storage overhead of keeping everything downloaded at once. It automates placeholder creation, status tracking, and on-demand downloads.
+Placeholdarr allows you to maintain a comprehensive **Plex**, Jellyfin, or Emby library without the storage overhead of keeping everything downloaded at once. It automates placeholder creation, status tracking, and on-demand downloads.
 
 ## Benefits & Features
 
@@ -45,6 +42,7 @@ Placeholdarr is onboarding-first: most behavior is configured in the WebUI.
   - Keep placeholder libraries separate from real-media libraries when possible.
   - Combined libraries are supported, but media-server trash behavior can be less predictable.
   - Placeholder output paths should be different from ARR root paths.
+- **Plex placeholder libraries (metadata agents):** Placeholdarr writes sidecar **`.nfo`** files next to placeholders. In Plex, set each **placeholder** movie and TV library and select **Plex NFO Movies** and **Plex NFO Series** as the agent. 
 - **Environment variables:** use `.env` primarily for infrastructure/runtime overrides (host/port/log level/database).
 
 ## Troubleshooting
@@ -52,3 +50,7 @@ Placeholdarr is onboarding-first: most behavior is configured in the WebUI.
 - Check logs in `/config/logs/` for startup, webhook, and sync details.
 - Log files under `/config/logs/` capture full detail (VERBOSE/DEBUG and above). Use the System Logs tab display filter to narrow what you read.
 
+## Credits
+
+- **Jellyfin support integration:** Thanks to [Priky-one](https://github.com/Priky-one) for implementing Jellyfin support.
+- **GHCR Docker workflow support:** Thanks to [aves-omni](https://github.com/aves-omni) for GitHub Container Registry workflow integration.

@@ -440,11 +440,25 @@ def _dashboard_not_built_response() -> PlainTextResponse:
     )
 
 
-def _serve_dashboard_index() -> FileResponse | PlainTextResponse:
+_SETUP_PREVIEW_SNIPPET = "<script>window.__PLACEHOLDARR_SETUP_PREVIEW__=!0</script>"
+
+
+def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse | PlainTextResponse | HTMLResponse:
     index_path = _dashboard_dist_index_path()
     if not os.path.isfile(index_path):
         return _dashboard_not_built_response()
-    return FileResponse(index_path, media_type="text/html")
+    if not inject_setup_preview:
+        return FileResponse(index_path, media_type="text/html")
+    try:
+        with open(index_path, encoding="utf-8") as handle:
+            html = handle.read()
+    except OSError:
+        return FileResponse(index_path, media_type="text/html")
+    if "<head>" in html:
+        html = html.replace("<head>", "<head>" + _SETUP_PREVIEW_SNIPPET, 1)
+    else:
+        html = _SETUP_PREVIEW_SNIPPET + html
+    return HTMLResponse(content=html, media_type="text/html")
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -495,15 +509,17 @@ async def dashboard_settings_nested(path: str):
 
 
 @router.get("/setup", response_class=HTMLResponse)
-async def dashboard_setup_page():
+async def dashboard_setup_page(request: Request):
     """Serve SPA for onboarding wizard (client-side /setup route)."""
-    return _serve_dashboard_index()
+    inject = request.query_params.get("preview") == "1"
+    return _serve_dashboard_index(inject_setup_preview=inject)
 
 
 @router.get("/setup/{path:path}", response_class=HTMLResponse)
 async def dashboard_setup_nested(path: str):
     """Deep links under /setup still load the SPA shell."""
-    return _serve_dashboard_index()
+    inject = path == "preview" or path.startswith("preview/")
+    return _serve_dashboard_index(inject_setup_preview=inject)
 
 
 @router.get("/dashboard-next", response_class=HTMLResponse)
@@ -1829,6 +1845,7 @@ def _activity_marker_row_for_calendar_event(ev: EventLog) -> dict[str, Any]:
     completed_at = _parse_iso_datetime(payload.get("completed_at"))
     errors = int(payload.get("errors", 0) or 0)
     status = "FAILED" if errors > 0 else "DONE"
+    sort_time = completed_at or started_at or ev.created_at
     return {
         "id": f"marker-calendar-{ev.id}",
         "type": "job",
@@ -1840,7 +1857,7 @@ def _activity_marker_row_for_calendar_event(ev: EventLog) -> dict[str, Any]:
             f"Movies updated {int(payload.get('movie_rows_updated', 0) or 0)} • "
             f"Episodes updated {int(payload.get('episode_rows_updated', 0) or 0)}"
         ),
-        "time": (started_at.isoformat() if started_at else (ev.created_at.isoformat() if ev.created_at else None)),
+        "time": (sort_time.isoformat() if sort_time else None),
         "progress": {
             "running": False,
             "sections": [
@@ -1991,8 +2008,19 @@ def build_activity_snapshots_for_job(session, j: Job) -> list[dict[str, Any]]:
     return out
 
 
+# Events closer than this (same type) roll into one "(xN)" row — restores the implicit window the feed had
+# when it queried only the latest ``limit * 2`` EventLog rows before ``system_activity_history`` materialization.
+_REGROUP_BURST_MAX_GAP_SEC = 300
+
+
 def _merge_regrouped_event_rows_from_flat(flat_event_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rebuild grouped (xN) event rows from per-event snapshots stored in system_activity_history."""
+    """Rebuild grouped (xN) event rows from per-event snapshots stored in system_activity_history.
+
+    Historically, `/api/activity` read **recent** EventLog rows only (~``limit * 2``), so regrouping naturally
+    reflected short bursts. Materialized snapshots can flatten **many** days of events; without clustering,
+    every ``movie_added`` in the loaded history collapsed into a single misleading ``(xN)``. We cluster by
+    wall-clock gap (same idea as calendar status grouping / ``max_gap_sec``).
+    """
     grouped_event_types = {
         "movie_added",
         "movie_imported",
@@ -2020,59 +2048,100 @@ def _merge_regrouped_event_rows_from_flat(flat_event_rows: list[dict[str, Any]])
         else:
             rest.append({k: v for k, v in r.items() if not str(k).startswith("_")})
 
-    grouped_counters: dict[str, dict[str, Any]] = {}
+    by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in bucket:
         et = str(r.get("event_type") or "").strip().lower()
-        created_at = _parse_iso_datetime(r.get("time"))
-        entry = grouped_counters.setdefault(
-            et,
-            {"count": 0, "latest": created_at, "failed": 0},
-        )
-        entry["count"] = int(entry.get("count") or 0) + 1
-        if _normalize_event_status_for_activity_feed(r.get("status")).upper() == "FAILED":
-            entry["failed"] = int(entry.get("failed") or 0) + 1
-        latest = entry.get("latest")
-        if created_at and (not latest or created_at > latest):
-            entry["latest"] = created_at
-        grouped_items = entry.setdefault("items", [])
-        payload_dict = r.get("_payload") if isinstance(r.get("_payload"), dict) else {}
-        if isinstance(grouped_items, list) and len(grouped_items) < 25:
-            grouped_items.append(
+        by_type[et].append(r)
+
+    grouped_out: list[dict[str, Any]] = []
+    epoch_min = datetime.min.replace(tzinfo=timezone.utc)
+
+    for event_type, rows in by_type.items():
+        seen_ids: set[Any] = set()
+        uniq_rows: list[dict[str, Any]] = []
+        for r in rows:
+            rid = r.get("id")
+            if rid is not None:
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+            uniq_rows.append(r)
+
+        timed: list[tuple[dict[str, Any], datetime | None]] = [
+            (r, _parse_iso_datetime(r.get("time"))) for r in uniq_rows
+        ]
+        timed.sort(key=lambda x: x[1] or epoch_min)
+
+        clusters: list[list[tuple[dict[str, Any], datetime | None]]] = []
+        cur: list[tuple[dict[str, Any], datetime | None]] = []
+        for item in timed:
+            _r, ts = item
+            if not cur:
+                cur = [item]
+                continue
+            _pr, prev_ts = cur[-1]
+            burst = (
+                ts is not None
+                and prev_ts is not None
+                and (ts - prev_ts).total_seconds() <= float(_REGROUP_BURST_MAX_GAP_SEC)
+            )
+            if burst:
+                cur.append(item)
+            else:
+                clusters.append(cur)
+                cur = [item]
+        if cur:
+            clusters.append(cur)
+
+        for ci, cluster in enumerate(clusters):
+            count = len(cluster)
+            failed = 0
+            latest: datetime | None = None
+            grouped_items: list[dict[str, Any]] = []
+            for r, created_at in cluster:
+                if _normalize_event_status_for_activity_feed(r.get("status")).upper() == "FAILED":
+                    failed += 1
+                if created_at and (latest is None or created_at > latest):
+                    latest = created_at
+                payload_dict = r.get("_payload") if isinstance(r.get("_payload"), dict) else {}
+                if len(grouped_items) < 25:
+                    grouped_items.append(
+                        {
+                            "id": r.get("id"),
+                            "display_name": _humanize_event_type(r.get("event_type")),
+                            "status": _normalize_event_status_for_activity_feed(r.get("status")),
+                            "source": r.get("source"),
+                            "error": r.get("error"),
+                            "details": _activity_details_for_event(r.get("event_type"), payload_dict),
+                            "time": r.get("time"),
+                        }
+                    )
+
+            display_name = _humanize_event_type(event_type)
+            if failed > 0:
+                display_name = f"[Failed] {display_name}"
+            group_details = f"Grouped {count} similar events • Failures {failed}"
+            anchor_ts = cluster[-1][1] or cluster[0][1]
+            group_id = (
+                f"group:{event_type}:{int(anchor_ts.timestamp())}:{ci}"
+                if isinstance(anchor_ts, datetime)
+                else f"group:{event_type}:{ci}"
+            )
+            grouped_out.append(
                 {
-                    "id": r.get("id"),
-                    "display_name": _humanize_event_type(r.get("event_type")),
-                    "status": _normalize_event_status_for_activity_feed(r.get("status")),
-                    "source": r.get("source"),
-                    "error": r.get("error"),
-                    "details": _activity_details_for_event(r.get("event_type"), payload_dict),
-                    "time": r.get("time"),
+                    "id": group_id,
+                    "type": "event",
+                    "event_type": event_type,
+                    "display_name": f"{display_name} (x{count})",
+                    "status": "FAILED" if failed > 0 else "DONE",
+                    "details": group_details,
+                    "time": latest.isoformat() if isinstance(latest, datetime) else None,
+                    "progress": {
+                        "grouped_events": grouped_items if isinstance(grouped_items, list) else [],
+                    },
                 }
             )
 
-    grouped_out: list[dict[str, Any]] = []
-    for event_type, info in grouped_counters.items():
-        count = int(info.get("count") or 0)
-        failed = int(info.get("failed") or 0)
-        latest = info.get("latest")
-        display_name = _humanize_event_type(event_type)
-        if failed > 0:
-            display_name = f"[Failed] {display_name}"
-        group_details = f"Grouped {count} similar events • Failures {failed}"
-        grouped_items = info.get("items") if isinstance(info, dict) else []
-        grouped_out.append(
-            {
-                "id": f"group:{event_type}",
-                "type": "event",
-                "event_type": event_type,
-                "display_name": f"{display_name} (x{count})",
-                "status": "FAILED" if failed > 0 else "DONE",
-                "details": group_details,
-                "time": latest.isoformat() if isinstance(latest, datetime) else None,
-                "progress": {
-                    "grouped_events": grouped_items if isinstance(grouped_items, list) else [],
-                },
-            }
-        )
     return rest + grouped_out
 
 
@@ -2156,15 +2225,16 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
         seen_keys.add(key)
         unique.append(row)
 
-    failed = [x for x in unique if x.get("status") == "FAILED"]
-    rest = [x for x in unique if x.get("status") != "FAILED"]
-    prioritized = failed + rest
+    # Chronological "recent operations": do not prepend every FAILED row ahead of all successes.
+    # Large FAILED backlogs (e.g. old nfo_refresh attempts) otherwise consume the entire limit and
+    # hide successful lite sync, calendar refresh, and webhooks from the same session.
+    unique.sort(key=lambda x: x.get("time") or "", reverse=True)
 
-    top = prioritized[:limit]
+    top = unique[:limit]
     top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
     grouped_candidates = [
         row
-        for row in prioritized
+        for row in unique
         if (
             str(row.get("job_type") or "").startswith("sync_placeholder_")
             or str(row.get("display_name") or "").startswith("Series Added:")

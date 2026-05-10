@@ -108,7 +108,10 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
         old_args = record.args
         old_format = self._style._fmt
         try:
-            base_msg = self._strip_leading_known_emojis(str(record.msg))
+            # Apply %-interpolation before mutating msg/args. Callers use
+            # logger.info("uid=%s", uid, extra=...); we clear args when prefixing emoji.
+            interpolated = record.getMessage()
+            base_msg = self._strip_leading_known_emojis(interpolated)
             record.msg = f"{emoji} {base_msg}"
             record.args = ()
             self._style._fmt = old_format.replace('%(name)s', f'{filename}:{line_num}')

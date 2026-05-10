@@ -272,6 +272,62 @@ type LibraryFilter = "all" | "movie" | "series" | "placeholders" | "future" | "m
 
 type FieldValueMap = Record<string, unknown>;
 
+/**
+ * Dummy onboarding tour — `/setup/preview` (and `/setup?preview=1` if a proxy strips nested SPA paths).
+ */
+function isOnboardingPreviewRoute(pathname: string, search: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts.length >= 2 && parts[0] === "setup" && parts[1] === "preview") {
+    return true;
+  }
+  try {
+    const q = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+    return q.get("preview") === "1" && parts.length === 1 && parts[0] === "setup";
+  } catch {
+    return false;
+  }
+}
+
+declare global {
+  interface Window {
+    /** Set by FastAPI when serving `/setup/preview` HTML (survives stale bundles reading path wrong once). */
+    __PLACEHOLDARR_SETUP_PREVIEW__?: boolean;
+  }
+}
+
+/** Prefer URL path; when the server injected {@link Window.__PLACEHOLDARR_SETUP_PREVIEW__}, trust `window.location` for that full navigation. */
+function isActiveSetupPreviewRoute(pathname: string, search: string): boolean {
+  if (typeof window !== "undefined" && window.__PLACEHOLDARR_SETUP_PREVIEW__) {
+    return isOnboardingPreviewRoute(window.location.pathname, window.location.search);
+  }
+  return isOnboardingPreviewRoute(pathname, search);
+}
+
+function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
+  const out: FieldValueMap = {};
+  for (const section of payload.sections) {
+    for (const field of section.fields) {
+      switch (field.type) {
+        case "bool":
+          out[field.key] = false;
+          break;
+        case "int":
+          out[field.key] = 0;
+          break;
+        case "choice":
+          out[field.key] = field.options?.[0]?.value ?? "";
+          break;
+        default:
+          out[field.key] = "";
+      }
+    }
+  }
+  if ("ARR_INSTANCES_JSON" in out && String(out.ARR_INSTANCES_JSON ?? "").trim() === "") {
+    out.ARR_INSTANCES_JSON = "[]";
+  }
+  return out;
+}
+
 type CalendarFilters = {
   mediaTypes: Record<string, boolean>;
   releaseTypes: Record<string, boolean>;
@@ -495,6 +551,16 @@ export function App() {
   const libraryDigestRef = useRef<string>("");
 
   const currentTab = getTabFromPath(location.pathname);
+  const onboardingPreviewRoute = isActiveSetupPreviewRoute(location.pathname, location.search);
+  const onboardingPreviewRouteRef = useRef(false);
+  onboardingPreviewRouteRef.current = onboardingPreviewRoute;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!isOnboardingPreviewRoute(window.location.pathname, window.location.search)) {
+      delete window.__PLACEHOLDARR_SETUP_PREVIEW__;
+    }
+  }, [location.pathname, location.search]);
   const settingsSectionNames = useMemo(
     () =>
       settingsPayload
@@ -612,8 +678,17 @@ export function App() {
           // First visit: one full `getSettingsCurrent` (via loadSettings) so we do not block on status
           // and then again in a separate effect — that doubled network latency before the wizard appeared.
           // Later polls: light `getSettingsStatus` only so we never clobber in-progress wizard edits.
+          // `/setup/preview` uses dummy values and its own bootstrap effect — never call loadSettings here.
+          const setupPreviewPath = isActiveSetupPreviewRoute(location.pathname, location.search);
           try {
-            if (!settingsPayloadRef.current) {
+            if (setupPreviewPath) {
+              if (settingsPayloadRef.current) {
+                const status = await getSettingsStatus();
+                if (!stopped) {
+                  setSetupStatus(status);
+                }
+              }
+            } else if (!settingsPayloadRef.current) {
               await loadSettings(stopped);
             } else {
               const status = await getSettingsStatus();
@@ -630,7 +705,7 @@ export function App() {
               setErrorMessage(err instanceof Error ? err.message : "Unable to load setup. Check the API and try again.");
             }
           }
-          if (!stopped) {
+          if (!stopped && !setupPreviewPath) {
             setLoading(false);
           }
           return;
@@ -738,7 +813,7 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisibility);
       window.clearTimeout(timeoutId);
     };
-  }, [calendarMonth, currentTab, logLevel]);
+  }, [calendarMonth, currentTab, logLevel, location.pathname, location.search]);
 
   /** When switching back to System Activity, refresh the feed (poll may have skipped it on Placeholder History). */
   useEffect(() => {
@@ -894,6 +969,35 @@ export function App() {
     setTitleSearchIndex(0);
   }, [location.pathname]);
 
+  /** Dummy onboarding walk-through at `/setup/preview` — does not persist; refreshes when the route is opened. */
+  useEffect(() => {
+    if (!isActiveSetupPreviewRoute(location.pathname, location.search)) return;
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const payload = await getSettingsCurrent();
+        if (cancelled) return;
+        setSettingsPayload(payload);
+        setSetupStatus(payload.status);
+        const dummy = buildPreviewDummyFieldValues(payload);
+        setFieldValues(dummy);
+        setBaselineValues(dummy);
+        setOnboardingStepIndex(0);
+        setErrorMessage(null);
+      } catch (e) {
+        if (!cancelled) {
+          setErrorMessage(e instanceof Error ? e.message : "Unable to load onboarding preview.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname, location.search]);
+
   useEffect(() => {
     if (titleSearchIndex >= titleSearchResults.length) {
       setTitleSearchIndex(0);
@@ -1017,6 +1121,28 @@ export function App() {
     }
   }
 
+  const prevPreviewRouteRef = useRef<boolean | null>(null);
+  /** Leaving preview for real `/setup` must reload persisted values (preview uses dummy field state). */
+  useEffect(() => {
+    const prev = prevPreviewRouteRef.current;
+    prevPreviewRouteRef.current = onboardingPreviewRoute;
+    if (prev === null) return;
+    const leftPreview = prev && !onboardingPreviewRoute;
+    if (!leftPreview) return;
+    const realSetup =
+      location.pathname === "/setup" ||
+      (location.pathname.startsWith("/setup/") && !isOnboardingPreviewRoute(location.pathname, location.search));
+    if (!realSetup) return;
+    let cancelled = false;
+    void loadSettings(cancelled).catch(() => {
+      /* Errors surface via setup refresh */
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings identity changes each render; pathname transition is the trigger.
+  }, [onboardingPreviewRoute, location.pathname, location.search]);
+
   /** Load `/api/settings/current` as soon as the Settings tab is opened — do not wait for the next 5s poll tick (avoids a blank main pane when settings were never fetched while on Activity). */
   useEffect(() => {
     if (currentTab !== "settings") return;
@@ -1029,6 +1155,7 @@ export function App() {
   }, [currentTab, settingsPayload]);
 
   async function handlePartialSave(result: any, partialValues: Record<string, unknown>) {
+    if (onboardingPreviewRouteRef.current) return;
     if (!result) return;
     if (!result.ok) {
       const first = Object.entries(result.errors || {})[0];
@@ -1311,7 +1438,7 @@ export function App() {
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
     const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
-    if (setupStatus?.setup_complete) {
+    if (setupStatus?.setup_complete && !onboardingPreviewRoute) {
       return <Navigate to="/activity" replace />;
     }
     if (loading || !setupStatus || !settingsPayload) {
@@ -1331,36 +1458,46 @@ export function App() {
         payload={settingsPayload}
         stepIndex={onboardingStepIndex}
         values={fieldValues}
-        hasUnsavedChanges={hasUnsavedChanges}
+        hasUnsavedChanges={onboardingPreviewRoute ? false : hasUnsavedChanges}
+        previewMode={onboardingPreviewRoute}
         brand={brand}
         themeMode={themeMode}
         onBack={() => setOnboardingStepIndex((i) => Math.max(0, i - 1))}
         onNext={() => setOnboardingStepIndex((i) => Math.min(WIZARD_STEPS.length - 1, i + 1))}
         onPartialSave={handlePartialSave}
         onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
-        onTestConnection={async ({ service, urlKey, credentialKey }) => {
-          const url = String(fieldValues[urlKey] || "").trim();
-          const credential = String(fieldValues[credentialKey] || "").trim();
-          return testIntegrationConnection({ service, url, credential });
-        }}
-        onSave={async () => {
-          setSettingsFeedback("Saving...");
-          setSettingsFeedbackKind("");
-          const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
-          if (!result.ok) {
-            const first = Object.entries(result.errors || {})[0];
-            setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
-            setSettingsFeedbackKind("error");
-            return;
-          }
-          setBaselineValues(fieldValues);
-          setSettingsFeedback("Saved and applied.");
-          setSettingsFeedbackKind("success");
-          const payload = await getSettingsCurrent();
-          setSettingsPayload(payload);
-          setSetupStatus(payload.status);
-          setOnboardingVisible(!payload.status.setup_complete);
-        }}
+        onTestConnection={
+          onboardingPreviewRoute
+            ? async () => ({ ok: true, message: "Preview mode — connection not tested." })
+            : async ({ service, urlKey, credentialKey }) => {
+                const url = String(fieldValues[urlKey] || "").trim();
+                const credential = String(fieldValues[credentialKey] || "").trim();
+                return testIntegrationConnection({ service, url, credential });
+              }
+        }
+        onExitPreview={onboardingPreviewRoute ? () => navigate("/activity", { replace: true }) : undefined}
+        onSave={
+          onboardingPreviewRoute
+            ? undefined
+            : async () => {
+                setSettingsFeedback("Saving...");
+                setSettingsFeedbackKind("");
+                const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
+                if (!result.ok) {
+                  const first = Object.entries(result.errors || {})[0];
+                  setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
+                  setSettingsFeedbackKind("error");
+                  return;
+                }
+                setBaselineValues(fieldValues);
+                setSettingsFeedback("Saved and applied.");
+                setSettingsFeedbackKind("success");
+                const payload = await getSettingsCurrent();
+                setSettingsPayload(payload);
+                setSetupStatus(payload.status);
+                setOnboardingVisible(!payload.status.setup_complete);
+              }
+        }
       />
     );
   }
@@ -1423,19 +1560,17 @@ export function App() {
                 (isStudioGlass
                   ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
                   : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
-              const navActiveStyle = (
-                isStudioGlass
-                  ? {
-                      backgroundColor: alphaColor(brandSemantic.accent, 0.22),
-                      color: brandSemantic.fg,
-                      borderLeftColor: brandSemantic.accent,
-                    }
-                  : {
-                      backgroundColor: brandSemantic.fg,
-                      color: brandSemantic.accent,
-                      borderLeftColor: brandSemantic.accent,
-                    }
-              ) as const;
+              const navActiveStyle: CSSProperties = isStudioGlass
+                ? {
+                    backgroundColor: alphaColor(brandSemantic.accent, 0.22),
+                    color: brandSemantic.fg,
+                    borderLeftColor: brandSemantic.accent,
+                  }
+                : {
+                    backgroundColor: brandSemantic.fg,
+                    color: brandSemantic.accent,
+                    borderLeftColor: brandSemantic.accent,
+                  };
               const librarySectionActive = isActive("/library");
               const moviesSubActive =
                 location.pathname === LIBRARY_MOVIES_PATH ||
@@ -2840,17 +2975,6 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   );
 }
 
-function detailArrInstanceLinks(
-  payload: { arr_instance_links?: ArrInstanceOpenLink[]; arr_link?: string | null },
-  singleFallbackLabel: string,
-): { label: string; url: string }[] {
-  if (payload.arr_instance_links?.length) {
-    return payload.arr_instance_links.map((x) => ({ label: x.label, url: x.url }));
-  }
-  if (payload.arr_link) return [{ label: singleFallbackLabel, url: payload.arr_link }];
-  return [];
-}
-
 /** Logo well for movie file-state strip — matches onboarding ARR integration icon boxes (`#1e2430` + ring). */
 const MOVIE_FILE_STATE_RADARR_LOGO_WELL: CSSProperties = {
   backgroundColor: "#1e2430",
@@ -3085,37 +3209,6 @@ function SeriesFileStateSection(props: {
             </a>
           );
         })}
-      </div>
-    </div>
-  );
-}
-
-function DetailArrLaunchBar(props: {
-  links: { label: string; url: string }[];
-  iconSrc: string;
-  heading: string;
-  isLight: boolean;
-}) {
-  if (!props.links.length) return null;
-  return (
-    <div className={`rounded-xl border p-5 md:p-6 ${props.isLight ? "bg-white border-[#d7e2f0] shadow-sm" : "bg-[#171c22] border-[#424753]/40"}`}>
-      <h3 className={`text-[13px] font-headline uppercase tracking-widest ${props.isLight ? "text-slate-500" : "text-slate-400"}`}>{props.heading}</h3>
-      <div className="mt-4 flex flex-wrap gap-3">
-        {props.links.map((lnk) => (
-          <a
-            key={lnk.url}
-            href={lnk.url}
-            target="_blank"
-            rel="noreferrer"
-            className="detail-arr-instance-launch group inline-flex min-w-[12.5rem] flex-1 items-center gap-3 rounded-xl border border-[#424753]/50 px-4 py-3 transition-colors hover:border-[#424753] sm:max-w-sm sm:flex-none"
-          >
-            <img src={props.iconSrc} alt="" className="h-9 w-9 shrink-0 object-contain" decoding="async" />
-            <span className="detail-arr-instance-launch__label min-w-0 flex-1 font-headline text-[16px] font-semibold leading-tight text-slate-100">{lnk.label}</span>
-            <span className="material-symbols-outlined shrink-0 text-slate-500 transition-colors group-hover:text-slate-300" style={{ fontSize: 18 }}>
-              open_in_new
-            </span>
-          </a>
-        ))}
       </div>
     </div>
   );
@@ -4212,11 +4305,13 @@ function deriveIs4kFromRole(role: string) {
 function getPlexLibraryIdNote(fieldKey: string) {
   const shared =
     "For best request clarity and fewer scanner/trash cleanup issues, keep placeholders in separate Plex libraries from real media. Required when Plex is enabled.";
+  const nfoAgents =
+    "In Plex, edit that library’s metadata/agents so local NFO files are used (often Local Media Assets or “prefer local metadata”—labels vary by Plex version); Placeholdarr relies on sidecar .nfo files.";
   if (fieldKey === "PLEX_MOVIE_SECTION_ID") {
-    return `Use the Plex library ID for the placeholder movie library that points at your derived \`movies\` path. ${shared}`;
+    return `Use the Plex library ID for the placeholder movie library that points at your derived \`movies\` path. ${shared} ${nfoAgents}`;
   }
   if (fieldKey === "PLEX_TV_SECTION_ID") {
-    return `Use the Plex library ID for the placeholder TV library that points at your derived \`tv\` path. ${shared}`;
+    return `Use the Plex library ID for the placeholder TV library that points at your derived \`tv\` path. ${shared} ${nfoAgents}`;
   }
   return null;
 }
@@ -6362,7 +6457,7 @@ const ONBOARDING_MEDIA_CARDS = [
     id: "plex" as const,
     title: "Plex",
     enabledKey: "ENABLE_PLEX",
-    note: "Tautulli is required for Plex playback webhooks and playback-aware routing.",
+    note: "Tautulli is required for Plex playback webhooks and playback-aware routing. For each placeholder Plex library, enable local / NFO metadata agents so Placeholdarr sidecar NFO files show up in the UI.",
     keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
   },
   {
@@ -6835,12 +6930,15 @@ function OnboardingWizard(props: {
   stepIndex: number;
   values: FieldValueMap;
   hasUnsavedChanges: boolean;
+  /** When true, Continue skips API saves and Finish exits without persisting (dummy tour). */
+  previewMode?: boolean;
   brand: Brand;
   themeMode: ThemeMode;
   onBack: () => void;
   onNext: () => void;
   onChange: (key: string, value: unknown) => void;
-  onSave: () => Promise<void>;
+  onSave?: () => Promise<void>;
+  onExitPreview?: () => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
   onPartialSave?: (result: any, partialValues: Record<string, unknown>) => Promise<void> | void;
 }) {
@@ -6907,12 +7005,15 @@ function OnboardingWizard(props: {
     canUseSonarrSecondaryBehavior ? String(props.values.TV_PLAYBACK_INSTANCE_MODE ?? "match") : null,
   ].filter((value): value is string => Boolean(value));
   const fallbackUnnecessaryBecauseAllBoth = hasUnlockedSearchBehavior.length > 0 && hasUnlockedSearchBehavior.every((value) => value === "both");
-  const canProceed = (() => {
-    if (step.key === "paths") return hasLibraryRoot;
-    if (step.key === "media") return hasConfirmedMediaConnection;
-    if (step.key === "arr") return hasConfirmedArrConnection;
-    return true;
-  })();
+  const previewMode = Boolean(props.previewMode);
+  const canProceed = previewMode
+    ? true
+    : (() => {
+        if (step.key === "paths") return hasLibraryRoot;
+        if (step.key === "media") return hasConfirmedMediaConnection;
+        if (step.key === "arr") return hasConfirmedArrConnection;
+        return true;
+      })();
 
   useEffect(() => {
     if (fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)) {
@@ -7123,6 +7224,11 @@ function OnboardingWizard(props: {
           <div className="flex w-full max-w-3xl flex-1 min-h-0 flex-col px-3">
           <div className="flex flex-1 min-h-0 flex-col rounded-2xl border border-white/10 bg-[#121722]/93 backdrop-blur-md shadow-2xl overflow-hidden max-h-[min(900px,calc(100vh-7rem))]">
         <div className="px-6 sm:px-8 py-4 sm:py-5 border-b border-[#424753]/30 shrink-0">
+          {previewMode ? (
+            <div className="mb-4 rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-[13px] leading-snug text-amber-100/95">
+              Preview mode — nothing is saved. Use this to explore steps without changing your configuration.
+            </div>
+          ) : null}
           <div className="flex items-center gap-0">
             {WIZARD_STEPS.map((s, i) => {
               const done = i < props.stepIndex;
@@ -7568,6 +7674,11 @@ function OnboardingWizard(props: {
                     return;
                   }
 
+                  if (previewMode) {
+                    props.onNext();
+                    return;
+                  }
+
                   // Build partial payload for this step and save it
                   const partial = buildStepPartialValues(stepKeys);
                   try {
@@ -7595,12 +7706,30 @@ function OnboardingWizard(props: {
                 className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ backgroundColor: accent.hex }}
                 >
-                {keys.length ? (stepSaving ? "Saving..." : "Save & Continue") : "Continue"}
+                {previewMode
+                  ? "Next"
+                  : keys.length
+                    ? stepSaving
+                      ? "Saving..."
+                      : "Save & Continue"
+                    : "Continue"}
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_forward</span>
               </button>
+            ) : previewMode ? (
+              <button
+                type="button"
+                onClick={() => props.onExitPreview?.()}
+                className="flex items-center gap-2 px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>close</span>
+                Exit preview
+              </button>
             ) : (
-              <button type="button" onClick={() => props.onSave()}
-                className="flex items-center gap-2 px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors">
+              <button
+                type="button"
+                onClick={() => void props.onSave?.()}
+                className="flex items-center gap-2 px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors"
+              >
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check_circle</span>
                 Save &amp; Finish
               </button>

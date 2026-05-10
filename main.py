@@ -201,6 +201,15 @@ async def lifespan(app: FastAPI):
 
     load_env_and_migrate()
     logger.info("Placeholdarr service is running.", extra={'emoji_type': 'success'})
+    # Helps verify Docker entrypoint drop-priv (PUID/PGID): if uid/gid are 0 here, files on bind mounts will be owned by root.
+    logger.info(
+        "Runtime process identity uid=%s gid=%s euid=%s egid=%s",
+        os.getuid(),
+        os.getgid(),
+        os.geteuid(),
+        os.getegid(),
+        extra={"emoji_type": "info"},
+    )
 
     # Ensure default dummy media files are present before onboarding/settings use.
     try:
