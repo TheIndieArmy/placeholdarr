@@ -137,24 +137,6 @@ def _resolve_token(
         text = str(ctx[name])
         return text  # already a string; engine treats empty/missing identically
 
-    if name == "Status":
-        status_value = str(ctx.get("__status_enum__", "") or "").strip()
-        if status_value:
-            label_key = f"status.label.{status_value}"
-            try:
-                # render() already applies case for status.label keys.
-                return render(label_key, ctx, _nesting=nesting + ("Status",))
-            except UnknownTemplateKeyError:
-                return _apply_case(status_value, case_mode)
-        return ""
-
-    if name == "Bracket":
-        bracket_key = "bracket.with_runtime" if ctx.get("__has_runtime__") else "bracket.format"
-        try:
-            return render(bracket_key, ctx, _nesting=nesting + ("Bracket",))
-        except UnknownTemplateKeyError:
-            return ""
-
     if name == "Runtime":
         runtime = ctx.get("__runtime_text__")
         if isinstance(runtime, str):
@@ -167,11 +149,11 @@ def _resolve_token(
         except (TypeError, ValueError):
             return ""
         if h > 0 and m > 0:
-            return render("runtime.format.hm", {"Hours": str(h), "Minutes": str(m)}, _nesting=nesting + ("Runtime",))
+            return f"{h}h {m}m"
         if h > 0:
-            return render("runtime.format.h", {"Hours": str(h)}, _nesting=nesting + ("Runtime",))
+            return f"{h}h"
         if m > 0:
-            return render("runtime.format.m", {"Minutes": str(m)}, _nesting=nesting + ("Runtime",))
+            return f"{m}m"
         return ""
 
     return ""
@@ -201,9 +183,8 @@ def render(
 ) -> str:
     """Render a registered key against ``ctx``.
 
-    ``ctx`` may carry standard tokens (``Title``, ``DaysUntil``, ...) plus the
-    internal helpers ``__status_enum__``, ``__has_runtime__``, ``__runtime_text__``
-    used when chaining bracket templates.
+    ``ctx`` may carry standard tokens (``Title``, ``DaysUntil``, ...) plus
+    ``__runtime_text__`` used by REQUEST runtime formatting.
     """
     spec = get_message_key(key)
     if spec is None:
@@ -240,9 +221,6 @@ def render(
 
     rendered = _TOKEN_PATTERN.sub(_replace, template)
     rendered = _collapse_separators(rendered, sep)
-
-    if key.startswith("status.label."):
-        rendered = _apply_case(rendered, case)
 
     return _normalize_whitespace(rendered)
 
@@ -390,6 +368,85 @@ def media_tokens_for_movie(movie: Any) -> dict[str, Any]:
     }
 
 
+def media_tokens_for_series(series: Any) -> dict[str, Any]:
+    """Map a Series ORM row to the media token namespace (series-level surfaces)."""
+    if series is None:
+        return {}
+    title = str(getattr(series, "title", "") or "").strip()
+    year_val = getattr(series, "year", None)
+    runtime_min = getattr(series, "sonarr_runtime", None)
+    cert = str(getattr(series, "sonarr_certification", "") or "").strip()
+    studio = str(getattr(series, "sonarr_network", "") or "").strip()
+    genres = getattr(series, "sonarr_genres", None)
+    if isinstance(genres, list):
+        genres_text = ", ".join(str(g) for g in genres if g)
+    elif isinstance(genres, str):
+        genres_text = genres
+    else:
+        genres_text = ""
+
+    hours, minutes = _split_minutes(runtime_min)
+    return {
+        "Title": title,
+        "SeriesTitle": title,
+        "EpisodeTitle": "",
+        "SeasonNumber": "",
+        "EpisodeNumber": "",
+        "SXXEYY": "",
+        "Year": str(year_val) if year_val else "",
+        "ReleaseYear": str(year_val) if year_val else "",
+        "Genres": genres_text,
+        "Certification": cert,
+        "Studio": studio,
+        "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
+        "Hours": str(hours) if hours else "",
+        "Minutes": str(minutes) if minutes else "",
+    }
+
+
+def media_tokens_for_season(season: Any, series: Any = None) -> dict[str, Any]:
+    """Map Season (+ optional Series) for season-level title suffix templates."""
+    if season is None:
+        return {}
+    if series is None:
+        series = getattr(season, "series", None)
+    st = str(getattr(season, "title", "") or "").strip()
+    series_title = str(getattr(series, "title", "") or "").strip() if series else ""
+    sn = int(getattr(season, "season_number", 0) or 0)
+    year_val = getattr(season, "year", None)
+    if year_val is None and series is not None:
+        year_val = getattr(series, "year", None)
+    runtime_min = getattr(series, "sonarr_runtime", None) if series is not None else None
+    hours, minutes = _split_minutes(runtime_min)
+    genres_text = ""
+    cert = ""
+    studio = ""
+    if series is not None:
+        genres = getattr(series, "sonarr_genres", None)
+        if isinstance(genres, list):
+            genres_text = ", ".join(str(g) for g in genres if g)
+        elif isinstance(genres, str):
+            genres_text = genres
+        cert = str(getattr(series, "sonarr_certification", "") or "").strip()
+        studio = str(getattr(series, "sonarr_network", "") or "").strip()
+    return {
+        "Title": st,
+        "SeriesTitle": series_title,
+        "EpisodeTitle": "",
+        "SeasonNumber": f"{sn:02d}",
+        "EpisodeNumber": "",
+        "SXXEYY": "",
+        "Year": str(year_val) if year_val else "",
+        "ReleaseYear": str(year_val) if year_val else "",
+        "Genres": genres_text,
+        "Certification": cert,
+        "Studio": studio,
+        "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
+        "Hours": str(hours) if hours else "",
+        "Minutes": str(minutes) if minutes else "",
+    }
+
+
 def media_tokens_for_episode(episode: Any, season: Any = None, series: Any = None) -> dict[str, Any]:
     if episode is None:
         return {}
@@ -408,6 +465,22 @@ def media_tokens_for_episode(episode: Any, season: Any = None, series: Any = Non
         runtime_min = getattr(series, "sonarr_runtime", None)
 
     hours, minutes = _split_minutes(runtime_min)
+
+    year_val = getattr(episode, "year", None)
+    if year_val is None and series is not None:
+        year_val = getattr(series, "year", None)
+    genres_text = ""
+    cert = ""
+    studio = ""
+    if series is not None:
+        genres = getattr(series, "sonarr_genres", None)
+        if isinstance(genres, list):
+            genres_text = ", ".join(str(g) for g in genres if g)
+        elif isinstance(genres, str):
+            genres_text = genres
+        cert = str(getattr(series, "sonarr_certification", "") or "").strip()
+        studio = str(getattr(series, "sonarr_network", "") or "").strip()
+
     return {
         "Title": series_title or ep_title,
         "SeriesTitle": series_title,
@@ -415,6 +488,11 @@ def media_tokens_for_episode(episode: Any, season: Any = None, series: Any = Non
         "SeasonNumber": f"{sn:02d}",
         "EpisodeNumber": f"{en:02d}",
         "SXXEYY": f"S{sn:02d}E{en:02d}",
+        "Year": str(year_val) if year_val else "",
+        "ReleaseYear": str(year_val) if year_val else "",
+        "Genres": genres_text,
+        "Certification": cert,
+        "Studio": studio,
         "RuntimeMinutes": str(int(runtime_min)) if isinstance(runtime_min, (int, float)) and int(runtime_min) > 0 else "",
         "Hours": str(hours) if hours else "",
         "Minutes": str(minutes) if minutes else "",

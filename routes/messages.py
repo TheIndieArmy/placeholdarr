@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
+from core.config import settings
 from core.logger import logger
 from services.messages import (
     DEFAULT_SEPARATOR,
@@ -14,6 +16,8 @@ from services.messages import (
     InvalidTemplateError,
     UnknownTemplateKeyError,
     WRAPPER_PRESETS,
+    apply_wrapper,
+    get_overrides,
     get_template_config,
     get_token_specs,
     render,
@@ -22,12 +26,42 @@ from services.messages import (
     save_template_config,
     validate_template_text,
 )
-from services.messages.registry import CASE_OPTIONS, SEPARATOR_PRESETS, get_message_key, get_registry_for_settings_ui
+from services.messages.context import sample_projection_context
+from services.messages.registry import CASE_OPTIONS, SEPARATOR_PRESETS, MessageKey, get_message_key, get_registry_for_settings_ui
 from services.messages.template_engine import MAX_TEMPLATE_LENGTH
+from services.status_projection import projection_surfaces
 
 
 _VALID_APPLY_SCOPES = {"now", "next_full_sync", "future"}
 _DEFAULT_APPLY_SCOPE = "next_full_sync"
+
+
+def _preview_placeholder_status_updates_scope(body: dict[str, Any]) -> str:
+    raw = body.get("placeholder_status_updates")
+    if isinstance(raw, str):
+        u = raw.strip().upper()
+        if u in ("OFF", "REQUEST", "ALL"):
+            return u
+    return str(getattr(settings, "PLACEHOLDER_STATUS_UPDATES", "ALL") or "ALL").strip().upper()
+
+
+def _preview_projection_surfaces(body: dict[str, Any]) -> tuple[bool, bool]:
+    mode = body.get("projection_mode")
+    if isinstance(mode, str):
+        value = mode.strip().lower()
+        if value == "both":
+            return (True, True)
+        if value == "title":
+            return (True, False)
+        if value == "summary":
+            return (False, True)
+    return projection_surfaces()
+
+
+def _empty_tokens_for_template(template_src: str, ctx: dict[str, Any]) -> list[str]:
+    used = re.findall(r"\{([A-Za-z][A-Za-z0-9_]*)\}", str(template_src or ""))
+    return [t for t in used if t != "Sep" and not str(ctx.get(t, "")).strip()]
+
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
 
@@ -41,6 +75,19 @@ def _serialize_token(token) -> dict[str, Any]:
         "sample": token.sample,
         "placeholder": token.placeholder,
     }
+
+
+def _muted_under_request_scope(msg: MessageKey) -> bool:
+    """Dim in UI when Placeholder status updates = Request only (non-REQUEST templates inactive)."""
+    g = str(msg.group or "")
+    if msg.key == "line.request" or g in ("Request", "Title Suffix"):
+        return False
+    return bool(
+        g.startswith("Calendar")
+        or "Coming Soon" in g
+        or g.startswith("Queue")
+        or g.startswith("Import Grace")
+    )
 
 
 def _serialize_message(msg) -> dict[str, Any]:
@@ -70,6 +117,7 @@ def _serialize_message(msg) -> dict[str, Any]:
         "has_override": has_override,
         "allowed_tokens": list(msg.allowed_tokens),
         "sample_render": sample,
+        "muted_under_request_scope": _muted_under_request_scope(msg),
     }
 
 
@@ -105,6 +153,76 @@ def get_templates() -> JSONResponse:
             "wrapper_presets": list(WRAPPER_PRESETS),
             "max_template_length": MAX_TEMPLATE_LENGTH,
             "pending_full_sync_backfill": pending_backfill,
+        }
+    )
+
+
+@router.post("/preview")
+def post_message_preview(body: dict[str, Any]) -> JSONResponse:
+    """Live preview for REQUEST lines; honors draft projection toggles and status-update scope."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    media_raw = str(body.get("media") or "movie").strip().lower()
+    is_episode = media_raw in ("episode", "tv", "show")
+    media_key = "episode" if is_episode else "movie"
+    ctx = sample_projection_context(media_key)
+    overrides = dict(get_overrides() or {})
+
+    spec_syn = get_message_key("line.request")
+    if spec_syn is None:
+        raise HTTPException(status_code=500, detail="missing line.request registry")
+
+    template_syn = body.get("template_synopsis")
+    if template_syn is None:
+        template_syn = body.get("template")
+    tmpl_src_syn: str
+    if isinstance(template_syn, str) and template_syn.strip():
+        syn_inner = render_template("line.request", template_syn.strip(), ctx)
+        tmpl_src_syn = template_syn.strip()
+    else:
+        syn_inner = render("line.request", ctx)
+        o = overrides.get("line.request")
+        tmpl_src_syn = o if isinstance(o, str) and o.strip() else spec_syn.default
+
+    syn_bracket = apply_wrapper(syn_inner)
+
+    scope = _preview_placeholder_status_updates_scope(body)
+    title_on, summary_on = _preview_projection_surfaces(body)
+    demo_status = str(body.get("demo_status") or "REQUEST").strip().upper()
+    request_demo = demo_status == "REQUEST"
+    projection_allowed = scope != "OFF" and (scope == "ALL" or (scope == "REQUEST" and request_demo))
+
+    sample_title = "Cat's in the Bag..." if is_episode else "Inception"
+    sample_plot = "Sample library overview text for preview."
+
+    title_line_final = sample_title
+    summary_line_final = sample_plot
+
+    if projection_allowed and title_on:
+        suffix_key = "title.suffix.episode" if is_episode else "title.suffix.movie"
+        title_suffix = render(suffix_key, ctx)
+        if title_suffix.strip():
+            normalized_suffix = title_suffix if title_suffix[:1].isspace() else f" {title_suffix}"
+            title_line_final = f"{sample_title}{normalized_suffix}".strip()
+        else:
+            title_line_final = sample_title
+    if projection_allowed and summary_on:
+        summary_line_final = f"{syn_bracket} {sample_plot}".strip()
+
+    empty_syn = _empty_tokens_for_template(tmpl_src_syn, ctx)
+    return JSONResponse(
+        {
+            "media": media_key,
+            "inner_synopsis": syn_inner,
+            "bracket_synopsis": syn_bracket,
+            "title_line": title_line_final,
+            "summary_line": summary_line_final,
+            "projection_title_enabled": bool(title_on),
+            "projection_summary_enabled": bool(summary_on),
+            "placeholder_status_updates": scope,
+            "projection_blocked": not projection_allowed,
+            "empty_tokens": empty_syn,
         }
     )
 

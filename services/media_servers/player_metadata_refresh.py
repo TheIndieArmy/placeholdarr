@@ -24,6 +24,7 @@ from services.media_servers.plex_identity import (
     persist_movie_plex_identity,
 )
 from services.media_servers.plex_lookup import find_episode_by_series_tvdb, find_movie_by_id
+from services.messages.context import build_projection_context
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.status_projection import project_summary, project_title
 
@@ -404,10 +405,21 @@ def _project_text(
     base_summary: str | None,
     status: str,
     *,
+    suffix_template_key: str = "title.suffix.movie",
     runtime_minutes: int | None = None,
+    media_context: dict | None = None,
 ) -> tuple[str, str]:
-    return project_title(base_title or "", status), project_summary(
-        base_summary or "", status, runtime_minutes=runtime_minutes
+    return project_title(
+        base_title or "",
+        status,
+        suffix_template_key=suffix_template_key,
+        runtime_minutes=runtime_minutes,
+        media_context=media_context,
+    ), project_summary(
+        base_summary or "",
+        status,
+        runtime_minutes=runtime_minutes,
+        media_context=media_context,
     )
 
 
@@ -490,11 +502,14 @@ def _push_movie(
 ) -> None:
     status = _projected_display_status(placeholder)
     runtime_minutes = _runtime_minutes_movie(movie) if status.strip().upper() == "REQUEST" else None
+    media_ctx = build_projection_context(movie=movie, runtime_minutes=runtime_minutes)
     projected_title, projected_summary = _project_text(
         getattr(movie, "title", None),
         getattr(movie, "radarr_overview", None),
         status,
+        suffix_template_key="title.suffix.movie",
         runtime_minutes=runtime_minutes,
+        media_context=media_ctx,
     )
 
     if getattr(settings, "jellyfin_enabled", False):
@@ -629,11 +644,19 @@ def _push_episode(
     runtime_minutes = (
         _runtime_minutes_episode(episode, series) if status.strip().upper() == "REQUEST" else None
     )
+    media_ctx = build_projection_context(
+        episode=episode,
+        season=season,
+        series=series,
+        runtime_minutes=runtime_minutes,
+    )
     projected_ep_title, projected_ep_summary = _project_text(
         getattr(episode, "title", None),
         getattr(episode, "sonarr_episode_overview", None),
         status,
+        suffix_template_key="title.suffix.episode",
         runtime_minutes=runtime_minutes,
+        media_context=media_ctx,
     )
     if getattr(settings, "jellyfin_enabled", False):
         jf_ep = _find_jellyfin_episode_item_id(series, season, episode)

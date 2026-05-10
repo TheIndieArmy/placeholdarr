@@ -43,7 +43,10 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         name="Title",
         label="Title",
         group="Media",
-        description="Movie or series title.",
+        description=(
+            "Movies: the film title. TV: series title when known, otherwise the episode title. "
+            "Use {SeriesTitle} and {EpisodeTitle} when you want explicit control on TV."
+        ),
         sample="Inception",
     ),
     TokenSpec(
@@ -144,24 +147,6 @@ _TOKEN_SPECS: tuple[TokenSpec, ...] = (
         group="Episode",
         description="Combined season and episode code.",
         sample="S02E05",
-    ),
-    # Status
-    TokenSpec(
-        name="Status",
-        label="Status",
-        group="Status",
-        description=(
-            "Inside bracket templates: the short label Placeholdarr shows for that item in brackets "
-            "(same wording as in Plex for bracket-style lines)."
-        ),
-        sample="REQUEST",
-    ),
-    TokenSpec(
-        name="Bracket",
-        label="Bracket",
-        group="Status",
-        description="The full bracketed status text Placeholdarr would otherwise project (uses bracket templates).",
-        sample="[REQUEST]",
     ),
     # Calendar
     TokenSpec(
@@ -269,15 +254,10 @@ _EPISODE_TOKENS = (
 )
 
 
-def _bracket_tokens() -> tuple[str, ...]:
-    return ("Sep", "Status", "Runtime", "Hours", "Minutes")
-
-
 def _request_line_tokens() -> tuple[str, ...]:
     """Tokens allowed inside the customizable Request line template (line.request).
 
-    Excludes ``Status``/``Bracket`` because the Request line itself IS the bracket inner;
-    those nested tokens would create a confusing recursive context.
+    Episode-only tokens resolve empty for movies; single-template UX with dual previews.
     """
     return (
         "Sep",
@@ -291,209 +271,92 @@ def _request_line_tokens() -> tuple[str, ...]:
         "Genres",
         "Certification",
         "Studio",
+        "SeriesTitle",
+        "SeasonNumber",
+        "EpisodeNumber",
+        "EpisodeTitle",
+        "SXXEYY",
     )
-
-
-# Must match ``DisplayStatus`` in ``services/source_of_truth/status_intent.py`` (order + values).
-_DISPLAY_STATUS_ENUM_VALUES: tuple[str, ...] = (
-    "REQUEST",
-    "COMING_SOON",
-    "COMING_SOON_30",
-    "COMING_SOON_14",
-    "COMING_SOON_7",
-    "COMING_SOON_1",
-    "COMING_SOON_TODAY",
-    "SEARCHING",
-    "DOWNLOADING",
-    "IMPORT_IN_PROGRESS",
-    "NOT_FOUND",
-    "AVAILABLE",
-    "CLEANUP",
-    "DELETED",
-    "ARCHIVED",
-)
-
-
-# Tooltips: these strings are the *visible* word inside [ … ] for each internal stage (DisplayStatus).
-# Users edit wording here; bracket *shape* (e.g. runtime + separator) is under Bracket & Duration.
-_STATUS_LABEL_TOOLTIPS: dict[str, str] = {
-    "REQUEST": (
-        "Word inside [ … ] for the REQUEST stage. With runtime, combine with “Bracket format (with runtime)” "
-        "— e.g. default templates give [1h 5m · REQUEST]. Change only the word here unless you also edit bracket shape."
-    ),
-    "SEARCHING": "Word inside [ … ] when the item is searching and no queue line replaces the bracket.",
-    "DOWNLOADING": "Word inside [ … ] when downloading without a detailed queue progress line.",
-    "IMPORT_IN_PROGRESS": "Word inside [ … ] when import is in progress and no finer queue import line is shown.",
-    "NOT_FOUND": "Word inside [ … ] when no qualifying release was found.",
-    "AVAILABLE": "Word inside [ … ] when the file exists (rarely projected).",
-    "DELETED": "Word inside [ … ] briefly after removal from ARR.",
-    "ARCHIVED": "Reserved stage — rarely emitted; wording if it ever appears in brackets.",
-    "CLEANUP": "Reserved stage — rarely emitted; wording if it ever appears in brackets.",
-}
-
-
-# Plex/NFO usually show calendar countdown lines for these stages — not the raw COMING_SOON_* bracket word.
-# Hide those rows from Settings so users only edit templates that actually drive on-screen copy.
-_STAGES_WITHOUT_PLEX_BRACKET_WORD_SETTINGS: frozenset[str] = frozenset(
-    {
-        "COMING_SOON",
-        "COMING_SOON_30",
-        "COMING_SOON_14",
-        "COMING_SOON_7",
-        "COMING_SOON_1",
-        "COMING_SOON_TODAY",
-        "ARCHIVED",
-        "CLEANUP",
-    }
-)
-
-
-def _settings_ui_for_status_label(enum_value: str) -> bool:
-    return enum_value not in _STAGES_WITHOUT_PLEX_BRACKET_WORD_SETTINGS
-
-
-def _status_label_ui_name(enum_value: str) -> str:
-    special = {
-        "REQUEST": "Request label",
-        "SEARCHING": "Searching label",
-        "DOWNLOADING": "Downloading label",
-        "IMPORT_IN_PROGRESS": "Import in progress label",
-        "NOT_FOUND": "Not found label",
-        "AVAILABLE": "Available label",
-        "DELETED": "Deleted label",
-        "ARCHIVED": "Archived label",
-        "CLEANUP": "Cleanup label",
-        "COMING_SOON": "Coming soon label",
-        "COMING_SOON_30": "Coming soon (30+ days) label",
-        "COMING_SOON_14": "Coming soon (14–29 days) label",
-        "COMING_SOON_7": "Coming soon (7–13 days) label",
-        "COMING_SOON_1": "Coming soon (1–6 days) label",
-        "COMING_SOON_TODAY": "Release day label",
-        "RETRYING": "Retrying label",
-    }
-    return special.get(enum_value, f"{enum_value.replace('_', ' ').title()} label")
-
-
-def _iter_status_label_keys() -> tuple[MessageKey, ...]:
-    """Per-stage word fallbacks used by the engine when ``{Status}`` is rendered
-    inside a legacy bracket template. Hidden from Settings UI in the situation-first
-    model — users edit the visible Plex line directly via ``line.request`` and the
-    queue/calendar/import-grace situation rows.
-    """
-    rows: list[MessageKey] = []
-    for ev in _DISPLAY_STATUS_ENUM_VALUES:
-        rows.append(
-            MessageKey(
-                key=f"status.label.{ev}",
-                label=_status_label_ui_name(ev),
-                default=ev,
-                group="Internal: Stage labels",
-                subgroup=None,
-                tooltip=_STATUS_LABEL_TOOLTIPS.get(
-                    ev,
-                    f"Internal fallback word for stage {ev} (used by legacy bracket templates).",
-                ),
-                allowed_tokens=("Sep",),
-                sample_context={},
-                settings_ui=False,
-            )
-        )
-    rows.append(
-        MessageKey(
-            key="status.label.RETRYING",
-            label=_status_label_ui_name("RETRYING"),
-            default="RETRYING",
-            group="Internal: Stage labels",
-            subgroup=None,
-            tooltip=(
-                "Internal fallback word while the queue monitor is retrying after a transient queue failure "
-                "or after an item left the queue during the retry grace window."
-            ),
-            allowed_tokens=("Sep",),
-            sample_context={},
-            settings_ui=False,
-        )
-    )
-    return tuple(rows)
 
 
 def _build_registry() -> tuple[MessageKey, ...]:
     keys: list[MessageKey] = []
 
-    # --- Bracket labels (word inside [ … ] per internal stage) ---
-    keys.extend(_iter_status_label_keys())
-
     # --- Request line (situation-first; the inner text wrapped by the global preset) ---
     keys.append(
         MessageKey(
             key="line.request",
-            label="Request line",
+            label="Request line (synopsis)",
             default="{Runtime} {Sep} REQUEST",
             group="Request",
             subgroup=None,
             tooltip=(
-                "The bracketed line shown in Plex/NFO for newly requested items. The global "
-                "wrapper preset sandwiches it (e.g. [ ]). Empty tokens auto-collapse, so "
-                "without a runtime this renders as just \u201cREQUEST\u201d."
+                "Inner text placed inside the global wrapper when showing REQUEST status at the "
+                "start of the synopsis/overview field (rich line: runtime + metadata tokens). Empty tokens collapse."
             ),
             allowed_tokens=_request_line_tokens(),
             sample_context={"Runtime": "1h 5m"},
         )
     )
 
-    # --- Title suffix (kept; user-facing for title/both projection mode) ---
+    # --- Title suffix (fixed base title + customizable suffix per library kind) ---
+    _suffix_tooltip = (
+        "Suffix appended when status projection targets the title field. "
+        "The base title shown in the UI is fixed and is not part of this template."
+    )
     keys.append(
         MessageKey(
-            key="title.suffix.format",
-            label="Title suffix format",
-            default="{Title} - {Bracket}",
+            key="title.suffix.movie",
+            label="Movie title suffix",
+            default=" (Placeholder)",
             group="Title Suffix",
             subgroup=None,
-            tooltip=(
-                "How the projected status is appended to the player title when projection mode is set to "
-                "Title or Both. Use {Title} for the cleaned title and {Bracket} for the rendered bracket."
-            ),
-            allowed_tokens=("Title", "Bracket", "Sep"),
-            sample_context={"Title": "Inception", "Bracket": "[REQUEST]"},
+            tooltip=_suffix_tooltip + " Uses the movie title as the hard prefix.",
+            allowed_tokens=(),
+            sample_context={},
+        )
+    )
+    keys.append(
+        MessageKey(
+            key="title.suffix.series",
+            label="Series title suffix",
+            default=" (Placeholder)",
+            group="Title Suffix",
+            subgroup=None,
+            tooltip=_suffix_tooltip
+            + " Uses the series (show) title as the hard prefix (tvshow.nfo and episode showtitle).",
+            allowed_tokens=(),
+            sample_context={},
+        )
+    )
+    keys.append(
+        MessageKey(
+            key="title.suffix.season",
+            label="Season title suffix",
+            default=" (Placeholder)",
+            group="Title Suffix",
+            subgroup=None,
+            tooltip=_suffix_tooltip
+            + " Uses the season display name as the hard prefix (e.g. “Show S01”). "
+            "Reserved for season-level surfaces; preview uses sample data.",
+            allowed_tokens=(),
+            sample_context={},
+        )
+    )
+    keys.append(
+        MessageKey(
+            key="title.suffix.episode",
+            label="Episode title suffix",
+            default=" (Placeholder)",
+            group="Title Suffix",
+            subgroup=None,
+            tooltip=_suffix_tooltip + " Uses the episode title as the hard prefix.",
+            allowed_tokens=(),
+            sample_context={},
         )
     )
 
-    # --- Internal: legacy bracket / runtime templates kept for read-compat fallback ---
-    # These are hidden from Settings UI. Users who customized them on a previous
-    # version keep their behavior until they save in the new UI; new users only see
-    # ``line.request`` + the global wrapper preset.
-    keys.append(
-        MessageKey(
-            key="bracket.format",
-            label="Bracket format",
-            default="[{Status}]",
-            group="Internal: Legacy bracket",
-            subgroup=None,
-            tooltip=(
-                "Legacy bracket shape used as a fallback when projecting non-REQUEST stages "
-                "without a situation-specific row. Hidden in the new UI."
-            ),
-            allowed_tokens=_bracket_tokens(),
-            sample_context={"Status": "REQUEST"},
-            settings_ui=False,
-        )
-    )
-    keys.append(
-        MessageKey(
-            key="bracket.with_runtime",
-            label="Bracket format (with runtime)",
-            default="[{Runtime} {Sep} {Status}]",
-            group="Internal: Legacy bracket",
-            subgroup=None,
-            tooltip=(
-                "Legacy bracket-with-runtime template used during read-compat for users who "
-                "customized it before the situation-first redesign."
-            ),
-            allowed_tokens=_bracket_tokens(),
-            sample_context={"Status": "REQUEST", "Runtime": "1h 5m"},
-            settings_ui=False,
-        )
-    )
+    # --- Internal runtime formatting helpers (no status/bracket semantics) ---
     keys.append(
         MessageKey(
             key="runtime.format.hm",
@@ -501,7 +364,7 @@ def _build_registry() -> tuple[MessageKey, ...]:
             default="{Hours}h {Minutes}m",
             group="Internal: Runtime",
             subgroup=None,
-            tooltip="Internal: how {Runtime} renders when both hours and minutes are non-zero.",
+            tooltip="Internal runtime formatting helper.",
             allowed_tokens=("Hours", "Minutes"),
             sample_context={"Hours": "1", "Minutes": "5"},
             settings_ui=False,
@@ -514,7 +377,7 @@ def _build_registry() -> tuple[MessageKey, ...]:
             default="{Hours}h",
             group="Internal: Runtime",
             subgroup=None,
-            tooltip="Internal: how {Runtime} renders when minutes are zero.",
+            tooltip="Internal runtime formatting helper.",
             allowed_tokens=("Hours",),
             sample_context={"Hours": "2"},
             settings_ui=False,
@@ -527,12 +390,13 @@ def _build_registry() -> tuple[MessageKey, ...]:
             default="{Minutes}m",
             group="Internal: Runtime",
             subgroup=None,
-            tooltip="Internal: how {Runtime} renders when the runtime is under one hour.",
+            tooltip="Internal runtime formatting helper.",
             allowed_tokens=("Minutes",),
             sample_context={"Minutes": "45"},
             settings_ui=False,
         )
     )
+
 
     # --- Calendar ---
     cal_movie_tokens = ("Sep", "DaysUntil", "ReleaseLabel", "ReleaseDate") + _MEDIA_TOKENS

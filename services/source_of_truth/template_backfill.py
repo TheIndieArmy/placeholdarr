@@ -5,9 +5,10 @@ existing placeholders may already be on disk with the old projected text in thei
 and Plex/player metadata. This module wires the three apply-scope choices the Settings
 UI offers into concrete actions:
 
-- ``now``: enqueue a single ``nfo_refresh`` follow-up job covering every active
-  placeholder. Reuses the existing job pipeline so the worker rewrites NFOs and pushes
-  player metadata refreshes for each title.
+- ``now``: enqueue batched ``nfo_refresh`` jobs for every active placeholder (same as
+  REQUEST NFO backfill). The worker rewrites NFOs only; the last batch triggers one
+  library section refresh with Plex ``force=1`` so players pick up changes without
+  per-title direct projection.
 - ``next_full_sync``: set the ``PLACEHOLDER_TEMPLATE_BACKFILL_PENDING`` AppConfig flag.
   The next full sync (scheduled or manual) consumes it via ``run_pending_backfill_if_set``.
 - ``future``: clear the pending flag (no retroactive work).
@@ -18,18 +19,23 @@ sync does not silently skip the queued backfill.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from core.logger import logger
 from services.postgres.db import get_session
-from services.postgres.models import AppConfig, Placeholder
-from services.source_of_truth.status_reconciler import enqueue_nfo_refresh
+from services.postgres.models import AppConfig, Job, Placeholder
+from services.source_of_truth.status_reconciler import NFO_REFRESH_JOB_TYPE, enqueue_nfo_refresh
 
 
 PENDING_FLAG_KEY = "PLACEHOLDER_TEMPLATE_BACKFILL_PENDING"
+# Latest template_backfill_run_id allowed to trigger the one-shot library refresh (Plex force).
+# New immediate enqueue supersedes pending jobs; in-flight older batches still write NFOs but skip
+# refresh_all_sections unless AppConfig still matches their payload run id.
+ACTIVE_TEMPLATE_RUN_KEY = "PLACEHOLDER_TEMPLATE_BACKFILL_ACTIVE_RUN_ID"
 
 
 def _collect_active_placeholder_ids(session) -> list[int]:
@@ -113,6 +119,75 @@ def mark_template_backfill_pending() -> dict[str, Any]:
             pass
 
 
+def supersede_pending_template_nfo_jobs(session) -> int:
+    """Mark pending immediate template backfill ``nfo_refresh`` jobs as done without processing.
+
+    Prevents stacked full-library sweeps when the user saves ``Apply now`` repeatedly.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (
+        session.query(Job)
+        .filter(
+            Job.job_type == NFO_REFRESH_JOB_TYPE,
+            Job.status == "PENDING",
+            text("(job.payload::jsonb) ? 'template_backfill_source'"),
+        )
+        .with_for_update(skip_locked=True)
+        .all()
+    )
+    for job in rows:
+        job.status = "DONE"
+        job.error_message = "superseded_by_newer_template_backfill"
+        job.updated_at = now
+        session.add(job)
+    return len(rows)
+
+
+def _set_active_template_run_id(session, run_id: str) -> None:
+    row = session.query(AppConfig).filter(AppConfig.key == ACTIVE_TEMPLATE_RUN_KEY).first()
+    if row is None:
+        session.add(
+            AppConfig(
+                key=ACTIVE_TEMPLATE_RUN_KEY,
+                value=str(run_id),
+                value_type="string",
+                restart_required=False,
+                description=(
+                    "Internal: template apply-now run id allowed to trigger the completion library refresh."
+                ),
+            )
+        )
+    else:
+        row.value = str(run_id)
+        row.value_type = "string"
+        session.add(row)
+
+
+def is_active_template_backfill_run(session, run_id: str) -> bool:
+    """True if ``run_id`` is still the authoritative immediate template backfill run."""
+    rid = str(run_id or "").strip()
+    if not rid:
+        return False
+    row = session.query(AppConfig).filter(AppConfig.key == ACTIVE_TEMPLATE_RUN_KEY).first()
+    active = str(row.value or "").strip() if row else ""
+    return bool(active) and active == rid
+
+
+def clear_active_template_backfill_run_if_matches(session, run_id: str) -> None:
+    """Clear active run marker after the completion refresh for that run (compare-and-clear)."""
+    rid = str(run_id or "").strip()
+    if not rid:
+        return
+    row = session.query(AppConfig).filter(AppConfig.key == ACTIVE_TEMPLATE_RUN_KEY).first()
+    if row is None:
+        return
+    if str(row.value or "").strip() != rid:
+        return
+    row.value = ""
+    row.value_type = "string"
+    session.add(row)
+
+
 def clear_pending_template_backfill() -> dict[str, Any]:
     """Reset the pending flag (used by ``future`` and after ``now`` runs)."""
     session = get_session()
@@ -137,26 +212,48 @@ def clear_pending_template_backfill() -> dict[str, Any]:
 def enqueue_template_backfill(*, source: str = "user_save") -> dict[str, Any]:
     """Queue an NFO refresh covering every active placeholder.
 
-    Returns a small status dict describing how many placeholders were enqueued. The actual
-    NFO rewrite + projection refresh is performed asynchronously by the worker.
+    Returns a small status dict describing how many placeholders were enqueued. The worker
+    rewrites NFOs in batches; the final batch schedules one library refresh (see
+    ``status_reconciler.process_nfo_refresh_job``), matching REQUEST NFO backfill behavior.
     """
     session = get_session()
     try:
+        superseded = supersede_pending_template_nfo_jobs(session)
+        if superseded:
+            logger.info(
+                f"Template backfill ({source}): superseded {superseded} pending nfo_refresh job(s) from a prior apply-now.",
+                extra={"emoji_type": "processing"},
+            )
+
         ids = _collect_active_placeholder_ids(session)
         if not ids:
             logger.info(
                 f"Template backfill ({source}): no active placeholders to refresh.",
                 extra={"emoji_type": "info"},
             )
-            return {"ok": True, "placeholder_count": 0, "enqueued": False, "source": source}
+            session.commit()
+            return {
+                "ok": True,
+                "placeholder_count": 0,
+                "enqueued": False,
+                "source": source,
+                "superseded_pending_jobs": superseded,
+            }
+
+        run_id = uuid.uuid4().hex
+        started = datetime.now(timezone.utc).isoformat()
+        _set_active_template_run_id(session, run_id)
 
         out = enqueue_nfo_refresh(
             ids,
             session=session,
             merge_into_pending=False,
+            player_metadata_refresh={int(pid): False for pid in ids},
             payload_extras={
                 "template_backfill_source": source,
-                "template_backfill_started_at": datetime.now(timezone.utc).isoformat(),
+                "template_backfill_started_at": started,
+                "template_backfill_run_id": run_id,
+                "template_backfill_refresh_on_completion": True,
             },
         )
         if not isinstance(out, dict) or not out.get("ok"):
@@ -165,8 +262,9 @@ def enqueue_template_backfill(*, source: str = "user_save") -> dict[str, Any]:
         out["placeholder_count"] = len(ids)
         out["enqueued"] = True
         out["source"] = source
+        out["superseded_pending_jobs"] = superseded
         logger.info(
-            f"Template backfill ({source}) queued for {len(ids)} placeholders.",
+            f"Template backfill ({source}) queued for {len(ids)} placeholders (run_id={run_id}).",
             extra={"emoji_type": "processing"},
         )
         return out

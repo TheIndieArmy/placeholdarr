@@ -23,6 +23,8 @@ SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
 REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
     {
         "PLACEHOLDER_CREATE_NFO",
+        "PLACEHOLDER_STATUS_PROJECT_TITLE",
+        "PLACEHOLDER_STATUS_PROJECT_SUMMARY",
         "CHECK_INTERVAL",
         "QUEUE_MONITOR_POLL_INTERVAL_SECONDS",
         "QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS",
@@ -326,8 +328,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PLACEHOLDER_STATUS_PROJECTION_MODE",
             {
                 "section": "Status Updates",
-                "label": "Placeholder status projection mode",
-                "description": "When status updates are on, choose whether bracketed status appears in summary text, title text, or both.",
+                "label": "Project status into",
+                "description": "Choose where bracketed placeholder status appears in media library metadata.",
                 "type": "choice",
                 "restart_required": True,
                 "options": [

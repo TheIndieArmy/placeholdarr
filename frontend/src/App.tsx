@@ -27,7 +27,7 @@ import {
   saveSettings,
   testIntegrationConnection,
 } from "./api/dashboard";
-import { fetchJson } from "./api/client";
+import { fetchJson, postJson } from "./api/client";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
 import plexIcon from "./assets/services/plex.svg";
@@ -137,7 +137,6 @@ const SETTINGS_SECTION_ORDER = [
   "Calendar",
   "Lookahead",
   "Status Updates",
-  "Status Messages",
   "Advanced",
 ];
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
@@ -148,7 +147,6 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   "Calendar": "calendar_month",
   "Lookahead": "fast_forward",
   "Status Updates": "edit_notifications",
-  "Status Messages": "edit_note",
   "Advanced": "tune",
 };
 const SETTINGS_SECTION_SLUGS: Record<string, string> = {
@@ -159,15 +157,15 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   "Calendar": "calendar",
   "Lookahead": "lookahead",
   "Status Updates": "status-updates",
-  "Status Messages": "status-messages",
   "Advanced": "advanced",
 };
 
 /** Virtual settings sections backed by their own API endpoint, not `/api/settings/current`. */
-const VIRTUAL_SETTINGS_SECTIONS = new Set<string>(["Status Messages"]);
+const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
 
 function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (!slug.trim()) return undefined;
+  if (slug === "status-messages") return "Status Updates";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -548,6 +546,9 @@ export function App() {
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
   const [settingsFeedback, setSettingsFeedback] = useState("");
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
+  /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
+  const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
+  const statusMessagesSaveRef = useRef<(() => Promise<void>) | null>(null);
 
   const [setupStatus, setSetupStatus] = useState<{ setup_complete: boolean } | null>(null);
   const setupCompleteRef = useRef<boolean | undefined>(undefined);
@@ -611,7 +612,14 @@ export function App() {
     () => settingsValuesDirty(fieldValues, baselineValues, settingsPayload),
     [fieldValues, baselineValues, settingsPayload],
   );
+  const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
   const hasUnsavedChangesRef = useRef(false);
+  const registerStatusMessagesSaveFlow = useCallback((fn: (() => Promise<void>) | null) => {
+    statusMessagesSaveRef.current = fn;
+  }, []);
+  const handleStatusMessagesMetaChange = useCallback((meta: { dirty: boolean; hasValidationErrors: boolean }) => {
+    setStatusMessagesMeta(meta);
+  }, []);
   const selectedCalendarItem = useMemo(
     () => findCalendarItem(calendar, calendarSelectedId),
     [calendar, calendarSelectedId],
@@ -648,8 +656,8 @@ export function App() {
   }, [library, titleSearch]);
 
   useEffect(() => {
-    hasUnsavedChangesRef.current = hasUnsavedChanges;
-  }, [hasUnsavedChanges]);
+    hasUnsavedChangesRef.current = combinedSettingsDirty;
+  }, [combinedSettingsDirty]);
 
   useEffect(() => {
     try {
@@ -668,13 +676,13 @@ export function App() {
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!hasUnsavedChanges) return;
+      if (!combinedSettingsDirty) return;
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [hasUnsavedChanges]);
+  }, [combinedSettingsDirty]);
 
   useEffect(() => {
     let stopped = false;
@@ -1141,7 +1149,7 @@ export function App() {
     setFieldValues(nextValues);
     setBaselineValues(nextValues);
 
-    // Must match `settingsSectionNames`: include virtual tabs (e.g. Status Messages) that are not in `/api/settings/current`.
+    // Must match `settingsSectionNames`: include any virtual tabs not returned by `/api/settings/current`.
     const apiSectionsForNav = payload.sections ?? [];
     const sections = SETTINGS_SECTION_ORDER.filter(
       (name) => VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSectionsForNav.some((s) => s.name === name),
@@ -1208,7 +1216,7 @@ export function App() {
 
   function tryNavigate(path: string) {
     const stayingWithinSettings = currentTab === "settings" && path.startsWith("/settings");
-    if (!hasUnsavedChanges || currentTab !== "settings" || stayingWithinSettings) {
+    if (!combinedSettingsDirty || currentTab !== "settings" || stayingWithinSettings) {
       navigate(path);
       return;
     }
@@ -1418,30 +1426,91 @@ export function App() {
           payload={settingsPayload}
           activeSection={activeSettingsSection}
           values={fieldValues}
-          hasUnsavedChanges={hasUnsavedChanges}
+          hasUnsavedChanges={combinedSettingsDirty}
+          messagesSaveBlocked={statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors}
           feedback={settingsFeedback}
           feedbackKind={settingsFeedbackKind}
           brand={brand}
           themeMode={themeMode}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+          onStatusMessagesMetaChange={handleStatusMessagesMetaChange}
+          registerStatusMessagesSaveFlow={registerStatusMessagesSaveFlow}
           onSave={async () => {
             setSettingsFeedback("Saving...");
             setSettingsFeedbackKind("");
-            const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
-            if (!result.ok) {
-              const first = Object.entries(result.errors || {})[0];
-              setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
+            if (statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors) {
+              setSettingsFeedback("Fix status message template errors before saving.");
               setSettingsFeedbackKind("error");
               return;
             }
-            setBaselineValues(fieldValues);
-            const restartKeys = result.restart_required_keys || [];
-            setSettingsFeedback(restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.");
-            setSettingsFeedbackKind("success");
-            const payload = await getSettingsCurrent();
-            setSettingsPayload(payload);
-            setSetupStatus(payload.status);
-            setOnboardingVisible(!payload.status.setup_complete);
+            let messageTemplatesSaved = false;
+            try {
+              /* Persist field-backed settings (incl. PLACEHOLDER_STATUS_PROJECTION_MODE) before saving templates +
+               * enqueueing nfo_refresh jobs. Otherwise workers can run with stale projection mode while message
+               * cache already has the new line.request — yielding summary-style titles and new plot brackets. */
+              if (hasUnsavedChanges) {
+                const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
+                if (!result.ok) {
+                  const first = Object.entries(result.errors || {})[0];
+                  setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
+                  setSettingsFeedbackKind("error");
+                  return;
+                }
+                setBaselineValues(fieldValues);
+                const restartKeys = result.restart_required_keys || [];
+                const baseMsg =
+                  restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.";
+                if (statusMessagesMeta.dirty && statusMessagesSaveRef.current) {
+                  try {
+                    await statusMessagesSaveRef.current();
+                    messageTemplatesSaved = true;
+                    setSettingsFeedback(`${baseMsg} Message templates saved.`);
+                  } catch (err: unknown) {
+                    const code =
+                      err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
+                    if (code === "MESSAGES_SAVE_CANCELLED") {
+                      setSettingsFeedback("");
+                      setSettingsFeedbackKind("");
+                      return;
+                    }
+                    setSettingsFeedback(err instanceof Error ? err.message : "Message templates save failed");
+                    setSettingsFeedbackKind("error");
+                    return;
+                  }
+                } else {
+                  setSettingsFeedback(baseMsg);
+                }
+                setSettingsFeedbackKind("success");
+                const payload = await getSettingsCurrent();
+                setSettingsPayload(payload);
+                setSetupStatus(payload.status);
+                setOnboardingVisible(!payload.status.setup_complete);
+              } else if (statusMessagesMeta.dirty && statusMessagesSaveRef.current) {
+                try {
+                  await statusMessagesSaveRef.current();
+                  messageTemplatesSaved = true;
+                } catch (err: unknown) {
+                  const code =
+                    err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
+                  if (code === "MESSAGES_SAVE_CANCELLED") {
+                    setSettingsFeedback("");
+                    setSettingsFeedbackKind("");
+                    return;
+                  }
+                  setSettingsFeedback(err instanceof Error ? err.message : "Message templates save failed");
+                  setSettingsFeedbackKind("error");
+                  return;
+                }
+                setSettingsFeedback("Message templates saved and applied.");
+                setSettingsFeedbackKind("success");
+              } else {
+                setSettingsFeedback("");
+                setSettingsFeedbackKind("");
+              }
+            } catch (e: unknown) {
+              setSettingsFeedback(e instanceof Error ? e.message : "Save failed");
+              setSettingsFeedbackKind("error");
+            }
           }}
           onTestConnection={async ({ service, urlKey, credentialKey }) => {
             const url = String(fieldValues[urlKey] || "").trim();
@@ -5816,12 +5885,16 @@ function SettingsPanel(props: {
   activeSection: string;
   values: FieldValueMap;
   hasUnsavedChanges: boolean;
+  /** When message templates are dirty but invalid, top Save stays disabled. */
+  messagesSaveBlocked: boolean;
   feedback: string;
   feedbackKind: "" | "success" | "error";
   brand: Brand;
   themeMode: ThemeMode;
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
+  onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
+  registerStatusMessagesSaveFlow: (fn: (() => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
@@ -6056,9 +6129,14 @@ function SettingsPanel(props: {
             </span>
           )}
           {!isVirtualActive && (
-            <button type="button" onClick={() => props.onSave()}
-              className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors"
-              style={{ backgroundColor: accent.hex }}>
+            <button
+              type="button"
+              onClick={() => props.onSave()}
+              disabled={!props.hasUnsavedChanges || props.messagesSaveBlocked}
+              title={props.messagesSaveBlocked ? "Fix status message template errors before saving" : undefined}
+              className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ backgroundColor: accent.hex }}
+            >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               Save Settings
             </button>
@@ -6449,11 +6527,23 @@ function SettingsPanel(props: {
                   intro: <LookaheadSectionIntro variant="onboarding" embedded />,
                 })
               ) : active.name === "Status Updates" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: <StatusUpdatesSectionIntro variant="onboarding" embedded />,
-                })
-              ) : active.name === "Status Messages" ? (
-                <StatusMessagesPanel brand={props.brand} themeMode={props.themeMode} />
+                <>
+                  {renderOnboardingStyleSectionRows(active.fields, {
+                    intro: <StatusUpdatesSectionIntro variant="onboarding" embedded />,
+                  })}
+                  <StatusMessagesPanel
+                    brand={props.brand}
+                    themeMode={props.themeMode}
+                    statusUpdatesScope={String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "ALL")}
+                    projectionDraft={{
+                      placeholder_status_updates: String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "ALL"),
+                      projection_mode: String(props.values.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary"),
+                    }}
+                    onMetaChange={props.onStatusMessagesMetaChange}
+                    registerSaveFlow={props.registerStatusMessagesSaveFlow}
+                    embedded
+                  />
+                </>
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
               ) : (
@@ -6489,6 +6579,7 @@ type StatusMessageRow = {
   has_override: boolean;
   allowed_tokens: string[];
   sample_render: string;
+  muted_under_request_scope?: boolean;
 };
 
 type StatusMessageTokenSpec = {
@@ -6521,8 +6612,8 @@ type StatusMessagePayload = {
 type ApplyScope = "now" | "next_full_sync" | "future";
 
 const STATUS_MESSAGE_GROUP_ORDER = [
-  "Request",
   "Title Suffix",
+  "Request",
   "Calendar Coming Soon",
   "Queue Monitor",
   "Import Grace",
@@ -6551,6 +6642,51 @@ function collectStatusTemplateTokenNames(template: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) out.push(m[1]);
   return out;
+}
+
+const TITLE_SUFFIX_ROW_KEYS = new Set([
+  "title.suffix.movie",
+  "title.suffix.series",
+  "title.suffix.season",
+  "title.suffix.episode",
+]);
+
+function isTitleSuffixRowKey(key: string): boolean {
+  return TITLE_SUFFIX_ROW_KEYS.has(key);
+}
+
+function normalizeTitleSuffixTemplate(rowKey: string, value: string): string {
+  const text = typeof value === "string" ? value : "";
+  const stripByKey: Record<string, RegExp> = {
+    "title.suffix.movie": /\{Title\}\s*/gi,
+    "title.suffix.series": /\{SeriesTitle\}\s*/gi,
+    "title.suffix.season": /\{Title\}\s*/gi,
+    "title.suffix.episode": /\{EpisodeTitle\}\s*/gi,
+  };
+  const re = stripByKey[rowKey];
+  const stripped = re ? text.replace(re, "") : text;
+  const withPlaceholderLiteral = stripped.replace(/\{Bracket\}/g, "(Placeholder)");
+  return withPlaceholderLiteral.replace(/^\+\s*/, "");
+}
+
+function titleSuffixHardPrefix(rowKey: string): string {
+  const m: Record<string, string> = {
+    "title.suffix.movie": "{Title}",
+    "title.suffix.series": "{SeriesTitle}",
+    "title.suffix.season": "{Title}",
+    "title.suffix.episode": "{EpisodeTitle}",
+  };
+  return m[rowKey] ?? "{Title}";
+}
+
+function titleSuffixPreviewBase(rowKey: string): string {
+  const m: Record<string, string> = {
+    "title.suffix.movie": "Inception",
+    "title.suffix.series": "Breaking Bad",
+    "title.suffix.season": "Breaking Bad S01",
+    "title.suffix.episode": "Cat's in the Bag...",
+  };
+  return m[rowKey] ?? "";
 }
 
 function validateStatusMessageTemplate(
@@ -6603,7 +6739,133 @@ function clientRenderStatusMessage(template: string, ctx: Record<string, string>
   return collapsed;
 }
 
-function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
+type StatusProjectionDraft = {
+  placeholder_status_updates: string;
+  projection_mode: string;
+};
+
+function deriveProjectionSurfacesFromDraft(d: StatusProjectionDraft | undefined): {
+  project_title: boolean;
+  project_summary: boolean;
+} {
+  const mode = String(d?.projection_mode ?? "summary").trim().toLowerCase();
+  if (mode === "both") return { project_title: true, project_summary: true };
+  if (mode === "title") return { project_title: true, project_summary: false };
+  return { project_title: false, project_summary: true };
+}
+
+type LineRequestPreviewResp = {
+  title_line: string;
+  summary_line: string;
+  empty_tokens: string[];
+  projection_title_enabled?: boolean;
+  projection_summary_enabled?: boolean;
+  projection_blocked?: boolean;
+};
+
+function LineRequestLivePreview(props: {
+  synopsisTemplate: string;
+  projectionDraft?: StatusProjectionDraft;
+  brand: Brand;
+  themeMode: ThemeMode;
+}) {
+  const [movie, setMovie] = useState<LineRequestPreviewResp | null>(null);
+  const [episode, setEpisode] = useState<LineRequestPreviewResp | null>(null);
+  const { project_title: draftTitle, project_summary: draftSummary } = deriveProjectionSurfacesFromDraft(
+    props.projectionDraft,
+  );
+  const scope = String(props.projectionDraft?.placeholder_status_updates ?? "ALL").trim().toUpperCase();
+
+  useEffect(() => {
+    let cancelled = false;
+    const syn = props.synopsisTemplate ?? "";
+    void (async () => {
+      try {
+        const base = {
+          template_synopsis: syn,
+          projection_mode: String(props.projectionDraft?.projection_mode ?? "summary"),
+          placeholder_status_updates: scope,
+        };
+        const [m, e] = await Promise.all([
+          postJson<LineRequestPreviewResp>("/api/messages/preview", { ...base, media: "movie" }),
+          postJson<LineRequestPreviewResp>("/api/messages/preview", { ...base, media: "episode" }),
+        ]);
+        if (!cancelled) {
+          setMovie(m);
+          setEpisode(e);
+        }
+      } catch {
+        if (!cancelled) {
+          setMovie(null);
+          setEpisode(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.synopsisTemplate, draftTitle, draftSummary, scope]);
+
+  function renderSampleColumn(label: string, data: LineRequestPreviewResp | null) {
+    return (
+      <div>
+        <p className="text-slate-500 font-headline uppercase tracking-wider mb-1">{label}</p>
+        {data ? (
+          <>
+            {data.projection_blocked && (
+              <p className="text-amber-300/90 text-[12px] mb-2">Status updates Off — placeholders would not decorate text.</p>
+            )}
+            <p className={`text-slate-300 ${!data.projection_title_enabled ? "opacity-50" : ""}`}>
+              <span className="text-slate-500">Title:</span> {data.title_line}
+              {!data.projection_title_enabled && (
+                <span className="text-slate-500 text-[11px] ml-1"> (title projection off)</span>
+              )}
+            </p>
+            <p className={`text-slate-300 mt-1 ${!data.projection_summary_enabled ? "opacity-50" : ""}`}>
+              <span className="text-slate-500">Synopsis lead:</span> {data.summary_line}
+              {!data.projection_summary_enabled && (
+                <span className="text-slate-500 text-[11px] ml-1"> (synopsis projection off)</span>
+              )}
+            </p>
+            {(data.empty_tokens?.length ?? 0) > 0 && (
+              <p className="text-slate-500 mt-1">
+                Empty on synopsis sample: {(data.empty_tokens ?? []).map((t) => `{${t}}`).join(", ")}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-slate-500">…</p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${UI_SECTION_FRAME_CLASS} px-5 py-4 mb-4`}>
+      <h3 className="text-[14px] font-headline uppercase tracking-wider text-slate-400 mb-1">
+        Live preview (sample data · REQUEST placeholder)
+      </h3>
+      <p className="text-[12px] text-slate-500 mb-3">
+        Reflects projection targets and status-update scope from the section above (including unsaved changes). REQUEST text comes from
+        Request line (synopsis); movie and TV episode samples use Movie / Episode title suffix templates.
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
+        {renderSampleColumn("Movie", movie)}
+        {renderSampleColumn("TV episode", episode)}
+      </div>
+    </div>
+  );
+}
+
+function StatusMessagesPanel(props: {
+  brand: Brand;
+  themeMode: ThemeMode;
+  statusUpdatesScope?: string;
+  projectionDraft?: StatusProjectionDraft;
+  embedded?: boolean;
+  onMetaChange?: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
+  registerSaveFlow?: (fn: (() => Promise<void>) | null) => void;
+}) {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const [payload, setPayload] = useState<StatusMessagePayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -6623,6 +6885,7 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
     placeholderCount: number;
     pending: boolean;
   }>(null);
+  const scopeFlowWaitersRef = useRef<{ resolve: () => void; reject: (e: unknown) => void } | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -6641,8 +6904,10 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
       const next: Record<string, string> = {};
       const def: Record<string, string> = {};
       for (const row of data.registry) {
-        next[row.key] = row.has_override ? row.value : row.default;
-        def[row.key] = row.default;
+        const currentRaw = row.has_override ? row.value : row.default;
+        const defaultRaw = row.default;
+        next[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, currentRaw) : currentRaw;
+        def[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, defaultRaw) : defaultRaw;
       }
       setValues(next);
       setDefaults(def);
@@ -6717,30 +6982,55 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
     return false;
   }, [payload, values, knownTokenSet]);
 
+  useEffect(() => {
+    props.onMetaChange?.({ dirty, hasValidationErrors });
+  }, [props.onMetaChange, dirty, hasValidationErrors]);
+
+  useEffect(() => {
+    return () => {
+      props.onMetaChange?.({ dirty: false, hasValidationErrors: false });
+      const w = scopeFlowWaitersRef.current;
+      scopeFlowWaitersRef.current = null;
+      w?.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
+    };
+  }, [props.onMetaChange]);
+
   function setRowValue(key: string, value: string) {
-    setValues((prev) => ({ ...prev, [key]: value }));
+    const nextValue = isTitleSuffixRowKey(key) ? normalizeTitleSuffixTemplate(key, value) : value;
+    setValues((prev) => ({ ...prev, [key]: nextValue }));
   }
 
   function resetRow(key: string) {
     setValues((prev) => ({ ...prev, [key]: defaults[key] ?? "" }));
   }
 
-  async function handleSavePressed() {
-    if (!payload || saving || !dirty || hasValidationErrors) return;
+  const runMessagesSaveFlow = useCallback(async () => {
+    if (!payload) return;
+    if (!dirty) return;
+    if (hasValidationErrors) {
+      throw new Error("Fix status message template validation errors before saving.");
+    }
     setFeedback(null);
+    let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
     try {
-      const data = await fetchJson<{ placeholder_count: number; pending_full_sync_backfill: boolean }>(
-        "/api/messages/templates/apply_estimate",
-        { credentials: "same-origin" },
-      );
+      data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+    } catch {
+      data = { placeholder_count: 0, pending_full_sync_backfill: false };
+    }
+    await new Promise<void>((resolve, reject) => {
+      scopeFlowWaitersRef.current = { resolve, reject };
       setScopeModal({
         placeholderCount: Number(data?.placeholder_count ?? 0),
         pending: !!data?.pending_full_sync_backfill,
       });
-    } catch {
-      setScopeModal({ placeholderCount: 0, pending: false });
-    }
-  }
+    });
+  }, [payload, dirty, hasValidationErrors]);
+
+  useEffect(() => {
+    if (!props.registerSaveFlow) return;
+    props.registerSaveFlow(runMessagesSaveFlow);
+    return () => props.registerSaveFlow?.(null);
+  }, [props.registerSaveFlow, runMessagesSaveFlow]);
 
   async function handleSave(applyScope: ApplyScope) {
     if (!payload) return;
@@ -6749,7 +7039,8 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
     try {
       const overrides: Record<string, string> = {};
       for (const row of payload.registry ?? []) {
-        const v = values[row.key] ?? "";
+        const raw = values[row.key] ?? "";
+        const v = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, raw) : raw;
         if (v.trim() && v !== row.default) overrides[row.key] = v;
       }
       const resp = await fetch("/api/messages/templates", {
@@ -6780,6 +7071,9 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
         const firstKey = Object.keys(errors)[0];
         const msg = firstKey ? `${firstKey}: ${errors[firstKey]}` : `Save failed (HTTP ${resp.status})`;
         setFeedback({ kind: "error", message: msg });
+        const w = scopeFlowWaitersRef.current;
+        scopeFlowWaitersRef.current = null;
+        w?.reject(new Error(msg));
         return;
       }
       let savedMsg = "Status messages saved";
@@ -6789,8 +7083,14 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
       setFeedback({ kind: "success", message: savedMsg });
       setScopeModal(null);
       await reload();
+      const w = scopeFlowWaitersRef.current;
+      scopeFlowWaitersRef.current = null;
+      w?.resolve();
     } catch (e: unknown) {
       setFeedback({ kind: "error", message: e instanceof Error ? e.message : "Save failed" });
+      const w = scopeFlowWaitersRef.current;
+      scopeFlowWaitersRef.current = null;
+      w?.reject(e);
     } finally {
       setSaving(false);
     }
@@ -6835,17 +7135,24 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
     );
   }
 
-  return (
-    <div className="min-h-[40vh] px-6 py-5 space-y-5">
-      {/* Top toolbar: separator + case + actions */}
+  const scopeUpper = String(props.statusUpdatesScope ?? "").toUpperCase();
+  const panelInner = (
+    <div className={props.embedded ? "min-h-[40vh] px-2 py-5 space-y-5" : "min-h-[40vh] px-6 py-5 space-y-5"}>
+      <LineRequestLivePreview
+        synopsisTemplate={values["line.request"] ?? ""}
+        projectionDraft={props.projectionDraft}
+        brand={props.brand}
+        themeMode={props.themeMode}
+      />
+      {/* Top toolbar: separator + case + wrapper + status + reset (one row, wraps on narrow viewports) */}
       <div className={`${UI_SECTION_FRAME_CLASS} px-5 py-4`}>
-        <div className="flex flex-wrap items-end gap-4 justify-between">
-          <div className="flex flex-wrap items-end gap-4">
-            <div>
-              <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Separator</label>
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Separator</label>
               <div className="flex items-center gap-2">
                 <select
-                  className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  className={`min-w-0 max-w-[13rem] shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] py-2 pl-3 pr-9 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  title="Separator preset"
                   value={payload.separator_presets.some((p) => p.value === separator) ? separator : "__custom__"}
                   onChange={(e) => {
                     if (e.target.value === "__custom__") return;
@@ -6858,17 +7165,19 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                   <option value="__custom__">Custom…</option>
                 </select>
                 <input
-                  className={`w-24 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  className={`w-24 shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 font-mono text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
                   value={separator}
                   onChange={(e) => setSeparator(e.target.value)}
                   maxLength={6}
+                  title="Custom separator character"
                 />
               </div>
             </div>
-            <div>
-              <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Default Case</label>
+            <div className="flex flex-col gap-1">
+              <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Default Case</label>
               <select
-                className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                className={`min-w-0 max-w-[13rem] shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] py-2 pl-3 pr-9 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                title="Default case for rendered messages"
                 value={caseMode}
                 onChange={(e) => setCaseMode(e.target.value)}
               >
@@ -6877,11 +7186,12 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-[12px] font-headline uppercase tracking-wider text-slate-400 mb-1">Wrapper</label>
-              <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-[12px] font-headline uppercase tracking-wider text-slate-400">Wrapper</label>
+              <div className="flex flex-wrap items-center gap-2">
                 <select
-                  className={`bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  className={`min-w-0 max-w-[13rem] shrink-0 rounded-lg border border-[#424753]/40 bg-[#0f1419] py-2 pl-3 pr-9 text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                  title="Status bracket wrapper preset"
                   value={wrapperPreset}
                   onChange={(e) => setWrapperPreset(e.target.value)}
                 >
@@ -6892,7 +7202,7 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                 {wrapperPreset === "custom" && (
                   <>
                     <input
-                      className={`w-16 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                      className={`w-16 rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 font-mono text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
                       value={wrapperOpen}
                       onChange={(e) => setWrapperOpen(e.target.value)}
                       maxLength={8}
@@ -6900,7 +7210,7 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                       title="Custom open text"
                     />
                     <input
-                      className={`w-16 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 outline-none font-mono ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                      className={`w-16 rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 font-mono text-[15px] text-slate-200 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
                       value={wrapperClose}
                       onChange={(e) => setWrapperClose(e.target.value)}
                       maxLength={8}
@@ -6910,26 +7220,15 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                   </>
                 )}
               </div>
-              <p className="text-[11px] text-slate-500 mt-1 font-mono">
-                Preview: {wrapperPair.open || ""}REQUEST{wrapperPair.close || ""}
-              </p>
             </div>
-          </div>
-          <div className="flex items-center gap-3">
-            {dirty && (
-              <span className="flex items-center gap-1.5 text-[14px] text-yellow-400 font-headline uppercase tracking-wider">
-                <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
-                Unsaved changes
-              </span>
-            )}
             {payload.pending_full_sync_backfill && (
-              <span className="flex items-center gap-1.5 text-[13px] text-amber-300 font-headline uppercase tracking-wider" title="Earlier save chose Next full sync; the backfill runs at the next full sync.">
+              <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] font-headline uppercase tracking-wider text-amber-300" title="Earlier save chose Next full sync; the backfill runs at the next full sync.">
                 <span className="material-symbols-outlined" style={{ fontSize: 14 }}>schedule</span>
                 Backfill pending
               </span>
             )}
             {feedback && (
-              <span className={`text-[14px] font-headline uppercase tracking-wider ${feedback.kind === "success" ? "text-green-400" : "text-red-400"}`}>
+              <span className={`max-w-[14rem] shrink text-[14px] font-headline uppercase tracking-wider sm:max-w-xs ${feedback.kind === "success" ? "text-green-400" : "text-red-400"}`}>
                 {feedback.message}
               </span>
             )}
@@ -6937,25 +7236,16 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
               type="button"
               onClick={handleResetAll}
               disabled={saving}
-              className="text-[13px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline disabled:opacity-50"
+              className="shrink-0 whitespace-nowrap text-[13px] font-headline uppercase tracking-wider text-slate-400 underline-offset-2 hover:text-slate-200 hover:underline disabled:opacity-50"
             >
               Reset all to defaults
             </button>
-            <button
-              type="button"
-              onClick={handleSavePressed}
-              disabled={saving || !dirty || hasValidationErrors}
-              title={hasValidationErrors ? "Fix validation errors before saving" : ""}
-              className="flex items-center gap-2 px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
-              {saving ? "Saving…" : "Save Messages"}
-            </button>
-          </div>
         </div>
+        <p className="mt-2 font-mono text-[11px] text-slate-500">
+          Preview: {wrapperPair.open || ""}REQUEST{wrapperPair.close || ""}
+        </p>
         <p className="ui-field-description mt-3">
-          Customize the lines Placeholdarr writes into NFOs / projects to your media player. Each row is the inner text; the global <span className="font-mono">Wrapper</span> applies <span className="font-mono">{wrapperPair.open || "·"}{wrapperPair.close || "·"}</span> around it. Missing tokens auto-collapse so optional metadata is safe to include. Click a row's <span className="font-mono">{`{ }`}</span> button to browse tokens.
+          Customize the lines Placeholdarr writes into NFOs / projects to your media player. Use <span className="font-semibold">Save Settings</span> at the top of this page to persist templates and choose backfill timing. Each row is the inner text; the global <span className="font-mono">Wrapper</span> applies <span className="font-mono">{wrapperPair.open || "·"}{wrapperPair.close || "·"}</span> around it. Missing tokens auto-collapse so optional metadata is safe to include. Click a row's <span className="font-mono">{`{ }`}</span> button to browse tokens.
         </p>
       </div>
 
@@ -7002,18 +7292,28 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                       );
                       const innerPreview = validation.error
                         ? ""
-                        : clientRenderStatusMessage(value || row.default, sampleCtx, separator, caseMode, tokenSamplesByName);
+                        : isTitleSuffixRowKey(row.key)
+                          ? (value || row.default)
+                          : clientRenderStatusMessage(value || row.default, sampleCtx, separator, caseMode, tokenSamplesByName);
                       // Rows whose final Plex/NFO line is wrapped by the global preset show the wrapped form here too.
                       const isWrappedSituation =
                         row.key === "line.request" ||
                         row.key.startsWith("queue.") ||
                         row.key.startsWith("calendar.") ||
                         row.key.startsWith("import_grace.");
-                      const preview = innerPreview && isWrappedSituation
+                      const wrappedPreview = innerPreview && isWrappedSituation
                         ? `${wrapperPair.open}${innerPreview}${wrapperPair.close}`
                         : innerPreview;
+                      const preview = isTitleSuffixRowKey(row.key)
+                        ? `${titleSuffixPreviewBase(row.key)}${innerPreview || ""}`
+                        : wrappedPreview;
+                      const rowMuted = scopeUpper === "REQUEST" && !!row.muted_under_request_scope;
                       return (
-                        <div key={row.key} className="space-y-2">
+                        <div
+                          key={row.key}
+                          className={`space-y-2 ${rowMuted ? "opacity-40" : ""}`}
+                          title={rowMuted ? "Not used while placeholder status updates are limited to REQUEST." : undefined}
+                        >
                           <div className="flex items-baseline gap-2 flex-wrap">
                             <label className="text-[15px] font-semibold text-slate-100">{row.label}</label>
                             {isOverride && (
@@ -7025,21 +7325,38 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
                             <span className="ml-auto font-mono text-[12px] text-slate-500">{row.key}</span>
                           </div>
                           <div className="flex gap-2">
-                            <input
-                              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
-                              value={value}
-                              maxLength={payload.max_template_length ?? 400}
-                              placeholder={row.default}
-                              onChange={(e) => setRowValue(row.key, e.target.value)}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setTokenModal({ rowKey: row.key })}
-                              className="px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-mono transition-colors"
-                              title="Insert a token"
-                            >
-                              {`{ }`}
-                            </button>
+                            {isTitleSuffixRowKey(row.key) ? (
+                              <div className="flex-1 flex items-center bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 gap-2">
+                                <span className="text-[13px] font-mono text-slate-400 whitespace-nowrap">
+                                  {titleSuffixHardPrefix(row.key)}
+                                </span>
+                                <input
+                                  className={`flex-1 bg-transparent border-0 px-0 py-0 text-[15px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                                  value={value}
+                                  maxLength={payload.max_template_length ?? 400}
+                                  placeholder={row.default}
+                                  onChange={(e) => setRowValue(row.key, e.target.value)}
+                                />
+                              </div>
+                            ) : (
+                              <input
+                                className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[15px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)}`}
+                                value={value}
+                                maxLength={payload.max_template_length ?? 400}
+                                placeholder={row.default}
+                                onChange={(e) => setRowValue(row.key, e.target.value)}
+                              />
+                            )}
+                            {(row.allowed_tokens?.length ?? 0) > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setTokenModal({ rowKey: row.key })}
+                                className="px-3 py-2 bg-[#252e3a] hover:bg-[#30353b] border border-[#424753]/40 rounded-lg text-[14px] text-slate-300 font-mono transition-colors"
+                                title="Insert a token"
+                              >
+                                {`{ }`}
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => resetRow(row.key)}
@@ -7099,7 +7416,12 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
           placeholderCount={scopeModal.placeholderCount}
           alreadyPending={scopeModal.pending}
           saving={saving}
-          onCancel={() => setScopeModal(null)}
+          onCancel={() => {
+            setScopeModal(null);
+            const w = scopeFlowWaitersRef.current;
+            scopeFlowWaitersRef.current = null;
+            w?.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
+          }}
           onConfirm={(scope) => handleSave(scope)}
           brand={props.brand}
           themeMode={props.themeMode}
@@ -7107,6 +7429,25 @@ function StatusMessagesPanel(props: { brand: Brand; themeMode: ThemeMode }) {
       )}
     </div>
   );
+
+  if (props.embedded) {
+    return (
+      <details className="mt-2 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
+        <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
+          <span
+            className="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-90"
+            style={{ fontSize: 18 }}
+          >
+            chevron_right
+          </span>
+          Advanced — message templates
+        </summary>
+        <div className="px-0 pb-2 border-t border-[#424753]/30">{panelInner}</div>
+      </details>
+    );
+  }
+
+  return panelInner;
 }
 
 function StatusMessagesApplyScopeModal(props: {

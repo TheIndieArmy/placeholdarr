@@ -57,6 +57,35 @@ def _empty_config() -> dict[str, Any]:
 
 _WRAPPER_PRESET_VALUES = {entry["value"] for entry in WRAPPER_PRESETS}
 
+_TITLE_SUFFIX_KEYS = frozenset(
+    {
+        "title.suffix.movie",
+        "title.suffix.series",
+        "title.suffix.season",
+        "title.suffix.episode",
+    }
+)
+
+
+def _coerce_title_suffix_value(key: str, raw: str) -> str:
+    """Title suffix templates are literal-only (no {Tokens}). Invalid stored values fall back to default."""
+    spec = get_message_key(key)
+    if spec is None:
+        return raw
+    text = str(raw) if raw is not None else ""
+    if not text.strip():
+        return str(spec.default)
+    # Import here: template_engine imports store at module load.
+    from services.messages.template_engine import validate_template_text
+
+    try:
+        vr = validate_template_text(key, text)
+        if vr.get("ok"):
+            return text
+    except Exception:
+        pass
+    return str(spec.default)
+
 
 def _normalize(payload: Any) -> dict[str, Any]:
     """Coerce raw stored payload into the canonical shape used in memory."""
@@ -85,13 +114,21 @@ def _normalize(payload: Any) -> dict[str, Any]:
 
     overrides_raw = payload.get("overrides") or {}
     if isinstance(overrides_raw, dict):
+        migrated = dict(overrides_raw)
+        legacy = migrated.get("title.suffix.format")
+        if isinstance(legacy, str) and legacy.strip():
+            for nk in _TITLE_SUFFIX_KEYS:
+                if nk not in migrated:
+                    migrated[nk] = legacy
         clean: dict[str, str] = {}
-        for k, v in overrides_raw.items():
+        for k, v in migrated.items():
             if not isinstance(k, str):
                 continue
             if get_message_key(k) is None:
                 continue
             text = "" if v is None else str(v)
+            if k in _TITLE_SUFFIX_KEYS:
+                text = _coerce_title_suffix_value(k, text)
             clean[k] = text
         base["overrides"] = clean
 
