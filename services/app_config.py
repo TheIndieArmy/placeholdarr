@@ -770,6 +770,8 @@ def apply_persisted_settings(session=None) -> dict[str, Any]:
 
 
 def get_onboarding_status(session=None) -> dict[str, Any]:
+    from services.startup_gate import startup_sync_complete
+
     owns_session = session is None
     session = session or get_session()
     try:
@@ -782,6 +784,7 @@ def get_onboarding_status(session=None) -> dict[str, Any]:
             "setup_completed_at": setup_row.value if setup_row else None,
             "configured_settings": configured_count,
             "available_settings": len(SETTINGS_SCHEMA),
+            "startup_sync_complete": startup_sync_complete.is_set(),
         }
     finally:
         if owns_session:

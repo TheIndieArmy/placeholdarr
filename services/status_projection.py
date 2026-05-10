@@ -78,6 +78,22 @@ def format_duration_label(minutes: int) -> str:
     return f"{h}h {m}m"
 
 
+# User-facing labels for status enum values that should not be shown in their
+# raw SCREAMING_SNAKE form. Anything not listed here renders as the raw value.
+_FRIENDLY_STATUS_LABELS: dict[str, str] = {
+    "SEARCH_QUEUED": "Search queued",
+}
+
+
+def _friendly_status_label(status: str | None) -> str:
+    """Map an enum value to its user-facing label. Falls back to the raw value."""
+    raw = str(status or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    return _FRIENDLY_STATUS_LABELS.get(upper, raw)
+
+
 def _summary_status_bracket(clean_status: str, runtime_minutes: int | None) -> str:
     """Build [REQUEST] or [1h 5m · REQUEST] when runtime is known (REQUEST only)."""
     status_upper = clean_status.upper()
@@ -87,7 +103,8 @@ def _summary_status_bracket(clean_status: str, runtime_minutes: int | None) -> s
             dur = format_duration_label(rm)
             if dur:
                 return f"[{dur} · {clean_status}]"
-    return f"[{clean_status}]"
+    label = _friendly_status_label(clean_status) or clean_status
+    return f"[{label}]"
 
 
 def projected_status_display(
@@ -120,7 +137,8 @@ def projected_status_display(
     eff_upper = str(effective).strip().upper()
     if eff_upper == "REQUEST":
         return _summary_status_bracket("REQUEST", runtime_minutes)
-    return str(effective).strip() or None
+    friendly = _friendly_status_label(effective)
+    return friendly.strip() or None
 
 
 def project_title(title: str | None, status: str | None) -> str:
@@ -128,7 +146,8 @@ def project_title(title: str | None, status: str | None) -> str:
     clean_status = str(status or "").strip()
     if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"title", "both"}:
         return clean_title
-    return f"{clean_title} - [{clean_status}]".strip()
+    label = _friendly_status_label(clean_status) or clean_status
+    return f"{clean_title} - [{label}]".strip()
 
 
 def project_summary(

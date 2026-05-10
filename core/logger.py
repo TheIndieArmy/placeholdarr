@@ -1,8 +1,9 @@
+import glob
 import logging
 import os
 import sys
+import threading
 import traceback
-import glob
 from datetime import datetime
 
 # Try to import settings; if pydantic validation fails (missing paths), print a friendly message and exit
@@ -125,7 +126,7 @@ class EnhancedEmojiLogFormatter(logging.Formatter):
 
 logger = logging.getLogger(__name__)
 
-# Emit VERBOSE/custom + DEBUG/INFO/… for file handlers; console filters below.
+# Emit all levels (including VERBOSE); handlers do not filter by level — UI/log viewers filter display.
 logger.setLevel(VERBOSE_LEVEL_NUM)
 
 logger.propagate = False
@@ -182,7 +183,7 @@ def _cleanup_old_log_files(log_dir: str, max_files: int) -> None:
                 print(f"Failed to delete old log file {old_file}: {e}", file=sys.stderr)
 
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.NOTSET)
 console_handler.setFormatter(EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
 log_dir = _resolve_log_dir()
@@ -219,3 +220,72 @@ if workspace_file_handler is not None:
 logger.debug(f"File logging initialized at {log_file_path} (keeping {max_run_files} run files)", extra={'emoji_type': 'debug'})
 if workspace_file_handler is not None:
     logger.debug(f"Workspace logging mirrored at {workspace_log_path}", extra={'emoji_type': 'debug'})
+
+
+def _stall_heartbeat_interval_sec() -> float:
+    try:
+        v = float(getattr(settings, "STALL_HEARTBEAT_INTERVAL_SEC", 10.0) or 10.0)
+    except Exception:
+        v = 10.0
+    return max(3.0, v)
+
+
+def start_verbose_stall_heartbeat(
+    label: str,
+    *,
+    interval_sec: float | None = None,
+    escalate_after_sec: float | None = None,
+    escalate_message: str | None = None,
+) -> threading.Event:
+    """Emit ``logger.verbose`` stall/liveness lines until the returned event is ``set()``.
+
+    INFO stays for coarse progress only; stall lines are VERBOSE diagnostics. Handlers
+    record full levels; the app UI filters what operators see.
+    Interval: ``STALL_HEARTBEAT_INTERVAL_SEC``.
+
+    Optional escalation: when ``escalate_after_sec`` is set, the first heartbeat
+    tick at or beyond that elapsed-time threshold also emits a ``WARNING`` line
+    (using ``escalate_message`` if provided, otherwise a generic message). This
+    is used to surface DB lock contention on the worker job-claim commit path
+    so it is unambiguous in operator logs.
+    """
+    import time
+
+    stop = threading.Event()
+    every = float(interval_sec) if interval_sec is not None else _stall_heartbeat_interval_sec()
+    started = time.monotonic()
+    safe_label = (label or "stall").replace("\n", " ")[:200]
+    escalate_threshold = (
+        float(escalate_after_sec) if escalate_after_sec is not None else None
+    )
+
+    # If VERBOSE is disabled and we have nothing to escalate, no thread needed.
+    verbose_enabled = logger.isEnabledFor(VERBOSE_LEVEL_NUM)
+    if not verbose_enabled and escalate_threshold is None:
+        return stop
+
+    def _run() -> None:
+        warned = False
+        while not stop.wait(every):
+            elapsed = time.monotonic() - started
+            if verbose_enabled:
+                logger.verbose(
+                    f"Stall heartbeat [{safe_label}] elapsed_s={elapsed:.1f}",
+                    extra={"emoji_type": "processing"},
+                )
+            if (
+                not warned
+                and escalate_threshold is not None
+                and elapsed >= escalate_threshold
+            ):
+                msg = escalate_message or (
+                    f"Stall heartbeat [{safe_label}] blocked "
+                    f">{escalate_threshold:.0f}s — likely DB lock contention "
+                    "from a long-running transaction (calendar/sync), not "
+                    "external API"
+                )
+                logger.warning(msg, extra={"emoji_type": "warning"})
+                warned = True
+
+    threading.Thread(target=_run, name=f"vstall-{safe_label[:24]}", daemon=True).start()
+    return stop

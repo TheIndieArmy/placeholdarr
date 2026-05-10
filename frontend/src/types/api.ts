@@ -380,6 +380,8 @@ export interface SettingsStatus {
   setup_completed_at?: string | null;
   configured_settings: number;
   available_settings: number;
+  /** False while the background startup ARR sync is still running (workers may be gated). */
+  startup_sync_complete?: boolean;
 }
 
 export interface SettingsPayload {

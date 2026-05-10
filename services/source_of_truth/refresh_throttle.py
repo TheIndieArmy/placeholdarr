@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, text
+from sqlalchemy.exc import OperationalError
 
+from core.logger import logger
 from services.postgres.db import get_session
 from services.postgres.models import LibraryRefreshThrottle
 
@@ -47,18 +49,40 @@ def try_acquire_refresh_lease(
 
     session = get_session()
     try:
+        # Avoid wedging workers for tens of seconds when another session holds
+        # LibraryRefreshThrottle rows (SELECT … FOR UPDATE waits by default).
+        try:
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+        except Exception:
+            pass
+
         rows_by_section: dict[int, LibraryRefreshThrottle] = {}
         blocked_ids: list[int] = []
         block_reason = ""
 
         # Atomically check all target sections
         for section_id in target_ids:
-            row = (
-                session.query(LibraryRefreshThrottle)
-                .filter(LibraryRefreshThrottle.section_id == section_id)
-                .with_for_update()
-                .first()
-            )
+            try:
+                row = (
+                    session.query(LibraryRefreshThrottle)
+                    .filter(LibraryRefreshThrottle.section_id == section_id)
+                    .with_for_update()
+                    .first()
+                )
+            except OperationalError as ex:
+                low = str(ex).lower()
+                if "lock timeout" in low or "canceling statement" in low:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                    return {
+                        "allowed": False,
+                        "granted_section_ids": [],
+                        "blocked_section_ids": list(target_ids),
+                        "reason": "lock_contention",
+                    }
+                raise
             if not row:
                 row = LibraryRefreshThrottle(section_id=section_id, source=source)
                 session.add(row)

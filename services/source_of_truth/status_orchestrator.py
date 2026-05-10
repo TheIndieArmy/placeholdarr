@@ -92,9 +92,18 @@ class StatusOrchestrator:
         self.session = session
     
     def _get_session(self) -> Session:
-        """Get or create a DB session."""
+        """Get or create a DB session.
+
+        Phase 2 connection-lifecycle: the legacy ``get_session().__enter__()``
+        path was a session leak — ``__exit__`` was never called, so the
+        connection stayed checked out until garbage collection. All current
+        call sites construct ``StatusOrchestrator(session=...)`` so this
+        branch is unreachable, but we now return a freshly opened Session
+        directly. Callers that opt into ``self.session is None`` MUST close
+        it themselves.
+        """
         if self.session is None:
-            return get_session().__enter__()
+            return get_session()
         return self.session
 
     def _compute_initial_creation_status(
@@ -546,6 +555,17 @@ class StatusOrchestrator:
                 ph.display_progress = None
             ph.updated_at = datetime.now(timezone.utc)
 
+            if getattr(ph, "queue_monitor_active", None):
+                terminal_clear = {
+                    DisplayStatus.AVAILABLE.value,
+                    DisplayStatus.NOT_FOUND.value,
+                    DisplayStatus.DELETED.value,
+                    DisplayStatus.ARCHIVED.value,
+                }
+                if str(intent.new_status or "").strip().upper() in terminal_clear:
+                    ph.queue_monitor_active = False
+                    ph.queue_monitor_active_set_at = None
+
             old_status_text = str(old_status or "")
             new_status_text = str(intent.new_status or "")
             source_text = str(intent.source.value)
@@ -579,7 +599,7 @@ class StatusOrchestrator:
             
             session.commit()
             
-            logger.info(
+            logger.debug(
                 f"Applied status intent: Placeholder[{intent.placeholder_id}] "
                 f"{old_status!r} -> {intent.new_status!r} "
                 f"(source={intent.source.value}, reason={intent.reason!r})"

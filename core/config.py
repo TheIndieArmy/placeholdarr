@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     LOG_DIR: str = os.getenv("LOG_DIR", "").split('#')[0].strip()
     LOG_FILE: str = os.getenv("LOG_FILE", "").split('#')[0].strip()
     LOG_MAX_RUN_FILES: int = int(os.getenv("LOG_MAX_RUN_FILES", "10").split('#')[0].strip())
+    # Stall / liveness ticks (VERBOSE). Interval only; does not promote them to INFO.
+    STALL_HEARTBEAT_INTERVAL_SEC: float = float(os.getenv("STALL_HEARTBEAT_INTERVAL_SEC", "10").split('#')[0].strip())
     WORKER_COUNT: int = 4
 
     # Plex
@@ -293,9 +295,111 @@ class Settings(BaseSettings):
     MATERIALIZATION_OVERLAP_REFRESH_MIN_INTERVAL_SECONDS: int = 90
     MATERIALIZATION_OVERLAP_REFRESH_LEASE_SECONDS: int = 180
     ENABLE_STATUS_ORCHESTRATOR_CALENDAR: bool = os.getenv("ENABLE_STATUS_ORCHESTRATOR_CALENDAR", "true").split('#')[0].strip().lower() == "true"
+    # Calendar phase batch size: how many placeholders to evaluate + commit per
+    # chunk. The calendar phase iterates the entire on-disk placeholder set
+    # (tens of thousands on large libraries). Without batching, a single
+    # transaction stays open for the whole scan and can block unrelated worker
+    # job-claim commits (e.g. webhook commits sitting behind a long-running
+    # release-window scan). Smaller values keep transactions short and worker
+    # claims responsive at the cost of more round-trips; larger values are
+    # faster overall but hold locks longer per chunk.
+    CALENDAR_PHASE_BATCH_SIZE: int = int(
+        os.getenv("CALENDAR_PHASE_BATCH_SIZE", "500").split('#')[0].strip() or "500"
+    )
     REFRESH_TRIGGER_SUPPRESSED: bool = False
     # Number of worker threads to start when the app starts (default 4)
     # Use WORKER_COUNT to tune parallelism; workers are always started by the app.
+
+    # Job queue uses Postgres LISTEN/NOTIFY with periodic safety polling (see WORKER_SAFETY_POLL_SECONDS).
+    USE_JOB_DRIVEN_REFRESH: bool = os.getenv("USE_JOB_DRIVEN_REFRESH", "true").split('#')[0].strip().lower() == "true"
+    USE_JOB_DRIVEN_STARTUP_SYNC: bool = os.getenv("USE_JOB_DRIVEN_STARTUP_SYNC", "true").split('#')[0].strip().lower() == "true"
+    # Safety wake when using NOTIFY-driven queue monitor (missed NOTIFY recovery).
+    QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS: int = int(
+        os.getenv("QUEUE_MONITOR_NOTIFY_SAFETY_POLL_SECONDS", "300").split('#')[0].strip() or "300"
+    )
+
+    # Worker NOTIFY-driven loop tuning. Safety poll is the maximum interval an
+    # executor sleeps between drain attempts when no NOTIFY arrives; it acts
+    # as a backstop against missed wakes. Phase 3 of the holistic NOTIFY
+    # audit tightens these defaults: with Phase 1 short handlers, a stuck
+    # claim now self-heals in minutes rather than the previous half-hour.
+    # WORKER_SAFETY_POLL_SECONDS: was 60s; tightened to 15s so a missed
+    # NOTIFY costs at most ~15s of latency.
+    WORKER_SAFETY_POLL_SECONDS: int = int(
+        os.getenv("WORKER_SAFETY_POLL_SECONDS", "15").split('#')[0].strip() or "15"
+    )
+    # WORKER_STALE_CLAIMED_RESET_SECONDS: was 1800s; tightened to 900s
+    # because Phase 1 handlers are bounded by JOB_HANDLER_TIMEOUT_SECONDS
+    # (default 600s) plus a small headroom. Operators with intentionally
+    # long-running batch jobs should override via env.
+    WORKER_STALE_CLAIMED_RESET_SECONDS: int = int(
+        os.getenv("WORKER_STALE_CLAIMED_RESET_SECONDS", "900").split('#')[0].strip() or "900"
+    )
+    WORKER_STALE_CLAIMED_REAP_INTERVAL_SECONDS: int = int(
+        os.getenv("WORKER_STALE_CLAIMED_REAP_INTERVAL_SECONDS", "300").split('#')[0].strip() or "300"
+    )
+    # Per-job watchdog (FM-6): logs an ERROR if a handler runs longer than this.
+    # The thread is not killed; this is an observability hook so operators see
+    # hung handlers before the reaper requeues them.
+    JOB_HANDLER_TIMEOUT_SECONDS: int = int(
+        os.getenv("JOB_HANDLER_TIMEOUT_SECONDS", "600").split('#')[0].strip() or "600"
+    )
+    # Postgres ``lock_timeout`` applied to the worker's per-transaction job
+    # claim (SELECT FOR UPDATE + UPDATE + COMMIT). If the claim cannot acquire
+    # the locks it needs within this many seconds, the transaction errors with
+    # SQLSTATE 55P03 and the worker rolls back and retries on the next wake
+    # instead of stalling for hours behind a long-running transaction (e.g.
+    # calendar phase or sync). Set to 0 to disable the safety net (not
+    # recommended). Default: 30s — generous enough to absorb normal contention
+    # bursts but short enough that workers self-heal quickly.
+    WORKER_CLAIM_LOCK_TIMEOUT_SECONDS: int = int(
+        os.getenv("WORKER_CLAIM_LOCK_TIMEOUT_SECONDS", "30").split('#')[0].strip() or "30"
+    )
+    # Maximum number of jobs a single executor's drain pass processes
+    # before yielding back to the wait/clear loop. Caps how long one
+    # worker monopolizes the pool when a large burst arrives; other
+    # workers and a re-set ``_drain_event`` pick up the rest.
+    WORKER_MAX_JOBS_PER_DRAIN: int = int(
+        os.getenv("WORKER_MAX_JOBS_PER_DRAIN", "50").split('#')[0].strip() or "50"
+    )
+    # Master switch for NOTIFY-driven worker wakes. When false, the
+    # executor falls back to a tight polling loop using
+    # ``WORKER_FALLBACK_POLL_SECONDS`` and skips the LISTEN bridge. Useful
+    # as a one-line rollback when NOTIFY misbehaves in production.
+    WORKER_NOTIFY_ENABLED: bool = (
+        os.getenv("WORKER_NOTIFY_ENABLED", "true").split('#')[0].strip().lower() == "true"
+    )
+    # Polling interval used when ``WORKER_NOTIFY_ENABLED=false``. Tighter
+    # than ``WORKER_SAFETY_POLL_SECONDS`` because polling is the only
+    # wake mechanism in fallback mode.
+    WORKER_FALLBACK_POLL_SECONDS: int = int(
+        os.getenv("WORKER_FALLBACK_POLL_SECONDS", "5").split('#')[0].strip() or "5"
+    )
+
+    # ----------------------------------------------------------------
+    # Database connection pool tuning. Phase 2 of the holistic NOTIFY
+    # audit makes pool sizing externally configurable rather than the
+    # legacy hardcoded 10/20. Operators sizing for many workers should
+    # confirm pool_size + max_overflow + (notifier LISTEN) + (other
+    # processes) stays under Postgres ``max_connections`` (default 100).
+    # ----------------------------------------------------------------
+    DB_POOL_SIZE: int = int(
+        os.getenv("DB_POOL_SIZE", "20").split('#')[0].strip() or "20"
+    )
+    DB_POOL_MAX_OVERFLOW: int = int(
+        os.getenv("DB_POOL_MAX_OVERFLOW", "20").split('#')[0].strip() or "20"
+    )
+    DB_POOL_TIMEOUT_SECONDS: int = int(
+        os.getenv("DB_POOL_TIMEOUT_SECONDS", "10").split('#')[0].strip() or "10"
+    )
+    DB_POOL_RECYCLE_SECONDS: int = int(
+        os.getenv("DB_POOL_RECYCLE_SECONDS", "1800").split('#')[0].strip() or "1800"
+    )
+    # Max seconds to wait for init_db's Postgres advisory lock when another process
+    # is running migrations (blocking pg_advisory_lock + lock_timeout).
+    RUNTIME_SCHEMA_LOCK_WAIT_SECONDS: int = int(
+        os.getenv("RUNTIME_SCHEMA_LOCK_WAIT_SECONDS", "120").split('#')[0].strip() or "120"
+    )
 
     # Add a method to clean string values
     @validator('*', pre=True)
