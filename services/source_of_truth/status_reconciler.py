@@ -290,6 +290,96 @@ def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) ->
     return bool(episode_written or series_written)
 
 
+def _clear_active_template_backfill_run_standalone(run_id: str) -> None:
+    """Clear template backfill marker using a short-lived session.
+
+    Used after ``_nfo_refresh_completion_scan_if_last_batch`` closes the worker
+    session prior to long-running Plex HTTP.
+    """
+    from services.source_of_truth import template_backfill as template_backfill_mod
+
+    s = get_session()
+    try:
+        template_backfill_mod.clear_active_template_backfill_run_if_matches(s, run_id)
+        s.commit()
+    except Exception as exc:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            f"Template backfill: failed to clear active run marker run_id={run_id}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _nfo_refresh_completion_scan_if_last_batch(
+    session,
+    job: Job,
+    *,
+    run_id: str,
+    payload_run_id_key: str,
+    log_prefix: str,
+    only_if: Any = None,
+    after_refresh: Any = None,
+) -> None:
+    """After batched NFO jobs sharing ``run_id``, refresh library sections once (Plex force=1).
+
+    ``only_if`` / ``after_refresh`` are optional hooks used by template backfill so superseded runs
+    never trigger a library refresh, and the active run clears its marker after the final batch.
+    """
+    pending_same_run = (
+        session.query(Job.id)
+        .filter(
+            Job.job_type == NFO_REFRESH_JOB_TYPE,
+            Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
+            Job.id != job.id,
+            Job.payload[payload_run_id_key].as_string() == run_id,
+        )
+        .first()
+    )
+    if pending_same_run:
+        return
+    if only_if is not None and not only_if():
+        return
+
+    # Phase 1 connection-lifecycle: ``refresh_all_sections`` is a multi-second Plex
+    # HTTP burst. Commit + close the worker's session so the pool slot returns
+    # BEFORE the HTTP runs.
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+    try:
+        session.close()
+    except Exception:
+        pass
+
+    try:
+        refresh_stats = refresh_all_sections(
+            has_movies=True,
+            has_episodes=True,
+            plex_force_metadata_refresh=True,
+        )
+        logger.info(
+            f"{log_prefix} run complete; triggered one library section refresh "
+            f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
+            f"failed={int(refresh_stats.get('failed', 0) or 0)}",
+            extra={"emoji_type": "success"},
+        )
+    except Exception as ex:
+        logger.warning(
+            f"{log_prefix} completion refresh failed run_id={run_id}: {ex}",
+            extra={"emoji_type": "warning"},
+        )
+    finally:
+        if after_refresh is not None:
+            after_refresh()
 
 
 def process_nfo_refresh_job(session, job: Job) -> dict:
@@ -326,6 +416,16 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             f"nfo_refresh: idempotency claim skipped due to error: {exc}",
             extra={"emoji_type": "debug"},
         )
+
+    # Large coordinated backfills (template apply-now, REQUEST NFO backfill) may be enqueued while in-process
+    # settings/messages were mid-save. Reload persisted projection settings + message templates from DB so NFO
+    # writes match committed config even if the UI/API ordering was imperfect.
+    if payload.get("template_backfill_source") or payload.get("request_backfill_run_id"):
+        from services.app_config import apply_persisted_settings
+        from services.messages import store as message_store
+
+        apply_persisted_settings()
+        message_store.reload_cache()
 
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     n_total = len(placeholders)
@@ -384,6 +484,8 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     do_player = _job_player_metadata_refresh(job)
     run_id = str(payload.get("request_backfill_run_id") or "").strip()
     completion_refresh = bool(payload.get("request_backfill_refresh_on_completion"))
+    template_run_id = str(payload.get("template_backfill_run_id") or "").strip()
+    template_completion_refresh = bool(payload.get("template_backfill_refresh_on_completion"))
     subject = _nfo_refresh_subject_summary(session, placeholders)
     subj_part = f" · {subject}" if subject else ""
     logger.debug(
@@ -417,45 +519,25 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                 extra={"emoji_type": "warning"},
             )
     elif completion_refresh and run_id:
-        pending_same_run = (
-            session.query(Job.id)
-            .filter(
-                Job.job_type == NFO_REFRESH_JOB_TYPE,
-                Job.status.in_(["PENDING", "CLAIMED", "WORKING"]),
-                Job.id != job.id,
-                Job.payload["request_backfill_run_id"].astext == run_id,
-            )
-            .first()
+        _nfo_refresh_completion_scan_if_last_batch(
+            session,
+            job,
+            run_id=run_id,
+            payload_run_id_key="request_backfill_run_id",
+            log_prefix="REQUEST NFO backfill",
         )
-        if not pending_same_run:
-            # Phase 1 connection-lifecycle: ``refresh_all_sections`` is a
-            # multi-second Plex HTTP burst. Commit + close the worker's
-            # session so the pool slot returns BEFORE the HTTP runs.
-            try:
-                session.commit()
-            except Exception:
-                session.rollback()
-            try:
-                session.close()
-            except Exception:
-                pass
-            try:
-                refresh_stats = refresh_all_sections(
-                    has_movies=True,
-                    has_episodes=True,
-                    plex_force_metadata_refresh=True,
-                )
-                logger.info(
-                    "REQUEST NFO backfill run complete; triggered one library section refresh "
-                    f"run_id={run_id} refreshed={int(refresh_stats.get('refreshed', 0) or 0)} "
-                    f"failed={int(refresh_stats.get('failed', 0) or 0)}",
-                    extra={"emoji_type": "success"},
-                )
-            except Exception as ex:
-                logger.warning(
-                    f"REQUEST NFO backfill completion refresh failed run_id={run_id}: {ex}",
-                    extra={"emoji_type": "warning"},
-                )
+    elif template_completion_refresh and template_run_id:
+        from services.source_of_truth import template_backfill as template_backfill_mod
+
+        _nfo_refresh_completion_scan_if_last_batch(
+            session,
+            job,
+            run_id=template_run_id,
+            payload_run_id_key="template_backfill_run_id",
+            log_prefix="Template backfill",
+            only_if=lambda: template_backfill_mod.is_active_template_backfill_run(session, template_run_id),
+            after_refresh=lambda: _clear_active_template_backfill_run_standalone(template_run_id),
+        )
 
     return {
         "ok": True,

@@ -48,6 +48,7 @@ from services.source_of_truth.media_refresh_handler import (
 )
 from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
+from services.messages.context import build_projection_context_from_session
 from services.status_projection import projected_status_display
 
 
@@ -402,10 +403,18 @@ def _mark_placeholder_row_active(
     row.lifecycle_status = "ACTIVE"
     row.display_status = REQUEST_STATUS
     row.display_reason = REQUEST_REASON
+    _rm = _placeholder_runtime_minutes(session, movie_id=movie_id, episode_id=episode_id)
+    _media_ctx = build_projection_context_from_session(
+        session,
+        movie_id=movie_id,
+        episode_id=episode_id,
+        runtime_minutes=_rm,
+    )
     row.display_status_projected = projected_status_display(
         REQUEST_STATUS,
         reason=REQUEST_REASON,
-        runtime_minutes=_placeholder_runtime_minutes(session, movie_id=movie_id, episode_id=episode_id),
+        runtime_minutes=_rm,
+        media_context=_media_ctx,
     )
     row.display_progress = 0
     # Reset observation-tracking keys in extra so stale state from a previous

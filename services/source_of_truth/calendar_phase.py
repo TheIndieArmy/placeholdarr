@@ -10,6 +10,7 @@ from sqlalchemy import and_, func, or_
 
 from core.config import settings
 from core.logger import logger
+from services.messages import render as render_message
 from services.placeholders import ensure_placeholder_file, resolve_calendar_variant_dummy_path
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
@@ -146,11 +147,13 @@ def _compute_calendar_decision(
             release_type_preferred=release_type_preferred,
         )
 
+    cal_ctx_movie = {"ReleaseLabel": release_label} if release_type else {}
+
     if not countdown_enabled:
-        if media_type == "movie" and release_type:
-            label = f"{release_label} release coming soon"
+        if media_type == "movie":
+            label = render_message("calendar.movie.generic", cal_ctx_movie)
         else:
-            label = "Coming Soon" if media_type == "movie" else "Airing soon"
+            label = render_message("calendar.tv.generic", {})
         return CalendarDecision(
             status=DisplayStatus.COMING_SOON.value,
             reason=label,
@@ -160,10 +163,10 @@ def _compute_calendar_decision(
         )
 
     if days_until == 0:
-        if media_type == "movie" and release_type:
-            label = f"{release_label} release today"
+        if media_type == "movie":
+            label = render_message("calendar.movie.today", cal_ctx_movie)
         else:
-            label = "Coming Soon (Today)" if media_type == "movie" else "Airing today"
+            label = render_message("calendar.tv.today", {})
         return CalendarDecision(
             status=DisplayStatus.COMING_SOON_TODAY.value,
             reason=label,
@@ -173,16 +176,21 @@ def _compute_calendar_decision(
         )
 
     if media_type == "movie":
-        if release_type:
-            label = (
-                f"{release_label} release in 1 day"
-                if days_until == 1
-                else f"{release_label} release in {days_until} days"
-            )
-        else:
-            label = "Coming Soon (1 day)" if days_until == 1 else f"Coming Soon ({days_until} days)"
+        movie_ctx = {**cal_ctx_movie, "DaysUntil": str(days_until)}
+        countdown_key = (
+            "calendar.movie.countdown.singular"
+            if days_until == 1
+            else "calendar.movie.countdown.plural"
+        )
+        label = render_message(countdown_key, movie_ctx)
     else:
-        label = "Airing in 1 day" if days_until == 1 else f"Airing in {days_until} days"
+        tv_ctx = {"DaysUntil": str(days_until)}
+        countdown_key = (
+            "calendar.tv.countdown.singular"
+            if days_until == 1
+            else "calendar.tv.countdown.plural"
+        )
+        label = render_message(countdown_key, tv_ctx)
 
     if days_until <= 6:
         status = DisplayStatus.COMING_SOON_1.value

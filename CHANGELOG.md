@@ -7,6 +7,23 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+
+- **Status message live preview API**: `POST /api/messages/preview` returns dual movie/episode sample lines (title + synopsis), honors draft projection mode and status-update scope, and reports empty tokens for the REQUEST synopsis template.
+- **Unified projection context for NFOs and players**: Media tokens (movie/episode/season/series) plus runtime flow through the same helper so REQUEST lines and title suffixes match between sidecar NFOs and direct player projection.
+- **Template apply-now coalescing**: Repeated “Apply now” supersedes pending template `nfo_refresh` jobs and tracks an active run id so only the latest sweep triggers the one-shot Plex library refresh when the final batch finishes.
+
+### Changed
+
+- **Settings → Status Updates** now includes the customizable status message templates (the old **Status Messages** tab is removed; `/settings/status-messages` redirects to Status Updates). Save blocks when templates have validation errors; saving persists field-backed settings first, then templates, so workers do not mix stale projection mode with new template text.
+- **Message registry (labels)**: Per-stage `status.label.*` and legacy bracket keys are dropped from the user-facing list; REQUEST uses **Request line (synopsis)** with expanded tokens (including TV fields). Title projection uses separate **title suffix** strings per surface (`movie`, `series`, `season`, `episode`) instead of `{Title}` / `{Bracket}` formatting.
+- **Status projection**: Projection mode maps to title and/or summary surfaces explicitly; stripping removes both square and angle bracket prefixes/suffixes where applicable.
+- **Docker entrypoint**: Creates `passwd`/`group` entries for `PUID`/`PGID` when missing so `setpriv` and `chown` work on slim base images.
+
+### Fixed
+
+- **Worker NFO backfill completion query**: Job payload run-id filters use SQLAlchemy JSON `.as_string()` (generic `JSON` columns), fixing `astext` crashes when completing coordinated backfill batches.
+
 ### Summary
 
 Placeholdarr used to wake background workers on a fixed timer and ask the database “is there work?” over and over. That was simple and predictable, but under load it meant many threads hitting Postgres even when nothing had changed, and work could sit in the queue until the next poll interval.

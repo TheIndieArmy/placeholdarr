@@ -27,6 +27,7 @@ from core.config import settings
 from services.source_of_truth.status_intent import StatusIntent, StatusSource, DisplayStatus
 from services.postgres.models import Placeholder, Movie, Series, Season, Episode, EventLog
 from services.postgres.db import get_session
+from services.messages.context import build_projection_context_from_session
 from services.status_projection import projected_status_display
 
 logger = logging.getLogger(__name__)
@@ -541,10 +542,18 @@ class StatusOrchestrator:
             old_status = ph.display_status
             ph.display_status = intent.new_status
             ph.display_reason = intent.reason
+            _rm = _runtime_minutes_for_placeholder(session, ph)
+            _media_ctx = build_projection_context_from_session(
+                session,
+                movie_id=getattr(ph, "movie_id", None),
+                episode_id=getattr(ph, "episode_id", None),
+                runtime_minutes=_rm,
+            )
             ph.display_status_projected = projected_status_display(
                 intent.new_status,
                 reason=intent.reason,
-                runtime_minutes=_runtime_minutes_for_placeholder(session, ph),
+                runtime_minutes=_rm,
+                media_context=_media_ctx,
             )
             if intent.progress is not None:
                 try:

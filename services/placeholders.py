@@ -10,6 +10,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from core.config import settings
+from services.messages.context import build_projection_context
 from services.status_projection import project_summary, project_title
 
 
@@ -467,11 +468,26 @@ def _append_people_as_tag(lines: list[str], tag_name: str, values: Any) -> None:
 def _movie_nfo_xml(movie: Any) -> str:
     status = str(getattr(movie, "placeholder_status", "") or "REQUEST")
     raw_title = str(getattr(movie, "title", "") or "")
-    title = escape(project_title(raw_title, status))
     year = getattr(movie, "year", None)
     runtime = _to_int(getattr(movie, "radarr_runtime", None))
+    rm = runtime if runtime is not None and runtime > 0 else None
+    media_ctx = build_projection_context(movie=movie, runtime_minutes=rm)
+    title = escape(
+        project_title(
+            raw_title,
+            status,
+            suffix_template_key="title.suffix.movie",
+            runtime_minutes=rm,
+            media_context=media_ctx,
+        )
+    )
     overview = escape(
-        project_summary(str(getattr(movie, "radarr_overview", "") or ""), status, runtime_minutes=runtime)
+        project_summary(
+            str(getattr(movie, "radarr_overview", "") or ""),
+            status,
+            runtime_minutes=rm,
+            media_context=media_ctx,
+        )
     )
     tmdbid = getattr(movie, "tmdbid", None)
     imdbid = getattr(movie, "imdbid", None)
@@ -503,7 +519,7 @@ def _movie_nfo_xml(movie: Any) -> str:
     if overview:
         lines.append(f"  <plot>{overview}</plot>")
     else:
-        lines.append(f"  <plot>{escape(project_summary('', status, runtime_minutes=runtime))}</plot>")
+        lines.append(f"  <plot>{escape(project_summary('', status, runtime_minutes=rm, media_context=media_ctx))}</plot>")
     if ratings:
         lines.append("  <ratings>")
         for name, value_text, votes_text, is_default in ratings:
@@ -574,16 +590,37 @@ def _movie_nfo_xml(movie: Any) -> str:
 
 
 def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
-    show_title = escape(str(getattr(series, "title", "") or ""))
     status = str(getattr(episode, "placeholder_status", "") or "REQUEST")
+    raw_series_title = str(getattr(series, "title", "") or "")
     raw_episode_title = str(getattr(episode, "title", "") or "")
-    episode_title = escape(project_title(raw_episode_title, status))
     runtime = _to_int(getattr(episode, "sonarr_runtime", None)) or _to_int(getattr(series, "sonarr_runtime", None))
+    rm = runtime if runtime is not None and runtime > 0 else None
+    media_ctx = build_projection_context(episode=episode, season=season, series=series, runtime_minutes=rm)
+    series_ctx = build_projection_context(series=series, runtime_minutes=rm)
+    show_title = escape(
+        project_title(
+            raw_series_title,
+            status,
+            suffix_template_key="title.suffix.series",
+            runtime_minutes=rm,
+            media_context=series_ctx,
+        )
+    )
+    episode_title = escape(
+        project_title(
+            raw_episode_title,
+            status,
+            suffix_template_key="title.suffix.episode",
+            runtime_minutes=rm,
+            media_context=media_ctx,
+        )
+    )
     plot = escape(
         project_summary(
             str(getattr(episode, "sonarr_episode_overview", "") or ""),
             status,
-            runtime_minutes=runtime,
+            runtime_minutes=rm,
+            media_context=media_ctx,
         )
     )
     season_number = int(getattr(season, "season_number", 0) or 0)
@@ -615,7 +652,7 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     if plot:
         lines.append(f"  <plot>{plot}</plot>")
     else:
-        lines.append(f"  <plot>{escape(project_summary('', status, runtime_minutes=runtime))}</plot>")
+        lines.append(f"  <plot>{escape(project_summary('', status, runtime_minutes=rm, media_context=media_ctx))}</plot>")
     if tvdbid:
         lines.append(f"  <tvdbid>{escape(str(tvdbid))}</tvdbid>")
         # uniqueid lets Emby/Jellyfin match this episode to their databases
@@ -651,7 +688,20 @@ def ensure_episode_nfo(media_path: str, episode: Any, season: Any, series: Any) 
 
 def _series_nfo_xml(series: Any) -> str:
     """Render a tvshow.nfo XML for a series object."""
-    title = escape(str(getattr(series, "title", "") or ""))
+    status = str(getattr(series, "placeholder_status", "") or "REQUEST")
+    raw_title = str(getattr(series, "title", "") or "")
+    runtime = _to_int(getattr(series, "sonarr_runtime", None))
+    rm = runtime if runtime is not None and runtime > 0 else None
+    media_ctx = build_projection_context(series=series, runtime_minutes=rm)
+    title = escape(
+        project_title(
+            raw_title,
+            status,
+            suffix_template_key="title.suffix.series",
+            runtime_minutes=rm,
+            media_context=media_ctx,
+        )
+    )
     overview = escape(str(getattr(series, "sonarr_series_overview", "") or ""))
     tvdbid = getattr(series, "tvdbid", None)
     imdbid = getattr(series, "imdbid", None)
@@ -666,7 +716,6 @@ def _series_nfo_xml(series: Any) -> str:
     poster_url = escape(str(getattr(series, "remote_poster", "") or ""))
     fanart_url = escape(str(getattr(series, "remote_fanart", "") or ""))
     banner_url = escape(str(getattr(series, "remote_banner", "") or ""))
-    runtime = _to_int(getattr(series, "sonarr_runtime", None))
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
