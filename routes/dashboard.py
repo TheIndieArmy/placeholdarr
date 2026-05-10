@@ -46,6 +46,52 @@ router = APIRouter()
 
 
 def _launch_post_onboarding_startup_sync() -> None:
+    """First-run sync after onboarding completes.
+
+    Phase 4: enqueue ``startup_sync_runner`` Job when ``USE_JOB_DRIVEN_STARTUP_SYNC``
+    is enabled; otherwise preserve the legacy daemon-thread behaviour.
+
+    When job-driven mode is on, workers are not started during lifespan if onboarding
+    was still incomplete at boot — start runtime services *before* enqueueing so a
+    worker can claim the job (the handler also calls ``start_runtime_background_services``
+    idempotently).
+    """
+    try:
+        from services.source_of_truth.startup_sync_job import (
+            enqueue_startup_sync_runner_job,
+            use_job_driven_startup_sync,
+        )
+
+        if use_job_driven_startup_sync():
+            try:
+                from main import start_runtime_background_services
+
+                start_runtime_background_services(reason="post_onboarding_before_runner_job")
+            except Exception as exc:
+                logger.error(
+                    f"Failed to start runtime services before post-onboarding job: {exc}",
+                    extra={"emoji_type": "error"},
+                )
+            session = get_session()
+            try:
+                enqueue_startup_sync_runner_job(session, reason="post_onboarding")
+                session.commit()
+                logger.info(
+                    "Enqueued post-onboarding startup_sync_runner job",
+                    extra={"emoji_type": "gear"},
+                )
+                return
+            except Exception as exc:
+                session.rollback()
+                logger.warning(
+                    f"Failed to enqueue post-onboarding startup job; falling back to thread: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+            finally:
+                session.close()
+    except Exception:
+        pass
+
     def _runner() -> None:
         from services.startup_gate import startup_sync_complete
         try:
@@ -160,6 +206,50 @@ def _arr_endpoint_fingerprint() -> dict[str, tuple[str, str]]:
 
 
 def _launch_arr_change_full_sync(reason: str) -> None:
+    """Run per-instance ``run_full_sync`` after ARR endpoints change.
+
+    Phase 4: enqueue ``startup_sync_runner`` with reason ``arr_endpoint_changed``
+    when job-driven startup sync is enabled.
+
+    Same as post-onboarding: ensure workers/schedulers are up before enqueueing when
+    startup deferred them at boot (see ``_launch_post_onboarding_startup_sync``).
+    """
+    try:
+        from services.source_of_truth.startup_sync_job import (
+            enqueue_startup_sync_runner_job,
+            use_job_driven_startup_sync,
+        )
+
+        if use_job_driven_startup_sync():
+            try:
+                from main import start_runtime_background_services
+
+                start_runtime_background_services(reason="arr_change_before_runner_job")
+            except Exception as exc:
+                logger.error(
+                    f"Failed to start runtime services before ARR-change startup job: {exc}",
+                    extra={"emoji_type": "error"},
+                )
+            session = get_session()
+            try:
+                enqueue_startup_sync_runner_job(session, reason="arr_endpoint_changed")
+                session.commit()
+                logger.info(
+                    f"Enqueued ARR-change startup_sync_runner job reason={reason}",
+                    extra={"emoji_type": "gear"},
+                )
+                return
+            except Exception as exc:
+                session.rollback()
+                logger.warning(
+                    f"Failed to enqueue ARR-change startup job; falling back to thread: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+            finally:
+                session.close()
+    except Exception:
+        pass
+
     def _runner() -> None:
         try:
             from services.source_of_truth.sync_runner import run_full_sync
@@ -488,6 +578,115 @@ async def dashboard_next_assets(asset_path: str):
 # ---------------------------------------------------------------------------
 # JSON API endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.get("/api/health")
+async def api_health():
+    """Liveness probe: no database access. Use from the browser host to verify TCP/process."""
+    return JSONResponse({"ok": True})
+
+
+@router.get("/api/ready")
+async def api_ready():
+    """Readiness probe: includes whether the startup source-of-truth sync has released the worker gate."""
+    from services.startup_gate import startup_sync_complete
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "startup_sync_complete": startup_sync_complete.is_set(),
+        }
+    )
+
+
+@router.get("/api/diagnostics/db")
+async def api_diagnostics_db():
+    """Operational snapshot of database health for incident triage.
+
+    Phase 2 of the holistic NOTIFY audit: surfaces SQLAlchemy pool counters,
+    Postgres lock blockers + longest-running transaction, and shared
+    notifier health. Designed to be cheap (<100ms) so it's safe to poll
+    from monitoring or a debug page during stalls.
+    """
+    from services.postgres.db import pool_stats
+
+    out: dict[str, Any] = {"ok": True}
+
+    out["pool"] = pool_stats()
+
+    pg: dict[str, Any] = {}
+    session = get_session()
+    try:
+        try:
+            blockers_rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        blocked.pid AS blocked_pid,
+                        blocking.pid AS blocking_pid,
+                        blocked.usename AS blocked_user,
+                        blocking.usename AS blocking_user,
+                        blocked.state AS blocked_state,
+                        blocking.state AS blocking_state,
+                        EXTRACT(EPOCH FROM (now() - blocked.query_start))::int AS blocked_query_age_s,
+                        EXTRACT(EPOCH FROM (now() - blocking.query_start))::int AS blocking_query_age_s,
+                        LEFT(COALESCE(blocked.query, ''), 200) AS blocked_query,
+                        LEFT(COALESCE(blocking.query, ''), 200) AS blocking_query
+                    FROM pg_stat_activity AS blocked
+                    JOIN pg_stat_activity AS blocking
+                      ON blocking.pid = ANY(pg_blocking_pids(blocked.pid))
+                    WHERE blocked.wait_event_type = 'Lock'
+                    LIMIT 20
+                    """
+                )
+            ).fetchall()
+            pg["blockers"] = [dict(r._mapping) for r in blockers_rows]
+        except Exception as exc:
+            pg["blockers_error"] = str(exc)
+
+        try:
+            longest = session.execute(
+                text(
+                    """
+                    SELECT
+                        pid,
+                        usename,
+                        state,
+                        EXTRACT(EPOCH FROM (now() - xact_start))::int AS xact_age_s,
+                        EXTRACT(EPOCH FROM (now() - query_start))::int AS query_age_s,
+                        LEFT(COALESCE(query, ''), 200) AS query
+                    FROM pg_stat_activity
+                    WHERE state IS NOT NULL
+                      AND state <> 'idle'
+                      AND xact_start IS NOT NULL
+                    ORDER BY xact_start ASC NULLS LAST
+                    LIMIT 5
+                    """
+                )
+            ).fetchall()
+            pg["longest_running"] = [dict(r._mapping) for r in longest]
+        except Exception as exc:
+            pg["longest_running_error"] = str(exc)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    out["postgres"] = pg
+
+    notifier_info: dict[str, Any] = {}
+    try:
+        from services.postgres.notifier import get_shared_notifier_health
+
+        notifier_info = get_shared_notifier_health() or {}
+    except Exception as exc:
+        notifier_info["error"] = str(exc)
+    out["notifier"] = notifier_info
+
+    out["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return JSONResponse(out)
+
 
 @router.get("/api/stats")
 async def stats():

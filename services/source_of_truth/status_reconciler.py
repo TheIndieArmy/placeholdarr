@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -194,6 +196,9 @@ def _enqueue_batched_placeholder_job(
         added_set = set(additions)
         ids_remaining = [pid for pid in ids_remaining if pid not in added_set]
 
+    from services.source_of_truth.job_priority import default_priority_for
+
+    job_priority = default_priority_for(job_type)
     while ids_remaining:
         chunk = ids_remaining[:batch_size]
         ids_remaining = ids_remaining[batch_size:]
@@ -207,6 +212,7 @@ def _enqueue_batched_placeholder_job(
             },
             status="PENDING",
             run_after=run_after,
+            priority=job_priority,
         )
         session.add(job)
         session.flush()
@@ -284,6 +290,34 @@ def _refresh_episode_nfo(session, placeholder: Placeholder, episode: Episode) ->
     return bool(episode_written or series_written)
 
 
+def _clear_active_template_backfill_run_standalone(run_id: str) -> None:
+    """Clear template backfill marker using a short-lived session.
+
+    Used after ``_nfo_refresh_completion_scan_if_last_batch`` closes the worker
+    session prior to long-running Plex HTTP.
+    """
+    from services.source_of_truth import template_backfill as template_backfill_mod
+
+    s = get_session()
+    try:
+        template_backfill_mod.clear_active_template_backfill_run_if_matches(s, run_id)
+        s.commit()
+    except Exception as exc:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            f"Template backfill: failed to clear active run marker run_id={run_id}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def _nfo_refresh_completion_scan_if_last_batch(
     session,
     job: Job,
@@ -313,6 +347,19 @@ def _nfo_refresh_completion_scan_if_last_batch(
         return
     if only_if is not None and not only_if():
         return
+
+    # Phase 1 connection-lifecycle: ``refresh_all_sections`` is a multi-second Plex
+    # HTTP burst. Commit + close the worker's session so the pool slot returns
+    # BEFORE the HTTP runs.
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+    try:
+        session.close()
+    except Exception:
+        pass
+
     try:
         refresh_stats = refresh_all_sections(
             has_movies=True,
@@ -336,12 +383,39 @@ def _nfo_refresh_completion_scan_if_last_batch(
 
 
 def process_nfo_refresh_job(session, job: Job) -> dict:
-    """Refresh placeholder sidecar NFO files for a scoped set of placeholders."""
+    """Refresh placeholder sidecar NFO files for a scoped set of placeholders.
+
+    Phase 4 idempotency: claim a per-job-id key BEFORE rewriting any NFO
+    file or triggering a Plex section refresh. A reaper-induced re-claim
+    sees the key and skips, avoiding duplicate disk writes / library
+    scans.
+    """
     payload = job.payload if isinstance(job.payload, dict) else {}
     placeholder_ids = payload.get("placeholder_ids") or []
     ids = [int(pid) for pid in placeholder_ids if pid is not None]
     if not ids:
         return {"ok": False, "reason": "no_placeholder_ids"}
+
+    try:
+        from services.source_of_truth.idempotency import (
+            nfo_refresh_idempotency_key,
+            try_claim_processed_key,
+        )
+
+        job_id_val = getattr(job, "id", None)
+        if isinstance(job_id_val, int):
+            idem_key = nfo_refresh_idempotency_key(job_id=int(job_id_val))
+            if not try_claim_processed_key(session, idem_key, job_type=NFO_REFRESH_JOB_TYPE):
+                logger.info(
+                    f"nfo_refresh job_id={job_id_val} skipped — idempotency key already claimed",
+                    extra={"emoji_type": "info"},
+                )
+                return {"ok": True, "skipped": "already_processed"}
+    except Exception as exc:
+        logger.debug(
+            f"nfo_refresh: idempotency claim skipped due to error: {exc}",
+            extra={"emoji_type": "debug"},
+        )
 
     # Large coordinated backfills (template apply-now, REQUEST NFO backfill) may be enqueued while in-process
     # settings/messages were mid-save. Reload persisted projection settings + message templates from DB so NFO
@@ -354,32 +428,58 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
         message_store.reload_cache()
 
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
+    n_total = len(placeholders)
     refreshed = 0
     # (Placeholder row, entity dedupe key) for rows whose NFO was rewritten this run
     refreshed_for_player_push: list[tuple[Placeholder, tuple[str, int]]] = []
-    for placeholder in placeholders:
-        movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
-        episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
-        effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
-        if movie and bool(getattr(movie, "has_placeholder", False)):
-            effective_has_placeholder = True
-        if episode and bool(getattr(episode, "has_placeholder", False)):
-            effective_has_placeholder = True
-        if effective_has_placeholder and not bool(getattr(placeholder, "has_placeholder", False)):
-            # Self-heal drift so follow-up jobs do not keep skipping valid placeholders.
-            placeholder.has_placeholder = True
-            placeholder.updated_at = datetime.now(timezone.utc)
-            session.add(placeholder)
-        if not effective_has_placeholder:
-            continue
+    loop_pos = [0]
+    nfo_started = time.monotonic()
+    stop_nfo_hb = threading.Event()
 
-        if movie and _refresh_movie_nfo(placeholder, movie):
-            refreshed += 1
-            refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))
-            continue
-        if episode and _refresh_episode_nfo(session, placeholder, episode):
-            refreshed += 1
-            refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+    def _nfo_refresh_stall_heartbeat():
+        while not stop_nfo_hb.wait(10.0):
+            logger.verbose(
+                f"nfo_refresh job_id={job.id}: still running "
+                f"progress={loop_pos[0]}/{n_total} nfo_refreshed={refreshed} "
+                f"elapsed_s={time.monotonic() - nfo_started:.1f}",
+                extra={"emoji_type": "processing"},
+            )
+
+    _nfo_hb_t = None
+    if n_total:
+        _nfo_hb_t = threading.Thread(
+            target=_nfo_refresh_stall_heartbeat,
+            name=f"nfo-refresh-hb-{job.id}",
+            daemon=True,
+        )
+        _nfo_hb_t.start()
+    try:
+        for placeholder in placeholders:
+            loop_pos[0] += 1
+            movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
+            episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+            effective_has_placeholder = bool(getattr(placeholder, "has_placeholder", False))
+            if movie and bool(getattr(movie, "has_placeholder", False)):
+                effective_has_placeholder = True
+            if episode and bool(getattr(episode, "has_placeholder", False)):
+                effective_has_placeholder = True
+            if effective_has_placeholder and not bool(getattr(placeholder, "has_placeholder", False)):
+                # Self-heal drift so follow-up jobs do not keep skipping valid placeholders.
+                placeholder.has_placeholder = True
+                placeholder.updated_at = datetime.now(timezone.utc)
+                session.add(placeholder)
+            if not effective_has_placeholder:
+                continue
+
+            if movie and _refresh_movie_nfo(placeholder, movie):
+                refreshed += 1
+                refreshed_for_player_push.append((placeholder, ("movie", int(movie.id))))
+                continue
+            if episode and _refresh_episode_nfo(session, placeholder, episode):
+                refreshed += 1
+                refreshed_for_player_push.append((placeholder, ("episode", int(episode.id))))
+    finally:
+        stop_nfo_hb.set()
 
     do_player = _job_player_metadata_refresh(job)
     run_id = str(payload.get("request_backfill_run_id") or "").strip()
@@ -436,9 +536,7 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             payload_run_id_key="template_backfill_run_id",
             log_prefix="Template backfill",
             only_if=lambda: template_backfill_mod.is_active_template_backfill_run(session, template_run_id),
-            after_refresh=lambda: template_backfill_mod.clear_active_template_backfill_run_if_matches(
-                session, template_run_id
-            ),
+            after_refresh=lambda: _clear_active_template_backfill_run_standalone(template_run_id),
         )
 
     return {

@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import func, or_
 
 from core.config import settings
-from core.logger import logger
+from core.logger import logger, start_verbose_stall_heartbeat
 from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback, refresh_selected_sections
 from services.placeholders import (
     ensure_episode_nfo,
@@ -35,10 +35,95 @@ from services.source_of_truth.placeholder_cleanup import (
     cleanup_episode_placeholder_files,
     cleanup_movie_placeholder_files,
 )
+from services.source_of_truth.media_refresh_handler import (
+    KIND_BULK_INITIAL,
+    KIND_DELAYED_FINAL,
+    KIND_OVERLAP_PATH_BATCH,
+    KIND_PHASE_FINAL_EPISODE,
+    KIND_PHASE_FINAL_MOVIE,
+    KIND_PHASE_INITIAL_EPISODE,
+    KIND_PHASE_INITIAL_MOVIE,
+    enqueue_media_refresh_job,
+    use_job_driven_refresh,
+)
 from services.source_of_truth.refresh_throttle import try_acquire_refresh_lease
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
 from services.messages.context import build_projection_context_from_session
 from services.status_projection import projected_status_display
+
+
+def _enqueue_media_refresh_via_new_session(
+    *,
+    kind: str,
+    payload: dict[str, Any] | None,
+    delay_seconds: float,
+) -> bool:
+    """Enqueue a media_refresh Job using a fresh short-lived session.
+
+    Returns True on successful commit, False otherwise. We use a dedicated
+    session so we never piggy-back on the materializer's current transaction
+    state — the Job needs to be committed promptly so the worker NOTIFY
+    listener can see it (Postgres only delivers NOTIFY after commit).
+    """
+    s = get_session()
+    try:
+        enqueue_media_refresh_job(
+            s,
+            kind=kind,
+            payload=payload or {},
+            delay_seconds=delay_seconds,
+        )
+        s.commit()
+        return True
+    except Exception as exc:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+        logger.error(
+            f"Failed to enqueue media_refresh kind={kind} delay={delay_seconds}s: {exc}",
+            extra={"emoji_type": "error"},
+        )
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _schedule_media_refresh(
+    timer_fn,
+    *,
+    delay_seconds: float,
+    kind: str,
+    payload: dict[str, Any] | None,
+    log_message: str | None = None,
+) -> None:
+    """Either enqueue a media_refresh Job (Phase 3) or fall back to threading.Timer.
+
+    Behind feature flag `USE_JOB_DRIVEN_REFRESH`. When the flag is on AND the
+    Job enqueue succeeds, the Timer is NOT started. On any failure, falls back
+    to the legacy Timer so refreshes never silently disappear.
+    """
+    if use_job_driven_refresh():
+        if _enqueue_media_refresh_via_new_session(
+            kind=kind,
+            payload=payload,
+            delay_seconds=delay_seconds,
+        ):
+            if log_message:
+                logger.info(log_message, extra={"emoji_type": "info"})
+            return
+        # If enqueue failed, fall back to the Timer below so we don't lose the
+        # refresh entirely.
+        logger.warning(
+            f"media_refresh job enqueue failed for kind={kind}; falling back to threading.Timer",
+            extra={"emoji_type": "warning"},
+        )
+    threading.Timer(delay_seconds, timer_fn).start()
+    if log_message:
+        logger.info(log_message, extra={"emoji_type": "info"})
 
 
 REQUEST_STATUS = "REQUEST"
@@ -766,11 +851,22 @@ def _run_materialization_for_ids(
         "checkpoint_sequence": 0,
     }
     is_full_sync = (observation_source == "full_sync_materialization")
+    event_scoped = (not is_full_sync) and str(observation_source or "").startswith("event_")
     movie_phase_start_mono: float | None = None
     last_movie_periodic_refresh_mono: float | None = None
     episode_phase_start_mono: float | None = None
     last_episode_periodic_refresh_mono: float | None = None
     bulk_initial_non_plex_refresh_done = False
+    scoped_core_started = time.monotonic()
+
+    def _scoped_phase(label: str) -> None:
+        if is_full_sync:
+            return
+        logger.info(
+            f"Scoped materialization phase [{observation_source}]: {label} "
+            f"elapsed_s={time.monotonic() - scoped_core_started:.1f}",
+            extra={"emoji_type": "info"},
+        )
 
     def _trigger_bulk_initial_media_server_refresh() -> None:
         """Trigger a combined library refresh for all media servers after bulk operations."""
@@ -795,16 +891,24 @@ def _run_materialization_for_ids(
                 extra={"emoji_type": "success"},
             )
 
-        threading.Timer(20.0, _delayed_media_server_refresh).start()
-        bulk_initial_non_plex_refresh_done = True
-        logger.info(
-            "Bulk sync scheduled initial media server library refresh in 20 seconds.",
-            extra={"emoji_type": "info"},
+        _schedule_media_refresh(
+            _delayed_media_server_refresh,
+            delay_seconds=20.0,
+            kind=KIND_BULK_INITIAL,
+            payload={
+                "has_movies": bool(movie_ids),
+                "has_episodes": bool(episode_ids),
+                "include_plex": True,
+                "include_jellyfin": True,
+                "include_emby": True,
+            },
+            log_message="Bulk sync scheduled initial media server library refresh in 20 seconds.",
         )
+        bulk_initial_non_plex_refresh_done = True
 
     def _emit_overlap_checkpoint(trigger_reason: str, *, force: bool = False) -> None:
-        if not overlap_enabled or is_full_sync:
-            # Skip path-based overlap checkpoints during full sync.
+        if not overlap_enabled or is_full_sync or event_scoped:
+            # Skip path-based overlap checkpoints during full sync or event-scoped runs.
             return
 
         now_mono = time.monotonic()
@@ -862,7 +966,20 @@ def _run_materialization_for_ids(
                         extra={"emoji_type": "success"},
                     )
 
-                threading.Timer(20.0, _delayed_plex_path_refresh, args=(set(created_paths), set(delete_paths))).start()
+                if use_job_driven_refresh() and _enqueue_media_refresh_via_new_session(
+                    kind=KIND_OVERLAP_PATH_BATCH,
+                    payload={
+                        "has_movies": bool(movie_ids),
+                        "has_episodes": bool(episode_ids),
+                        "include_plex": True,
+                        "created_paths": sorted(set(created_paths)),
+                        "delete_paths": sorted(set(delete_paths)),
+                    },
+                    delay_seconds=20.0,
+                ):
+                    pass
+                else:
+                    threading.Timer(20.0, _delayed_plex_path_refresh, args=(set(created_paths), set(delete_paths))).start()
                 overlap_state["pending_created_paths"].clear()
                 overlap_state["pending_delete_paths"].clear()
                 logger.info("Scheduled delayed Plex path refresh in 20 seconds.", extra={"emoji_type": "info"})
@@ -966,9 +1083,18 @@ def _run_materialization_for_ids(
                 def _initial_movie_refresh():
                     refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
 
-                threading.Timer(5.0, _initial_movie_refresh).start()
+                _schedule_media_refresh(
+                    _initial_movie_refresh,
+                    delay_seconds=5.0,
+                    kind=KIND_PHASE_INITIAL_MOVIE,
+                    payload={
+                        "has_movies": True,
+                        "has_episodes": False,
+                        "bypass_suppression": True,
+                    },
+                    log_message="Full sync movie phase started; scheduled initial library refresh in 5 seconds.",
+                )
                 stats["movie_refresh_triggered"] = True
-                logger.info("Full sync movie phase started; scheduled initial library refresh in 5 seconds.", extra={"emoji_type": "info"})
 
             if now - last_movie_periodic_refresh_mono >= 300:
                 refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
@@ -993,6 +1119,9 @@ def _run_materialization_for_ids(
         _process_single_movie_materialization(movie_id)
     if movie_obsolete_ids:
         run_determination_for_entities_in_session(session, movie_ids=list(movie_obsolete_ids), episode_ids=[])
+    _scoped_phase(
+        "obsolete movie pass done (includes secondary scoped determination when obsolete set non-empty)"
+    )
     if movie_ids:
         pending_movie_needs = [
             int(r[0])
@@ -1004,12 +1133,22 @@ def _run_materialization_for_ids(
         pending_movie_needs = []
     for movie_id in pending_movie_needs:
         _process_single_movie_materialization(movie_id)
+    _scoped_phase("needs-placeholder movie pass done")
 
     if is_full_sync and movie_phase_start_mono is not None:
         def _final_movie_refresh():
             refresh_selected_sections(has_movies=True, has_episodes=False, bypass_suppression=True)
-        threading.Timer(5.0, _final_movie_refresh).start()
-        logger.info("Full sync movie phase complete; scheduled final library refresh in 5 seconds.", extra={"emoji_type": "info"})
+        _schedule_media_refresh(
+            _final_movie_refresh,
+            delay_seconds=5.0,
+            kind=KIND_PHASE_FINAL_MOVIE,
+            payload={
+                "has_movies": True,
+                "has_episodes": False,
+                "bypass_suppression": True,
+            },
+            log_message="Full sync movie phase complete; scheduled final library refresh in 5 seconds.",
+        )
 
     def _split_episode_ids_by_determination(session, ids: list[int]) -> tuple[list[int], list[int]]:
         if not ids:
@@ -1096,9 +1235,18 @@ def _run_materialization_for_ids(
                 def _initial_episode_refresh():
                     refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
 
-                threading.Timer(5.0, _initial_episode_refresh).start()
+                _schedule_media_refresh(
+                    _initial_episode_refresh,
+                    delay_seconds=5.0,
+                    kind=KIND_PHASE_INITIAL_EPISODE,
+                    payload={
+                        "has_movies": False,
+                        "has_episodes": True,
+                        "bypass_suppression": True,
+                    },
+                    log_message="Full sync episode phase started; scheduled initial library refresh in 5 seconds.",
+                )
                 stats["tv_refresh_triggered"] = True
-                logger.info("Full sync episode phase started; scheduled initial library refresh in 5 seconds.", extra={"emoji_type": "info"})
 
             if now - last_episode_periodic_refresh_mono >= 300:
                 refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
@@ -1215,15 +1363,38 @@ def _run_materialization_for_ids(
         pending_episode_needs = []
     for episode_id in pending_episode_needs:
         _process_single_episode_materialization(episode_id)
+    _scoped_phase("episode obsolete + needs passes done")
 
     if is_full_sync and episode_phase_start_mono is not None:
         def _final_episode_refresh():
             refresh_selected_sections(has_movies=False, has_episodes=True, bypass_suppression=True)
-        threading.Timer(5.0, _final_episode_refresh).start()
-        logger.info("Full sync episode phase complete; scheduled final library refresh in 5 seconds.", extra={"emoji_type": "info"})
+        _schedule_media_refresh(
+            _final_episode_refresh,
+            delay_seconds=5.0,
+            kind=KIND_PHASE_FINAL_EPISODE,
+            payload={
+                "has_movies": False,
+                "has_episodes": True,
+                "bypass_suppression": True,
+            },
+            log_message="Full sync episode phase complete; scheduled final library refresh in 5 seconds.",
+        )
 
-    if overlap_enabled and (movie_ids or episode_ids):
+    # Final overlap flush coalesces path refreshes for large materialization passes. For
+    # event_scoped runs (``event_*`` sources, e.g. ARR webhooks) it is usually 1 title and
+    # the checkpoint still called ``try_acquire_refresh_lease`` / job enqueue and could
+    # block 10s+ on DB locks while this session held rows. The delayed final block below
+    # already schedules the same path refresh with created_paths/delete_refresh_paths.
+    if overlap_enabled and (movie_ids or episode_ids) and not event_scoped:
+        _scoped_phase("before final overlap checkpoint")
         _emit_overlap_checkpoint("final_loop_flush", force=True)
+        _scoped_phase("after final overlap checkpoint")
+    elif overlap_enabled and (movie_ids or episode_ids) and event_scoped:
+        logger.info(
+            f"Skipped final overlap checkpoint (event_scoped source={observation_source}) — "
+            f"delayed final path refresh still scheduled with collected paths",
+            extra={"emoji_type": "info"},
+        )
 
     logger.info(
         "Placeholder creation summary: "
@@ -1234,6 +1405,19 @@ def _run_materialization_for_ids(
         f"nfo_written={stats['nfo_written']}",
         extra={"emoji_type": "success"},
     )
+
+    # Event-scoped runs used to hold one huge transaction until after delayed-final
+    # scheduling/enqueue, making session.commit() wait on row locks held by other workers.
+    # Commit core placeholder/movie/episode writes here so locks release before job enqueue.
+    if not is_full_sync:
+        session.commit()
+        logger.info(
+            "Scoped materialization: committed core DB state before delayed path refresh scheduling "
+            "(releases locks earlier for event-scoped runs)",
+            extra={"emoji_type": "info"},
+        )
+
+    _scoped_phase("before scheduling delayed final path refresh (async Timer or job)")
 
     if not is_full_sync:
         def _trigger_delayed_final_refresh():
@@ -1254,9 +1438,21 @@ def _run_materialization_for_ids(
                 extra={"emoji_type": "success"},
             )
 
-        threading.Timer(20.0, _trigger_delayed_final_refresh).start()
-        logger.info("Media server refreshes were scheduled to run asynchronously in 20 seconds.", extra={"emoji_type": "success"})
+        _schedule_media_refresh(
+            _trigger_delayed_final_refresh,
+            delay_seconds=20.0,
+            kind=KIND_DELAYED_FINAL,
+            payload={
+                "has_movies": bool(movie_ids),
+                "has_episodes": bool(episode_ids),
+                "include_plex": True,
+                "created_paths": sorted(set(changed_paths)),
+                "delete_paths": sorted(set(delete_refresh_paths)),
+            },
+            log_message="Media server refreshes were scheduled to run asynchronously in 20 seconds.",
+        )
 
+    _scoped_phase("materialization core returning (next step is session.commit in caller)")
     return stats
 
 
@@ -1326,6 +1522,35 @@ def run_materialization_for_entities(
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
 
     session = get_session()
+    stop_scoped_hb = threading.Event()
+    scoped_started = time.monotonic()
+    _scoped_hb_interval = max(
+        3.0, float(getattr(settings, "STALL_HEARTBEAT_INTERVAL_SEC", 10.0) or 10.0)
+    )
+
+    def _scoped_materialization_stall_heartbeat():
+        while not stop_scoped_hb.wait(_scoped_hb_interval):
+            logger.verbose(
+                f"Scoped materialization still running: observation_source={observation_source} "
+                f"movies={len(movie_ids)} episodes={len(episode_ids)} "
+                f"elapsed_s={time.monotonic() - scoped_started:.1f} "
+                f"(long stall after 'persisting' → often PostgreSQL commit waiting on locks)",
+                extra={"emoji_type": "processing"},
+            )
+
+    _scoped_t = None
+    if movie_ids or episode_ids:
+        logger.info(
+            f"Scoped materialization starting: observation_source={observation_source} "
+            f"movies={len(movie_ids)} episodes={len(episode_ids)}",
+            extra={"emoji_type": "info"},
+        )
+        _scoped_t = threading.Thread(
+            target=_scoped_materialization_stall_heartbeat,
+            name=f"scoped-mat-hb-{observation_source}",
+            daemon=True,
+        )
+        _scoped_t.start()
     try:
         stats = run_materialization_for_entities_in_session(
             session,
@@ -1333,7 +1558,19 @@ def run_materialization_for_entities(
             episode_ids=episode_ids,
             observation_source=observation_source,
         )
-        session.commit()
+        if movie_ids or episode_ids:
+            logger.info(
+                f"Scoped materialization persisting: observation_source={observation_source} "
+                f"(if this line is followed by a long silence, commit is usually waiting on a row lock)",
+                extra={"emoji_type": "info"},
+            )
+        v_hb = start_verbose_stall_heartbeat(
+            f"scoped_materialization.session.commit source={observation_source}",
+        )
+        try:
+            session.commit()
+        finally:
+            v_hb.set()
         logger.info(f"Scoped materialization complete: {stats}", extra={"emoji_type": "success"})
         return stats
     except Exception as e:
@@ -1341,6 +1578,7 @@ def run_materialization_for_entities(
         logger.error(f"Scoped materialization failed: {e}", extra={"emoji_type": "error"})
         raise
     finally:
+        stop_scoped_hb.set()
         session.close()
 
 

@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 from core.logger import logger
 from sqlalchemy import create_engine, inspect, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -12,6 +14,15 @@ _engine = None
 _SessionFactory = None
 
 
+def _coerce_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Read an int setting with safe fallback to ``default`` and a floor of ``minimum``."""
+    try:
+        v = int(getattr(settings, name, default) or default)
+    except Exception:
+        v = default
+    return max(minimum, v)
+
+
 def get_engine():
     global _engine, _SessionFactory
     if _engine is not None:
@@ -21,17 +32,31 @@ def get_engine():
         f"postgresql://{settings.DB_USER}:{settings.DB_PASS}"
         f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
     )
-    # Configure a conservative connection pool. These values can be tuned
-    # later based on your Postgres max_connections setting. Using a single
-    # engine instance prevents many pools from being created and hitting
-    # the "too many clients" error.
+    # Phase 2 of the holistic NOTIFY audit: connection pool sizing is now
+    # externally tunable via env / settings. Defaults are higher than the
+    # legacy hardcoded values (10/20) to give NOTIFY-era spiky concurrency
+    # more headroom, while still well under typical Postgres
+    # ``max_connections`` (100). Operators sizing for many workers should
+    # confirm: pool_size + max_overflow + (notifier LISTEN) + (other apps)
+    # < server max_connections.
+    pool_size = _coerce_int("DB_POOL_SIZE", 20, minimum=1)
+    max_overflow = _coerce_int("DB_POOL_MAX_OVERFLOW", 20, minimum=0)
+    pool_timeout = _coerce_int("DB_POOL_TIMEOUT_SECONDS", 10, minimum=1)
+    pool_recycle = _coerce_int("DB_POOL_RECYCLE_SECONDS", 1800, minimum=60)
     _engine = create_engine(
         url,
         echo=False,
         future=True,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+    )
+    logger.info(
+        f"DB engine created pool_size={pool_size} max_overflow={max_overflow} "
+        f"pool_timeout={pool_timeout}s pool_recycle={pool_recycle}s",
+        extra={"emoji_type": "gear"},
     )
     # Ensure the DB session / display timezone is set to UTC on every new connection.
     # This makes TIMESTAMPTZ values display consistently as UTC and avoids
@@ -74,13 +99,70 @@ def get_session(engine=None):
     """Return a SQLAlchemy Session from a module-level session factory.
 
     Avoid creating new engines/sessionmakers on each call. Callers should
-    close() the returned session when finished.
+    close() the returned session when finished. New code should prefer
+    ``session_scope()`` so close-on-finally is impossible to forget.
     """
     global _engine, _SessionFactory
     if _SessionFactory is None:
-        # ensure engine and session factory initialized
         _engine = get_engine()
     return _SessionFactory()
+
+
+@contextmanager
+def session_scope():
+    """Yield a Session and guarantee close-on-finally.
+
+    Phase 2 of the holistic NOTIFY audit: this is the preferred shape for
+    new code paths. Existing ``get_session()`` call sites can be migrated
+    incrementally; the contract is identical except that a stray ``raise``
+    inside the ``with`` block always leaves the connection returned to the
+    pool. Use ``session.commit()`` explicitly for writes.
+
+    Example:
+        with session_scope() as session:
+            session.execute(...)
+            session.commit()
+    """
+    session = get_session()
+    try:
+        yield session
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def pool_stats() -> dict:
+    """Return a dict snapshot of SQLAlchemy pool counters for diagnostics.
+
+    Returned keys (all ints, missing if the pool does not expose them):
+    ``size``, ``checked_in``, ``checked_out``, ``overflow``, ``total``.
+    Safe to call from request handlers; does not block.
+    """
+    try:
+        engine = get_engine()
+        pool = engine.pool
+        out: dict[str, int] = {}
+        for attr, label in (
+            ("size", "size"),
+            ("checkedin", "checked_in"),
+            ("checkedout", "checked_out"),
+            ("overflow", "overflow"),
+        ):
+            fn = getattr(pool, attr, None)
+            if callable(fn):
+                try:
+                    out[label] = int(fn())
+                except Exception:
+                    pass
+        try:
+            out["total"] = int(out.get("checked_in", 0)) + int(out.get("checked_out", 0))
+        except Exception:
+            pass
+        return out
+    except Exception:
+        return {}
 
 def init_db(engine=None, convert_ts: bool | None = None):
     """Initialize DB schema and optionally convert naive timestamp columns to timestamptz.
@@ -121,64 +203,82 @@ def init_db(engine=None, convert_ts: bool | None = None):
     # conditions when creating or altering schema concurrently.
     logger.info("Runtime schema management: create tables + apply add-only migrations", extra={'emoji_type': 'info'})
 
-    # Acquire an advisory lock so concurrent processes don't run create/migrate
-    # at the same time. The numeric key is arbitrary but should be stable.
+    # Serialize init_db across processes (two containers, or overlapping restarts).
+    # Previously we used pg_try_advisory_lock with ~1.25s of retries; migrations often
+    # take longer than that while another session still held the lock, which logged a
+    # scary WARNING and then proceeded anyway. Use blocking pg_advisory_lock with a
+    # bounded lock_timeout so we normally wait quietly until the lock is free.
     lock_key = 987654321
+    lock_wait_seconds = max(5, min(_coerce_int("RUNTIME_SCHEMA_LOCK_WAIT_SECONDS", 120, minimum=5), 600))
     got_lock = False
     try:
         with engine.connect() as conn:
-            # Try to acquire advisory lock with a few short retries to handle
-            # races when multiple processes start at nearly the same time.
-            attempts = 0
-            while attempts < 5 and not got_lock:
+            try:
+                conn.execute(text(f"SET LOCAL lock_timeout = '{int(lock_wait_seconds)}s'"))
+                conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": lock_key})
+                conn.commit()
+                got_lock = True
+            except Exception as exc:
                 try:
-                    got_lock = bool(conn.execute(text('SELECT pg_try_advisory_lock(:k)'), {'k': lock_key}).scalar())
-                except Exception:
-                    got_lock = False
-                if not got_lock:
-                    import time
-                    time.sleep(0.25)
-                    attempts += 1
-
-            if not got_lock:
-                logger.warning('Could not acquire advisory lock for runtime schema operations after retries; proceeding anyway (race risk)', extra={'emoji_type': 'warning'})
-
-            # Import models so they are registered with Base.metadata
-            import services.postgres.models  # noqa: F401
-
-            logger.info(f"Creating tables from SQLAlchemy models: {list(Base.metadata.tables.keys())}", extra={'emoji_type': 'info'})
-            try:
-                Base.metadata.create_all(bind=engine)
-            except Exception as ex:
-                logger.error(f"Failed to create tables via create_all(): {ex}", extra={'emoji_type': 'error'})
-
-            # Refresh inspector and run add-only column migrations
-            inspector = inspect(engine)
-            try:
-                _migrate_columns(engine, inspector)
-            except Exception as ex:
-                logger.error(f"Runtime add-only column migration failed: {ex}", extra={'emoji_type': 'error'})
-
-            # Migrate instance_key composite unique constraints (drop legacy single-col,
-            # backfill instance_key, create composite indexes).
-            try:
-                _migrate_instance_key_constraints(engine)
-            except Exception as ex:
-                logger.error(f"Runtime instance_key constraint migration failed: {ex}", extra={'emoji_type': 'error'})
-
-            # Optionally perform timestamp conversions if configured
-            try:
-                if os.getenv('CONVERT_TS') == '1':
-                    _convert_timestamp_columns(engine, inspector)
-            except Exception as ex:
-                logger.error(f"Runtime timestamp conversion failed: {ex}", extra={'emoji_type': 'error'})
-
-            # Release advisory lock if we acquired it
-            if got_lock:
-                try:
-                    conn.execute(text('SELECT pg_advisory_unlock(:k)'), {'k': lock_key})
+                    conn.rollback()
                 except Exception:
                     pass
+                logger.warning(
+                    "Runtime schema advisory lock not acquired within "
+                    f"{lock_wait_seconds}s — another instance may be migrating, or the DB "
+                    f"session is stuck. Proceeding with schema steps anyway (concurrent DDL "
+                    f"risk): {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+
+            try:
+                # Import models so they are registered with Base.metadata
+                import services.postgres.models  # noqa: F401
+
+                logger.info(
+                    f"Creating tables from SQLAlchemy models: {list(Base.metadata.tables.keys())}",
+                    extra={'emoji_type': 'info'},
+                )
+                try:
+                    Base.metadata.create_all(bind=engine)
+                except Exception as ex:
+                    logger.error(f"Failed to create tables via create_all(): {ex}", extra={'emoji_type': 'error'})
+
+                # Refresh inspector and run add-only column migrations
+                inspector = inspect(engine)
+                try:
+                    _migrate_columns(engine, inspector)
+                except Exception as ex:
+                    logger.error(f"Runtime add-only column migration failed: {ex}", extra={'emoji_type': 'error'})
+
+                # Migrate instance_key composite unique constraints (drop legacy single-col,
+                # backfill instance_key, create composite indexes).
+                try:
+                    _migrate_instance_key_constraints(engine)
+                except Exception as ex:
+                    logger.error(
+                        f"Runtime instance_key constraint migration failed: {ex}",
+                        extra={'emoji_type': 'error'},
+                    )
+
+                # Optionally perform timestamp conversions if configured
+                try:
+                    if os.getenv('CONVERT_TS') == '1':
+                        _convert_timestamp_columns(engine, inspector)
+                except Exception as ex:
+                    logger.error(f"Runtime timestamp conversion failed: {ex}", extra={'emoji_type': 'error'})
+            finally:
+                # Session-level advisory locks survive commit; always release if we
+                # acquired, so the pooled connection is not returned with a lock held.
+                if got_lock:
+                    try:
+                        conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
+                        conn.commit()
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
     except Exception as ex:
         logger.error(f"Runtime schema management failed: {ex}", extra={'emoji_type': 'error'})
 
@@ -271,6 +371,149 @@ def init_db(engine=None, convert_ts: bool | None = None):
     inspector = inspect(engine)
     created_tables = inspector.get_table_names()
     logger.info(f"Tables AFTER create_all(): {created_tables}", extra={'emoji_type': 'info'})
+
+    # Ensure NOTIFY triggers are installed on the job table so worker listeners
+    # are woken on every Job INSERT/UPDATE-to-PENDING. Idempotent (CREATE OR
+    # REPLACE / DROP IF EXISTS + CREATE). Safe to run on every startup.
+    try:
+        _ensure_job_notify_trigger(engine)
+    except Exception as ex:
+        logger.error(
+            f"Failed to ensure job NOTIFY trigger: {ex}",
+            extra={'emoji_type': 'error'},
+        )
+
+    try:
+        _ensure_placeholder_queue_monitor_index(engine)
+    except Exception as ex:
+        logger.debug(
+            f"Could not ensure placeholder queue_monitor_active partial index: {ex}",
+            extra={'emoji_type': 'debug'},
+        )
+
+
+def _ensure_placeholder_queue_monitor_index(engine):
+    """Partial index for playback-flagged placeholders tracked by the queue monitor."""
+    idx_sql = text(
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_placeholder_queue_monitor_active "
+        "ON placeholder (queue_monitor_active) WHERE queue_monitor_active = TRUE"
+    )
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level='AUTOCOMMIT')
+        conn.execute(idx_sql)
+
+
+def _ensure_job_notify_trigger(engine):
+    """Install Postgres triggers that emit NOTIFY 'placeholdarr_jobs' on job changes.
+
+    Statement-level (FOR EACH STATEMENT) so a multi-row INSERT or UPDATE produces
+    one NOTIFY rather than N. The listener drains all PENDING work on each wake,
+    so one wake-per-statement is enough.
+
+    Channel name is hard-coded to match `services.postgres.notifier.JOBS_CHANNEL`.
+
+    Phase 6 portability: ``EXECUTE FUNCTION`` is the Postgres 11+ syntax.
+    Older 9.6 / 10 servers require ``EXECUTE PROCEDURE``. We attempt the
+    modern syntax first and fall back if the server rejects it.
+    """
+    # Detect server major version once and pick syntax accordingly. The
+    # check is cheap (one round-trip) and lets us emit a clear log line
+    # if the operator is running an unsupported version.
+    server_major = 0
+    try:
+        with engine.connect() as conn:
+            ver = conn.execute(text("SHOW server_version_num")).scalar()
+            try:
+                server_major = int(int(str(ver or '0')) // 10000)
+            except Exception:
+                server_major = 0
+    except Exception:
+        server_major = 0
+
+    if 0 < server_major < 11:
+        logger.warning(
+            f"Postgres {server_major}.x detected — NOTIFY triggers will use legacy "
+            "EXECUTE PROCEDURE syntax. Postgres 11+ is recommended (see README).",
+            extra={'emoji_type': 'warning'},
+        )
+
+    fn_sql = text(
+        """
+        CREATE OR REPLACE FUNCTION notify_jobs_change() RETURNS trigger AS $$
+        BEGIN
+            PERFORM pg_notify('placeholdarr_jobs', '');
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    drop_insert_sql = text("DROP TRIGGER IF EXISTS job_notify_insert ON job")
+    drop_update_sql = text("DROP TRIGGER IF EXISTS job_notify_update ON job")
+
+    use_legacy = bool(0 < server_major < 11)
+    exec_clause = "EXECUTE PROCEDURE" if use_legacy else "EXECUTE FUNCTION"
+    create_insert_sql = text(
+        f"""
+        CREATE TRIGGER job_notify_insert
+        AFTER INSERT ON job
+        FOR EACH STATEMENT
+        {exec_clause} notify_jobs_change()
+        """
+    )
+    create_update_sql = text(
+        f"""
+        CREATE TRIGGER job_notify_update
+        AFTER UPDATE OF status, run_after ON job
+        FOR EACH STATEMENT
+        {exec_clause} notify_jobs_change()
+        """
+    )
+
+    def _install(connection):
+        connection.execute(fn_sql)
+        connection.execute(drop_insert_sql)
+        connection.execute(drop_update_sql)
+        connection.execute(create_insert_sql)
+        connection.execute(create_update_sql)
+        connection.commit()
+
+    try:
+        with engine.connect() as conn:
+            _install(conn)
+    except Exception as exc:
+        # If we tried the modern syntax against a server that rejects it,
+        # retry with the legacy clause as a last-ditch fallback.
+        if not use_legacy and 'EXECUTE FUNCTION' in str(exc).upper():
+            logger.warning(
+                "EXECUTE FUNCTION rejected; retrying with legacy EXECUTE PROCEDURE",
+                extra={'emoji_type': 'warning'},
+            )
+            create_insert_sql = text(
+                """
+                CREATE TRIGGER job_notify_insert
+                AFTER INSERT ON job
+                FOR EACH STATEMENT
+                EXECUTE PROCEDURE notify_jobs_change()
+                """
+            )
+            create_update_sql = text(
+                """
+                CREATE TRIGGER job_notify_update
+                AFTER UPDATE OF status, run_after ON job
+                FOR EACH STATEMENT
+                EXECUTE PROCEDURE notify_jobs_change()
+                """
+            )
+            with engine.connect() as conn:
+                _install(conn)
+        else:
+            raise
+
+    logger.info(
+        "Installed NOTIFY triggers on job table (channel='placeholdarr_jobs', "
+        f"server_major={server_major or 'unknown'})",
+        extra={'emoji_type': 'success'},
+    )
 
 
 def _migrate_instance_key_constraints(engine):

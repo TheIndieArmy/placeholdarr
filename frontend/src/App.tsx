@@ -52,6 +52,7 @@ import type {
   SeriesEpisodeDetail,
   SettingsField,
   SettingsPayload,
+  SettingsStatus,
   StatsResponse,
 } from "./types/api";
 
@@ -550,7 +551,7 @@ export function App() {
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
   const statusMessagesSaveRef = useRef<(() => Promise<void>) | null>(null);
 
-  const [setupStatus, setSetupStatus] = useState<{ setup_complete: boolean } | null>(null);
+  const [setupStatus, setSetupStatus] = useState<SettingsStatus | null>(null);
   const setupCompleteRef = useRef<boolean | undefined>(undefined);
   useEffect(() => {
     setupCompleteRef.current = setupStatus?.setup_complete;
@@ -1931,6 +1932,24 @@ export function App() {
               }}
             >
               Onboarding required. Complete the setup wizard to unlock the full dashboard flow.
+            </div>
+          ) : null}
+
+          {/* Startup source-of-truth sync still running (workers gated); API is up — not the same as “Reconnecting”. */}
+          {setupStatus?.setup_complete &&
+          setupStatus.startup_sync_complete === false &&
+          !showReconnectPanel ? (
+            <div
+              className="border-b border-l-4 px-6 py-3 text-[15px]"
+              style={{
+                backgroundColor: alphaColor(brandSemantic.accent2, isStudioGlass ? 0.1 : 0.08),
+                borderColor: alphaColor(brandSemantic.accent, isStudioGlass ? 0.28 : 0.2),
+                borderLeftColor: brandAccent.hex,
+                color: isStudioGlass ? brandSemantic.fgMuted : brandSemantic.fgMuted,
+              }}
+            >
+              Initial ARR/library sync is still running. Background jobs stay paused until it finishes; refresh activity
+              after you see &quot;Startup source-of-truth completed&quot; in logs.
             </div>
           ) : null}
 

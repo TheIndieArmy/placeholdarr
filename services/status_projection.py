@@ -97,6 +97,22 @@ def format_duration_label(minutes: int) -> str:
     return render("runtime.format.hm", {"Hours": str(h), "Minutes": str(m)})
 
 
+# User-facing labels for status enum values that should not be shown in their
+# raw SCREAMING_SNAKE form. Anything not listed here renders as the raw value.
+_FRIENDLY_STATUS_LABELS: dict[str, str] = {
+    "SEARCH_QUEUED": "Search queued",
+}
+
+
+def _friendly_status_label(status: str | None) -> str:
+    """Map an enum value to its user-facing label. Falls back to the raw value."""
+    raw = str(status or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    return _FRIENDLY_STATUS_LABELS.get(upper, raw)
+
+
 def _summary_status_bracket(
     clean_status: str,
     runtime_minutes: int | None,
@@ -124,7 +140,8 @@ def _summary_status_bracket(
         inner = request_inner_line_synopsis(runtime_minutes, media_context)
         return apply_wrapper(inner)
 
-    return apply_wrapper(text)
+    label = _friendly_status_label(text) or text
+    return apply_wrapper(label)
 
 
 def projected_status_display(
@@ -159,7 +176,8 @@ def projected_status_display(
     if eff_upper == "REQUEST":
         # Single stored snapshot: synopsis-style bracket (what dashboards treat as canonical).
         return _summary_status_bracket("REQUEST", runtime_minutes, media_context, for_title_surface=False)
-    return str(effective).strip() or None
+    friendly = _friendly_status_label(effective)
+    return friendly.strip() or None
 
 
 def project_title(
