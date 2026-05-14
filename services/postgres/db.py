@@ -74,6 +74,31 @@ def get_engine():
     event.listen(_engine, "connect", _set_utc_timezone)
     # also prepare a Session factory so get_session can use it
     _SessionFactory = sessionmaker(bind=_engine, future=True)
+    if bool(getattr(settings, "DB_POOL_TELEMETRY_ENABLED", True)):
+        try:
+            from services.postgres.pool_telemetry import register_pool_telemetry
+
+            register_pool_telemetry(
+                _engine,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                slow_checkin_seconds=float(
+                    getattr(settings, "DB_POOL_SLOW_CHECKIN_LOG_SECONDS", 15.0) or 15.0
+                ),
+                near_full_cooldown_seconds=float(
+                    getattr(settings, "DB_POOL_NEAR_FULL_LOG_COOLDOWN_SECONDS", 30.0) or 30.0
+                ),
+                free_slots_warn_threshold=int(
+                    max(0, getattr(settings, "DB_POOL_NEAR_FULL_FREE_SLOTS", 3) or 3)
+                ),
+            )
+            logger.info(
+                "DB pool telemetry enabled (slow check-in logs + near-full snapshots; "
+                "Postgres application_name prefixed with ph_ on checkout)",
+                extra={"emoji_type": "gear"},
+            )
+        except Exception as ex:
+            logger.warning("Could not register DB pool telemetry: %s", ex, extra={"emoji_type": "warning"})
     try:
         from services.placeholder_activity_history_hooks import register_placeholder_activity_history_hooks
 

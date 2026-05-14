@@ -395,6 +395,19 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE_SECONDS: int = int(
         os.getenv("DB_POOL_RECYCLE_SECONDS", "1800").split('#')[0].strip() or "1800"
     )
+    # Checkout/checkin telemetry: logs long-held pool connections and near-exhaustion snapshots.
+    DB_POOL_TELEMETRY_ENABLED: bool = (
+        os.getenv("DB_POOL_TELEMETRY_ENABLED", "true").split('#')[0].strip().lower() in ("1", "true", "yes")
+    )
+    DB_POOL_SLOW_CHECKIN_LOG_SECONDS: float = float(
+        os.getenv("DB_POOL_SLOW_CHECKIN_LOG_SECONDS", "15").split('#')[0].strip() or "15"
+    )
+    DB_POOL_NEAR_FULL_LOG_COOLDOWN_SECONDS: float = float(
+        os.getenv("DB_POOL_NEAR_FULL_LOG_COOLDOWN_SECONDS", "30").split('#')[0].strip() or "30"
+    )
+    DB_POOL_NEAR_FULL_FREE_SLOTS: int = int(
+        os.getenv("DB_POOL_NEAR_FULL_FREE_SLOTS", "3").split('#')[0].strip() or "3"
+    )
     # Max seconds to wait for init_db's Postgres advisory lock when another process
     # is running migrations (blocking pg_advisory_lock + lock_timeout).
     RUNTIME_SCHEMA_LOCK_WAIT_SECONDS: int = int(

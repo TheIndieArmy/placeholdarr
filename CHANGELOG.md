@@ -12,6 +12,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Status message live preview API**: `POST /api/messages/preview` returns dual movie/episode sample lines (title + synopsis), honors draft projection mode and status-update scope, and reports empty tokens for the REQUEST synopsis template.
 - **Unified projection context for NFOs and players**: Media tokens (movie/episode/season/series) plus runtime flow through the same helper so REQUEST lines and title suffixes match between sidecar NFOs and direct player projection.
 - **Template apply-now coalescing**: Repeated “Apply now” supersedes pending template `nfo_refresh` jobs and tracks an active run id so only the latest sweep triggers the one-shot Plex library refresh when the final batch finishes.
+- **DB pool checkout telemetry**: Optional instrumentation (`services/postgres/pool_telemetry.py`) registers on the SQLAlchemy engine to log near-exhaustion snapshots (active thread + hold time), warn on slow check-ins, and set Postgres `application_name` to `ph_*` on checkout for correlation with `pg_stat_activity`. Tunable via `DB_POOL_TELEMETRY_ENABLED`, `DB_POOL_SLOW_CHECKIN_LOG_SECONDS`, `DB_POOL_NEAR_FULL_LOG_COOLDOWN_SECONDS`, and `DB_POOL_NEAR_FULL_FREE_SLOTS`.
 
 ### Changed
 
@@ -23,6 +24,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Fixed
 
 - **Worker NFO backfill completion query**: Job payload run-id filters use SQLAlchemy JSON `.as_string()` (generic `JSON` columns), fixing `astext` crashes when completing coordinated backfill batches.
+- **Dashboard stats snapshot refresh**: Refreshes that recompute `/api/stats` materialized counters now take a Postgres session advisory lock (`pg_try_advisory_lock`) so only one `UPDATE dashboard_stats_snapshot` runs at a time—concurrent hooks skip instead of stacking many sessions on the singleton row. The refresh transaction also uses `SET LOCAL lock_timeout = '15s'` so a stray blocker fails fast instead of wedging the pool for hours (mitigates `idle in transaction` + `transactionid` / `tuple` wait chains that could surface as repeated worker claim `lock_timeout` warnings).
 
 ### Summary
 
@@ -46,6 +48,8 @@ Operators: job NOTIFY uses modern Postgres trigger syntax; **Postgres 11+** is r
 ### Database, pool, and schema
 
 - **Pool env:** `DB_POOL_SIZE`, `DB_POOL_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, `DB_POOL_RECYCLE_SECONDS` (replaces hardcoded pool in `db.py`). `session_scope()`; fix for `StatusOrchestrator._get_session` session leak.
+- **Pool telemetry env:** `DB_POOL_TELEMETRY_ENABLED` (default on), `DB_POOL_SLOW_CHECKIN_LOG_SECONDS`, `DB_POOL_NEAR_FULL_LOG_COOLDOWN_SECONDS`, `DB_POOL_NEAR_FULL_FREE_SLOTS`; hooks registered from `get_engine()` when enabled.
+- **Dashboard stats snapshot:** single-flight advisory lock + bounded `lock_timeout` on the post-commit refresh path (`dashboard_stats_snapshot_hooks`) to prevent many pooled connections blocking on one row.
 - **Ops:** `GET /api/diagnostics/db` (pool, `pg_stat_activity` / blockers, long xacts, notifier snapshot).
 - **Startup migrations:** blocking `pg_advisory_lock` with `lock_timeout` and `RUNTIME_SCHEMA_LOCK_WAIT_SECONDS` (replaces short `pg_try` retries and spurious warnings); unlock in `finally`. Engine log line uses real pool numbers (f-string). Job NOTIFY triggers: `EXECUTE FUNCTION` vs `EXECUTE PROCEDURE` by server version.
 
