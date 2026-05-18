@@ -7,6 +7,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-05-16
+
 ### Added
 
 - **Status message live preview API**: `POST /api/messages/preview` returns dual movie/episode sample lines (title + synopsis), honors draft projection mode and status-update scope, and reports empty tokens for the REQUEST synopsis template.
