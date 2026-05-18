@@ -6,6 +6,9 @@ or TVDB + season/episode (TV), matching how libraries are keyed in practice.
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +27,7 @@ from services.media_servers.plex_identity import (
     persist_movie_plex_identity,
 )
 from services.media_servers.plex_lookup import find_episode_by_series_tvdb, find_movie_by_id
+from services.messages.context import build_projection_context
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
 from services.status_projection import project_summary, project_title
 
@@ -404,10 +408,21 @@ def _project_text(
     base_summary: str | None,
     status: str,
     *,
+    suffix_template_key: str = "title.suffix.movie",
     runtime_minutes: int | None = None,
+    media_context: dict | None = None,
 ) -> tuple[str, str]:
-    return project_title(base_title or "", status), project_summary(
-        base_summary or "", status, runtime_minutes=runtime_minutes
+    return project_title(
+        base_title or "",
+        status,
+        suffix_template_key=suffix_template_key,
+        runtime_minutes=runtime_minutes,
+        media_context=media_context,
+    ), project_summary(
+        base_summary or "",
+        status,
+        runtime_minutes=runtime_minutes,
+        media_context=media_context,
     )
 
 
@@ -490,11 +505,14 @@ def _push_movie(
 ) -> None:
     status = _projected_display_status(placeholder)
     runtime_minutes = _runtime_minutes_movie(movie) if status.strip().upper() == "REQUEST" else None
+    media_ctx = build_projection_context(movie=movie, runtime_minutes=runtime_minutes)
     projected_title, projected_summary = _project_text(
         getattr(movie, "title", None),
         getattr(movie, "radarr_overview", None),
         status,
+        suffix_template_key="title.suffix.movie",
         runtime_minutes=runtime_minutes,
+        media_context=media_ctx,
     )
 
     if getattr(settings, "jellyfin_enabled", False):
@@ -506,16 +524,17 @@ def _push_movie(
                 session.flush()
             jf_ok = update_jellyfin_item_text(jf, title=projected_title, overview=projected_summary)
             _summary_mark(summary, "jellyfin", jf_ok)
-            logger.info(
-                "Jellyfin direct projection movie outcome="
-                f"{'ok' if jf_ok else 'failed'} item_id={jf} movie_id={int(getattr(movie, 'id', 0) or 0)} "
-                f"status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            if not jf_ok:
+            if jf_ok:
                 logger.debug(
-                    f"Jellyfin direct projection failed item_id={jf}",
+                    "Jellyfin: updated movie title/summary in library "
+                    f"(item_id={jf}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
                     extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    "Jellyfin: could not update movie title/summary "
+                    f"(item_id={jf}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                    extra={"emoji_type": "warning"},
                 )
                 _mark_fallback(fallback, "jellyfin", "movie")
         else:
@@ -533,16 +552,17 @@ def _push_movie(
         if em:
             em_ok = update_emby_item_text(em, title=projected_title, overview=projected_summary)
             _summary_mark(summary, "emby", em_ok)
-            logger.info(
-                "Emby direct projection movie outcome="
-                f"{'ok' if em_ok else 'failed'} item_id={em} movie_id={int(getattr(movie, 'id', 0) or 0)} "
-                f"status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            if not em_ok:
+            if em_ok:
                 logger.debug(
-                    f"Emby direct projection failed item_id={em}",
+                    "Emby: updated movie title/summary in library "
+                    f"(item_id={em}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
                     extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    "Emby: could not update movie title/summary "
+                    f"(item_id={em}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                    extra={"emoji_type": "warning"},
                 )
                 _mark_fallback(fallback, "emby", "movie")
         else:
@@ -563,12 +583,19 @@ def _push_movie(
                 title=projected_title,
                 summary=projected_summary,
             )
-            logger.info(
-                "Plex direct projection movie cached-key outcome="
-                f"{outcome} rating_key={plex_key} movie_id={int(getattr(movie, 'id', 0) or 0)} "
-                f"status={status!r}",
-                extra={"emoji_type": "info"},
-            )
+            if outcome == "ok":
+                logger.debug(
+                    "Plex: updated movie title/summary "
+                    f"(rating_key={plex_key}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                    extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    "Plex: movie title/summary update issue "
+                    f"(outcome={outcome}, rating_key={plex_key}, "
+                    f"movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                    extra={"emoji_type": "warning"},
+                )
             _summary_mark(summary, "plex", outcome == "ok")
             # Drop cached keys on 404 or failures so the next block re-resolves by TMDB.
             if outcome in ("not_found", "failed"):
@@ -580,11 +607,25 @@ def _push_movie(
                 _mark_fallback(fallback, "plex", "movie")
                 return
         if not _plex_coalesce_cached_rating_key(movie):
-            plex_movie = find_movie_by_id(
-                getattr(movie, "tmdbid", None),
-                title=getattr(movie, "title", None),
-                year=getattr(movie, "year", None),
-            )
+            try:
+                from services.placeholders import movie_placeholder_path as _mpp
+
+                _mpath = str(getattr(movie, "placeholder_filepath", "") or "").strip() or _mpp(movie)
+            except Exception:
+                _mpath = ""
+            if _mpath and not os.path.isfile(_mpath):
+                logger.warning(
+                    "Plex lookup skipped: expected placeholder media file missing on disk "
+                    f"path={_mpath!r} movie_id={int(getattr(movie, 'id', 0) or 0)}",
+                    extra={"emoji_type": "warning"},
+                )
+                plex_movie = None
+            else:
+                plex_movie = find_movie_by_id(
+                    getattr(movie, "tmdbid", None),
+                    title=getattr(movie, "title", None),
+                    year=getattr(movie, "year", None),
+                )
             if plex_movie is not None and getattr(plex_movie, "ratingKey", None) is not None:
                 persist_movie_plex_identity(session, movie, plex_movie)
                 session.flush()
@@ -593,12 +634,20 @@ def _push_movie(
                     title=projected_title,
                     summary=projected_summary,
                 )
-                logger.info(
-                    "Plex direct projection movie resolved-key outcome="
-                    f"{outcome} rating_key={plex_movie.ratingKey} movie_id={int(getattr(movie, 'id', 0) or 0)} "
-                    f"status={status!r}",
-                    extra={"emoji_type": "info"},
-                )
+                if outcome == "ok":
+                    logger.debug(
+                        "Plex: updated movie title/summary after lookup "
+                        f"(rating_key={plex_movie.ratingKey}, "
+                        f"movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                        extra={"emoji_type": "debug"},
+                    )
+                else:
+                    logger.warning(
+                        "Plex: movie title/summary update issue after lookup "
+                        f"(outcome={outcome}, rating_key={plex_movie.ratingKey}, "
+                        f"movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                        extra={"emoji_type": "warning"},
+                    )
                 _summary_mark(summary, "plex", outcome == "ok")
                 if outcome != "ok":
                     _mark_fallback(fallback, "plex", "movie")
@@ -629,11 +678,19 @@ def _push_episode(
     runtime_minutes = (
         _runtime_minutes_episode(episode, series) if status.strip().upper() == "REQUEST" else None
     )
+    media_ctx = build_projection_context(
+        episode=episode,
+        season=season,
+        series=series,
+        runtime_minutes=runtime_minutes,
+    )
     projected_ep_title, projected_ep_summary = _project_text(
         getattr(episode, "title", None),
         getattr(episode, "sonarr_episode_overview", None),
         status,
+        suffix_template_key="title.suffix.episode",
         runtime_minutes=runtime_minutes,
+        media_context=media_ctx,
     )
     if getattr(settings, "jellyfin_enabled", False):
         jf_ep = _find_jellyfin_episode_item_id(series, season, episode)
@@ -644,13 +701,18 @@ def _push_episode(
                 session.flush()
             jf_ep_ok = update_jellyfin_item_text(jf_ep, title=projected_ep_title, overview=projected_ep_summary)
             _summary_mark(summary, "jellyfin", jf_ep_ok)
-            logger.info(
-                "Jellyfin direct projection episode outcome="
-                f"{'ok' if jf_ep_ok else 'failed'} item_id={jf_ep} "
-                f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            if not jf_ep_ok:
+            if jf_ep_ok:
+                logger.debug(
+                    "Jellyfin: updated episode title/summary "
+                    f"(item_id={jf_ep}, episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                    extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    "Jellyfin: could not update episode title/summary "
+                    f"(item_id={jf_ep}, episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                    extra={"emoji_type": "warning"},
+                )
                 _mark_fallback(fallback, "jellyfin", "episode")
         if not jf_ep:
             logger.debug(
@@ -669,13 +731,18 @@ def _push_episode(
         if em_ep:
             em_ep_ok = update_emby_item_text(em_ep, title=projected_ep_title, overview=projected_ep_summary)
             _summary_mark(summary, "emby", em_ep_ok)
-            logger.info(
-                "Emby direct projection episode outcome="
-                f"{'ok' if em_ep_ok else 'failed'} item_id={em_ep} "
-                f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
-                extra={"emoji_type": "info"},
-            )
-            if not em_ep_ok:
+            if em_ep_ok:
+                logger.debug(
+                    "Emby: updated episode title/summary "
+                    f"(item_id={em_ep}, episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                    extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    "Emby: could not update episode title/summary "
+                    f"(item_id={em_ep}, episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                    extra={"emoji_type": "warning"},
+                )
                 _mark_fallback(fallback, "emby", "episode")
         if not em_ep:
             logger.debug(
@@ -693,12 +760,19 @@ def _push_episode(
         ep_key = _plex_coalesce_cached_rating_key(episode)
         if ep_key:
             ep_out = update_plex_item_text(ep_key, title=projected_ep_title, summary=projected_ep_summary)
-            logger.info(
-                "Plex direct projection episode cached-key outcome="
-                f"{ep_out} rating_key={ep_key} episode_id={int(getattr(episode, 'id', 0) or 0)} "
-                f"status={status!r}",
-                extra={"emoji_type": "info"},
-            )
+            if ep_out == "ok":
+                logger.debug(
+                    "Plex: updated episode title/summary "
+                    f"(rating_key={ep_key}, episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                    extra={"emoji_type": "debug"},
+                )
+            else:
+                logger.warning(
+                    "Plex: episode title/summary update issue "
+                    f"(outcome={ep_out}, rating_key={ep_key}, "
+                    f"episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                    extra={"emoji_type": "warning"},
+                )
             _summary_mark(summary, "plex", ep_out == "ok")
             if ep_out in ("not_found", "failed"):
                 episode.plex_id = None
@@ -719,12 +793,20 @@ def _push_episode(
                         title=projected_ep_title,
                         summary=projected_ep_summary,
                     )
-                    logger.info(
-                        "Plex direct projection episode resolved-key outcome="
-                        f"{retry_out} rating_key={plex_ep.ratingKey} "
-                        f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
-                        extra={"emoji_type": "info"},
-                    )
+                    if retry_out == "ok":
+                        logger.debug(
+                            "Plex: updated episode title/summary after re-resolve "
+                            f"(rating_key={plex_ep.ratingKey}, "
+                            f"episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                            extra={"emoji_type": "debug"},
+                        )
+                    else:
+                        logger.warning(
+                            "Plex: episode title/summary update issue after re-resolve "
+                            f"(outcome={retry_out}, rating_key={plex_ep.ratingKey}, "
+                            f"episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                            extra={"emoji_type": "warning"},
+                        )
                     _summary_mark(summary, "plex", retry_out == "ok")
                     if retry_out != "ok":
                         _mark_fallback(fallback, "plex", "episode")
@@ -746,12 +828,20 @@ def _push_episode(
                     title=projected_ep_title,
                     summary=projected_ep_summary,
                 )
-                logger.info(
-                    "Plex direct projection episode lookup-only outcome="
-                    f"{outcome} rating_key={plex_ep.ratingKey} "
-                    f"episode_id={int(getattr(episode, 'id', 0) or 0)} status={status!r}",
-                    extra={"emoji_type": "info"},
-                )
+                if outcome == "ok":
+                    logger.debug(
+                        "Plex: updated episode title/summary after lookup "
+                        f"(rating_key={plex_ep.ratingKey}, "
+                        f"episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                        extra={"emoji_type": "debug"},
+                    )
+                else:
+                    logger.warning(
+                        "Plex: episode title/summary update issue after lookup "
+                        f"(outcome={outcome}, rating_key={plex_ep.ratingKey}, "
+                        f"episode_id={int(getattr(episode, 'id', 0) or 0)})",
+                        extra={"emoji_type": "warning"},
+                    )
                 _summary_mark(summary, "plex", outcome == "ok")
                 if outcome != "ok":
                     _mark_fallback(fallback, "plex", "episode")
@@ -834,8 +924,31 @@ def push_placeholder_player_metadata(
         )
         return acc
 
+    # Projection only makes sense while a dummy/placeholder is supposed to exist. Deletes and
+    # materializer cleanups clear has_placeholder — there is no meaningful "deleted" line to push
+    # to Plex/Jellyfin/Emby title/summary (and lifecycle DELETED is DB-only).
+    lifecycle = str(getattr(placeholder, "lifecycle_status", "") or "").strip().upper()
+    if lifecycle == "DELETED":
+        logger.debug(
+            "Skipping player metadata push (placeholder lifecycle DELETED) "
+            f"placeholder_id={getattr(placeholder, 'id', None)}",
+            extra={"emoji_type": "debug"},
+        )
+        return acc
+
     movie = session.query(Movie).get(placeholder.movie_id) if placeholder.movie_id else None
     episode = session.query(Episode).get(placeholder.episode_id) if placeholder.episode_id else None
+
+    row_has_dummy = bool(getattr(placeholder, "has_placeholder", False))
+    movie_has_dummy = bool(movie and getattr(movie, "has_placeholder", False))
+    episode_has_dummy = bool(episode and getattr(episode, "has_placeholder", False))
+    if not row_has_dummy and not movie_has_dummy and not episode_has_dummy:
+        logger.debug(
+            "Skipping player metadata push (no dummy on disk for this title) "
+            f"placeholder_id={getattr(placeholder, 'id', None)}",
+            extra={"emoji_type": "debug"},
+        )
+        return acc
 
     if movie:
         _push_movie(session, movie, placeholder, acc, run_summary)
@@ -848,13 +961,48 @@ def push_placeholder_batch_player_metadata(session, placeholders: list[Placehold
     """Project status directly for a placeholder batch and fallback-refresh once."""
     fallback = ProjectionFallbackAccumulator()
     summary = ProjectionBatchSummary()
-    for placeholder in placeholders:
-        push_placeholder_player_metadata(session, placeholder, fallback=fallback, summary=summary)
+    total = len(placeholders)
+    if total:
+        logger.info(
+            f"Player metadata batch: starting {total} placeholder(s) "
+            f"(progress every 25 items; finer stall detail at VERBOSE)…",
+            extra={"emoji_type": "info"},
+        )
+    batch_started = time.monotonic()
+    stop_batch_hb = threading.Event()
+
+    def _player_batch_stall_heartbeat():
+        while not stop_batch_hb.wait(10.0):
+            logger.verbose(
+                f"Player metadata batch: still running (may be inside one slow Plex/Jellyfin call) "
+                f"total={total} elapsed_s={time.monotonic() - batch_started:.1f}",
+                extra={"emoji_type": "processing"},
+            )
+
+    _phb = None
+    if total:
+        _phb = threading.Thread(
+            target=_player_batch_stall_heartbeat,
+            name="player-metadata-batch-hb",
+            daemon=True,
+        )
+        _phb.start()
+    try:
+        for i, placeholder in enumerate(placeholders, start=1):
+            push_placeholder_player_metadata(session, placeholder, fallback=fallback, summary=summary)
+            if total and (i % 25 == 0 or i == total):
+                logger.info(
+                    f"Player metadata batch: processed {i}/{total} "
+                    f"(elapsed_s={time.monotonic() - batch_started:.1f})",
+                    extra={"emoji_type": "info"},
+                )
+    finally:
+        stop_batch_hb.set()
     logger.info(
-        "Direct projection summary: "
-        f"plex(ok={summary.plex_ok},failed={summary.plex_failed},disabled={summary.plex_disabled}) "
-        f"jellyfin(ok={summary.jellyfin_ok},failed={summary.jellyfin_failed},disabled={summary.jellyfin_disabled}) "
-        f"emby(ok={summary.emby_ok},failed={summary.emby_failed},disabled={summary.emby_disabled})",
+        "Player libraries synced for this batch — "
+        f"Plex: {summary.plex_ok} ok / {summary.plex_failed} failed / {summary.plex_disabled} off; "
+        f"Jellyfin: {summary.jellyfin_ok} ok / {summary.jellyfin_failed} failed / {summary.jellyfin_disabled} off; "
+        f"Emby: {summary.emby_ok} ok / {summary.emby_failed} failed / {summary.emby_disabled} off",
         extra={"emoji_type": "info"},
     )
     _run_projection_fallback_refreshes(fallback)

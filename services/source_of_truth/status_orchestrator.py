@@ -27,6 +27,7 @@ from core.config import settings
 from services.source_of_truth.status_intent import StatusIntent, StatusSource, DisplayStatus
 from services.postgres.models import Placeholder, Movie, Series, Season, Episode, EventLog
 from services.postgres.db import get_session
+from services.messages.context import build_projection_context_from_session
 from services.status_projection import projected_status_display
 
 logger = logging.getLogger(__name__)
@@ -92,9 +93,18 @@ class StatusOrchestrator:
         self.session = session
     
     def _get_session(self) -> Session:
-        """Get or create a DB session."""
+        """Get or create a DB session.
+
+        Phase 2 connection-lifecycle: the legacy ``get_session().__enter__()``
+        path was a session leak — ``__exit__`` was never called, so the
+        connection stayed checked out until garbage collection. All current
+        call sites construct ``StatusOrchestrator(session=...)`` so this
+        branch is unreachable, but we now return a freshly opened Session
+        directly. Callers that opt into ``self.session is None`` MUST close
+        it themselves.
+        """
         if self.session is None:
-            return get_session().__enter__()
+            return get_session()
         return self.session
 
     def _compute_initial_creation_status(
@@ -532,10 +542,18 @@ class StatusOrchestrator:
             old_status = ph.display_status
             ph.display_status = intent.new_status
             ph.display_reason = intent.reason
+            _rm = _runtime_minutes_for_placeholder(session, ph)
+            _media_ctx = build_projection_context_from_session(
+                session,
+                movie_id=getattr(ph, "movie_id", None),
+                episode_id=getattr(ph, "episode_id", None),
+                runtime_minutes=_rm,
+            )
             ph.display_status_projected = projected_status_display(
                 intent.new_status,
                 reason=intent.reason,
-                runtime_minutes=_runtime_minutes_for_placeholder(session, ph),
+                runtime_minutes=_rm,
+                media_context=_media_ctx,
             )
             if intent.progress is not None:
                 try:
@@ -545,6 +563,17 @@ class StatusOrchestrator:
             elif intent.new_status != DisplayStatus.DOWNLOADING.value:
                 ph.display_progress = None
             ph.updated_at = datetime.now(timezone.utc)
+
+            if getattr(ph, "queue_monitor_active", None):
+                terminal_clear = {
+                    DisplayStatus.AVAILABLE.value,
+                    DisplayStatus.NOT_FOUND.value,
+                    DisplayStatus.DELETED.value,
+                    DisplayStatus.ARCHIVED.value,
+                }
+                if str(intent.new_status or "").strip().upper() in terminal_clear:
+                    ph.queue_monitor_active = False
+                    ph.queue_monitor_active_set_at = None
 
             old_status_text = str(old_status or "")
             new_status_text = str(intent.new_status or "")
@@ -579,7 +608,7 @@ class StatusOrchestrator:
             
             session.commit()
             
-            logger.info(
+            logger.debug(
                 f"Applied status intent: Placeholder[{intent.placeholder_id}] "
                 f"{old_status!r} -> {intent.new_status!r} "
                 f"(source={intent.source.value}, reason={intent.reason!r})"

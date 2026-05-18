@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,6 +25,9 @@ from services.source_of_truth.arr_api import (
     fetch_sonarr_episode_item,
 )
 from services.source_of_truth.determiner import run_determination_for_entities
+from services.source_of_truth.entity_materialization_job import (
+    enqueue_entity_materialization_job,
+)
 from services.source_of_truth.materializer import (
     _mark_placeholder_rows_deleted,
     run_materialization_for_entities,
@@ -959,45 +963,40 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
         session.flush()
         movie_row_id = int(movie_row.id)
         session.commit()
-
-        determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
-        materialization_stats = run_materialization_for_entities(
-            movie_ids=[movie_row_id],
-            observation_source="event_movie_deleted",
+        ev_mono = time.monotonic()
+        logger.info(
+            f"movie_deleted webhook: tombstone committed movie_row_id={movie_row_id} "
+            f"radarr_id={movie_id} instance={instance or '?'} — running scoped determination, "
+            f"then enqueueing materialization (avoids long commit on webhook thread)",
+            extra={"emoji_type": "info"},
         )
 
-        movie_after = session.query(Movie).filter(Movie.id == movie_row_id).first()
-        mat = materialization_stats_dict(materialization_stats)
-        result_reason, status_label = outcome_reason_and_status_from_materialization("Movie removed from Radarr", mat)
-        result_path = (
-            str(getattr(movie_after, "placeholder_filepath", "") or "").strip()
-            if movie_after
-            else ""
-        ) or movie_placeholder_path(movie_after or movie_row)
-        append_placeholder_activity_status(
+        determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
+        logger.info(
+            f"movie_deleted webhook: determination finished movie_row_id={movie_row_id} "
+            f"elapsed_s={time.monotonic() - ev_mono:.1f}",
+            extra={"emoji_type": "info"},
+        )
+
+        enqueue_entity_materialization_job(
             session,
-            item_type="movie",
-            movie_id=movie_row_id,
-            episode_id=None,
-            series_id=None,
-            season_id=None,
-            season_number=None,
-            instance_key=getattr(movie_after, "instance_key", None) if movie_after else getattr(movie_row, "instance_key", None),
-            instance_id=getattr(movie_after, "instance_id", None) if movie_after else getattr(movie_row, "instance_id", None),
-            event_type="placeholder_event_movie_deleted_result",
-            path=str(result_path or ""),
-            item_title=str(getattr(movie_after, "title", None) or getattr(movie_row, "title", None) or "Unknown Movie"),
-            series_title=None,
-            reason=result_reason,
-            status_label=status_label,
-            source="event_movie_deleted",
-            extra_snapshot={
-                "determination": determination_stats if isinstance(determination_stats, dict) else {},
-                "materialization": mat,
-                "movie_id": int(movie_row_id),
+            movie_ids=[movie_row_id],
+            episode_ids=[],
+            observation_source="event_movie_deleted",
+            payload_extras={
+                "finalize_movie_deleted_activity": True,
+                "movie_row_id": int(movie_row_id),
+                "determination_stats": determination_stats
+                if isinstance(determination_stats, dict)
+                else {},
             },
         )
         session.commit()
+        logger.info(
+            f"movie_deleted webhook: scoped materialization enqueued + handler finished movie_row_id={movie_row_id} "
+            f"total_elapsed_s={time.monotonic() - ev_mono:.1f}",
+            extra={"emoji_type": "success"},
+        )
 
         return {
             "ok": True,
@@ -1005,7 +1004,7 @@ def process_movie_deleted_event(payload: dict[str, Any], instance: str | None = 
             "is_4k": inferred_is_4k,
             "movie_id": movie_row_id,
             "determination": determination_stats,
-            "materialization": materialization_stats,
+            "materialization_enqueued": True,
         }
     except Exception:
         session.rollback()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from core.config import settings
 
@@ -15,6 +16,16 @@ def get_projection_mode() -> str:
     if raw in VALID_PROJECTION_MODES:
         return raw
     return "summary"
+
+
+def projection_surfaces() -> tuple[bool, bool]:
+    """Return (apply_status_to_title, apply_status_to_summary) from projection mode."""
+    mode = get_projection_mode()
+    if mode == "title":
+        return (True, False)
+    if mode == "both":
+        return (True, True)
+    return (False, True)
 
 
 def _updates_scope() -> str:
@@ -42,8 +53,11 @@ def strip_status_from_title(title: str | None) -> str:
     while text != previous:
         previous = text
         text = re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+        text = re.sub(r"^\<[^>]+\>\s*", "", text).strip()
         text = re.sub(r"\s*-\s*\[[^\]]+\]\s*$", "", text).strip()
+        text = re.sub(r"\s*-\s*\<[^>]+\>\s*$", "", text).strip()
         text = re.sub(r"\s*\[[^\]]+\]\s*$", "", text).strip()
+        text = re.sub(r"\s*\<[^>]+\>\s*$", "", text).strip()
 
     return re.sub(r"\s+", " ", text).strip()
 
@@ -54,6 +68,7 @@ def strip_status_from_summary(summary: str | None) -> str:
     # Legacy: "~45m · " before "[REQUEST]" (older NFO / summaries)
     text = re.sub(r"^~(?:\d+h(?:\s+\d+m)?|\d+m)\s*·\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+    text = re.sub(r"^\<[^>]+\>\s*", "", text).strip()
     return text
 
 
@@ -70,24 +85,63 @@ def format_duration_label(minutes: int) -> str:
     """Human-readable duration from whole minutes (e.g. 45m, 1h, 1h 5m)."""
     if minutes <= 0:
         return ""
+
+    # Defer to the customizable template engine so users can localize duration formatting.
+    from services.messages import render
+
     if minutes < 60:
-        return f"{minutes}m"
+        return render("runtime.format.m", {"Minutes": str(minutes)})
     h, m = divmod(minutes, 60)
     if m == 0:
-        return f"{h}h"
-    return f"{h}h {m}m"
+        return render("runtime.format.h", {"Hours": str(h)})
+    return render("runtime.format.hm", {"Hours": str(h), "Minutes": str(m)})
 
 
-def _summary_status_bracket(clean_status: str, runtime_minutes: int | None) -> str:
-    """Build [REQUEST] or [1h 5m · REQUEST] when runtime is known (REQUEST only)."""
-    status_upper = clean_status.upper()
-    if status_upper == "REQUEST" and runtime_minutes is not None:
-        rm = _rounded_minutes(runtime_minutes)
-        if rm > 0:
-            dur = format_duration_label(rm)
-            if dur:
-                return f"[{dur} · {clean_status}]"
-    return f"[{clean_status}]"
+# User-facing labels for status enum values that should not be shown in their
+# raw SCREAMING_SNAKE form. Anything not listed here renders as the raw value.
+_FRIENDLY_STATUS_LABELS: dict[str, str] = {
+    "SEARCH_QUEUED": "Search queued",
+}
+
+
+def _friendly_status_label(status: str | None) -> str:
+    """Map an enum value to its user-facing label. Falls back to the raw value."""
+    raw = str(status or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    return _FRIENDLY_STATUS_LABELS.get(upper, raw)
+
+
+def _summary_status_bracket(
+    clean_status: str,
+    runtime_minutes: int | None,
+    media_context: dict[str, Any] | None = None,
+    *,
+    for_title_surface: bool = False,
+) -> str:
+    """Build the wrapped status bracket for synopsis or title surfaces.
+
+    REQUEST placeholders use ``line.request`` for both synopsis and title surfaces.
+
+    Pipeline (situation-first): render an inner line per situation, then apply the
+    global wrapper preset (``[ ]`` by default) post-render.
+    """
+    from services.messages import apply_wrapper
+    from services.messages.request_line_render import request_inner_line_synopsis
+
+    text = str(clean_status or "").strip()
+    if not text:
+        return ""
+
+    upper = text.upper()
+
+    if upper == "REQUEST":
+        inner = request_inner_line_synopsis(runtime_minutes, media_context)
+        return apply_wrapper(inner)
+
+    label = _friendly_status_label(text) or text
+    return apply_wrapper(label)
 
 
 def projected_status_display(
@@ -95,6 +149,7 @@ def projected_status_display(
     *,
     reason: str | None = None,
     runtime_minutes: int | None = None,
+    media_context: dict[str, Any] | None = None,
 ) -> str | None:
     """Return persisted user-facing status label for display surfaces."""
     raw_status = str(status or "").strip()
@@ -119,16 +174,33 @@ def projected_status_display(
 
     eff_upper = str(effective).strip().upper()
     if eff_upper == "REQUEST":
-        return _summary_status_bracket("REQUEST", runtime_minutes)
-    return str(effective).strip() or None
+        # Single stored snapshot: synopsis-style bracket (what dashboards treat as canonical).
+        return _summary_status_bracket("REQUEST", runtime_minutes, media_context, for_title_surface=False)
+    friendly = _friendly_status_label(effective)
+    return friendly.strip() or None
 
 
-def project_title(title: str | None, status: str | None) -> str:
+def project_title(
+    title: str | None,
+    status: str | None,
+    *,
+    suffix_template_key: str = "title.suffix.movie",
+    runtime_minutes: int | None = None,
+    media_context: dict[str, Any] | None = None,
+) -> str:
     clean_title = strip_status_from_title(title)
     clean_status = str(status or "").strip()
-    if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"title", "both"}:
+    _title_on, _sum_on = projection_surfaces()
+    if not clean_status or not should_project_status(clean_status) or not _title_on:
         return clean_title
-    return f"{clean_title} - [{clean_status}]".strip()
+
+    from services.messages import render
+
+    suffix = render(suffix_template_key, dict(media_context or {}))
+    if not suffix.strip():
+        return clean_title
+    normalized_suffix = suffix if suffix[:1].isspace() else f" {suffix}"
+    return f"{clean_title}{normalized_suffix}".strip()
 
 
 def project_summary(
@@ -136,10 +208,14 @@ def project_summary(
     status: str | None,
     *,
     runtime_minutes: int | None = None,
+    media_context: dict[str, Any] | None = None,
 ) -> str:
     clean_summary = strip_status_from_summary(summary)
     clean_status = str(status or "").strip()
-    if not clean_status or not should_project_status(clean_status) or get_projection_mode() not in {"summary", "both"}:
+    _title_on, _sum_on = projection_surfaces()
+    if not clean_status or not should_project_status(clean_status) or not _sum_on:
         return clean_summary
-    bracket = _summary_status_bracket(clean_status, runtime_minutes)
+    bracket = _summary_status_bracket(
+        clean_status, runtime_minutes, media_context, for_title_surface=False
+    )
     return f"{bracket} {clean_summary}".strip()

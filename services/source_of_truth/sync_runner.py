@@ -771,6 +771,17 @@ def run_full_sync(
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         stats['duration_seconds'] = round(elapsed, 2)
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
+        # If the user saved Status Message changes with "Next full sync", materialize them
+        # now so existing placeholders pick up the new templates.
+        try:
+            from services.source_of_truth.template_backfill import run_pending_backfill_if_set
+            backfill = run_pending_backfill_if_set(source='full_sync')
+            stats['template_backfill'] = backfill
+        except Exception as bf_exc:
+            logger.warning(
+                f"Pending template backfill skipped after fullsync: {bf_exc}",
+                extra={'emoji_type': 'warning'},
+            )
         return stats
     except Exception as e:
         session.rollback()

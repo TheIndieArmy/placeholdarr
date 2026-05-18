@@ -38,6 +38,7 @@ class DisplayStatus(Enum):
     COMING_SOON_TODAY = "COMING_SOON_TODAY"      # Release date is today
     
     # Action states
+    SEARCH_QUEUED = "SEARCH_QUEUED"               # Search request received, will start shortly
     SEARCHING = "SEARCHING"                       # Queue monitor: actively searching for media
     DOWNLOADING = "DOWNLOADING"                   # Queue monitor: download in progress
     IMPORT_IN_PROGRESS = "IMPORT_IN_PROGRESS"    # ImportHandler: file being imported to media server

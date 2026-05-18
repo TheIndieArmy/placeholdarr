@@ -244,12 +244,6 @@ def update_plex_item_text(rating_key: str | int, *, title: str, summary: str) ->
             extra={"emoji_type": "warning"},
         )
         return "failed"
-    except Exception as e:
-        logger.warning(
-            f"Plex item metadata refresh failed rating_key={key}: {e}",
-            extra={"emoji_type": "warning"},
-        )
-        return "failed"
 
 
 def refresh_plex_section_ids(

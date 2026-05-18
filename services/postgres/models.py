@@ -5,6 +5,8 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from services.postgres.db import Base
 from datetime import datetime, timezone
 
+from core.config import settings
+
 
 def utcnow():
     """Return a timezone-aware UTC datetime for SQLAlchemy defaults."""
@@ -97,10 +99,20 @@ class Movie(Base):
 
     @hybrid_property
     def is_4k(self) -> bool:
-        """Compatibility shim derived from instance identity (no dedicated DB column)."""
+        """True when this row's Radarr instance is configured as the 4K/secondary library.
+
+        Uses ``ARR_INSTANCES_JSON`` (``is_4k`` on the matching ``instance_key``), not substring
+        heuristics — keys named ``4k`` still follow config (they may point at primary Radarr).
+        """
         key = str(getattr(self, 'instance_key', '') or '').strip().lower()
+        if not key:
+            return False
+        item = settings.resolve_arr_instance("radarr", instance_key=key)
+        if item is not None:
+            return bool(item.get("is_4k", False))
+        # Legacy rows / unknown keys: keep old heuristics
         instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
-        return ('4k' in key) or key.endswith('_secondary') or instance_id.endswith(':secondary')
+        return ("4k" in key) or key.endswith("_secondary") or instance_id.endswith(":secondary")
 
     def __repr__(self):
         return (
@@ -168,6 +180,10 @@ class Placeholder(Base):
     # canonical determination mirrored from decider
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # When True, the queue-monitor producer should actively poll ARR /queue for this
+    # placeholder (playback-initiated search flow). Cleared on terminal status.
+    queue_monitor_active = Column(Boolean, default=False, server_default=text('false'))
+    queue_monitor_active_set_at = Column(DateTime(timezone=True), nullable=True)
     # (placeholder) last-observed timestamp for the placeholder row
 
     def __repr__(self):
@@ -270,10 +286,20 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
     error_message = Column(String, nullable=True)
+    # Set when status=CLAIMED; cleared when PENDING/DONE/FAILED. Prevents a stale handler from
+    # committing after the stale-CLAIMED reaper requeues the job (NOTIFY worker parity).
+    claim_token = Column(String(36), nullable=True)
+    # Phase 5: job priority. Higher numbers are claimed first (within the
+    # set of rows whose ``run_after`` is satisfied). Defaults assigned by
+    # ``services.source_of_truth.job_priority.default_priority_for`` so
+    # interactive jobs (webhooks, playback) are not starved by big batch
+    # phases (calendar / sync).
+    priority = Column(Integer, nullable=False, server_default=text('0'))
 
     __table_args__ = (
-        # index to speed up claiming
+        # index to speed up claiming (priority + run_after used by claim ORDER BY)
         Index('ix_job_status_run_after', 'status', 'run_after'),
+        Index('ix_job_status_priority_runafter', 'status', 'priority', 'run_after'),
         # index for lookup/dedupe by group
         Index('ix_job_groupid', 'group_id'),
         # Partial unique index to prevent multiple active combined_refresh jobs with same group_id
@@ -323,6 +349,32 @@ class FSScanRun(Base):
 
     def __repr__(self):
         return f"<FSScanRun(id={self.id}, run_id={self.run_id!r})>"
+
+
+class ProcessedJobKey(Base):
+    """Idempotency-key registry for side-effecting handlers.
+
+    Phase 4 of the holistic NOTIFY audit: the stale-CLAIMED reaper resets
+    rows that may still be running their original handler thread, which
+    means the same external action (NFO write, Plex refresh, ARR search
+    trigger) can fire twice. Handlers atomically INSERT a deterministic
+    key derived from ``(job_type, target_id [, run_id])`` BEFORE doing the
+    side effect; the second runner sees the unique-constraint hit and
+    skips. Old keys are pruned by a periodic sweep.
+    """
+
+    __tablename__ = 'processed_job_key'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String, nullable=False, unique=True)
+    job_type = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text('now()'))
+
+    __table_args__ = (
+        Index('ix_processed_job_key_created_at', 'created_at'),
+    )
+
+    def __repr__(self):
+        return f"<ProcessedJobKey(id={self.id}, key={self.key!r})>"
 
 
 class ArrState(Base):
@@ -432,10 +484,15 @@ class Series(Base):
 
     @hybrid_property
     def is_4k(self) -> bool:
-        """Compatibility shim derived from instance identity (no dedicated DB column)."""
+        """True when this row's Sonarr instance is configured as the 4K/secondary library."""
         key = str(getattr(self, 'instance_key', '') or '').strip().lower()
+        if not key:
+            return False
+        item = settings.resolve_arr_instance("sonarr", instance_key=key)
+        if item is not None:
+            return bool(item.get("is_4k", False))
         instance_id = str(getattr(self, 'instance_id', '') or '').strip().lower()
-        return ('4k' in key) or key.endswith('_secondary') or instance_id.endswith(':secondary')
+        return ("4k" in key) or key.endswith("_secondary") or instance_id.endswith(":secondary")
 
     def __repr__(self):
         return (

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.config import settings
+from services.messages import render as render_message
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
 from services.placeholder_activity_log import (
     append_placeholder_activity_status,
@@ -19,14 +20,31 @@ from services.status_projection import projected_status_display
 
 IMPORT_GRACE_JOB_TYPE = "import_grace"
 IMPORT_GRACE_REASON = "import_grace_countdown"
-COUNTDOWN_STATUSES = [
-    "NOW IN LIBRARY - RETIRING PLACEHOLDER IN 5 MIN",
-    "NOW IN LIBRARY - RETIRING PLACEHOLDER IN 4 MIN",
-    "NOW IN LIBRARY - RETIRING PLACEHOLDER IN 3 MIN",
-    "NOW IN LIBRARY - RETIRING PLACEHOLDER IN 2 MIN",
-    "NOW IN LIBRARY - RETIRING PLACEHOLDER IN 1 MIN",
-    "NOW IN LIBRARY - RETIRING PLACEHOLDER IN LESS THAN A MINUTE",
-]
+# Number of countdown ticks before the final "less than a minute" tick.
+# Historically: 5, 4, 3, 2, 1 minutes remaining, plus a "less than a minute" final.
+COUNTDOWN_MINUTES_DECREASING = (5, 4, 3, 2, 1)
+
+
+def _countdown_status_text(minutes_remaining: int) -> str:
+    """Render the customizable countdown status text for a given minutes-remaining tick."""
+    return render_message("import_grace.countdown", {"MinutesRemaining": str(int(minutes_remaining))})
+
+
+def _countdown_lt_1_min_status_text() -> str:
+    return render_message("import_grace.countdown_lt_1_min", {})
+
+
+def _all_countdown_status_texts() -> list[str]:
+    """Render all countdown status strings in display order."""
+    return [_countdown_status_text(m) for m in COUNTDOWN_MINUTES_DECREASING] + [_countdown_lt_1_min_status_text()]
+
+
+# Backwards-compatible shim for any consumer still importing the static list.
+# Generated lazily so it picks up template overrides at scheduling time.
+def __getattr__(name: str):  # pragma: no cover - simple compatibility shim
+    if name == "COUNTDOWN_STATUSES":
+        return _all_countdown_status_texts()
+    raise AttributeError(name)
 
 
 def _import_grace_step_seconds() -> int:
@@ -43,8 +61,9 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
     now = base_time or datetime.now(timezone.utc)
     step = max(1, int(step_seconds or _import_grace_step_seconds()))
 
+    countdown_texts = _all_countdown_status_texts()
     scheduled: list[dict[str, Any]] = []
-    for step_index, status_text in enumerate(COUNTDOWN_STATUSES):
+    for step_index, status_text in enumerate(countdown_texts):
         scheduled.append(
             {
                 "step_index": step_index,
@@ -56,8 +75,8 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
 
     scheduled.append(
         {
-            "step_index": len(COUNTDOWN_STATUSES),
-            "run_after": now + timedelta(seconds=len(COUNTDOWN_STATUSES) * step),
+            "step_index": len(countdown_texts),
+            "run_after": now + timedelta(seconds=len(countdown_texts) * step),
             "status_text": None,
             "finalize": True,
         }
@@ -70,12 +89,15 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
 def _enqueue_nfo_refresh_job(session, placeholder_ids: list[int]) -> None:
     if not placeholder_ids:
         return
+    from services.source_of_truth.job_priority import default_priority_for
+
     session.add(
         Job(
             job_type=NFO_REFRESH_JOB_TYPE,
             payload={"placeholder_ids": placeholder_ids},
             status="PENDING",
             run_after=datetime.now(timezone.utc),
+            priority=default_priority_for(NFO_REFRESH_JOB_TYPE),
         )
     )
 
@@ -117,6 +139,9 @@ def _schedule_import_grace(
     active_ids = _set_countdown_status(session, placeholder_ids, initial_status)
     _enqueue_nfo_refresh_job(session, active_ids)
 
+    from services.source_of_truth.job_priority import default_priority_for
+
+    grace_priority = default_priority_for(IMPORT_GRACE_JOB_TYPE)
     for item in schedule[1:]:
         session.add(
             Job(
@@ -132,6 +157,7 @@ def _schedule_import_grace(
                 },
                 status="PENDING",
                 run_after=item["run_after"],
+                priority=grace_priority,
             )
         )
 

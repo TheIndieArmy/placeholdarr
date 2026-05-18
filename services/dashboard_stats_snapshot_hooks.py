@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import event, func
+from sqlalchemy import event, func, text
 from sqlalchemy.orm import Session, object_session
 
 from core.logger import logger
@@ -22,6 +22,11 @@ from services.library_future_semantics import sql_episode_future_outside_lookahe
 
 _hooks_registered = False
 _DIRTY_KEY = "dashboard_stats_snapshot_dirty"
+# Serialize snapshot refreshes across processes (Postgres session advisory lock).
+# Without this, many after_commit hooks can each open a session and pile up on
+# UPDATE dashboard_stats_snapshot WHERE id=1, wedging the DB behind one
+# long-lived idle-in-transaction elsewhere (transactionid / tuple waits).
+_DASHBOARD_STATS_ADVISORY_LOCK_KEY = 8_729_0001
 
 
 def _utc_now() -> datetime:
@@ -134,13 +139,81 @@ def _mark_dirty(_mapper, _connection, target) -> None:
     session.info[_DIRTY_KEY] = True
 
 
-def _after_flush_postexec(session: Session, _flush_context) -> None:
+def _refresh_dashboard_stats_in_new_session() -> None:
+    """Recompute the snapshot row in its own session/transaction.
+
+    Must NOT run inside another session's flush/commit: the worker sets
+    ``SET LOCAL lock_timeout`` on job-claim transactions; running the heavy
+    aggregate queries + ``UPDATE dashboard_stats_snapshot`` (single hot row)
+    inside that same transaction caused 55P03 lock timeouts and chained
+    blocking when any other session held an ``idle in transaction`` lock.
+
+    Only one refresh runs at a time cluster-wide (``pg_try_advisory_lock``); others
+    skip quietly so we never stack many UPDATEs on the singleton row. The refresh
+    itself uses a short ``lock_timeout`` so a stray blocker fails fast instead
+    of holding a pool connection for hours.
+    """
+    from services.postgres.db import get_session
+
+    sess = get_session()
+    locked = False
+    try:
+        locked = bool(
+            sess.execute(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": _DASHBOARD_STATS_ADVISORY_LOCK_KEY},
+            ).scalar()
+        )
+        if not locked:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            return
+        try:
+            sess.execute(text("SET LOCAL lock_timeout = '15s'"))
+        except Exception:
+            pass
+        _refresh_dashboard_stats_snapshot(sess)
+        sess.commit()
+    except Exception as exc:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "dashboard_stats_snapshot refresh skipped: %s",
+            exc,
+            extra={"emoji_type": "warning"},
+        )
+    finally:
+        if locked:
+            try:
+                sess.execute(
+                    text("SELECT pg_advisory_unlock(:k)"),
+                    {"k": _DASHBOARD_STATS_ADVISORY_LOCK_KEY},
+                )
+                sess.commit()
+            except Exception:
+                try:
+                    sess.rollback()
+                except Exception:
+                    pass
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+def _after_commit(session: Session) -> None:
     if not session.info.pop(_DIRTY_KEY, False):
         return
-    try:
-        _refresh_dashboard_stats_snapshot(session)
-    except Exception as exc:
-        logger.warning("dashboard_stats_snapshot refresh skipped: %s", exc, extra={"emoji_type": "warning"})
+    _refresh_dashboard_stats_in_new_session()
+
+
+def _after_rollback(session: Session) -> None:
+    # Avoid a stale dirty flag if this Session object is reused (rare).
+    session.info.pop(_DIRTY_KEY, None)
 
 
 def register_dashboard_stats_snapshot_hooks() -> None:
@@ -155,5 +228,6 @@ def register_dashboard_stats_snapshot_hooks() -> None:
         event.listen(model, "after_update", _mark_dirty)
         event.listen(model, "after_delete", _mark_dirty)
 
-    event.listen(Session, "after_flush_postexec", _after_flush_postexec)
+    event.listen(Session, "after_commit", _after_commit)
+    event.listen(Session, "after_rollback", _after_rollback)
     logger.info("Registered dashboard_stats_snapshot ORM hooks", extra={"emoji_type": "success"})
