@@ -27,6 +27,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Worker NFO backfill completion query**: Job payload run-id filters use SQLAlchemy JSON `.as_string()` (generic `JSON` columns), fixing `astext` crashes when completing coordinated backfill batches.
 - **Dashboard stats snapshot refresh**: Refreshes that recompute `/api/stats` materialized counters now take a Postgres session advisory lock (`pg_try_advisory_lock`) so only one `UPDATE dashboard_stats_snapshot` runs at a time—concurrent hooks skip instead of stacking many sessions on the singleton row. The refresh transaction also uses `SET LOCAL lock_timeout = '15s'` so a stray blocker fails fast instead of wedging the pool for hours (mitigates `idle in transaction` + `transactionid` / `tuple` wait chains that could surface as repeated worker claim `lock_timeout` warnings).
+- **Queue monitor NOTIFY wake race on idle sleep**: The producer no longer calls `_wake_event.clear()` before waiting when the idle probe finds no active placeholders. A playback-triggered NOTIFY between that probe and `clear()` could be erased and delay SEARCHING/DOWNLOADING updates until the safety poll (default 300s); the idle path now waits only when the event is unset and clears after wake (aligned with the worker drain-race fix).
 
 ### Summary
 

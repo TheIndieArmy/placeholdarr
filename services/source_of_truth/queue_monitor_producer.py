@@ -389,8 +389,11 @@ class QueueMonitorProducer:
 
             if ctx is None:
                 clear_queue_download_snapshot()
+                # Do not clear() before wait: NOTIFY between the idle probe and
+                # clear() would be lost until the safety poll (see worker drain-race fix).
+                if not self._wake_event.is_set():
+                    self._wake_event.wait(timeout=safety)
                 self._wake_event.clear()
-                self._wake_event.wait(timeout=safety)
                 continue
 
             logger.debug(
