@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, func, or_
@@ -23,6 +23,7 @@ from services.media_servers.jellyfin import get_jellyfin_file_path
 
 
 PLAYBACK_FALLBACK_JOB_TYPE = 'playback_fallback'
+SEASON_EPISODE_SEARCH_FALLBACK_JOB_TYPE = 'season_episode_search_fallback'
 
 
 def _instance_label(is_4k: bool) -> str:
@@ -73,6 +74,43 @@ def _fallback_timeout_minutes() -> int:
 
 def _fallback_enabled() -> bool:
     return bool(getattr(settings, 'ENABLE_PLAYBACK_FALLBACK_SEARCH', False)) and _fallback_timeout_minutes() > 0
+
+
+def _season_episode_fallback_enabled() -> bool:
+    return bool(getattr(settings, 'ENABLE_SEASON_EPISODE_SEARCH_FALLBACK', True))
+
+
+def _season_episode_fallback_delay_seconds() -> int:
+    """Wait until queue monitor would likely have finished before episode-level retry."""
+    try:
+        search_timeout = max(
+            30,
+            int(getattr(settings, 'QUEUE_MONITOR_SEARCH_TIMEOUT_SECONDS', 120) or 120),
+        )
+    except Exception:
+        search_timeout = 120
+    try:
+        retry_grace = max(30, int(getattr(settings, 'QUEUE_MONITOR_RETRY_GRACE_SECONDS', 300) or 300))
+    except Exception:
+        retry_grace = 300
+    return search_timeout + retry_grace + 30
+
+
+def _episode_eligible_for_episode_search(ep: Episode) -> bool:
+    """Episodes Sonarr can realistically grab individually (skip unaired / on-disk)."""
+    if bool(getattr(ep, 'has_file', False)):
+        return False
+    if bool(getattr(ep, 'is_deleted', False)):
+        return False
+    if not getattr(ep, 'sonarrid', None):
+        return False
+    air = getattr(ep, 'air_date', None)
+    if isinstance(air, date) and air > date.today():
+        return False
+    arr_status = str(getattr(ep, 'sonarr_status', '') or '').strip().lower()
+    if arr_status == 'unaired':
+        return False
+    return True
 
 
 def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
@@ -1036,6 +1074,46 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
     return targets, metadata
 
 
+def _trigger_playback_sonarr_search(
+    *,
+    mode: str,
+    series_id: int,
+    season_number: int | None,
+    target_meta: dict[str, Any],
+    target_episode_ids: list[int],
+    url: str,
+    api_key: str,
+) -> bool:
+    """Issue the Sonarr search command that matches TV_PLAY_MODE."""
+    if mode == 'series':
+        return trigger_sonarr_search(series_id=series_id, url=url, api_key=api_key)
+
+    if mode == 'season':
+        if season_number is None:
+            return False
+        season_numbers = [int(season_number)]
+        if target_meta.get('season_boundary_next_included'):
+            season_numbers.append(int(season_number) + 1)
+        return any(
+            trigger_sonarr_search(
+                series_id=series_id,
+                season_number=sn,
+                url=url,
+                api_key=api_key,
+            )
+            for sn in season_numbers
+        )
+
+    if not target_episode_ids:
+        return False
+    return trigger_sonarr_search(
+        series_id=series_id,
+        episode_ids=target_episode_ids,
+        url=url,
+        api_key=api_key,
+    )
+
+
 def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row: Movie | None = None) -> list[StatusIntent]:
     intents: list[StatusIntent] = []
     rows: list[Placeholder] = []
@@ -1141,21 +1219,16 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
 
     mode = _play_mode()
     search_triggered = False
-    if mode == 'series':
-        if getattr(series_row, 'sonarrid', None):
-            search_triggered = trigger_sonarr_search(
-                series_id=int(series_row.sonarrid),
-                url=base_url,
-                api_key=api_key,
-            )
-    else:
-        if target_episode_ids and getattr(series_row, 'sonarrid', None):
-            search_triggered = trigger_sonarr_search(
-                series_id=int(series_row.sonarrid),
-                episode_ids=target_episode_ids,
-                url=base_url,
-                api_key=api_key,
-            )
+    if getattr(series_row, 'sonarrid', None):
+        search_triggered = _trigger_playback_sonarr_search(
+            mode=mode,
+            series_id=int(series_row.sonarrid),
+            season_number=season_number,
+            target_meta=target_meta,
+            target_episode_ids=target_episode_ids,
+            url=base_url,
+            api_key=api_key,
+        )
 
     reached_end_marked = False
     if bool(target_meta.get('reached_end')) and getattr(series_row, 'sonarrid', None):
@@ -1174,6 +1247,14 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     if intents:
         StatusOrchestrator(session=session).apply_and_project_statuses(intents)
 
+    season_episode_fallback_job_id: int | None = None
+    if mode == 'season' and search_triggered:
+        season_episode_fallback_job_id = _enqueue_season_episode_search_fallback(
+            session,
+            series_row=series_row,
+            episode_ids=[int(ep.id) for ep in targets if getattr(ep, 'id', None)],
+        )
+
     return {
         'ok': True,
         'event': 'playback_start',
@@ -1186,7 +1267,158 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'monitor_updated': int(monitor_result.get('updated', 0)),
         'monitor_failed': int(monitor_result.get('failed', 0)),
         'search_triggered': bool(search_triggered),
+        'season_episode_fallback_job_id': season_episode_fallback_job_id,
         'reached_end_marked': bool(reached_end_marked),
+        'status_intents_applied': len(intents),
+    }
+
+
+def _enqueue_season_episode_search_fallback(
+    session,
+    *,
+    series_row: Series,
+    episode_ids: list[int],
+) -> int | None:
+    if _play_mode() != 'season' or not _season_episode_fallback_enabled():
+        return None
+
+    catalog_ids = sorted({int(x) for x in episode_ids if x})
+    if not catalog_ids:
+        return None
+
+    series_id = int(series_row.id)
+    is_4k = bool(getattr(series_row, 'is_4k', False))
+    delay_seconds = _season_episode_fallback_delay_seconds()
+    run_after = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+    payload = {
+        'series_id': series_id,
+        'is_4k': is_4k,
+        'episode_ids': catalog_ids,
+    }
+
+    pending = (
+        session.query(Job)
+        .filter(
+            Job.job_type == SEASON_EPISODE_SEARCH_FALLBACK_JOB_TYPE,
+            Job.status == 'PENDING',
+        )
+        .all()
+    )
+    for job in pending:
+        job_payload = job.payload if isinstance(job.payload, dict) else {}
+        if int(job_payload.get('series_id', -1)) != series_id:
+            continue
+        if bool(job_payload.get('is_4k', False)) != is_4k:
+            continue
+        merged_ids = sorted(
+            {int(x) for x in (job_payload.get('episode_ids') or [])} | set(catalog_ids)
+        )
+        job.payload = {**job_payload, 'episode_ids': merged_ids}
+        existing_run_after = job.run_after
+        if existing_run_after is None or run_after > existing_run_after:
+            job.run_after = run_after
+        session.add(job)
+        session.flush()
+        logger.info(
+            f"Updated season episode search fallback job_id={job.id} series_id={series_id} "
+            f"episodes={len(merged_ids)} run_after={run_after.isoformat()}",
+            extra={'emoji_type': 'processing'},
+        )
+        return int(job.id)
+
+    job = Job(
+        job_type=SEASON_EPISODE_SEARCH_FALLBACK_JOB_TYPE,
+        payload=payload,
+        status='PENDING',
+        max_attempts=3,
+        run_after=run_after,
+    )
+    session.add(job)
+    session.flush()
+    logger.info(
+        f"Enqueued season episode search fallback job_id={job.id} series_id={series_id} "
+        f"episodes={len(catalog_ids)} delay_seconds={delay_seconds}",
+        extra={'emoji_type': 'processing'},
+    )
+    return int(job.id)
+
+
+def process_season_episode_search_fallback_job(session, job: Job) -> dict[str, Any]:
+    if not _season_episode_fallback_enabled():
+        return {'ok': True, 'skipped': 'season_episode_fallback_disabled'}
+
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    try:
+        series_id = int(payload.get('series_id'))
+    except Exception:
+        return {'ok': False, 'reason': 'invalid_series_id'}
+
+    is_4k = bool(payload.get('is_4k', False))
+    catalog_ids = [int(x) for x in (payload.get('episode_ids') or [])]
+
+    if _play_mode() != 'season':
+        return {'ok': True, 'skipped': 'tv_play_mode_not_season'}
+
+    series_row = session.query(Series).filter(Series.id == series_id).first()
+    if series_row is None or bool(getattr(series_row, 'is_deleted', False)):
+        return {'ok': True, 'skipped': 'series_gone', 'series_id': series_id}
+
+    if not catalog_ids:
+        return {'ok': True, 'skipped': 'no_episode_ids', 'series_id': series_id}
+
+    episodes = (
+        session.query(Episode)
+        .filter(
+            Episode.id.in_(catalog_ids),
+            Episode.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    eligible = [ep for ep in episodes if _episode_eligible_for_episode_search(ep)]
+    if not eligible:
+        return {
+            'ok': True,
+            'skipped': 'no_eligible_episodes',
+            'series_id': series_id,
+            'instance': _instance_label(is_4k),
+        }
+
+    base_url, api_key = _resolve_endpoint('series', is_4k)
+    if not base_url or not api_key or not getattr(series_row, 'sonarrid', None):
+        return {
+            'ok': False,
+            'reason': 'missing_series_arr_config',
+            'series_id': series_id,
+            'instance': _instance_label(is_4k),
+        }
+
+    sonarr_episode_ids = [int(ep.sonarrid) for ep in eligible if getattr(ep, 'sonarrid', None)]
+    search_triggered = trigger_sonarr_search(
+        series_id=int(series_row.sonarrid),
+        episode_ids=sonarr_episode_ids,
+        url=base_url,
+        api_key=api_key,
+    )
+
+    intents = _placeholder_intents_for_targets(session, eligible)
+    if intents:
+        for intent in intents:
+            intent.reason = 'Season search incomplete; triggering per-episode search'
+        StatusOrchestrator(session=session).apply_and_project_statuses(intents)
+
+    logger.info(
+        f"Season episode search fallback series_id={series_id} instance={_instance_label(is_4k)} "
+        f"episodes={len(sonarr_episode_ids)} search_triggered={search_triggered}",
+        extra={'emoji_type': 'playback'},
+    )
+
+    return {
+        'ok': True,
+        'event': 'season_episode_search_fallback',
+        'series_id': series_id,
+        'instance': _instance_label(is_4k),
+        'eligible_episodes': len(sonarr_episode_ids),
+        'search_triggered': bool(search_triggered),
         'status_intents_applied': len(intents),
     }
 

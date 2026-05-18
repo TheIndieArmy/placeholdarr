@@ -554,7 +554,11 @@ def trigger_sonarr_search(
     url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
-    """Trigger Sonarr search at episode, season, or series scope."""
+    """Trigger Sonarr search at episode, season, or series scope.
+
+    Playback routing uses ``seasonSearch`` when ``TV_PLAY_MODE`` is ``season``,
+    ``seriesSearch`` for ``series``, and ``episodeSearch`` for ``episode``.
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key or not series_id:

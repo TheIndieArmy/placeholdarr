@@ -5663,8 +5663,10 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
         </li>
         <li>
           <span className="font-medium text-slate-200">Season</span>
-          {" — "}Only the played episode&apos;s season is monitored and searched. When you finish a season, Placeholdarr
-          automatically monitors and searches the next one.
+          {" — "}Missing episodes in the played season are monitored, then Sonarr&apos;s season search runs so season
+          packs can be grabbed when available. If episodes are still missing afterward (common when some are unreleased),
+          Placeholdarr retries with per-episode search for aired episodes only. When you finish a season, it monitors and
+          season-searches the next one the same way.
         </li>
         <li>
           <span className="font-medium text-slate-200">Episode</span>
@@ -5880,7 +5882,9 @@ function SettingsPanel(props: {
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
+    const seasonFallbackLocked =
+      field.key === "ENABLE_SEASON_EPISODE_SEARCH_FALLBACK" && tvPlayMode !== "season";
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || seasonFallbackLocked;
 
     return (
       <div key={field.key} className={`px-6 py-5 ${rowMuted ? "opacity-50" : ""}`}>
@@ -7108,7 +7112,9 @@ function OnboardingWizard(props: {
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
+    const seasonFallbackLocked =
+      field.key === "ENABLE_SEASON_EPISODE_SEARCH_FALLBACK" && tvPlayMode !== "season";
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || seasonFallbackLocked;
     return (
       <div key={field.key} className={rowMuted ? "opacity-50" : undefined}>
         <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>

@@ -234,6 +234,10 @@ class Settings(BaseSettings):
     # Play mode settings
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
     EPISODES_LOOKAHEAD: int = 5
+    # After seasonSearch, retry missing aired episodes with episodeSearch (skips unaired).
+    ENABLE_SEASON_EPISODE_SEARCH_FALLBACK: bool = os.getenv(
+        "ENABLE_SEASON_EPISODE_SEARCH_FALLBACK", "true"
+    ).split('#')[0].strip().lower() == "true"
     
     # Playback-related settings
     

@@ -19,8 +19,10 @@ from services.source_of_truth.event_handlers import (
 )
 from services.source_of_truth.event_playback import (
     PLAYBACK_FALLBACK_JOB_TYPE,
+    SEASON_EPISODE_SEARCH_FALLBACK_JOB_TYPE,
     process_playback_fallback_job,
     process_playback_start_event,
+    process_season_episode_search_fallback_job,
 )
 from services.source_of_truth.import_grace import (
     IMPORT_GRACE_JOB_TYPE,
@@ -251,6 +253,17 @@ def _process_claimed_job(session, job: Job):
             raise ValueError(str(result.get('reason') or 'playback_fallback_failed'))
         logger.info(
             f"Processed playback fallback job_id={getattr(job, 'id', '?')} result={result}",
+            extra={'emoji_type': 'success'},
+        )
+        _mark_job_done(session, job)
+        return
+
+    if job.job_type == SEASON_EPISODE_SEARCH_FALLBACK_JOB_TYPE:
+        result = process_season_episode_search_fallback_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'season_episode_search_fallback_failed'))
+        logger.info(
+            f"Processed season episode search fallback job_id={getattr(job, 'id', '?')} result={result}",
             extra={'emoji_type': 'success'},
         )
         _mark_job_done(session, job)

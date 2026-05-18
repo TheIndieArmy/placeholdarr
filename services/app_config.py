@@ -286,7 +286,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Lookahead",
                 "label": "Search mode",
-                "description": "How wide the Sonarr search is from the episode you played.",
+                "description": "How wide monitoring and Sonarr search scope are from the episode you played. Season mode uses Sonarr season search first, then per-episode search for aired episodes still missing.",
                 "type": "choice",
                 "restart_required": False,
                 "options": [
@@ -304,6 +304,16 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": "In Episode mode, how many upcoming episodes without files to include forward from the played episode.",
                 "type": "int",
                 "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "ENABLE_SEASON_EPISODE_SEARCH_FALLBACK",
+            {
+                "section": "Lookahead",
+                "label": "Season search episode fallback",
+                "description": "In Season mode, after season search finishes, automatically run per-episode search for aired episodes still missing (skips unreleased).",
+                "type": "bool",
                 "restart_required": False,
             },
         ),
