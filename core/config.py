@@ -238,7 +238,8 @@ class Settings(BaseSettings):
     EPISODES_LOOKAHEAD: int = 5
     
     # Playback-related settings
-    
+    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: bool = False
+    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = False
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
     # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:

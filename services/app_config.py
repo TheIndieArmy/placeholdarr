@@ -335,6 +335,34 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+            {
+                "section": "Lookahead",
+                "label": "Suppress search when aired targets are already monitored",
+                "description": (
+                    "When enabled, playback will not trigger a Sonarr search if every non-future lookahead "
+                    "episode is already monitored. Unmonitored future episodes can still be marked monitored "
+                    "without searching."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+            {
+                "section": "Lookahead",
+                "label": "Do not search future episodes on playback",
+                "description": (
+                    "When enabled, lookahead episodes that have not aired yet (or unknown air dates outside "
+                    "the calendar window) are marked monitored if needed but are excluded from Sonarr searches. "
+                    "When some aired episodes still need acquisition, only those episodes are searched."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
             "PLACEHOLDER_STATUS_UPDATES",
             {
                 "section": "Status Updates",
