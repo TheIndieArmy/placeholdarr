@@ -18,6 +18,7 @@ from services.source_of_truth.arr_share_guard import (
     sibling_movie_has_file,
 )
 from services.source_of_truth.filesystem import configured_roots
+from services.source_of_truth.status_intent import DisplayStatus
 
 
 DETERMINATION_OBSOLETE = 'obsolete_placeholder'
@@ -99,6 +100,83 @@ def _episode_placeholder_path_drifts(session, episode: Episode) -> bool:
     return bool(exp and cur and exp != cur)
 
 
+_ACQUIRING_DISPLAY_STATUSES = frozenset(
+    {
+        DisplayStatus.SEARCHING.value,
+        DisplayStatus.SEARCH_QUEUED.value,
+        DisplayStatus.DOWNLOADING.value,
+        DisplayStatus.IMPORT_IN_PROGRESS.value,
+    }
+)
+
+
+def _skip_placeholders_when_monitored_enabled() -> bool:
+    return bool(getattr(settings, "SKIP_PLACEHOLDERS_WHEN_MONITORED", False))
+
+
+def _entity_is_arr_monitored(entity, *, media_type: str) -> bool:
+    if media_type == "movie":
+        return bool(getattr(entity, "radarr_monitored", False))
+    return bool(getattr(entity, "sonarr_monitored", False))
+
+
+def _placeholder_row_actively_acquiring(row: Placeholder) -> bool:
+    if bool(getattr(row, "queue_monitor_active", False)):
+        return True
+    for field in ("display_status_projected", "display_status"):
+        value = str(getattr(row, field, "") or "").strip().upper()
+        if value in _ACQUIRING_DISPLAY_STATUSES:
+            return True
+    return False
+
+
+def _placeholder_actively_acquiring(
+    session,
+    *,
+    movie_id: int | None = None,
+    episode_id: int | None = None,
+) -> bool:
+    query = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
+    if movie_id is not None:
+        query = query.filter(Placeholder.movie_id == int(movie_id))
+    elif episode_id is not None:
+        query = query.filter(Placeholder.episode_id == int(episode_id))
+    else:
+        return False
+    for row in query.all():
+        if _placeholder_row_actively_acquiring(row):
+            return True
+    return False
+
+
+def _apply_monitored_placeholder_suppression(
+    session,
+    *,
+    base: str,
+    entity,
+    media_type: str,
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+    movie_id: int | None = None,
+    episode_id: int | None = None,
+) -> str:
+    """When enabled, monitored titles without a real file do not need placeholders."""
+    if not _skip_placeholders_when_monitored_enabled():
+        return base
+    if has_file or is_deleted or not _entity_is_arr_monitored(entity, media_type=media_type):
+        return base
+    if has_placeholder and _placeholder_actively_acquiring(
+        session,
+        movie_id=movie_id,
+        episode_id=episode_id,
+    ):
+        return DETERMINATION_EXISTS
+    if has_placeholder:
+        return DETERMINATION_OBSOLETE
+    return DETERMINATION_NOT_NEEDED
+
+
 def _apply_sibling_placeholder_suppression(
     *,
     arr_type: str,
@@ -142,6 +220,16 @@ def _resolve_movie_determination(
     )
     if _movie_placeholder_path_drifts(movie):
         return DETERMINATION_OBSOLETE, True
+    base = _apply_monitored_placeholder_suppression(
+        session,
+        base=base,
+        entity=movie,
+        media_type="movie",
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        movie_id=int(movie.id) if getattr(movie, "id", None) is not None else None,
+    )
     base = _apply_sibling_placeholder_suppression(
         arr_type="radarr",
         base=base,
@@ -192,6 +280,16 @@ def _resolve_episode_determination(
     )
     if _episode_placeholder_path_drifts(session, episode):
         return DETERMINATION_OBSOLETE, True
+    base = _apply_monitored_placeholder_suppression(
+        session,
+        base=base,
+        entity=episode,
+        media_type="episode",
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        episode_id=int(episode.id) if getattr(episode, "id", None) is not None else None,
+    )
     base = _apply_sibling_placeholder_suppression(
         arr_type="sonarr",
         base=base,

@@ -274,6 +274,9 @@ class Settings(BaseSettings):
 
     # Include specials (season 0) when creating episode subflows
     INCLUDE_SPECIALS: bool = False
+    # When True, skip creating placeholders for Radarr/Sonarr-monitored titles and remove
+    # stale placeholders when monitoring is learned during sync (import flow unchanged).
+    SKIP_PLACEHOLDERS_WHEN_MONITORED: bool = False
 
     # Postgres
     DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()

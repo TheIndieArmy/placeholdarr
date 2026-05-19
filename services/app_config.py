@@ -242,6 +242,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "SKIP_PLACEHOLDERS_WHEN_MONITORED",
+            {
+                "section": "Library sync",
+                "label": "Skip placeholders for monitored titles",
+                "description": (
+                    "When enabled, do not create placeholder files for movies or episodes that are monitored in "
+                    "Radarr or Sonarr (and have no real file). Existing placeholders are removed on the next ARR sync "
+                    "after monitoring is detected. Import still removes placeholders when a real file arrives. "
+                    "Manual monitor toggles in Radarr/Sonarr may take until the next full sync to apply."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
             "CALENDAR_LOOKAHEAD_DAYS",
             {
                 "section": "Calendar",

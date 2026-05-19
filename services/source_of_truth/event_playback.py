@@ -1099,6 +1099,9 @@ def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row:
 
 
 def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
+    # Playback may enable Radarr monitoring and trigger search. Placeholder removal for
+    # monitored titles is deferred to sync/determination (SKIP_PLACEHOLDERS_WHEN_MONITORED);
+    # import still removes placeholders when a real file lands.
     if bool(getattr(movie_row, 'is_deleted', False)):
         return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
 
@@ -1139,6 +1142,8 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
 
 
 def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
+    # Same as movie playback: do not run determination/materialization here; monitored
+    # cleanup is handled on the next ARR sync when SKIP_PLACEHOLDERS_WHEN_MONITORED is on.
     if bool(getattr(series_row, 'is_deleted', False)):
         return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
 

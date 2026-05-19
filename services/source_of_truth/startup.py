@@ -13,6 +13,7 @@ from services.placeholders import episode_placeholder_path, movie_placeholder_pa
 from services.postgres.models import ArrState, Episode, Movie, Placeholder, Season, Series
 from services.source_of_truth.arr_api import (
     fetch_radarr_movies,
+    fetch_sonarr_episodes,
     fetch_sonarr_series,
 )
 from services.source_of_truth.calendar_phase import run_calendar_phase
@@ -253,6 +254,69 @@ def _api_series_library_path(item: dict) -> str | None:
 
 def _api_series_monitored(item: dict) -> bool:
     return bool(item.get("monitored"))
+
+
+def _episode_monitored_signature(episode_rows: list[tuple[int, bool]]) -> int:
+    """Sum of Sonarr episode ids that are monitored — stable lite-sync drift signal."""
+    return sum(int(ep_id) for ep_id, monitored in episode_rows if monitored)
+
+
+def _db_episode_monitored_rows_by_series(session, instance_key: str) -> dict[int, list[tuple[int, bool]]]:
+    rows = (
+        session.query(Series.sonarrid, Episode.sonarrid, Episode.sonarr_monitored)
+        .join(Season, Season.series_id == Series.id)
+        .join(Episode, Episode.season_id == Season.id)
+        .filter(
+            Series.instance_key == instance_key,
+            Series.sonarrid.isnot(None),
+            Series.is_deleted == False,  # noqa: E712
+            Episode.is_deleted == False,  # noqa: E712
+            Episode.sonarrid.isnot(None),
+        )
+        .all()
+    )
+    out: dict[int, list[tuple[int, bool]]] = {}
+    for sid, eid, monitored in rows:
+        try:
+            sid_i = int(sid)
+            eid_i = int(eid)
+        except Exception:
+            continue
+        out.setdefault(sid_i, []).append((eid_i, bool(monitored)))
+    return out
+
+
+def _sonarr_episode_monitored_drift_series_ids(
+    session,
+    *,
+    instance_key: str,
+    base_url: str,
+    api_key: str,
+    candidate_series_ids: set[int],
+) -> set[int]:
+    """Series whose per-episode monitored flags differ between DB and Sonarr."""
+    if not candidate_series_ids:
+        return set()
+    db_by_series = _db_episode_monitored_rows_by_series(session, instance_key)
+    drift: set[int] = set()
+    for sid in candidate_series_ids:
+        db_rows = db_by_series.get(int(sid))
+        if not db_rows:
+            continue
+        db_sig = _episode_monitored_signature(db_rows)
+        api_eps = fetch_sonarr_episodes(int(sid), base_url, api_key) or []
+        api_rows: list[tuple[int, bool]] = []
+        for ep in api_eps:
+            if not isinstance(ep, dict):
+                continue
+            try:
+                eid = int(ep.get("id"))
+            except Exception:
+                continue
+            api_rows.append((eid, bool(ep.get("monitored"))))
+        if _episode_monitored_signature(api_rows) != db_sig:
+            drift.add(int(sid))
+    return drift
 
 
 def _api_series_total_episode_count(item: dict) -> int | None:
@@ -801,6 +865,18 @@ def _run_startup_lite_snapshot_for_instances(
                             or (api_episode_file_count is not None and db_episode_file_count != api_episode_file_count)
                         ):
                             changed_ids.add(sid)
+
+                    if bool(getattr(settings, "SKIP_PLACEHOLDERS_WHEN_MONITORED", False)):
+                        episode_mon_candidates = set(db_by_id.keys()) - changed_ids
+                        ep_mon_drift = _sonarr_episode_monitored_drift_series_ids(
+                            session,
+                            instance_key=instance_key,
+                            base_url=instance["base_url"],
+                            api_key=instance["api_key"],
+                            candidate_series_ids=episode_mon_candidates,
+                        )
+                        if ep_mon_drift:
+                            changed_ids |= ep_mon_drift
 
                     if changed_ids:
                         n_path = n_mon = n_del = n_tot = n_file = 0
