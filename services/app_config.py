@@ -751,7 +751,7 @@ def _validate_value(key: str, raw_value: Any) -> Any:
     elif value_type == "choice":
         value = str(raw_value or "").strip()
         if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and value.lower() == "off":
-            value = "summary"
+            value = "both"
         allowed = [str(o["value"]) for o in meta.get("options", [])]
         if not allowed:
             raise ValueError("choice field missing options")
@@ -771,9 +771,9 @@ def _get_row(session, key: str) -> AppConfig | None:
 def _set_runtime_value(key: str, value: Any) -> None:
     try:
         if key == "PLACEHOLDER_STATUS_PROJECTION_MODE":
-            raw = str(value or "summary").strip().lower()
+            raw = str(value or "both").strip().lower()
             if raw == "off" or raw not in {"summary", "title", "both"}:
-                value = "summary"
+                value = "both"
         setattr(settings, key, value)
     except Exception:
         pass
@@ -886,16 +886,16 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                     if legacy_row and not _is_blank(legacy_row.value):
                         effective_value = legacy_row.value
             if key == "PLACEHOLDER_STATUS_PROJECTION_MODE":
-                ev = str(effective_value or "summary").strip().lower()
+                ev = str(effective_value or "both").strip().lower()
                 if ev == "off" or ev not in {"summary", "title", "both"}:
-                    effective_value = "summary"
+                    effective_value = "both"
             if _is_blank(effective_value):
                 pass
             saved_value_out = None if bool(meta.get("secret", False)) else (row.value if row else None)
             if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and saved_value_out is not None:
                 sv = str(saved_value_out).strip().lower()
                 if sv == "off" or sv not in {"summary", "title", "both"}:
-                    saved_value_out = "summary"
+                    saved_value_out = "both"
             entry: dict[str, Any] = {
                 "key": key,
                 "section": meta["section"],

@@ -175,7 +175,6 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Library sync",
   "Calendar",
   "Lookahead",
-  "Status Updates",
   "Advanced",
 ] as const;
 
@@ -205,6 +204,22 @@ const WIZARD_STEPS = [
   { key: "media", name: "Media Servers" },
   { key: "arr", name: "ARR Services" },
   { key: "behavior", name: "Behavior" },
+  { key: "look_and_feel", name: "Look and feel" },
+] as const;
+
+/** Onboarding Look and feel step — status messaging + poster overlay previews. */
+const LOOK_AND_FEEL_FIELD_KEYS = [
+  "PLACEHOLDER_STATUS_UPDATES",
+  "PLACEHOLDER_STATUS_PROJECTION_MODE",
+  "PLACEHOLDER_POSTER_OVERLAY_MODE",
+] as const;
+
+const POSTER_OVERLAY_PREVIEW_TMDB_ID = 1226863;
+const POSTER_OVERLAY_EXAMPLES_BASE = `${import.meta.env.BASE_URL}overlay-examples/`.replace(/(?<!:)\/{2,}/g, "/");
+const POSTER_OVERLAY_EXAMPLE_MODES = [
+  { mode: "grayscale", label: "Grayscale poster", image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg` },
+  { mode: "top_banner", label: "Top banner — PLACEHOLDER", image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg` },
+  { mode: "corner_logo", label: "Corner badge — Placeholdarr logo", image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg` },
 ] as const;
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
@@ -356,6 +371,8 @@ function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
   if ("ARR_INSTANCES_JSON" in out && String(out.ARR_INSTANCES_JSON ?? "").trim() === "") {
     out.ARR_INSTANCES_JSON = "[]";
   }
+  out.PLACEHOLDER_STATUS_UPDATES = "ALL";
+  out.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
   return out;
 }
 
@@ -4799,9 +4816,9 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
     : "protect_siblings";
 
   if ("PLACEHOLDER_STATUS_PROJECTION_MODE" in cleaned) {
-    const pm = String(cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary").trim().toLowerCase();
+    const pm = String(cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "both").trim().toLowerCase();
     if (pm === "off" || !["summary", "title", "both"].includes(pm)) {
-      cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE = "summary";
+      cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
     }
   }
 
@@ -6072,6 +6089,96 @@ function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wiz
   );
 }
 
+function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
+  const wrapClass = props.embedded ? "space-y-3" : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+  return (
+    <div className={wrapClass}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player and optional poster overlays on
+        library art. Changes to poster overlays apply on the next NFO refresh — use the previews below to compare styles
+        without refreshing your whole library.
+      </p>
+    </div>
+  );
+}
+
+function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">Off</span>
+        {" — "}Use remote poster URLs only (no composited local art).
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Grayscale</span>
+        {" — "}Dimmed grayscale poster so placeholders stand out in the library grid.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Top banner</span>
+        {" — "}Original poster with a PLACEHOLDER banner across the top.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Corner badge</span>
+        {" — "}Placeholdarr logo badge in the bottom-right corner.
+      </li>
+    </ul>
+  );
+}
+
+function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean }) {
+  const selected = String(props.selectedMode ?? "off").trim().toLowerCase();
+  const gridClass = props.compact
+    ? "grid grid-cols-1 sm:grid-cols-3 gap-3"
+    : "grid grid-cols-1 sm:grid-cols-3 gap-4";
+  return (
+    <details className="mt-3 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
+      <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
+        <span
+          className="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-90"
+          style={{ fontSize: 18 }}
+        >
+          chevron_right
+        </span>
+        Overlay style examples
+      </summary>
+      <div className="px-4 pb-4 border-t border-[#424753]/30 pt-4 space-y-3">
+        <p className="text-[13px] text-slate-500 leading-relaxed">
+          Sample poster from TMDB movie {POSTER_OVERLAY_PREVIEW_TMDB_ID}. Your placeholders use each title&apos;s own poster.
+        </p>
+        <div className={gridClass}>
+          {POSTER_OVERLAY_EXAMPLE_MODES.map((item) => {
+            const active = selected === item.mode;
+            return (
+              <figure
+                key={item.mode}
+                className={`rounded-lg overflow-hidden border bg-[#0f1419]/80 ${
+                  active ? "border-[var(--brand-accent)] ring-1 ring-[var(--brand-accent)]/40" : "border-[#424753]/40"
+                }`}
+              >
+                <img
+                  src={item.image}
+                  alt={`${item.label} overlay example`}
+                  className="w-full aspect-[2/3] object-cover bg-[#0b111b]"
+                  loading="lazy"
+                />
+                <figcaption className="px-2 py-2 text-[12px] text-slate-400 leading-snug">
+                  <span className={active ? "font-medium text-slate-200" : ""}>{item.label}</span>
+                  {active ? (
+                    <span className="ml-1.5 text-[11px] font-headline uppercase tracking-wide text-[var(--brand-accent)]">
+                      Selected
+                    </span>
+                  ) : null}
+                </figcaption>
+              </figure>
+            );
+          })}
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /** Calendar toggle: copy lives here; `ENABLE_COMING_SOON_COUNTDOWN.description` in app_config is intentionally empty. */
 function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
@@ -6254,6 +6361,8 @@ function SettingsPanel(props: {
                 <StartupSyncModeDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+                <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
               ) : field.description && !isPlexSectionIdField(field.key) ? (
@@ -6313,6 +6422,10 @@ function SettingsPanel(props: {
             )}
           </div>
         )}
+
+        {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+          <PosterOverlayExamples selectedMode={String(value ?? "off")} />
+        ) : null}
 
         {testTarget ? (
           <div
@@ -6789,7 +6902,7 @@ function SettingsPanel(props: {
                     statusUpdatesScope={String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "ALL")}
                     projectionDraft={{
                       placeholder_status_updates: String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "ALL"),
-                      projection_mode: String(props.values.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary"),
+                      projection_mode: String(props.values.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "both"),
                     }}
                     onMetaChange={props.onStatusMessagesMetaChange}
                     registerSaveFlow={props.registerStatusMessagesSaveFlow}
@@ -7010,7 +7123,7 @@ function deriveProjectionSurfacesFromDraft(d: StatusProjectionDraft | undefined)
   project_title: boolean;
   project_summary: boolean;
 } {
-  const mode = String(d?.projection_mode ?? "summary").trim().toLowerCase();
+  const mode = String(d?.projection_mode ?? "both").trim().toLowerCase();
   if (mode === "both") return { project_title: true, project_summary: true };
   if (mode === "title") return { project_title: true, project_summary: false };
   return { project_title: false, project_summary: true };
@@ -7045,7 +7158,7 @@ function LineRequestLivePreview(props: {
       try {
         const base = {
           template_synopsis: syn,
-          projection_mode: String(props.projectionDraft?.projection_mode ?? "summary"),
+          projection_mode: String(props.projectionDraft?.projection_mode ?? "both"),
           placeholder_status_updates: scope,
         };
         const [m, e] = await Promise.all([
@@ -8738,6 +8851,8 @@ function OnboardingWizard(props: {
             <StartupSyncModeDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
             <PlaceholderStatusUpdatesDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+            <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
           ) : field.description ? (
@@ -8791,6 +8906,9 @@ function OnboardingWizard(props: {
             )}
           </div>
         )}
+        {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+          <PosterOverlayExamples selectedMode={String(props.values[field.key] ?? "off")} compact />
+        ) : null}
         {testTarget ? (
           <div
             className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-[14px] ${
@@ -9227,6 +9345,15 @@ function OnboardingWizard(props: {
             </div>
           ) : !fields.length ? (
             <div className="text-center text-slate-500 text-[16px] py-8">No fields for this step.</div>
+          ) : step.key === "look_and_feel" ? (
+            <div className="space-y-6">
+              <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                <LookAndFeelSectionIntro embedded />
+                <div className="mt-4 border-t border-[#424753]/25 pt-4 space-y-5">
+                  {fields.map((field) => wizardFieldRow(field))}
+                </div>
+              </div>
+            </div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
@@ -9743,11 +9870,13 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   if (stepKey === "media") {
     return [...mediaIntegrations];
   }
+  if (stepKey === "look_and_feel") {
+    return [...LOOK_AND_FEEL_FIELD_KEYS];
+  }
   return [
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
-    ...statusUpdates,
     ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
   ];
 }

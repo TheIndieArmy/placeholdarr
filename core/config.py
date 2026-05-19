@@ -228,7 +228,7 @@ class Settings(BaseSettings):
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
     PLACEHOLDER_CREATE_NFO: bool = True  # Always on; retained for env/back-compat only (see validator).
     PLACEHOLDER_STATUS_UPDATES: str = "ALL"
-    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both"] = "summary"
+    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both"] = "both"
     PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
     ENABLE_PRIMER: bool = False
@@ -466,10 +466,10 @@ class Settings(BaseSettings):
 
     @validator("PLACEHOLDER_STATUS_PROJECTION_MODE", pre=True)
     def normalize_placeholder_status_projection_mode(cls, v):
-        # "off" was removed from the UI; use Placeholder status updates = Off instead. Legacy values map to summary.
-        raw = str(v or "summary").strip().lower()
+        # "off" was removed from the UI; use Placeholder status updates = Off instead. Legacy values map to both.
+        raw = str(v or "both").strip().lower()
         if raw == "off" or raw not in {"summary", "title", "both"}:
-            return "summary"
+            return "both"
         return raw
 
     @validator('COMING_SOON_DUMMY_FILE_PATH')

@@ -15,6 +15,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **TV poster overlays**: Series roots also get `folder.jpg` (Plex show poster convention); episode NFOs reference composited `*-thumb.jpg` in `<art>` when local stills exist.
 - **Plex display of composited art**: When `poster.jpg` or episode `*-thumb.jpg` exists, NFO `<thumb>` tags now point at the local absolute path instead of the remote TVDB/TMDB URL so Plex does not keep showing agent art over the on-disk overlay.
 
+### Added
+
+- **Poster overlay style previews**: Settings → Status Updates includes an expandable **Overlay style examples** panel (sample TMDB poster with grayscale, top banner, and corner-badge treatments) so you can compare modes before triggering NFO refresh.
+- **Onboarding — Look and feel**: New wizard step for placeholder status updates, projection mode, and poster overlay mode (with the same overlay previews). Defaults: status updates **All**, project status into **Both**.
+
+
 ### Changed
 
 - **ARR Integrations — shared placeholder cleanup**: Split the shared-folder cleanup setting into separate Radarr and Sonarr controls (two-column layout, first under behavior options). Legacy `MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP` values still apply when the new keys are unset.

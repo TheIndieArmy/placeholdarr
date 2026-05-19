@@ -575,6 +575,29 @@ async def dashboard_next_assets(asset_path: str):
     return FileResponse(file_path)
 
 
+_OVERLAY_EXAMPLE_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".json": "application/json",
+}
+
+
+@router.get("/overlay-examples/{asset_path:path}")
+async def dashboard_overlay_examples(asset_path: str):
+    """Serve static poster overlay preview images from the Vite public folder (copied to dist on build)."""
+    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "overlay-examples")
+    safe_path = os.path.normpath(asset_path).lstrip("/")
+    if safe_path.startswith(".."):
+        return JSONResponse({"ok": False, "message": "invalid asset path"}, status_code=400)
+
+    file_path = os.path.join(dist_dir, safe_path)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"ok": False, "message": "asset not found"}, status_code=404)
+    _, ext = os.path.splitext(safe_path.lower())
+    media_type = _OVERLAY_EXAMPLE_MEDIA_TYPES.get(ext, "application/octet-stream")
+    return FileResponse(file_path, media_type=media_type)
+
+
 # ---------------------------------------------------------------------------
 # JSON API endpoints
 # ---------------------------------------------------------------------------
