@@ -1,0 +1,254 @@
+"""Write composited placeholder poster/thumb JPEGs beside media files."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from dataclasses import dataclass, field
+from typing import Any
+
+from services.poster_overlay import (
+    OVERLAY_META_FILENAME,
+    composite_poster_from_url,
+    logo_asset_stamp,
+    poster_overlay_compositing_available,
+    poster_overlay_mode,
+    save_jpeg,
+)
+
+POSTER_JPEG = "poster.jpg"
+SERIES_FOLDER_JPEG = "folder.jpg"
+
+
+@dataclass
+class LocalArtPaths:
+    poster: str | None = None
+    thumb: str | None = None
+
+    def as_dict(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        if self.poster:
+            out["poster"] = self.poster
+        if self.thumb:
+            out["thumb"] = self.thumb
+        return out
+
+
+@dataclass
+class ArtResult:
+    local_art: LocalArtPaths = field(default_factory=LocalArtPaths)
+    wrote_any: bool = False
+
+
+def _meta_path_for_output(output_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(output_path)), OVERLAY_META_FILENAME)
+
+
+def _read_meta(meta_path: str) -> dict | None:
+    if not os.path.isfile(meta_path):
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _publish_series_folder_poster(poster_path: str) -> None:
+    """Plex/Jellyfin often prefer folder.jpg for TV show posters in the series root."""
+    folder = os.path.dirname(os.path.abspath(poster_path))
+    dest = os.path.join(folder, SERIES_FOLDER_JPEG)
+    if os.path.abspath(dest) == os.path.abspath(poster_path):
+        return
+    try:
+        shutil.copy2(poster_path, dest)
+        _apply_art_file_permissions(poster_path, dest)
+    except OSError:
+        pass
+
+
+def _apply_art_file_permissions(anchor_path: str, *artifact_paths: str) -> None:
+    """Match placeholder media/NFO open permissions on composited art files."""
+    from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
+    if anchor_path:
+        _apply_dir_chain_permissions(anchor_path)
+    for path in artifact_paths:
+        if path and os.path.exists(path):
+            _ensure_open_permissions(path)
+
+
+def _write_meta(meta_path: str, *, mode: str, source_url: str, outputs: dict[str, str]) -> None:
+    payload = {
+        "mode": mode,
+        "source_url": source_url,
+        "outputs": outputs,
+        "logo_stamp": logo_asset_stamp(),
+    }
+    parent = os.path.dirname(meta_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, separators=(",", ":"))
+
+
+def _needs_regenerate(output_path: str, *, mode: str, source_url: str) -> bool:
+    if not os.path.isfile(output_path):
+        return True
+    meta = _read_meta(_meta_path_for_output(output_path))
+    if not meta:
+        return True
+    if str(meta.get("mode") or "") != mode:
+        return True
+    if str(meta.get("source_url") or "") != source_url:
+        return True
+    if str(meta.get("logo_stamp") or "") != logo_asset_stamp():
+        return True
+    return False
+
+
+def _write_composited(
+    output_path: str,
+    source_url: str | None,
+    *,
+    mode: str,
+    landscape: bool,
+    meta_key: str,
+) -> bool:
+    url = str(source_url or "").strip()
+    if not url:
+        return False
+    meta_path = _meta_path_for_output(output_path)
+    if not _needs_regenerate(output_path, mode=mode, source_url=url):
+        artifacts = [output_path, meta_path]
+        folder = os.path.dirname(os.path.abspath(output_path))
+        folder_jpg = os.path.join(folder, SERIES_FOLDER_JPEG)
+        if meta_key == "series_poster" and os.path.isfile(folder_jpg):
+            artifacts.append(folder_jpg)
+        _apply_art_file_permissions(output_path, *artifacts)
+        return True
+    img = composite_poster_from_url(url, mode, landscape=landscape)
+    if img is None:
+        return False
+    if not save_jpeg(img, output_path):
+        return False
+    meta = _read_meta(meta_path) or {}
+    outputs = dict(meta.get("outputs") or {})
+    outputs[meta_key] = os.path.basename(output_path)
+    _write_meta(meta_path, mode=mode, source_url=url, outputs=outputs)
+    artifacts = [output_path, meta_path]
+    if meta_key == "series_poster":
+        _publish_series_folder_poster(output_path)
+        folder_copy = os.path.join(os.path.dirname(os.path.abspath(output_path)), SERIES_FOLDER_JPEG)
+        if os.path.isfile(folder_copy):
+            artifacts.append(folder_copy)
+    _apply_art_file_permissions(output_path, *artifacts)
+    return True
+
+
+def episode_thumb_filename(media_path: str) -> str:
+    base, _ = os.path.splitext(os.path.basename(media_path))
+    return f"{base}-thumb.jpg"
+
+
+def remove_placeholder_art_in_dir(directory: str | None, *, media_path: str | None = None) -> bool:
+    """Remove composited art and overlay metadata from a folder."""
+    if not directory:
+        return False
+    folder = os.path.abspath(directory)
+    removed = False
+    candidates = [
+        os.path.join(folder, POSTER_JPEG),
+        os.path.join(folder, SERIES_FOLDER_JPEG),
+        os.path.join(folder, OVERLAY_META_FILENAME),
+    ]
+    if media_path:
+        candidates.append(os.path.join(folder, episode_thumb_filename(media_path)))
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed = True
+            except OSError:
+                pass
+    return removed
+
+
+def ensure_movie_placeholder_art(movie: Any, media_path: str) -> ArtResult:
+    result = ArtResult()
+    if not poster_overlay_compositing_available():
+        return result
+    mode = poster_overlay_mode()
+    folder = os.path.dirname(os.path.abspath(media_path))
+    out_path = os.path.join(folder, POSTER_JPEG)
+    url = getattr(movie, "remote_poster", None)
+    if _write_composited(out_path, url, mode=mode, landscape=False, meta_key="poster"):
+        result.local_art.poster = POSTER_JPEG
+        result.wrote_any = True
+    return result
+
+
+def ensure_series_placeholder_art(series: Any, series_folder: str) -> ArtResult:
+    result = ArtResult()
+    if not poster_overlay_compositing_available():
+        return result
+    if not series_folder:
+        return result
+    mode = poster_overlay_mode()
+    folder = os.path.abspath(series_folder)
+    out_path = os.path.join(folder, POSTER_JPEG)
+    url = getattr(series, "remote_poster", None)
+    if _write_composited(out_path, url, mode=mode, landscape=False, meta_key="series_poster"):
+        result.local_art.poster = POSTER_JPEG
+        result.wrote_any = True
+    return result
+
+
+def ensure_episode_placeholder_art(
+    episode: Any,
+    season: Any,
+    series: Any,
+    media_path: str,
+) -> ArtResult:
+    result = ArtResult()
+    if not poster_overlay_compositing_available():
+        return result
+    mode = poster_overlay_mode()
+    folder = os.path.dirname(os.path.abspath(media_path))
+
+    thumb_name = episode_thumb_filename(media_path)
+    thumb_path = os.path.join(folder, thumb_name)
+    still_url = getattr(episode, "sonarr_episode_still", None) or getattr(series, "remote_fanart", None)
+    if _write_composited(thumb_path, still_url, mode=mode, landscape=True, meta_key="episode_thumb"):
+        result.local_art.thumb = thumb_name
+        result.wrote_any = True
+
+    return result
+
+
+def _is_valid_art_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def discover_local_art(media_path: str | None, *, series_folder: str | None = None) -> LocalArtPaths:
+    """Return relative local art paths when composited files exist on disk."""
+    art = LocalArtPaths()
+    if media_path:
+        folder = os.path.dirname(os.path.abspath(media_path))
+        poster_abs = os.path.join(folder, POSTER_JPEG)
+        if _is_valid_art_file(poster_abs):
+            art.poster = POSTER_JPEG
+        thumb_name = episode_thumb_filename(media_path)
+        thumb_abs = os.path.join(folder, thumb_name)
+        if _is_valid_art_file(thumb_abs):
+            art.thumb = thumb_name
+    if series_folder:
+        series_poster = os.path.join(os.path.abspath(series_folder), POSTER_JPEG)
+        if _is_valid_art_file(series_poster) and not art.poster:
+            art.poster = POSTER_JPEG
+    return art

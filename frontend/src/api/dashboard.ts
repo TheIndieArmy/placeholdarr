@@ -62,15 +62,22 @@ export function getSettingsStatus(): Promise<SettingsStatus> {
   return fetchJson<SettingsStatus>("/api/settings/status");
 }
 
+export type NfoBackfillApplyScope = "now" | "next_full_sync" | "future";
+
 export async function saveSettings(
   values: Record<string, unknown>,
   partial = false,
   context?: { source?: string; stepKey?: string; stepName?: string },
+  applyScope?: NfoBackfillApplyScope,
 ): Promise<SaveSettingsResponse> {
+  const body: Record<string, unknown> = { values, partial, context };
+  if (applyScope) {
+    body.apply_scope = applyScope;
+  }
   const response = await fetch("/api/settings/save", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ values, partial, context }),
+    body: JSON.stringify(body),
   });
   return (await response.json()) as SaveSettingsResponse;
 }

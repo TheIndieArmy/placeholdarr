@@ -7,6 +7,20 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plex NFO + placeholder poster overlays**: Local composited art no longer uses bare `poster.jpg` in `<thumb preview>` (Plex expects http(s) URLs there). Remote poster URLs are kept for preview/thumb tags while `<art><poster>` points at the absolute local JPEG path when present, so plot/cast metadata loads again and Plex can pick up the overlay poster after a library refresh.
+- **NFO refresh without Pillow**: When poster overlay mode is enabled but Pillow is missing from the runtime, `nfo_refresh` no longer fails repeatedly; compositing is skipped with a warning and NFO files are still rewritten using remote poster URLs.
+- **Corner badge overlay**: Uses the real Placeholdarr mark exported from `Placeholdarr_yellow.svg` (replacing the temporary block-letter asset) and places the badge in the **bottom-right** corner (avoids Plex’s unwatched-episode count on TV posters). Poster regeneration runs automatically when the logo asset or layout stamp changes.
+- **TV poster overlays**: Series roots also get `folder.jpg` (Plex show poster convention); episode NFOs reference composited `*-thumb.jpg` in `<art>` when local stills exist.
+- **Plex display of composited art**: When `poster.jpg` or episode `*-thumb.jpg` exists, NFO `<thumb>` tags now point at the local absolute path instead of the remote TVDB/TMDB URL so Plex does not keep showing agent art over the on-disk overlay.
+
+### Changed
+
+- **ARR Integrations — shared placeholder cleanup**: Split the shared-folder cleanup setting into separate Radarr and Sonarr controls (two-column layout, first under behavior options). Legacy `MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP` values still apply when the new keys are unset.
+- **Shared placeholder cleanup (aggressive mode)**: “Remove when any instance has a real file” now applies across sync and materialization, not only on-disk delete: when a sibling instance has `has_file` for the same TMDB id or TVDB+season+episode, other instances are marked `not_needed` and stale placeholders are cleaned up instead of recreated on the next sync.
+- **Placeholder poster overlays for media players**: New **Placeholder poster overlay** setting (`off`, grayscale, top banner, or corner Placeholdarr badge). When enabled, Placeholdarr downloads poster/still art, composites the chosen treatment, writes `poster.jpg` (and episode `*-thumb.jpg`) beside placeholders, and points NFOs at local files so Plex/Jellyfin/Emby show obvious placeholder art after a library refresh.
+
 ## [0.9.11] - 2026-05-18
 
 ### Added

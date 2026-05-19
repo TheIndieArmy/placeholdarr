@@ -300,6 +300,36 @@ def run_pending_backfill_if_set(*, source: str = "full_sync") -> dict[str, Any]:
     return out
 
 
+def execute_nfo_backfill_apply_scope(apply_scope: str) -> dict[str, Any]:
+    """Materialize the user's chosen apply policy after settings or template changes.
+
+    - ``now``: enqueue an immediate NFO refresh covering all active placeholders.
+    - ``next_full_sync``: set the pending flag for the next full sync.
+    - ``future``: clear pending flag; no retroactive work.
+    """
+    scope = str(apply_scope or "future").strip().lower()
+    if scope not in {"now", "next_full_sync", "future"}:
+        scope = "future"
+
+    if scope == "now":
+        out = enqueue_template_backfill(source="user_apply_now")
+        out.setdefault("scope", "now")
+        try:
+            clear_pending_template_backfill()
+        except Exception:
+            pass
+        return out
+
+    if scope == "next_full_sync":
+        out = mark_template_backfill_pending()
+        out.setdefault("scope", "next_full_sync")
+        return out
+
+    out = clear_pending_template_backfill()
+    out.setdefault("scope", "future")
+    return out
+
+
 def placeholder_count_for_apply_now() -> int:
     """How many placeholders an immediate-now backfill would currently cover.
 

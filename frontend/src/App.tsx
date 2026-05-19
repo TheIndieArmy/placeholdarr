@@ -26,6 +26,7 @@ import {
   getStats,
   saveSettings,
   testIntegrationConnection,
+  type NfoBackfillApplyScope,
 } from "./api/dashboard";
 import { fetchJson, postJson } from "./api/client";
 import embyIcon from "./assets/services/emby.svg";
@@ -247,7 +248,11 @@ const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
 
 /** Shown in API/config but omitted from dashboard UI (onboarding + settings). */
-const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>(["WORKER_COUNT"]);
+const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
+  "WORKER_COUNT",
+  "RADARR_SHARED_PLACEHOLDER_CLEANUP",
+  "SONARR_SHARED_PLACEHOLDER_CLEANUP",
+]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
   "ARR_INSTANCES_JSON",
@@ -265,9 +270,15 @@ const ARR_REAL_FILE_PLAYBACK_KEYS = new Set<string>([
   "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
 ]);
 
+const ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS = new Set<string>([
+  "RADARR_SHARED_PLACEHOLDER_CLEANUP",
+  "SONARR_SHARED_PLACEHOLDER_CLEANUP",
+]);
+
 const ARR_BEHAVIOR_KEYS = new Set<string>([
   ...ARR_SEARCH_PLAYBACK_KEYS,
   ...ARR_REAL_FILE_PLAYBACK_KEYS,
+  ...ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS,
 ]);
 
 function partitionLibraryPathFields(fields: SettingsField[]) {
@@ -549,7 +560,15 @@ export function App() {
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
-  const statusMessagesSaveRef = useRef<(() => Promise<void>) | null>(null);
+  const statusMessagesSaveRef = useRef<((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null>(null);
+  const [nfoBackfillScopeModal, setNfoBackfillScopeModal] = useState<null | {
+    placeholderCount: number;
+    pending: boolean;
+    title: string;
+    description: string;
+    resolve: (scope: NfoBackfillApplyScope) => void;
+    reject: (reason: unknown) => void;
+  }>(null);
 
   const [setupStatus, setSetupStatus] = useState<SettingsStatus | null>(null);
   const setupCompleteRef = useRef<boolean | undefined>(undefined);
@@ -615,9 +634,41 @@ export function App() {
   );
   const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
   const hasUnsavedChangesRef = useRef(false);
-  const registerStatusMessagesSaveFlow = useCallback((fn: (() => Promise<void>) | null) => {
-    statusMessagesSaveRef.current = fn;
-  }, []);
+  const registerStatusMessagesSaveFlow = useCallback(
+    (fn: ((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null) => {
+      statusMessagesSaveRef.current = fn;
+    },
+    [],
+  );
+
+  const requestNfoBackfillApplyScopeChoice = useCallback(
+    (copy: { title: string; description: string }) =>
+      new Promise<NfoBackfillApplyScope | null>((resolve, reject) => {
+        void (async () => {
+          let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+          try {
+            data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+          } catch {
+            data = { placeholder_count: 0, pending_full_sync_backfill: false };
+          }
+          setNfoBackfillScopeModal({
+            placeholderCount: Number(data?.placeholder_count ?? 0),
+            pending: !!data?.pending_full_sync_backfill,
+            title: copy.title,
+            description: copy.description,
+            resolve: (scope) => {
+              setNfoBackfillScopeModal(null);
+              resolve(scope);
+            },
+            reject: (reason) => {
+              setNfoBackfillScopeModal(null);
+              reject(reason);
+            },
+          });
+        })();
+      }),
+    [],
+  );
   const handleStatusMessagesMetaChange = useCallback((meta: { dirty: boolean; hasValidationErrors: boolean }) => {
     setStatusMessagesMeta(meta);
   }, []);
@@ -1444,13 +1495,50 @@ export function App() {
               setSettingsFeedbackKind("error");
               return;
             }
-            let messageTemplatesSaved = false;
+            const statusKeysChanged =
+              hasUnsavedChanges && statusUpdateSettingsChanged(baselineValues, fieldValues);
+            const messagesDirty = statusMessagesMeta.dirty;
+            const needsBackfillPrompt = statusKeysChanged || messagesDirty;
+            let applyScope: NfoBackfillApplyScope | undefined;
             try {
-              /* Persist field-backed settings (incl. PLACEHOLDER_STATUS_PROJECTION_MODE) before saving templates +
-               * enqueueing nfo_refresh jobs. Otherwise workers can run with stale projection mode while message
-               * cache already has the new line.request — yielding summary-style titles and new plot brackets. */
+              if (needsBackfillPrompt) {
+                const modalCopy =
+                  statusKeysChanged && messagesDirty
+                    ? {
+                        title: "Apply changes to existing placeholders",
+                        description:
+                          "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
+                      }
+                    : statusKeysChanged
+                      ? {
+                          title: "Apply status & poster changes",
+                          description:
+                            "Choose when updates to placeholder status visibility, projection targets, or poster overlays should affect existing placeholders.",
+                        }
+                      : {
+                          title: "Apply template changes",
+                          description:
+                            "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.",
+                        };
+                const chosen = await requestNfoBackfillApplyScopeChoice(modalCopy);
+                if (chosen === null) {
+                  setSettingsFeedback("");
+                  setSettingsFeedbackKind("");
+                  return;
+                }
+                applyScope = chosen;
+              }
+
+              /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
-                const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
+                const settingsBackfillScope =
+                  statusKeysChanged && !messagesDirty ? applyScope : undefined;
+                const result = await saveSettings(
+                  buildPersistableSettingsValues(fieldValues, settingsPayload),
+                  false,
+                  undefined,
+                  settingsBackfillScope,
+                );
                 if (!result.ok) {
                   const first = Object.entries(result.errors || {})[0];
                   setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
@@ -1459,25 +1547,17 @@ export function App() {
                 }
                 setBaselineValues(fieldValues);
                 const restartKeys = result.restart_required_keys || [];
-                const baseMsg =
+                let baseMsg =
                   restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.";
-                if (statusMessagesMeta.dirty && statusMessagesSaveRef.current) {
-                  try {
-                    await statusMessagesSaveRef.current();
-                    messageTemplatesSaved = true;
-                    setSettingsFeedback(`${baseMsg} Message templates saved.`);
-                  } catch (err: unknown) {
-                    const code =
-                      err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-                    if (code === "MESSAGES_SAVE_CANCELLED") {
-                      setSettingsFeedback("");
-                      setSettingsFeedbackKind("");
-                      return;
-                    }
-                    setSettingsFeedback(err instanceof Error ? err.message : "Message templates save failed");
-                    setSettingsFeedbackKind("error");
-                    return;
+                if (settingsBackfillScope && (result.nfo_backfill?.enqueued || result.nfo_backfill_keys_changed?.length)) {
+                  baseMsg += " Library backfill queued.";
+                }
+                if (messagesDirty && statusMessagesSaveRef.current) {
+                  await statusMessagesSaveRef.current(applyScope);
+                  if (applyScope === "now" || applyScope === "next_full_sync") {
+                    baseMsg += statusKeysChanged ? "" : " Library backfill queued.";
                   }
+                  setSettingsFeedback(`${baseMsg} Message templates saved.`);
                 } else {
                   setSettingsFeedback(baseMsg);
                 }
@@ -1486,30 +1566,23 @@ export function App() {
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
                 setOnboardingVisible(!payload.status.setup_complete);
-              } else if (statusMessagesMeta.dirty && statusMessagesSaveRef.current) {
-                try {
-                  await statusMessagesSaveRef.current();
-                  messageTemplatesSaved = true;
-                } catch (err: unknown) {
-                  const code =
-                    err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-                  if (code === "MESSAGES_SAVE_CANCELLED") {
-                    setSettingsFeedback("");
-                    setSettingsFeedbackKind("");
-                    return;
-                  }
-                  setSettingsFeedback(err instanceof Error ? err.message : "Message templates save failed");
-                  setSettingsFeedbackKind("error");
-                  return;
-                }
+              } else if (messagesDirty && statusMessagesSaveRef.current) {
+                await statusMessagesSaveRef.current(applyScope);
                 setSettingsFeedback("Message templates saved and applied.");
                 setSettingsFeedbackKind("success");
               } else {
                 setSettingsFeedback("");
                 setSettingsFeedbackKind("");
               }
-            } catch (e: unknown) {
-              setSettingsFeedback(e instanceof Error ? e.message : "Save failed");
+            } catch (err: unknown) {
+              const code =
+                err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
+              if (code === "MESSAGES_SAVE_CANCELLED") {
+                setSettingsFeedback("");
+                setSettingsFeedbackKind("");
+                return;
+              }
+              setSettingsFeedback(err instanceof Error ? err.message : "Save failed");
               setSettingsFeedbackKind("error");
             }
           }}
@@ -2016,6 +2089,22 @@ export function App() {
           <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
           <Route path="*" element={null} />
         </Routes>
+
+        {nfoBackfillScopeModal ? (
+          <NfoBackfillApplyScopeModal
+            placeholderCount={nfoBackfillScopeModal.placeholderCount}
+            alreadyPending={nfoBackfillScopeModal.pending}
+            saving={false}
+            title={nfoBackfillScopeModal.title}
+            description={nfoBackfillScopeModal.description}
+            onCancel={() => {
+              nfoBackfillScopeModal.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
+            }}
+            onConfirm={(scope) => nfoBackfillScopeModal.resolve(scope)}
+            brand={brand}
+            themeMode={themeMode}
+          />
+        ) : null}
       </div>
   );
 }
@@ -4549,6 +4638,110 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
 
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
 const PLAYBACK_MODE_VALUES = new Set(["match", "primary", "secondary", "both"]);
+const SHARED_PLACEHOLDER_CLEANUP_VALUES = new Set(["protect_siblings", "any_instance_has_file"]);
+
+const SHARED_PLACEHOLDER_CLEANUP_HELP_RADARR: Record<string, string> = {
+  protect_siblings:
+    "When two Radarr instances share the same movie folder, placeholder files stay until no configured instance still needs them—even if the other Radarr already imported a real file.",
+  any_instance_has_file:
+    "Once any Radarr instance has a real file for this movie, other instances will not recreate placeholders on sync, and stale placeholder files are removed from disk.",
+};
+
+const SHARED_PLACEHOLDER_CLEANUP_HELP_SONARR: Record<string, string> = {
+  protect_siblings:
+    "When two Sonarr instances share the same series folder, placeholder files stay until no configured instance still needs them—even if the other Sonarr already imported real episodes.",
+  any_instance_has_file:
+    "Once any Sonarr instance has a real file for this episode, other instances will not recreate placeholders on sync, and stale placeholder files are removed from disk.",
+};
+
+function sharedPlaceholderCleanupMode(values: FieldValueMap, key: string): string {
+  const raw = String(values[key] ?? "protect_siblings").trim().toLowerCase();
+  return SHARED_PLACEHOLDER_CLEANUP_VALUES.has(raw) ? raw : "protect_siblings";
+}
+
+function SharedPlaceholderCleanupColumn(props: {
+  label: string;
+  settingKey: string;
+  enabled: boolean;
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+  helpByMode: Record<string, string>;
+  disabledHint: string;
+}) {
+  const mode = sharedPlaceholderCleanupMode(props.values, props.settingKey);
+  const focus = getBrandFocusClass(props.brand, props.themeMode);
+  return (
+    <div className="min-w-0">
+      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">{props.label}</label>
+      <select
+        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${props.enabled ? "" : "opacity-60 cursor-not-allowed"}`}
+        value={props.enabled ? mode : "na"}
+        onChange={(e) => props.onChange(props.settingKey, e.target.value)}
+        disabled={!props.enabled}
+      >
+        {props.enabled ? (
+          <>
+            <option value="protect_siblings">Protect until no instance needs placeholder (recommended)</option>
+            <option value="any_instance_has_file">Remove when any instance has a real file</option>
+          </>
+        ) : (
+          <option value="na">Not applicable, no second instance set up.</option>
+        )}
+      </select>
+      <p className="ui-field-description-compact mt-1.5">
+        {props.enabled ? (props.helpByMode[mode] ?? props.helpByMode.protect_siblings) : props.disabledHint}
+      </p>
+    </div>
+  );
+}
+
+function SharedPlaceholderCleanupPanel(props: {
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+  canUseRadarrSecondaryBehavior: boolean;
+  canUseSonarrSecondaryBehavior: boolean;
+}) {
+  return (
+    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+      <div className="text-center">
+        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">
+          Shared Placeholder Cleanup
+        </h3>
+        <p className="ui-field-description mx-auto max-w-2xl">
+          When two instances share the same on-disk folder, choose when placeholder files are removed from disk.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+        <SharedPlaceholderCleanupColumn
+          label="Movies (Radarr)"
+          settingKey="RADARR_SHARED_PLACEHOLDER_CLEANUP"
+          enabled={props.canUseRadarrSecondaryBehavior}
+          values={props.values}
+          onChange={props.onChange}
+          brand={props.brand}
+          themeMode={props.themeMode}
+          helpByMode={SHARED_PLACEHOLDER_CLEANUP_HELP_RADARR}
+          disabledHint="Not applicable, no second Radarr instance set up."
+        />
+        <SharedPlaceholderCleanupColumn
+          label="TV Shows (Sonarr)"
+          settingKey="SONARR_SHARED_PLACEHOLDER_CLEANUP"
+          enabled={props.canUseSonarrSecondaryBehavior}
+          values={props.values}
+          onChange={props.onChange}
+          brand={props.brand}
+          themeMode={props.themeMode}
+          helpByMode={SHARED_PLACEHOLDER_CLEANUP_HELP_SONARR}
+          disabledHint="Not applicable, no second Sonarr instance set up."
+        />
+      </div>
+    </div>
+  );
+}
 
 function buildPersistableSettingsValues(values: FieldValueMap, payload: SettingsPayload | null) {
   const allowedKeys = new Set<string>(
@@ -4588,10 +4781,36 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
     cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = false;
   }
 
+  const radarrSharedCleanupMode = String(cleaned.RADARR_SHARED_PLACEHOLDER_CLEANUP ?? "protect_siblings")
+    .trim()
+    .toLowerCase();
+  const sonarrSharedCleanupMode = String(cleaned.SONARR_SHARED_PLACEHOLDER_CLEANUP ?? "protect_siblings")
+    .trim()
+    .toLowerCase();
+  cleaned.RADARR_SHARED_PLACEHOLDER_CLEANUP = hasRadarrSecondary
+    ? SHARED_PLACEHOLDER_CLEANUP_VALUES.has(radarrSharedCleanupMode)
+      ? radarrSharedCleanupMode
+      : "protect_siblings"
+    : "protect_siblings";
+  cleaned.SONARR_SHARED_PLACEHOLDER_CLEANUP = hasSonarrSecondary
+    ? SHARED_PLACEHOLDER_CLEANUP_VALUES.has(sonarrSharedCleanupMode)
+      ? sonarrSharedCleanupMode
+      : "protect_siblings"
+    : "protect_siblings";
+
   if ("PLACEHOLDER_STATUS_PROJECTION_MODE" in cleaned) {
     const pm = String(cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary").trim().toLowerCase();
     if (pm === "off" || !["summary", "title", "both"].includes(pm)) {
       cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE = "summary";
+    }
+  }
+
+  if ("PLACEHOLDER_POSTER_OVERLAY_MODE" in cleaned) {
+    const om = String(cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE ?? "off").trim().toLowerCase();
+    if (!["off", "grayscale", "top_banner", "corner_logo"].includes(om)) {
+      cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = "off";
+    } else {
+      cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = om;
     }
   }
 
@@ -5073,8 +5292,15 @@ function ArrInstancesEditor(props: {
             <p className="text-[16px] text-slate-300 leading-relaxed">
               This removes &quot;{disconnectDialog.label}&quot; from Placeholdarr. When you save settings, movies or
               shows that were tracked only on this instance will be marked removed and their placeholders cleaned up.
-              If another configured {disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists
-              the same title (same TMDB or TVDB id), shared on-disk placeholders are left in place.
+              {String(
+                props.values[
+                  disconnectDialog.arrType === "radarr"
+                    ? "RADARR_SHARED_PLACEHOLDER_CLEANUP"
+                    : "SONARR_SHARED_PLACEHOLDER_CLEANUP"
+                ] ?? "protect_siblings",
+              ).trim().toLowerCase() === "any_instance_has_file"
+                ? ` If another configured ${disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists the same title, shared on-disk placeholders may still be removed when that instance has a real file (see Shared placeholder cleanup).`
+                : ` If another configured ${disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists the same title (same TMDB or TVDB id), shared on-disk placeholders are left in place.`}
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <button
@@ -5913,7 +6139,7 @@ function SettingsPanel(props: {
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
-  registerStatusMessagesSaveFlow: (fn: (() => Promise<void>) | null) => void;
+  registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
@@ -6340,8 +6566,15 @@ function SettingsPanel(props: {
                     />
                   </div>
 
-                  {/* Placeholder search mode dropdowns */}
-                  <div className="px-6 pb-5">
+                  <div className="px-6 pb-5 space-y-4">
+                    <SharedPlaceholderCleanupPanel
+                      values={props.values}
+                      onChange={props.onValueChange}
+                      brand={props.brand}
+                      themeMode={props.themeMode}
+                      canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                      canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                    />
                     <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
                         <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
@@ -6398,7 +6631,7 @@ function SettingsPanel(props: {
                         </div>
                       </div>
                     </div>
-                    <div className={`mt-3 ${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+                    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
                         <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
                         <p className="ui-field-description mx-auto max-w-2xl">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
@@ -6628,7 +6861,17 @@ type StatusMessagePayload = {
   pending_full_sync_backfill?: boolean;
 };
 
-type ApplyScope = "now" | "next_full_sync" | "future";
+type ApplyScope = NfoBackfillApplyScope;
+
+const NFO_BACKFILL_SETTING_KEYS = [
+  "PLACEHOLDER_STATUS_UPDATES",
+  "PLACEHOLDER_STATUS_PROJECTION_MODE",
+  "PLACEHOLDER_POSTER_OVERLAY_MODE",
+] as const;
+
+function statusUpdateSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return NFO_BACKFILL_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
+}
 
 const STATUS_MESSAGE_GROUP_ORDER = [
   "Title Suffix",
@@ -6883,7 +7126,7 @@ function StatusMessagesPanel(props: {
   projectionDraft?: StatusProjectionDraft;
   embedded?: boolean;
   onMetaChange?: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
-  registerSaveFlow?: (fn: (() => Promise<void>) | null) => void;
+  registerSaveFlow?: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const [payload, setPayload] = useState<StatusMessagePayload | null>(null);
@@ -7023,27 +7266,34 @@ function StatusMessagesPanel(props: {
     setValues((prev) => ({ ...prev, [key]: defaults[key] ?? "" }));
   }
 
-  const runMessagesSaveFlow = useCallback(async () => {
-    if (!payload) return;
-    if (!dirty) return;
-    if (hasValidationErrors) {
-      throw new Error("Fix status message template validation errors before saving.");
-    }
-    setFeedback(null);
-    let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
-    try {
-      data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
-    } catch {
-      data = { placeholder_count: 0, pending_full_sync_backfill: false };
-    }
-    await new Promise<void>((resolve, reject) => {
-      scopeFlowWaitersRef.current = { resolve, reject };
-      setScopeModal({
-        placeholderCount: Number(data?.placeholder_count ?? 0),
-        pending: !!data?.pending_full_sync_backfill,
-      });
-    });
-  }, [payload, dirty, hasValidationErrors]);
+  const runMessagesSaveFlow = useCallback(
+    async (preselectedScope?: ApplyScope) => {
+      if (!payload) return;
+      if (!dirty) return;
+      if (hasValidationErrors) {
+        throw new Error("Fix status message template validation errors before saving.");
+      }
+      let scope = preselectedScope;
+      if (!scope) {
+        setFeedback(null);
+        let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+        try {
+          data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+        } catch {
+          data = { placeholder_count: 0, pending_full_sync_backfill: false };
+        }
+        scope = await new Promise<ApplyScope>((resolve, reject) => {
+          scopeFlowWaitersRef.current = { resolve, reject };
+          setScopeModal({
+            placeholderCount: Number(data?.placeholder_count ?? 0),
+            pending: !!data?.pending_full_sync_backfill,
+          });
+        });
+      }
+      await handleSave(scope);
+    },
+    [payload, dirty, hasValidationErrors],
+  );
 
   useEffect(() => {
     if (!props.registerSaveFlow) return;
@@ -7431,7 +7681,7 @@ function StatusMessagesPanel(props: {
       )}
 
       {scopeModal && (
-        <StatusMessagesApplyScopeModal
+        <NfoBackfillApplyScopeModal
           placeholderCount={scopeModal.placeholderCount}
           alreadyPending={scopeModal.pending}
           saving={saving}
@@ -7469,10 +7719,12 @@ function StatusMessagesPanel(props: {
   return panelInner;
 }
 
-function StatusMessagesApplyScopeModal(props: {
+function NfoBackfillApplyScopeModal(props: {
   placeholderCount: number;
   alreadyPending: boolean;
   saving: boolean;
+  title?: string;
+  description?: string;
   onCancel: () => void;
   onConfirm: (scope: ApplyScope) => void;
   brand: Brand;
@@ -7491,9 +7743,12 @@ function StatusMessagesApplyScopeModal(props: {
     >
       <div className={`w-full max-w-xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] flex flex-col overflow-hidden`}>
         <div className="px-5 py-4 border-b border-[#424753]/30">
-          <h3 className="text-[18px] font-bold text-white font-headline">Apply template changes</h3>
+          <h3 className="text-[18px] font-bold text-white font-headline">
+            {props.title ?? "Apply template changes"}
+          </h3>
           <p className="ui-field-description mt-1">
-            Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.
+            {props.description ??
+              "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates."}
           </p>
         </div>
         <div className="px-5 py-4 space-y-3">
@@ -8454,6 +8709,12 @@ function OnboardingWizard(props: {
         ? Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)
         : false;
       partial.PLAYBACK_FALLBACK_TIMEOUT_MINUTES = String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "").trim() || 30;
+      partial.RADARR_SHARED_PLACEHOLDER_CLEANUP = canUseRadarrSecondaryBehavior
+        ? sharedPlaceholderCleanupMode(props.values, "RADARR_SHARED_PLACEHOLDER_CLEANUP")
+        : "protect_siblings";
+      partial.SONARR_SHARED_PLACEHOLDER_CLEANUP = canUseSonarrSecondaryBehavior
+        ? sharedPlaceholderCleanupMode(props.values, "SONARR_SHARED_PLACEHOLDER_CLEANUP")
+        : "protect_siblings";
     }
 
     return partial;
@@ -8777,6 +9038,14 @@ function OnboardingWizard(props: {
                 onSecondaryTestStatusChange={(arrType, ok) => {
                   setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                 }}
+              />
+              <SharedPlaceholderCleanupPanel
+                values={props.values}
+                onChange={props.onChange}
+                brand={props.brand}
+                themeMode={wizardUiTheme}
+                canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
               />
               <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                 <div className="text-center">

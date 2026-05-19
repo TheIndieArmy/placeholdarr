@@ -19,6 +19,15 @@ from services.postgres.models import AppConfig
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
 
+# Settings that rewrite existing placeholder NFOs / composited art when changed.
+NFO_BACKFILL_SETTING_KEYS = frozenset(
+    {
+        "PLACEHOLDER_STATUS_UPDATES",
+        "PLACEHOLDER_STATUS_PROJECTION_MODE",
+        "PLACEHOLDER_POSTER_OVERLAY_MODE",
+    }
+)
+
 # Keys removed from SETTINGS_SCHEMA but still accepted on save (no-op) for older clients / partial payloads.
 REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
     {
@@ -30,6 +39,7 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
         "QUEUE_MONITOR_REFRESH_MONITORED_DOWNLOADS_INTERVAL_SECONDS",
         "QUEUE_MONITOR_REFRESH_STAGGER_SECONDS",
         "LOG_LEVEL",
+        "MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP",
     }
 )
 
@@ -340,6 +350,26 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "PLACEHOLDER_POSTER_OVERLAY_MODE",
+            {
+                "section": "Status Updates",
+                "label": "Placeholder poster overlay",
+                "description": (
+                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Writes composited poster.jpg "
+                    "(and episode thumb images) beside placeholders and points NFOs at local files. "
+                    "Requires a library path refresh after changes."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "off", "label": "Off (remote poster URLs only)"},
+                    {"value": "grayscale", "label": "Grayscale poster"},
+                    {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
+                    {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
+                ],
+            },
+        ),
+        (
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
@@ -420,6 +450,54 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "int",
                 "min": 1,
                 "restart_required": False,
+            },
+        ),
+        (
+            "RADARR_SHARED_PLACEHOLDER_CLEANUP",
+            {
+                "section": "ARR Integrations",
+                "label": "Radarr shared placeholder cleanup",
+                "description": (
+                    "When two Radarr instances track the same movie (same TMDB id), controls shared placeholder "
+                    "behavior: keep placeholders until no instance still needs them, or stop creating/recreating "
+                    "placeholders on other instances once any instance has a real file (and remove stale on-disk files)."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {
+                        "value": "protect_siblings",
+                        "label": "Protect until no instance needs placeholder (recommended)",
+                    },
+                    {
+                        "value": "any_instance_has_file",
+                        "label": "Remove when any instance has a real file",
+                    },
+                ],
+            },
+        ),
+        (
+            "SONARR_SHARED_PLACEHOLDER_CLEANUP",
+            {
+                "section": "ARR Integrations",
+                "label": "Sonarr shared placeholder cleanup",
+                "description": (
+                    "When two Sonarr instances track the same episode (same TVDB id and season/episode), controls "
+                    "shared placeholder behavior: keep placeholders until no instance still needs them, or stop "
+                    "creating/recreating placeholders on other instances once any instance has a real file."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {
+                        "value": "protect_siblings",
+                        "label": "Protect until no instance needs placeholder (recommended)",
+                    },
+                    {
+                        "value": "any_instance_has_file",
+                        "label": "Remove when any instance has a real file",
+                    },
+                ],
             },
         ),
         (
@@ -802,6 +880,11 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped.setdefault(meta["section"], [])
             row = _get_row(session, key)
             effective_value = getattr(settings, key, row.value if row else None)
+            if key in {"RADARR_SHARED_PLACEHOLDER_CLEANUP", "SONARR_SHARED_PLACEHOLDER_CLEANUP"}:
+                if _is_blank(effective_value):
+                    legacy_row = _get_row(session, "MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP")
+                    if legacy_row and not _is_blank(legacy_row.value):
+                        effective_value = legacy_row.value
             if key == "PLACEHOLDER_STATUS_PROJECTION_MODE":
                 ev = str(effective_value or "summary").strip().lower()
                 if ev == "off" or ev not in {"summary", "title", "both"}:
@@ -838,7 +921,14 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             session.close()
 
 
-def save_settings(values: dict[str, Any], session=None, partial: bool = False, context: dict[str, Any] | None = None) -> dict[str, Any]:
+def save_settings(
+    values: dict[str, Any],
+    session=None,
+    partial: bool = False,
+    context: dict[str, Any] | None = None,
+    *,
+    apply_scope: str | None = None,
+) -> dict[str, Any]:
     owns_session = session is None
     session = session or get_session()
     errors: dict[str, str] = {}
@@ -908,6 +998,16 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                         errors[section_key] = "must be a positive integer"
                 except Exception:
                     errors[section_key] = "must be a positive integer"
+
+        nfo_backfill_keys_changed: list[str] = []
+        for key in NFO_BACKFILL_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                nfo_backfill_keys_changed.append(key)
 
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
@@ -1068,6 +1168,16 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
                     extra={"emoji_type": "error"},
                 )
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
+        backfill_summary: dict[str, Any] | None = None
+        if nfo_backfill_keys_changed and apply_scope:
+            from services.source_of_truth.template_backfill import execute_nfo_backfill_apply_scope
+
+            backfill_summary = execute_nfo_backfill_apply_scope(str(apply_scope))
+            logger.info(
+                f"NFO backfill after settings save scope={apply_scope} keys={nfo_backfill_keys_changed}",
+                extra={"emoji_type": "processing"},
+            )
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -1083,6 +1193,8 @@ def save_settings(values: dict[str, Any], session=None, partial: bool = False, c
             "restart_required_keys": restart_required_keys,
             "status": get_onboarding_status(session=session),
             "arr_instance_reconcile": arr_instance_reconcile,
+            "nfo_backfill_keys_changed": nfo_backfill_keys_changed,
+            "nfo_backfill": backfill_summary,
         }
     except Exception as exc:
         session.rollback()

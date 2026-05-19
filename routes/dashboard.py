@@ -3518,7 +3518,20 @@ async def settings_save(request: Request):
     )
     before_arr_fingerprint = _arr_endpoint_fingerprint()
     was_setup_complete = bool(get_onboarding_status().get("setup_complete"))
-    result = save_settings(values, partial=partial, context=context if isinstance(context, dict) else None)
+    apply_scope_raw = payload.get("apply_scope") if isinstance(payload, dict) else None
+    apply_scope = (
+        str(apply_scope_raw).strip().lower()
+        if isinstance(apply_scope_raw, str) and str(apply_scope_raw).strip()
+        else None
+    )
+    if apply_scope not in {None, "now", "next_full_sync", "future"}:
+        apply_scope = None
+    result = save_settings(
+        values,
+        partial=partial,
+        context=context if isinstance(context, dict) else None,
+        apply_scope=apply_scope,
+    )
     after_arr_fingerprint = _arr_endpoint_fingerprint()
     arr_endpoints_changed = before_arr_fingerprint != after_arr_fingerprint
     if result.get("ok") and not partial and not was_setup_complete and bool((result.get("status") or {}).get("setup_complete")):

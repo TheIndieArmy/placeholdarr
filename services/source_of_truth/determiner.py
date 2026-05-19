@@ -11,6 +11,12 @@ from core.logger import logger
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
+from services.source_of_truth.arr_share_guard import (
+    expand_determination_entity_ids,
+    shared_placeholder_suppresses_creation,
+    sibling_episode_has_file,
+    sibling_movie_has_file,
+)
 from services.source_of_truth.filesystem import configured_roots
 
 
@@ -93,7 +99,27 @@ def _episode_placeholder_path_drifts(session, episode: Episode) -> bool:
     return bool(exp and cur and exp != cur)
 
 
+def _apply_sibling_placeholder_suppression(
+    *,
+    arr_type: str,
+    base: str,
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+    sibling_has_file: bool,
+) -> str:
+    """When aggressive shared mode is on, sibling has_file suppresses local placeholder need."""
+    if not shared_placeholder_suppresses_creation(arr_type):
+        return base
+    if has_file or is_deleted or not sibling_has_file:
+        return base
+    if has_placeholder:
+        return DETERMINATION_OBSOLETE
+    return DETERMINATION_NOT_NEEDED
+
+
 def _resolve_movie_determination(
+    session,
     movie: Movie,
     *,
     placeholders_enabled: bool,
@@ -101,10 +127,13 @@ def _resolve_movie_determination(
     now_date: date,
 ) -> tuple[str, bool]:
     """Return (determination_value, path_drift_detected)."""
+    has_placeholder = bool(getattr(movie, 'has_placeholder', False))
+    has_file = bool(getattr(movie, 'has_file', False))
+    is_deleted = bool(getattr(movie, 'is_deleted', False))
     base = _compute_determination(
-        bool(getattr(movie, 'has_placeholder', False)),
-        bool(getattr(movie, 'has_file', False)),
-        bool(getattr(movie, 'is_deleted', False)),
+        has_placeholder,
+        has_file,
+        is_deleted,
         target_date=_preferred_movie_release_date(movie),
         release_status=getattr(movie, 'radarr_release_status', None),
         lookahead_days=lookahead_days,
@@ -113,6 +142,14 @@ def _resolve_movie_determination(
     )
     if _movie_placeholder_path_drifts(movie):
         return DETERMINATION_OBSOLETE, True
+    base = _apply_sibling_placeholder_suppression(
+        arr_type="radarr",
+        base=base,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_has_file=sibling_movie_has_file(session, movie),
+    )
     return base, False
 
 
@@ -141,10 +178,13 @@ def _resolve_episode_determination(
         if max_known_order is not None and max_known_order > (int(season_number), int(episode_number)):
             target_date = now_date
 
+    has_placeholder = bool(getattr(episode, 'has_placeholder', False))
+    has_file = bool(getattr(episode, 'has_file', False))
+    is_deleted = bool(getattr(episode, 'is_deleted', False))
     base = _compute_determination(
-        bool(getattr(episode, 'has_placeholder', False)),
-        bool(getattr(episode, 'has_file', False)),
-        bool(getattr(episode, 'is_deleted', False)),
+        has_placeholder,
+        has_file,
+        is_deleted,
         target_date=target_date,
         lookahead_days=lookahead_days,
         placeholders_enabled=placeholders_enabled,
@@ -152,6 +192,14 @@ def _resolve_episode_determination(
     )
     if _episode_placeholder_path_drifts(session, episode):
         return DETERMINATION_OBSOLETE, True
+    base = _apply_sibling_placeholder_suppression(
+        arr_type="sonarr",
+        base=base,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_has_file=sibling_episode_has_file(session, episode),
+    )
     return base, False
 
 
@@ -619,6 +667,7 @@ def run_determination_pass() -> dict:
         )
         for idx, movie in enumerate(movies, start=1):
             value, path_drift = _resolve_movie_determination(
+                session,
                 movie,
                 placeholders_enabled=placeholders_enabled,
                 lookahead_days=lookahead_days,
@@ -785,6 +834,50 @@ def run_determination_pass() -> dict:
         session.close()
 
 
+def run_determination_for_entities_with_siblings_in_session(
+    session,
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+) -> dict:
+    """Scoped determination including catalog siblings on other configured instances."""
+    expanded_movies, expanded_episodes = expand_determination_entity_ids(
+        session,
+        movie_ids=movie_ids,
+        episode_ids=episode_ids,
+    )
+    return run_determination_for_entities_in_session(
+        session,
+        movie_ids=expanded_movies,
+        episode_ids=expanded_episodes,
+    )
+
+
+def run_determination_for_entities_with_siblings(
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+) -> dict:
+    """Committing wrapper for scoped determination with sibling expansion."""
+    session = get_session()
+    try:
+        stats = run_determination_for_entities_with_siblings_in_session(
+            session,
+            movie_ids=movie_ids,
+            episode_ids=episode_ids,
+        )
+        session.commit()
+        logger.info(
+            f"Determination · scoped_with_siblings · complete: {stats}",
+            extra={'emoji_type': 'success'},
+        )
+        return stats
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Determination · scoped_with_siblings · failed: {e}", extra={'emoji_type': 'error'})
+        raise
+    finally:
+        session.close()
+
+
 def run_determination_for_entities(
     movie_ids: list[int] | None = None,
     episode_ids: list[int] | None = None,
@@ -861,6 +954,7 @@ def run_determination_for_entities_in_session(
 
     for idx, movie in enumerate(movies, start=1):
         value, path_drift = _resolve_movie_determination(
+            session,
             movie,
             placeholders_enabled=placeholders_enabled,
             lookahead_days=lookahead_days,

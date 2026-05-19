@@ -12,6 +12,7 @@ from services.placeholder_activity_log import (
     outcome_reason_and_status_from_materialization,
 )
 from services.postgres.models import Episode, Job, Movie, Placeholder, Season, Series
+from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
 from services.source_of_truth.determiner import run_determination_for_entities_in_session
 from services.source_of_truth.materializer import run_materialization_for_entities
 from services.source_of_truth.materializer import run_materialization_for_entities_in_session
@@ -254,15 +255,19 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             session.add(movie_row)
             session.flush()
             logger.debug(f"Finalize: Movie flushed, running determination for movie_id={entity_id}", extra={'emoji_type': 'debug'})
-            determination = run_determination_for_entities_in_session(
+            mat_movie_ids, _mat_episode_ids = expand_determination_entity_ids(
                 session,
                 movie_ids=[entity_id],
+            )
+            determination = run_determination_for_entities_in_session(
+                session,
+                movie_ids=mat_movie_ids,
             )
             logger.debug(f"Finalize: Determination complete for movie_id={entity_id}: {determination}", extra={'emoji_type': 'debug'})
             logger.debug(f"Finalize: Running in-session materialization for movie_id={entity_id}", extra={'emoji_type': 'debug'})
             materialization = run_materialization_for_entities_in_session(
                 session,
-                movie_ids=[entity_id],
+                movie_ids=mat_movie_ids,
                 observation_source="event_movie_imported_grace_finalize",
             )
             logger.debug(f"Finalize: Materialization complete for movie_id={entity_id}: {materialization}", extra={'emoji_type': 'debug'})
@@ -313,15 +318,19 @@ def process_import_grace_job(session, job: Job) -> dict[str, Any]:
             session.add(episode_row)
             session.flush()
             logger.debug(f"Finalize: Episode flushed, running determination for episode_id={entity_id}", extra={'emoji_type': 'debug'})
-            determination = run_determination_for_entities_in_session(
+            _mat_movie_ids, mat_episode_ids = expand_determination_entity_ids(
                 session,
                 episode_ids=[entity_id],
+            )
+            determination = run_determination_for_entities_in_session(
+                session,
+                episode_ids=mat_episode_ids,
             )
             logger.debug(f"Finalize: Determination complete for episode_id={entity_id}: {determination}", extra={'emoji_type': 'debug'})
             logger.debug(f"Finalize: Running in-session materialization for episode_id={entity_id}", extra={'emoji_type': 'debug'})
             materialization = run_materialization_for_entities_in_session(
                 session,
-                episode_ids=[entity_id],
+                episode_ids=mat_episode_ids,
                 observation_source="event_episode_imported_grace_finalize",
             )
             logger.debug(f"Finalize: Materialization complete for episode_id={entity_id}: {materialization}", extra={'emoji_type': 'debug'})

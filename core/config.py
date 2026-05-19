@@ -241,6 +241,21 @@ class Settings(BaseSettings):
     
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
+    # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:
+    # - protect_siblings: keep placeholder files until no sibling instance still needs them (default)
+    # - any_instance_has_file: delete on obsolete cleanup when this instance has a real file
+    RADARR_SHARED_PLACEHOLDER_CLEANUP: Literal["protect_siblings", "any_instance_has_file"] = (
+        os.getenv("RADARR_SHARED_PLACEHOLDER_CLEANUP", "protect_siblings").split("#")[0].strip()
+        or "protect_siblings"
+    )
+    SONARR_SHARED_PLACEHOLDER_CLEANUP: Literal["protect_siblings", "any_instance_has_file"] = (
+        os.getenv("SONARR_SHARED_PLACEHOLDER_CLEANUP", "protect_siblings").split("#")[0].strip()
+        or "protect_siblings"
+    )
+    # Composited local poster art for placeholders in Plex/Jellyfin/Emby (off = remote URLs in NFO only).
+    PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
+        os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
+    )
 
     # Calendar-based status update settings
     # CALENDAR_LOOKAHEAD_DAYS: how many days into the future to create/show "Coming Soon" placeholders

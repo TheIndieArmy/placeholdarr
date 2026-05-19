@@ -361,42 +361,9 @@ def _get_pending_backfill_flag() -> bool:
 
 
 def _execute_apply_scope(apply_scope: str) -> dict[str, Any]:
-    """Materialize the user's chosen apply policy after a successful template save.
+    from services.source_of_truth.template_backfill import execute_nfo_backfill_apply_scope
 
-    - ``now``: enqueue an immediate template-backfill job covering all active placeholders.
-    - ``next_full_sync``: set the pending flag so the next scheduled or manual full sync runs the job.
-    - ``future``: clear any pending flag and do nothing retroactive.
-    """
-    try:
-        from services.source_of_truth.template_backfill import (
-            clear_pending_template_backfill,
-            enqueue_template_backfill,
-            mark_template_backfill_pending,
-        )
-    except Exception as exc:
-        logger.warning(
-            f"Template backfill module unavailable: {exc}",
-            extra={"emoji_type": "warning"},
-        )
-        return {"scope": apply_scope, "ok": False, "reason": "backfill_module_unavailable"}
-
-    if apply_scope == "now":
-        out = enqueue_template_backfill()
-        out.setdefault("scope", "now")
-        try:
-            clear_pending_template_backfill()
-        except Exception:
-            pass
-        return out
-
-    if apply_scope == "next_full_sync":
-        out = mark_template_backfill_pending()
-        out.setdefault("scope", "next_full_sync")
-        return out
-
-    out = clear_pending_template_backfill()
-    out.setdefault("scope", "future")
-    return out
+    return execute_nfo_backfill_apply_scope(apply_scope)
 
 
 @router.get("/templates/apply_estimate")

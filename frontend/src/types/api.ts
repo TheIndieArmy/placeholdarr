@@ -395,6 +395,8 @@ export interface SaveSettingsResponse {
   saved_keys?: string[];
   restart_required_keys?: string[];
   status?: SettingsStatus;
+  nfo_backfill_keys_changed?: string[];
+  nfo_backfill?: { ok?: boolean; enqueued?: boolean; scope?: string };
 }
 
 export interface IntegrationTestResponse {
