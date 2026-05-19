@@ -340,9 +340,9 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Lookahead",
                 "label": "Suppress search when aired targets are already monitored",
                 "description": (
-                    "When enabled, playback will not trigger a Sonarr search if every non-future lookahead "
-                    "episode is already monitored. Unmonitored future episodes can still be marked monitored "
-                    "without searching."
+                    "When enabled, playback will not trigger a Sonarr search if every non-future target episode "
+                    "(for your search mode) is already monitored. Unmonitored future episodes can still be marked "
+                    "monitored without searching. Ignored when Monitor only on playback is enabled."
                 ),
                 "type": "bool",
                 "restart_required": False,
@@ -354,9 +354,25 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Lookahead",
                 "label": "Do not search future episodes on playback",
                 "description": (
-                    "When enabled, lookahead episodes that have not aired yet (or unknown air dates outside "
+                    "When enabled, playback target episodes that have not aired yet (or unknown air dates outside "
                     "the calendar window) are marked monitored if needed but are excluded from Sonarr searches. "
-                    "When some aired episodes still need acquisition, only those episodes are searched."
+                    "When some aired episodes still need acquisition, only those episodes are searched. "
+                    "Applies to Episode, Season, and Series search modes."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+            {
+                "section": "Lookahead",
+                "label": "Monitor only on playback (no search)",
+                "description": (
+                    "When enabled, playback never triggers Sonarr searches or SEARCHING placeholder status. "
+                    "Unmonitored target episodes (per your search mode) are still marked monitored in Sonarr. "
+                    "Use with Episode, Season, or Series search mode; takes priority over the other playback "
+                    "search suppression options."
                 ),
                 "type": "bool",
                 "restart_required": False,

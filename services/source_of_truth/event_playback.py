@@ -1161,6 +1161,10 @@ def _suppress_search_for_future_episodes() -> bool:
     return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", False))
 
 
+def _playback_monitor_only_no_search() -> bool:
+    return bool(getattr(settings, "PLAYBACK_MONITOR_ONLY_NO_SEARCH", False))
+
+
 def _partition_playback_targets(
     session,
     series_row: Series,
@@ -1308,6 +1312,11 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     to_monitor: list[Episode] = partition["to_monitor"]
     search_eligible: list[Episode] = partition["search_eligible"]
     monitor_ids: list[int] = partition["monitor_ids"]
+    skipped_search_reason = partition.get("skipped_search_reason")
+
+    if _playback_monitor_only_no_search():
+        search_eligible = []
+        skipped_search_reason = "monitor_only_no_search"
 
     monitor_result = {"updated": 0, "failed": 0}
     if monitor_ids:
@@ -1317,16 +1326,18 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             session.add(ep)
 
     mode = _play_mode()
-    search_triggered = _trigger_playback_sonarr_search_for_row(
-        session,
-        series_row=series_row,
-        targets=targets,
-        search_eligible=search_eligible,
-        mode=mode,
-        target_meta=target_meta,
-        base_url=base_url,
-        api_key=api_key,
-    )
+    search_triggered = False
+    if search_eligible:
+        search_triggered = _trigger_playback_sonarr_search_for_row(
+            session,
+            series_row=series_row,
+            targets=targets,
+            search_eligible=search_eligible,
+            mode=mode,
+            target_meta=target_meta,
+            base_url=base_url,
+            api_key=api_key,
+        )
 
     reached_end_marked = False
     if bool(target_meta.get('reached_end')) and getattr(series_row, 'sonarrid', None):
@@ -1359,7 +1370,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'future_targets': int(partition.get('future_count') or 0),
         'search_targets': len(search_eligible),
         'monitor_only_targets': max(0, len(targets) - len(search_eligible)),
-        'skipped_search_reason': partition.get('skipped_search_reason'),
+        'skipped_search_reason': skipped_search_reason,
         'monitor_updated': int(monitor_result.get('updated', 0)),
         'monitor_failed': int(monitor_result.get('failed', 0)),
         'search_triggered': bool(search_triggered),
