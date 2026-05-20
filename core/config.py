@@ -279,6 +279,8 @@ class Settings(BaseSettings):
     # When True, skip creating placeholders for Radarr/Sonarr-monitored titles and remove
     # stale placeholders when monitoring is learned during sync (import flow unchanged).
     SKIP_PLACEHOLDERS_WHEN_MONITORED: bool = False
+    # TV only: when skip-for-monitored is on, treat the whole show as skip if Sonarr series is monitored.
+    SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED: bool = False
 
     # Postgres
     DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()

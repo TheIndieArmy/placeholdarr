@@ -257,6 +257,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED",
+            {
+                "section": "Library sync",
+                "label": "TV: skip when series is monitored (Sonarr)",
+                "description": (
+                    "When the series is monitored in Sonarr, do not create placeholders for any episode in that show—even "
+                    "when individual seasons or episodes are unmonitored. Movies are unchanged."
+                ),
+                "type": "bool",
+                "restart_required": False,
+                "depends_on": "SKIP_PLACEHOLDERS_WHEN_MONITORED",
+                "nested": True,
+            },
+        ),
+        (
             "CALENDAR_LOOKAHEAD_DAYS",
             {
                 "section": "Calendar",
@@ -970,6 +985,10 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             }
             if meta["type"] == "choice":
                 entry["options"] = list(meta.get("options") or [])
+            if meta.get("depends_on"):
+                entry["depends_on"] = str(meta["depends_on"])
+            if meta.get("nested"):
+                entry["nested"] = True
             grouped[meta["section"]].append(entry)
         return {
             "status": get_onboarding_status(session=session),

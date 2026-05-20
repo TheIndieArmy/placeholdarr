@@ -114,9 +114,37 @@ def _skip_placeholders_when_monitored_enabled() -> bool:
     return bool(getattr(settings, "SKIP_PLACEHOLDERS_WHEN_MONITORED", False))
 
 
-def _entity_is_arr_monitored(entity, *, media_type: str) -> bool:
+def _skip_placeholders_when_series_monitored_enabled() -> bool:
+    return bool(
+        _skip_placeholders_when_monitored_enabled()
+        and getattr(settings, "SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED", False)
+    )
+
+
+def _series_monitored_for_episode(session, episode: Episode) -> bool:
+    """True when the parent series row is monitored in Sonarr."""
+    season_id = getattr(episode, "season_id", None)
+    if season_id is None:
+        return False
+    season = session.query(Season).filter(Season.id == int(season_id)).first()
+    if not season or getattr(season, "series_id", None) is None:
+        return False
+    series = session.query(Series).filter(Series.id == int(season.series_id)).first()
+    if not series:
+        return False
+    return bool(getattr(series, "sonarr_monitored", False))
+
+
+def _entity_is_arr_monitored(
+    entity,
+    *,
+    media_type: str,
+    series_monitored: bool = False,
+) -> bool:
     if media_type == "movie":
         return bool(getattr(entity, "radarr_monitored", False))
+    if series_monitored and _skip_placeholders_when_series_monitored_enabled():
+        return True
     return bool(getattr(entity, "sonarr_monitored", False))
 
 
@@ -160,11 +188,16 @@ def _apply_monitored_placeholder_suppression(
     is_deleted: bool,
     movie_id: int | None = None,
     episode_id: int | None = None,
+    series_monitored: bool = False,
 ) -> str:
     """When enabled, monitored titles without a real file do not need placeholders."""
     if not _skip_placeholders_when_monitored_enabled():
         return base
-    if has_file or is_deleted or not _entity_is_arr_monitored(entity, media_type=media_type):
+    if has_file or is_deleted or not _entity_is_arr_monitored(
+        entity,
+        media_type=media_type,
+        series_monitored=series_monitored,
+    ):
         return base
     if has_placeholder and _placeholder_actively_acquiring(
         session,
@@ -280,6 +313,11 @@ def _resolve_episode_determination(
     )
     if _episode_placeholder_path_drifts(session, episode):
         return DETERMINATION_OBSOLETE, True
+    series_monitored = (
+        _series_monitored_for_episode(session, episode)
+        if _skip_placeholders_when_series_monitored_enabled()
+        else False
+    )
     base = _apply_monitored_placeholder_suppression(
         session,
         base=base,
@@ -289,6 +327,7 @@ def _resolve_episode_determination(
         has_file=has_file,
         is_deleted=is_deleted,
         episode_id=int(episode.id) if getattr(episode, "id", None) is not None else None,
+        series_monitored=series_monitored,
     )
     base = _apply_sibling_placeholder_suppression(
         arr_type="sonarr",

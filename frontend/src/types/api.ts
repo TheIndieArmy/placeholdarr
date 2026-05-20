@@ -368,6 +368,10 @@ export interface SettingsField {
   saved_value?: unknown;
   has_saved_value?: boolean;
   options?: SettingsFieldOption[];
+  /** When set, the field is only interactive if the parent setting is enabled (bool). */
+  depends_on?: string;
+  /** Indent under the parent setting in the settings UI. */
+  nested?: boolean;
 }
 
 export interface SettingsSection {

@@ -162,6 +162,16 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   "Advanced": "advanced",
 };
 
+function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+  const parentKey = field.depends_on;
+  if (!parentKey) return false;
+  return !Boolean(values[parentKey]);
+}
+
+function settingsFieldIsNested(field: SettingsField): boolean {
+  return Boolean(field.nested);
+}
+
 /** Virtual settings sections backed by their own API endpoint, not `/api/settings/current`. */
 const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
 
@@ -6344,10 +6354,16 @@ function SettingsPanel(props: {
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
+    const parentDisabled = settingsFieldParentDisabled(field, props.values);
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const isNested = settingsFieldIsNested(field);
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
 
     return (
-      <div key={field.key} className={`px-6 py-5 ${rowMuted ? "opacity-50" : ""}`}>
+      <div
+        key={field.key}
+        className={`${isNested ? "pl-10 pr-6 py-4 ml-6 border-l border-[#424753]/40" : "px-6 py-5"} ${rowMuted ? "opacity-50" : ""}`}
+      >
         <div className="flex items-start gap-3 mb-2">
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
@@ -6380,18 +6396,22 @@ function SettingsPanel(props: {
         </div>
 
         {field.type === "bool" ? (
-          <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-            <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
+          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <div
+              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
               style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => props.onValueChange(field.key, !Boolean(value))}>
+              onClick={() => {
+                if (!interactionLocked) props.onValueChange(field.key, !Boolean(value));
+              }}
+            >
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className="text-[16px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(value) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
-            disabled={projectionFieldLocked}
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
+            disabled={interactionLocked}
             value={(() => {
               const raw = String(value ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
@@ -6406,9 +6426,9 @@ function SettingsPanel(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-              disabled={lookaheadRangeLocked}
+              disabled={interactionLocked}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
               onChange={e => props.onValueChange(field.key, e.target.value)}
@@ -8842,9 +8862,15 @@ function OnboardingWizard(props: {
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
+    const parentDisabled = settingsFieldParentDisabled(field, props.values);
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const isNested = settingsFieldIsNested(field);
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
     return (
-      <div key={field.key} className={rowMuted ? "opacity-50" : undefined}>
+      <div
+        key={field.key}
+        className={`${isNested ? "pl-8 ml-4 border-l border-[#424753]/40" : ""} ${rowMuted ? "opacity-50" : ""}`}
+      >
         <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
           (field.key === "STARTUP_SYNC_MODE" ? (
@@ -8864,18 +8890,22 @@ function OnboardingWizard(props: {
           </p>
         ) : null}
         {field.type === "bool" ? (
-          <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-            <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"}`}
+          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <div
+              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
               style={Boolean(props.values[field.key]) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => props.onChange(field.key, !Boolean(props.values[field.key]))}>
+              onClick={() => {
+                if (!interactionLocked) props.onChange(field.key, !Boolean(props.values[field.key]));
+              }}
+            >
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values[field.key]) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className="text-[16px] text-slate-300">{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
-            disabled={projectionFieldLocked}
+            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
+            disabled={interactionLocked}
             value={(() => {
               const raw = String(props.values[field.key] ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
@@ -8890,9 +8920,9 @@ function OnboardingWizard(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
+              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-              disabled={lookaheadRangeLocked}
+              disabled={interactionLocked}
               value={String(props.values[field.key] ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
               onChange={(e) => props.onChange(field.key, e.target.value)}
