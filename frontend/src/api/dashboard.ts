@@ -23,6 +23,10 @@ export function getActivity(limit = 100): Promise<ActivityRow[]> {
   return fetchJson<ActivityRow[]>(`/api/activity?limit=${limit}`);
 }
 
+export function getActivityOperations(limit = 100): Promise<ActivityRow[]> {
+  return fetchJson<ActivityRow[]>(`/api/activity/operations?limit=${limit}`);
+}
+
 export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivityRow[]> {
   return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
 }

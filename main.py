@@ -506,6 +506,9 @@ app = FastAPI(lifespan=lifespan)
 from routes.dashboard import router as dashboard_router
 app.include_router(dashboard_router)
 
+from routes.tasks import router as tasks_router
+app.include_router(tasks_router)
+
 # Customizable status message templates
 from routes.messages import router as messages_router
 app.include_router(messages_router)

@@ -1,5 +1,42 @@
 export type DashboardTab = "activity" | "library" | "calendar" | "errors" | "logs" | "settings" | "setup";
 
+export type ActivitySubPage = "placeholders" | "tasks" | "operations";
+
+export type TaskKey = "full_sync" | "lite_sync" | "calendar_only";
+
+export interface ScheduledTaskRow {
+  task_key: TaskKey;
+  label: string;
+  enabled: boolean;
+  interval_hours: number;
+  interval_label: string;
+  next_run: string | null;
+  running: boolean;
+  last_run: string | null;
+  last_duration_seconds: number | null;
+  last_status: string | null;
+}
+
+export interface TaskRunRow {
+  id: number;
+  task_key: TaskKey | string;
+  task_label: string;
+  trigger: string;
+  status: string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  error_message?: string | null;
+  skip_reason?: string | null;
+  details?: string | null;
+  progress?: ActivityRow["progress"];
+}
+
+export interface TaskRunStatusResponse {
+  working: boolean;
+  run: TaskRunRow | null;
+}
+
 export interface StatsResponse {
   movies: {
     total: number;

@@ -17,6 +17,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Added
 
+- **Task schedule persistence**: Next run times for full/lite sync are stored in AppConfig and survive restarts; manual and scheduled completions reset the interval from completion time (no boot-time stagger).
+- **Task queue progress**: Task history rows expand to show the same phased progress sections as the former System Activity sync cards.
+- **Activity — Tasks, Operations, Placeholders**: Activity splits into three sidebar pages (Placeholders default, Tasks, Operations). Tasks shows *arr-style scheduled full/lite sync (defaults weekly / 12h), run history with startup/manual/scheduled triggers, and Run now confirmations. Lite sync copy notes it includes calendar date refresh and Coming Soon updates. Operations is the live event feed without scheduled sync noise.
 - **Poster overlay style previews**: Settings → Status Updates includes an expandable **Overlay style examples** panel (sample TMDB poster with grayscale, top banner, and corner-badge treatments) so you can compare modes before triggering NFO refresh.
 - **Onboarding — Look and feel**: New wizard step for placeholder status updates, projection mode, and poster overlay mode (with the same overlay previews). Defaults: status updates **All**, project status into **Both**.
 

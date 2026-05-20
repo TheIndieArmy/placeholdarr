@@ -188,7 +188,9 @@ class Settings(BaseSettings):
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
     STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = "live"
-    FULL_SYNC_INTERVAL_HOURS: int = 0
+    FULL_SYNC_INTERVAL_HOURS: int = 168
+    # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
+    LITE_SYNC_INTERVAL_HOURS: int = 12
 
     # Library Paths
     LIBRARY_ROOT: str = ""
@@ -268,7 +270,7 @@ class Settings(BaseSettings):
     CALENDAR_LOOKAHEAD_DAYS: int = 30
     # Calendar scheduler cadence (independent from full sync).
     # <= 0 disables independent calendar scheduler.
-    CALENDAR_SYNC_INTERVAL_HOURS: int = 12
+    CALENDAR_SYNC_INTERVAL_HOURS: int = 0
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True
     # Deprecated: always treated as "coming_soon" (Coming Soon dummy when set, else standard dummy). Retained for env/back-compat only.

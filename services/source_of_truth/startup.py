@@ -1046,6 +1046,14 @@ def run_startup_source_of_truth() -> dict:
         startup_sync_stats: dict = {}
         determination_stats: dict = {}
         materialization_stats: dict = {}
+        startup_task_run_id: int | None = None
+        if selected_mode in ("full", "lite"):
+            from services.task_run_history import begin_task_run
+
+            startup_task_run_id = begin_task_run(
+                task_key="full_sync" if selected_mode == "full" else "lite_sync",
+                trigger="startup",
+            )
 
         logger.info(
             f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
@@ -1053,14 +1061,25 @@ def run_startup_source_of_truth() -> dict:
         )
         started_at = datetime.now(timezone.utc)
 
+        def _emit_startup_progress(**kwargs) -> None:
+            if startup_task_run_id is not None:
+                from services.source_of_truth.scheduled_sync import record_task_sync_progress
+
+                record_task_sync_progress(
+                    task_run_id=startup_task_run_id,
+                    mode=selected_mode,
+                    started_at=started_at,
+                    **kwargs,
+                )
+            else:
+                record_startup_sync_progress(mode=selected_mode, started_at=started_at, **kwargs)
+
         if selected_mode == 'full':
             startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
         elif selected_mode == 'lite':
             # Activity UI + operators otherwise see nothing until this phase finishes (can be many minutes:
             # full /movie or /series catalogs per instance, then per-item targeted sync).
-            record_startup_sync_progress(
-                mode=selected_mode,
-                started_at=started_at,
+            _emit_startup_progress(
                 current_phase="discovery",
                 startup_sync_stats=None,
                 determination_stats=None,
@@ -1125,9 +1144,7 @@ def run_startup_source_of_truth() -> dict:
                 extra={'emoji_type': 'info'},
             )
         else:
-            record_startup_sync_progress(
-                mode=selected_mode,
-                started_at=started_at,
+            _emit_startup_progress(
                 # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
                 current_phase="fs_scan",
                 startup_sync_stats=startup_sync_stats,
@@ -1156,9 +1173,7 @@ def run_startup_source_of_truth() -> dict:
             extra={'emoji_type': 'info'},
         )
         phase_started = time.monotonic()
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
+        _emit_startup_progress(
             current_phase='determination',
             startup_sync_stats=startup_sync_stats,
             determination_stats=None,
@@ -1197,9 +1212,7 @@ def run_startup_source_of_truth() -> dict:
             f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
         )
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
+        _emit_startup_progress(
             current_phase='materialization',
             startup_sync_stats=startup_sync_stats,
             determination_stats=determination_stats,
@@ -1279,9 +1292,7 @@ def run_startup_source_of_truth() -> dict:
             )
             request_nfo_backfill_stats = {"ok": False, "error": str(exc)}
 
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
+        _emit_startup_progress(
             current_phase='complete',
             startup_sync_stats=startup_sync_stats,
             determination_stats=determination_stats,
@@ -1338,24 +1349,56 @@ def run_startup_source_of_truth() -> dict:
                 extra={'emoji_type': 'debug'},
                 exc_info=True,
             )
+        if startup_task_run_id is not None:
+            from services.task_run_history import finish_task_run
+
+            finish_task_run(startup_task_run_id, status="done", summary=result)
         return result
     except Exception as exc:
         try:
             from services.startup_sync_activity import record_startup_sync_progress
 
-            record_startup_sync_progress(
-                mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
-                started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
-                current_phase='failed',
-                startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
-                determination_stats=determination_stats if 'determination_stats' in locals() else None,
-                materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
-                completed_at=datetime.now(timezone.utc),
-                failed=True,
-                error_message=str(exc),
-            )
+            if startup_task_run_id is not None:
+                from services.source_of_truth.scheduled_sync import record_task_sync_progress
+
+                record_task_sync_progress(
+                    task_run_id=startup_task_run_id,
+                    mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                    started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
+                    current_phase='failed',
+                    startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
+                    determination_stats=determination_stats if 'determination_stats' in locals() else None,
+                    materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
+                    completed_at=datetime.now(timezone.utc),
+                    failed=True,
+                    error_message=str(exc),
+                )
+            else:
+                record_startup_sync_progress(
+                    mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                    started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
+                    current_phase='failed',
+                    startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
+                    determination_stats=determination_stats if 'determination_stats' in locals() else None,
+                    materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
+                    completed_at=datetime.now(timezone.utc),
+                    failed=True,
+                    error_message=str(exc),
+                )
         except Exception:
             pass
+        if "startup_task_run_id" in locals() and startup_task_run_id is not None:
+            try:
+                from services.task_run_history import finish_task_run
+
+                finish_task_run(
+                    startup_task_run_id,
+                    status="failed",
+                    summary=result if "result" in locals() else None,
+                    error_message=str(exc),
+                )
+            except Exception:
+                pass
         raise
     finally:
         settings.REFRESH_TRIGGER_SUPPRESSED = False

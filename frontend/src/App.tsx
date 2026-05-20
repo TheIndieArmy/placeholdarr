@@ -14,6 +14,7 @@ import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getActivity,
+  getActivityOperations,
   getCalendar,
   getErrors,
   getLibrary,
@@ -28,6 +29,7 @@ import {
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
+import { getTasksHistory, getTasksScheduled, getTasksStatus, postTaskRun } from "./api/tasks";
 import { fetchJson, postJson } from "./api/client";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -41,7 +43,10 @@ import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticToke
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
+  ActivitySubPage,
   ArrInstanceOpenLink,
+  ScheduledTaskRow,
+  TaskRunRow,
   CalendarDay,
   CalendarResponse,
   DashboardTab,
@@ -61,6 +66,10 @@ const REFRESH_MS_VISIBLE = 5000;
 const REFRESH_MS_HIDDEN = 30000;
 const LIBRARY_MOVIES_PATH = "/library";
 const LIBRARY_TV_PATH = "/library/tv";
+const ACTIVITY_PLACEHOLDERS_PATH = "/activity/placeholders";
+const ACTIVITY_TASKS_PATH = "/activity/tasks";
+const ACTIVITY_OPERATIONS_PATH = "/activity/operations";
+const ACTIVITY_DEFAULT_PATH = ACTIVITY_PLACEHOLDERS_PATH;
 const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
 const LIBRARY_TV_FILTER_KEY = "placeholdarr:library-shelf-filter:tv";
 /** Legacy single key (pre split movies / TV pages). */
@@ -548,9 +557,11 @@ export function App() {
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
-  const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
-  const activityTabRef = useRef<"system" | "placeholders">(activityTab);
-  activityTabRef.current = activityTab;
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTaskRow[]>([]);
+  const [taskHistory, setTaskHistory] = useState<TaskRunRow[]>([]);
+  const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
+  const [taskRunPending, setTaskRunPending] = useState(false);
+  const [taskRunError, setTaskRunError] = useState<string | null>(null);
 
   const [libraryShelfFilters, setLibraryShelfFilters] = useState<{ movies: LibraryShelfFilter; tv: LibraryShelfFilter }>(() => {
     const migrated = readLegacyLibraryFilterMigration();
@@ -620,6 +631,9 @@ export function App() {
   const libraryDigestRef = useRef<string>("");
 
   const currentTab = getTabFromPath(location.pathname);
+  const activitySubPage = getActivitySubPage(location.pathname);
+  const activitySubPageRef = useRef<ActivitySubPage>(activitySubPage);
+  activitySubPageRef.current = activitySubPage;
   const onboardingPreviewRoute = isActiveSetupPreviewRoute(location.pathname, location.search);
   const onboardingPreviewRouteRef = useRef(false);
   onboardingPreviewRouteRef.current = onboardingPreviewRoute;
@@ -641,7 +655,7 @@ export function App() {
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
   /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
   const defaultLandingPath =
-    setupStatus != null && setupStatus.setup_complete ? "/activity" : "/setup";
+    setupStatus != null && setupStatus.setup_complete ? ACTIVITY_DEFAULT_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
@@ -836,13 +850,21 @@ export function App() {
         if (!stopped) setDashboardRefreshing(true);
 
         if (currentTab === "activity") {
-          await loadStats(stopped, setStats);
-          if (activityTabRef.current === "system") {
-            const rows = await getActivity(100);
+          const sub = activitySubPageRef.current;
+          if (sub === "tasks") {
+            await loadStats(stopped, setStats);
+            const [sched, hist] = await Promise.all([getTasksScheduled(), getTasksHistory(50)]);
+            if (!stopped) {
+              setScheduledTasks(sched.tasks || []);
+              setTaskHistory(hist || []);
+            }
+          } else if (sub === "operations") {
+            const rows = await getActivityOperations(100);
             if (!stopped) setActivity(rows || []);
+          } else {
+            const placeholderRows = await getPlaceholderActivity(100);
+            if (!stopped) setPlaceholderActivity(placeholderRows || []);
           }
-          const placeholderRows = await getPlaceholderActivity(100);
-          if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
           const searchTrim = titleSearchRef.current.trim();
           const useSummary = searchTrim.length === 0;
@@ -922,23 +944,6 @@ export function App() {
       window.clearTimeout(timeoutId);
     };
   }, [calendarMonth, currentTab, logLevel, location.pathname, location.search]);
-
-  /** When switching back to System Activity, refresh the feed (poll may have skipped it on Placeholder History). */
-  useEffect(() => {
-    if (currentTab !== "activity" || activityTab !== "system") return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const rows = await getActivity(100);
-        if (!cancelled) setActivity(rows || []);
-      } catch {
-        /* ignore — next poll will retry */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activityTab, currentTab]);
 
   /** When the user searches from the header, load full rows (overview) so overview matches work. */
   useEffect(() => {
@@ -1421,7 +1426,45 @@ export function App() {
       }
     };
 
-    if (currentTab === "activity") return <ActivityPanel rows={activity} placeholderRows={placeholderActivity} activityTab={activityTab} onActivityTabChange={setActivityTab} stats={stats} brand={brand} themeMode={themeMode} onOpenLibraryFilter={openLibraryWithFilter} />;
+    if (currentTab === "activity") {
+      if (location.pathname === "/activity" || location.pathname === "/activity/") {
+        return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
+      }
+      if (activitySubPage === "tasks") {
+        return (
+          <TasksPanel
+            scheduled={scheduledTasks}
+            history={taskHistory}
+            stats={stats}
+            brand={brand}
+            themeMode={themeMode}
+            onOpenLibraryFilter={openLibraryWithFilter}
+            onRequestRun={(kind) => {
+              setTaskRunError(null);
+              setTaskRunModal(kind);
+            }}
+          />
+        );
+      }
+      if (activitySubPage === "operations") {
+        return (
+          <ActivityPanel
+            mode="operations"
+            rows={activity}
+            brand={brand}
+            themeMode={themeMode}
+          />
+        );
+      }
+      return (
+        <ActivityPanel
+          mode="placeholders"
+          placeholderRows={placeholderActivity}
+          brand={brand}
+          themeMode={themeMode}
+        />
+      );
+    }
 
     if (currentTab === "library") {
       const shelf = libraryListShelf;
@@ -1642,7 +1685,7 @@ export function App() {
   if (setupRouteActive) {
     const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
     if (setupStatus?.setup_complete && !onboardingPreviewRoute) {
-      return <Navigate to="/activity" replace />;
+      return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
     }
     if (loading || !setupStatus || !settingsPayload) {
       return (
@@ -1678,7 +1721,7 @@ export function App() {
                 return testIntegrationConnection({ service, url, credential });
               }
         }
-        onExitPreview={onboardingPreviewRoute ? () => navigate("/activity", { replace: true }) : undefined}
+        onExitPreview={onboardingPreviewRoute ? () => navigate(ACTIVITY_DEFAULT_PATH, { replace: true }) : undefined}
         onSave={
           onboardingPreviewRoute
             ? undefined
@@ -1792,16 +1835,42 @@ export function App() {
               return (
                 <>
                   {isActive("/activity") ? (
-                    <button type="button" onClick={() => tryNavigate("/activity")} className={navActiveClass} style={navActiveStyle}>
+                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass} style={navActiveStyle}>
                       <span className="material-symbols-outlined">analytics</span>
                       <span>Activity</span>
                     </button>
                   ) : (
-                    <button type="button" onClick={() => tryNavigate("/activity")} className={navInactiveClass}>
+                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navInactiveClass}>
                       <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">analytics</span>
                       <span>Activity</span>
                     </button>
                   )}
+                  {currentTab === "activity" ? (
+                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                      {(
+                        [
+                          { label: "Placeholders", path: ACTIVITY_PLACEHOLDERS_PATH, icon: "history" },
+                          { label: "Tasks", path: ACTIVITY_TASKS_PATH, icon: "schedule" },
+                          { label: "Operations", path: ACTIVITY_OPERATIONS_PATH, icon: "bolt" },
+                        ] as const
+                      ).map(({ label, path, icon }) => {
+                        const isSubActive = location.pathname === path || location.pathname.startsWith(`${path}/`);
+                        return (
+                          <button
+                            key={path}
+                            type="button"
+                            onClick={() => tryNavigate(path)}
+                            className={subBase + (isSubActive ? subActiveClass : subInactiveClass)}
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                              {icon}
+                            </span>
+                            <span className="truncate">{label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
 
                   {librarySectionActive ? (
                     <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
@@ -2117,6 +2186,53 @@ export function App() {
           <Route path="*" element={null} />
         </Routes>
 
+        <TaskRunConfirmModals
+          modal={taskRunModal}
+          pending={taskRunPending}
+          error={taskRunError}
+          brand={brand}
+          themeMode={themeMode}
+          onClose={() => {
+            if (!taskRunPending) setTaskRunModal(null);
+          }}
+          onConfirmFull={async () => {
+            setTaskRunPending(true);
+            setTaskRunError(null);
+            try {
+              await postTaskRun("full_sync");
+              setTaskRunModal(null);
+            } catch (e) {
+              setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
+            } finally {
+              setTaskRunPending(false);
+            }
+          }}
+          onConfirmLite={async () => {
+            setTaskRunPending(true);
+            setTaskRunError(null);
+            try {
+              await postTaskRun("lite_sync");
+              setTaskRunModal(null);
+            } catch (e) {
+              setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
+            } finally {
+              setTaskRunPending(false);
+            }
+          }}
+          onConfirmCalendarOnly={async () => {
+            setTaskRunPending(true);
+            setTaskRunError(null);
+            try {
+              await postTaskRun("calendar_only");
+              setTaskRunModal(null);
+            } catch (e) {
+              setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
+            } finally {
+              setTaskRunPending(false);
+            }
+          }}
+        />
+
         {nfoBackfillScopeModal ? (
           <NfoBackfillApplyScopeModal
             placeholderCount={nfoBackfillScopeModal.placeholderCount}
@@ -2193,20 +2309,17 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
 }
 
 function ActivityPanel(props: {
-  rows: ActivityRow[];
+  mode: "operations" | "placeholders";
+  rows?: ActivityRow[];
   placeholderRows?: any[];
-  activityTab?: "system" | "placeholders";
-  onActivityTabChange?: (tab: "system" | "placeholders") => void;
-  stats: StatsResponse | null;
   brand: Brand;
   themeMode: ThemeMode;
-  onOpenLibraryFilter?: (f: LibraryFilter) => void;
 }) {
-  const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, accent);
   const isLight = props.themeMode === "light";
-  const tab = props.activityTab || "system";
+  const tab = props.mode === "placeholders" ? "placeholders" : "system";
+  const rows = props.rows || [];
   const panelShellStyle: React.CSSProperties | undefined = isLight
     ? {
         borderColor: semantic.glassBorder,
@@ -2220,9 +2333,10 @@ function ActivityPanel(props: {
   const rowKey = (row: ActivityRow, idx: number) => `${row.type}-${String((row as any).id ?? row.time ?? idx)}`;
 
   useEffect(() => {
+    if (props.mode !== "operations") return;
     setExpandedRows((prev) => {
       const next = { ...prev };
-      props.rows.forEach((row, idx) => {
+      rows.forEach((row, idx) => {
         const jt = String((row as any).job_type || "");
         if (jt !== "full_sync_progress" && jt !== "queue_monitor_batch") {
           return;
@@ -2237,32 +2351,34 @@ function ActivityPanel(props: {
       });
       return next;
     });
-  }, [props.rows]);
+  }, [props.mode, rows]);
 
-  // Check if there are any failures
-  const failedCount = props.rows.filter(r => r.status === "FAILED").length;
+  const failedCount = rows.filter(r => r.status === "FAILED").length;
   const hasFailures = failedCount > 0;
-
-  // For placeholder tab: count active vs deleted
   const createdCount = placeholderRows.filter(r => r.action === "Created").length;
   const deletedCount = placeholderRows.filter(r => r.action === "Deleted").length;
 
   return (
     <div>
-      {/* Status pill */}
+      {props.mode === "operations" ? (
       <div className="flex items-center gap-2 mb-4">
-        <div className={`w-2 h-2 rounded-full ${tab === "system" && hasFailures ? "bg-red-500" : "bg-green-500"}`} />
+        <div className={`w-2 h-2 rounded-full ${hasFailures ? "bg-red-500" : "bg-green-500"}`} />
         <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
-          {tab === "system"
-            ? hasFailures
-              ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
-              : "System Online"
-            : `${createdCount} Created • ${deletedCount} Deleted`}
+          {hasFailures
+            ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
+            : "System Online"}
         </span>
       </div>
+      ) : (
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-2 h-2 rounded-full bg-green-500" />
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
+          {`${createdCount} Created • ${deletedCount} Deleted`}
+        </span>
+      </div>
+      )}
 
-      {/* Alert banner if there are system failures */}
-      {tab === "system" && hasFailures && (
+      {props.mode === "operations" && hasFailures && (
         <div className="mb-6 p-4 rounded-lg border border-red-600/40 bg-red-900/20">
           <div className="flex items-start gap-3">
             <span className="material-symbols-outlined text-red-400 flex-shrink-0" style={{ fontSize: 20 }}>error</span>
@@ -2274,73 +2390,7 @@ function ActivityPanel(props: {
         </div>
       )}
 
-      {/* Top stat cards (shown on both system and placeholder tabs) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
-        <StatCard
-          accent={accent}
-          themeMode={props.themeMode}
-          title="Movies"
-          value={s?.movies.total}
-          sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
-          onClick={() => props.onOpenLibraryFilter?.("movie")}
-        />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
-      </div>
-
-      {/* Tab buttons */}
-      <div
-        className={`flex gap-2 mb-6 border-b pb-4 ${isLight ? "" : "border-[#424753]/30"}`}
-        style={isLight ? { borderBottomColor: semantic.borderSubtle } : undefined}
-      >
-        <button
-          type="button"
-          onClick={() => props.onActivityTabChange?.("system")}
-          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-[14px] font-headline uppercase tracking-wider transition-colors ${
-            tab === "system"
-              ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
-              : isLight
-                ? "text-slate-500 hover:text-slate-800"
-                : "text-slate-400 hover:text-slate-200"
-          }`}
-          style={
-            tab === "system"
-              ? {
-                  borderBottomColor: semantic.accent3,
-                  backgroundColor: alphaColor(semantic.accent2, isLight ? 0.12 : 0.16),
-                }
-              : undefined
-          }
-        >
-          System Activity
-        </button>
-        <button
-          type="button"
-          onClick={() => props.onActivityTabChange?.("placeholders")}
-          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-[14px] font-headline uppercase tracking-wider transition-colors ${
-            tab === "placeholders"
-              ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
-              : isLight
-                ? "text-slate-500 hover:text-slate-800"
-                : "text-slate-400 hover:text-slate-200"
-          }`}
-          style={
-            tab === "placeholders"
-              ? {
-                  borderBottomColor: semantic.accent3,
-                  backgroundColor: alphaColor(semantic.accent2, isLight ? 0.12 : 0.16),
-                }
-              : undefined
-          }
-        >
-          Placeholder History
-        </button>
-      </div>
-
-      {/* System Activity table */}
-      {tab === "system" && (
+      {props.mode === "operations" && (
         <div
           className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
           style={panelShellStyle}
@@ -2348,10 +2398,10 @@ function ActivityPanel(props: {
           <div className="flex justify-between items-start px-4 py-3 border-b border-[#424753]/30">
             <div>
               <h2 className="text-[20px] font-bold text-white font-headline">Recent Operations</h2>
-              <p className="text-[13px] text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
+              <p className="text-[13px] text-slate-400 mt-0.5">{rows.length} recent operations</p>
             </div>
           </div>
-          {!props.rows.length ? (
+          {!rows.length ? (
             <div className="p-10 text-center text-slate-500 text-[16px]">No recent activity.</div>
           ) : (
             <>
@@ -2375,7 +2425,7 @@ function ActivityPanel(props: {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#424753]/15">
-                  {props.rows.map((row, idx) => {
+                  {rows.map((row, idx) => {
                     const displayName = (row as any).display_name || row.event_type || row.job_type || "--";
                     const detailLine = (row as any).details || "";
                     const status = String(row.status || "").toLowerCase();
@@ -2568,15 +2618,14 @@ function ActivityPanel(props: {
               </table>
               </div>
               <div className="px-4 py-2 border-t border-[#424753]/20 text-[12px] text-slate-500 font-headline uppercase tracking-widest">
-                Showing {props.rows.length} items
+                Showing {rows.length} items
               </div>
             </>
           )}
         </div>
       )}
 
-      {/* Placeholder history table */}
-      {tab === "placeholders" && (
+      {props.mode === "placeholders" && (
         <div
           className={`rounded-xl overflow-hidden mb-6 border ${isLight ? "border-slate-200/90" : "border-[#424753]/40 bg-[#171c22]"}`}
           style={{
@@ -2797,32 +2846,347 @@ function ActivityPanel(props: {
         </div>
       )}
 
-      {/* Storage Progress (system tab only) */}
-      {tab === "system" && (
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
-          <div className="mb-4">
-            <span className="font-headline text-[14px] font-bold text-white uppercase tracking-widest">Storage Progress</span>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <div className="flex justify-between text-[12px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
-                <span>Movies on Disk</span><span>{s?.movies.downloaded ?? "--"} / {s?.movies.total ?? "--"}</span>
-              </div>
-              <div className="h-1.5 bg-[#252e3a] rounded-full">
-                <div className="h-full rounded-full" style={{ backgroundColor: accent.hex, width: s ? `${Math.min(100, (s.movies.downloaded / Math.max(s.movies.total, 1)) * 100).toFixed(0)}%` : "0%" }} />
-              </div>
+    </div>
+  );
+}
+
+function taskProgressStatusTokenClass(token: string): string {
+  const normalized = String(token || "").toLowerCase();
+  if (normalized === "done") return "text-green-300 bg-green-700/20 border-green-500/30";
+  if (normalized === "failed") return "text-red-300 bg-red-700/20 border-red-500/30";
+  if (normalized === "working") return "text-sky-300 bg-sky-700/20 border-sky-500/30";
+  if (normalized === "skipped") return "text-amber-300 bg-amber-700/20 border-amber-500/30";
+  return "text-slate-300 bg-slate-700/20 border-slate-500/30";
+}
+
+function TaskSyncProgressSections(props: { progress: ActivityRow["progress"] }) {
+  const sections = Array.isArray(props.progress?.sections) ? props.progress!.sections! : [];
+  if (!sections.length) return null;
+  return (
+    <div className="mt-2 mx-auto w-full max-w-[1100px] grid gap-2 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
+      {sections.map((section: any, sidx: number) => {
+        const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+        const sectionStatus = String(section?.status || "pending").toLowerCase();
+        const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped";
+        return (
+          <div key={`task-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[12px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
+              <span className={`rounded border px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider ${taskProgressStatusTokenClass(sectionStatus)}`}>
+                {String(section?.status || "pending")}
+              </span>
             </div>
-            <div>
-              <div className="flex justify-between text-[12px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
-                <span>Episodes on Disk</span><span>{s?.episodes.downloaded ?? "--"} / {s?.episodes.total ?? "--"}</span>
-              </div>
-              <div className="h-1.5 bg-[#252e3a] rounded-full">
-                <div className="h-full rounded-full" style={{ backgroundColor: accent.hex, width: s ? `${Math.min(100, (s.episodes.downloaded / Math.max(s.episodes.total, 1)) * 100).toFixed(0)}%` : "0%" }} />
-              </div>
+            <div className="space-y-0.5 text-[13px] text-slate-400">
+              {showMetrics ? (
+                metrics.map((metric: any, midx: number) => (
+                  <div key={`task-metric-${sidx}-${midx}`} className="flex justify-between gap-2">
+                    <span>{String(metric?.label || "Metric")}</span>
+                    <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sky-300/80">{sectionStatus === "working" ? "Running..." : "Waiting to start..."}</div>
+              )}
             </div>
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatTaskDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "--";
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function TasksPanel(props: {
+  scheduled: ScheduledTaskRow[];
+  history: TaskRunRow[];
+  stats: StatsResponse | null;
+  brand: Brand;
+  themeMode: ThemeMode;
+  onOpenLibraryFilter?: (f: LibraryFilter) => void;
+  onRequestRun: (kind: "full" | "lite") => void;
+}) {
+  const s = props.stats;
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  const isLight = props.themeMode === "light";
+  const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setHistoryExpanded((prev) => {
+      const next = { ...prev };
+      for (const run of props.history) {
+        const key = `task-run-${run.id}`;
+        const hasProgress = Array.isArray(run.progress?.sections) && run.progress!.sections!.length > 0;
+        if (!hasProgress) continue;
+        if (String(run.status).toUpperCase() === "WORKING" && next[key] === undefined) {
+          next[key] = true;
+        }
+      }
+      return next;
+    });
+  }, [props.history]);
+
+  const statusClass = (status: string | null | undefined) => {
+    const t = String(status || "").toUpperCase();
+    if (t === "DONE") return "text-green-400";
+    if (t === "FAILED") return "text-red-400";
+    if (t === "SKIPPED") return "text-amber-400";
+    if (t === "WORKING") return "text-sky-400";
+    return "text-slate-400";
+  };
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+        <StatCard
+          accent={accent}
+          themeMode={props.themeMode}
+          title="Movies"
+          value={s?.movies.total}
+          sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
+          onClick={() => props.onOpenLibraryFilter?.("movie")}
+        />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
+      </div>
+
+      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+        <div className="px-4 py-3 border-b border-[#424753]/30">
+          <h2 className="text-[20px] font-bold text-white font-headline">Scheduled</h2>
+          <p className="text-[13px] text-slate-400 mt-0.5">Recurring library maintenance</p>
         </div>
-      )}
+        <div className="overflow-x-auto">
+          <table className="min-w-[640px] w-full">
+            <thead>
+              <tr className="border-b border-[#424753]/20">
+                {["Name", "Interval", "Last execution", "Last duration", "Next execution", ""].map((h) => (
+                  <th key={h} className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#424753]/15">
+              {props.scheduled.map((task) => (
+                <tr key={task.task_key} className="hover:bg-[#1e2430]/40">
+                  <td className="px-3 py-3 text-[15px] text-slate-200 font-medium">
+                    {task.label}
+                    {task.task_key === "lite_sync" ? (
+                      <p className="text-[12px] text-slate-500 font-normal mt-0.5 max-w-md">
+                        Catalog diff plus calendar date refresh and Coming Soon status updates.
+                      </p>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400">{task.interval_label}</td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400 whitespace-nowrap">
+                    {task.last_run ? timeAgo(task.last_run) : "--"}
+                    {task.last_status ? (
+                      <span className={`ml-2 text-[11px] uppercase ${statusClass(task.last_status)}`}>{task.last_status}</span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400 font-mono">{formatTaskDuration(task.last_duration_seconds)}</td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400 whitespace-nowrap">
+                    {task.running ? <span className="text-sky-400">Running now</span> : task.next_run ? timeUntil(task.next_run) : task.enabled ? "--" : "Disabled"}
+                  </td>
+                  <td className="px-3 py-3 text-right">
+                    <button
+                      type="button"
+                      disabled={!task.enabled || task.running}
+                      onClick={() => props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite")}
+                      className="inline-flex items-center justify-center w-9 h-9 rounded-lg border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Run now"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 18 }}>refresh</span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+        <div className="px-4 py-3 border-b border-[#424753]/30">
+          <h2 className="text-[20px] font-bold text-white font-headline">Queue</h2>
+          <p className="text-[13px] text-slate-400 mt-0.5">
+            Recent task runs (scheduled, manual, and startup). Expand a row for phase details. Manual runs reset the next scheduled time.
+          </p>
+        </div>
+        {!props.history.length ? (
+          <div className="p-10 text-center text-slate-500">No task history yet.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[640px] w-full">
+              <thead>
+                <tr className="border-b border-[#424753]/20">
+                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status"].map((h) => (
+                    <th key={h} className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#424753]/15">
+                {props.history.map((run) => {
+                  const rowKey = `task-run-${run.id}`;
+                  const hasProgress = Array.isArray(run.progress?.sections) && run.progress!.sections!.length > 0;
+                  const isExpanded = !!historyExpanded[rowKey];
+                  return (
+                    <Fragment key={run.id}>
+                      <tr className="hover:bg-[#1e2430]/40">
+                        <td className="px-3 py-2 text-[14px] text-slate-200">
+                          <div className="flex items-start gap-2">
+                            {hasProgress ? (
+                              <button
+                                type="button"
+                                onClick={() => setHistoryExpanded((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))}
+                                className="mt-0.5 text-slate-400 hover:text-slate-200"
+                                aria-label={isExpanded ? "Collapse details" : "Expand details"}
+                              >
+                                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                                  {isExpanded ? "expand_less" : "expand_more"}
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="w-4" />
+                            )}
+                            <span>{run.task_label}</span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 capitalize">{run.trigger}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{timeAgo(run.started_at)}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{run.ended_at ? timeAgo(run.ended_at) : "--"}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">{formatTaskDuration(run.duration_seconds)}</td>
+                        <td className="px-3 py-2">
+                          <span className={`text-[12px] font-headline uppercase tracking-wider ${statusClass(run.status)}`}>
+                            {run.status}
+                          </span>
+                          {run.details ? (
+                            <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">{run.details}</p>
+                          ) : null}
+                          {run.skip_reason ? (
+                            <p className="text-[11px] text-slate-500 mt-0.5">{run.skip_reason}</p>
+                          ) : null}
+                          {run.error_message ? (
+                            <p className="text-[11px] text-red-300/80 mt-0.5">{run.error_message}</p>
+                          ) : null}
+                        </td>
+                      </tr>
+                      {hasProgress && isExpanded ? (
+                        <tr className="bg-[#1a2028]/60">
+                          <td colSpan={6} className="px-4 py-3">
+                            <TaskSyncProgressSections progress={run.progress} />
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TaskRunConfirmModals(props: {
+  modal: null | "full" | "lite";
+  pending: boolean;
+  error: string | null;
+  brand: Brand;
+  themeMode: ThemeMode;
+  onClose: () => void;
+  onConfirmFull: () => void;
+  onConfirmLite: () => void;
+  onConfirmCalendarOnly: () => void;
+}) {
+  if (!props.modal) return null;
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !props.pending) props.onClose();
+      }}
+    >
+      <div className={`w-full max-w-xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] flex flex-col overflow-hidden`}>
+        <div className="px-5 py-4 border-b border-[#424753]/30">
+          <h3 className="text-[18px] font-bold text-white font-headline">
+            {props.modal === "full" ? "Run full ARR sync now?" : "Run maintenance sync"}
+          </h3>
+          {props.modal === "full" ? (
+            <p className="ui-field-description mt-2 leading-relaxed">
+              Full sync pulls complete Radarr and Sonarr catalogs into Placeholdarr, then runs filesystem scan,
+              placeholder reconciliation, determination, materialization, and calendar status updates. Large libraries
+              can take a long time and use significant CPU, disk I/O, and ARR API quota.
+            </p>
+          ) : (
+            <p className="ui-field-description mt-2 leading-relaxed">
+              <strong className="text-slate-200">Lite sync</strong> checks ARR for catalog changes (targeted sync only),
+              then runs calendar date refresh and Coming Soon status updates. Scheduled lite sync always includes both.
+              <br />
+              <br />
+              <strong className="text-slate-200">Calendar only</strong> refreshes release dates from ARR calendar APIs and
+              updates placeholder statuses—no full catalog pull.
+            </p>
+          )}
+          {props.error ? <p className="text-[13px] text-red-400 mt-2">{props.error}</p> : null}
+        </div>
+        <div className="px-5 py-4 flex flex-wrap justify-end gap-3 border-t border-[#424753]/30">
+          <button
+            type="button"
+            disabled={props.pending}
+            onClick={props.onClose}
+            className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          {props.modal === "full" ? (
+            <button
+              type="button"
+              disabled={props.pending}
+              onClick={props.onConfirmFull}
+              className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+              style={{ backgroundColor: accent.hex }}
+            >
+              {props.pending ? "Starting…" : "Run full sync"}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={props.pending}
+                onClick={props.onConfirmCalendarOnly}
+                className="px-4 py-2 rounded-lg border border-[#424753]/50 text-[14px] font-headline uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
+              >
+                Calendar only
+              </button>
+              <button
+                type="button"
+                disabled={props.pending}
+                onClick={props.onConfirmLite}
+                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+                style={{ backgroundColor: accent.hex }}
+              >
+                {props.pending ? "Starting…" : "Run lite sync"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -9700,14 +10064,35 @@ function OnboardingWizard(props: {
     </>
   );
 }
+function getActivitySubPage(pathname: string): ActivitySubPage {
+  if (pathname === ACTIVITY_TASKS_PATH || pathname.startsWith(`${ACTIVITY_TASKS_PATH}/`)) return "tasks";
+  if (pathname === ACTIVITY_OPERATIONS_PATH || pathname.startsWith(`${ACTIVITY_OPERATIONS_PATH}/`)) return "operations";
+  return "placeholders";
+}
+
 function getTabFromPath(pathname: string): DashboardTab {
   if (pathname === "/setup" || pathname.startsWith("/setup/")) return "setup";
   if (pathname.startsWith("/library")) return "library";
+  if (pathname.startsWith("/activity")) return "activity";
   if (pathname.startsWith("/calendar")) return "calendar";
   if (pathname.startsWith("/errors")) return "errors";
   if (pathname.startsWith("/logs")) return "logs";
   if (pathname.startsWith("/settings")) return "settings";
   return "activity";
+}
+
+function timeUntil(iso: string | null): string {
+  if (!iso) return "--";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "--";
+  const diffMs = t - Date.now();
+  if (diffMs <= 0) return "now";
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `in ${mins} min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `in ${hours} hr`;
+  const days = Math.floor(hours / 24);
+  return `in ${days} day${days === 1 ? "" : "s"}`;
 }
 
 function getCurrentMonthToken() {

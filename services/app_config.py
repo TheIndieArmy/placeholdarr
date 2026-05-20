@@ -225,7 +225,22 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Library sync",
                 "label": "Scheduled full sync interval (hours)",
-                "description": "How often to schedule a full ARR/database reconciliation. Set to 0 to disable recurring full sync jobs.",
+                "description": "How often to schedule a full ARR/database reconciliation (default 168 = weekly). Set to 0 to disable recurring full sync jobs.",
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "LITE_SYNC_INTERVAL_HOURS",
+            {
+                "section": "Library sync",
+                "label": "Scheduled lite sync interval (hours)",
+                "description": (
+                    "How often to run lite sync: ARR catalog diff, targeted sync for changes, calendar date refresh, "
+                    "Coming Soon status updates, and scoped placeholder work. Default 12 hours. Set to 0 to disable. "
+                    "Includes calendar maintenance; a separate calendar interval is only used when lite sync is off."
+                ),
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
@@ -289,8 +304,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "CALENDAR_SYNC_INTERVAL_HOURS",
             {
                 "section": "Calendar",
-                "label": "Calendar sync interval (hours)",
-                "description": "How often the calendar/date refresh job runs. Set to 0 to disable this scheduler.",
+                "label": "Calendar sync interval (hours, legacy)",
+                "description": (
+                    "Only used when lite sync interval is 0. When lite sync is enabled, calendar date refresh and "
+                    "status updates run as part of lite sync instead. Set to 0 to disable."
+                ),
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
