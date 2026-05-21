@@ -43,6 +43,33 @@ from services.task_run_history import (
 TaskTrigger = Literal["scheduled", "manual", "startup"]
 
 
+def _placeholder_ids_for_entity_rows(
+    *,
+    movie_row_ids: list[int] | None = None,
+    episode_row_ids: list[int] | None = None,
+) -> list[int]:
+    from services.postgres.db import get_session
+    from services.postgres.models import Placeholder
+
+    mids = [int(x) for x in (movie_row_ids or []) if x is not None]
+    eids = [int(x) for x in (episode_row_ids or []) if x is not None]
+    if not mids and not eids:
+        return []
+
+    session = get_session()
+    try:
+        q = session.query(Placeholder.id).filter(Placeholder.has_placeholder == True)  # noqa: E712
+        if mids and eids:
+            q = q.filter((Placeholder.movie_id.in_(mids)) | (Placeholder.episode_id.in_(eids)))
+        elif mids:
+            q = q.filter(Placeholder.movie_id.in_(mids))
+        else:
+            q = q.filter(Placeholder.episode_id.in_(eids))
+        return [int(r[0]) for r in q.all() if r and r[0] is not None]
+    finally:
+        session.close()
+
+
 def _apply_schedule_after_success(task_key: str, trigger: TaskTrigger) -> None:
     """Manual and scheduled completions advance the persisted next-run clock."""
     if trigger not in ("scheduled", "manual"):
@@ -197,6 +224,16 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         completed_at = datetime.now(timezone.utc)
         finish_task_run(task_run_id, status="done", summary=result)
         _apply_schedule_after_success("full_sync", trigger)
+        try:
+            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
+
+            art_out = enqueue_placeholder_art_backfill_all(source=f"full_sync:{trigger}")
+            result["placeholder_art_backfill"] = art_out
+        except Exception as art_exc:
+            logger.warning(
+                f"Full sync art backfill enqueue failed: {art_exc}",
+                extra={"emoji_type": "warning"},
+            )
         return result
     except Exception as exc:
         logger.exception("Full sync failed run_id=%s", run_id)
@@ -356,6 +393,18 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
 
         result["calendar"] = run_calendar_phase()
         result["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+
+        try:
+            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
+
+            ph_ids = _placeholder_ids_for_entity_rows(
+                movie_row_ids=movie_row_ids,
+                episode_row_ids=episode_row_ids,
+            )
+            if ph_ids:
+                result["placeholder_art_refresh"] = enqueue_placeholder_art_refresh(ph_ids)
+        except Exception as art_exc:
+            logger.warning(f"Lite sync art refresh enqueue failed: {art_exc}", extra={"emoji_type": "warning"})
 
         if own_run:
             finish_task_run(task_run_id, status="done", summary=result)

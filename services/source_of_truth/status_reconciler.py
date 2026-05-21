@@ -16,6 +16,12 @@ from services.postgres.db import get_session
 from services.postgres.models import AppConfig, Episode, Movie, Placeholder, Job, Season, Series
 from services.media_servers.player_metadata_refresh import push_placeholder_batch_player_metadata
 from services.media_servers.refresh import refresh_all_sections
+from services.source_of_truth.placeholder_job_enqueue import (
+    enqueue_batched_placeholder_job,
+    job_placeholder_ids as _job_placeholder_ids,
+    normalize_placeholder_ids as _normalize_placeholder_ids,
+    set_job_placeholder_ids as _set_job_placeholder_ids,
+)
 
 
 NFO_REFRESH_JOB_TYPE = "nfo_refresh"
@@ -91,151 +97,10 @@ def _nfo_refresh_subject_summary(session, placeholders: list[Placeholder]) -> st
     return text
 
 
-def _normalize_placeholder_ids(placeholder_ids: list[int] | tuple[int, ...] | None) -> list[int]:
-    seen: set[int] = set()
-    normalized: list[int] = []
-    for value in placeholder_ids or []:
-        if value is None:
-            continue
-        pid = int(value)
-        if pid in seen:
-            continue
-        seen.add(pid)
-        normalized.append(pid)
-    return normalized
-
-
-def _job_placeholder_ids(job: Job) -> list[int]:
-    payload = job.payload if isinstance(job.payload, dict) else {}
-    return _normalize_placeholder_ids(payload.get("placeholder_ids") or [])
-
-
-def _set_job_placeholder_ids(job: Job, placeholder_ids: list[int]) -> None:
-    payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
-    payload["placeholder_ids"] = placeholder_ids
-    job.payload = payload
-
-
 def _job_player_metadata_refresh(job: Job) -> bool:
     payload = job.payload if isinstance(job.payload, dict) else {}
     return bool(payload.get("player_metadata_refresh", True))
 
-
-def _placeholder_player_merge_flag(placeholder_ids: list[int], by_id: dict[int, bool] | None) -> bool:
-    if not by_id:
-        return True
-    return any(bool(by_id.get(int(pid), True)) for pid in placeholder_ids)
-
-
-def _enqueue_batched_placeholder_job(
-    job_type: str,
-    placeholder_ids: list[int],
-    session,
-    *,
-    player_metadata_refresh_by_id: dict[int, bool] | None = None,
-    merge_into_pending: bool = True,
-    payload_extras: dict[str, Any] | None = None,
-) -> dict:
-    ids_remaining = _normalize_placeholder_ids(placeholder_ids)
-    if not ids_remaining:
-        return {"ok": False, "reason": "no_placeholder_ids"}
-
-    batch_size = _job_batch_size()
-    debounce_seconds = _job_debounce_seconds()
-    now = datetime.now(timezone.utc)
-    run_after = now if debounce_seconds <= 0 else now + timedelta(seconds=debounce_seconds)
-
-    touched_job_ids: list[int] = []
-    created_jobs = 0
-    updated_jobs = 0
-
-    pending_jobs: list[Job] = []
-    if merge_into_pending:
-        pending_jobs = (
-            session.query(Job)
-            .filter(Job.job_type == job_type, Job.status == "PENDING")
-            .order_by(Job.run_after.asc().nullsfirst(), Job.id.asc())
-            .with_for_update(skip_locked=True)
-            .all()
-        )
-
-    for job in pending_jobs:
-        if not ids_remaining:
-            break
-        existing_ids = _job_placeholder_ids(job)
-        if len(existing_ids) >= batch_size:
-            continue
-
-        additions: list[int] = []
-        existing_set = set(existing_ids)
-        capacity = batch_size - len(existing_ids)
-        for pid in ids_remaining:
-            if pid in existing_set:
-                continue
-            additions.append(pid)
-            existing_set.add(pid)
-            if len(additions) >= capacity:
-                break
-
-        if not additions:
-            continue
-
-        merged_flag = _job_player_metadata_refresh(job) or _placeholder_player_merge_flag(
-            additions, player_metadata_refresh_by_id
-        )
-        _set_job_placeholder_ids(job, existing_ids + additions)
-        payload = dict(job.payload or {}) if isinstance(job.payload, dict) else {}
-        payload["player_metadata_refresh"] = merged_flag
-        if payload_extras:
-            payload.update(payload_extras)
-        job.payload = payload
-        job.updated_at = now
-        session.add(job)
-        touched_job_ids.append(int(job.id))
-        updated_jobs += 1
-        added_set = set(additions)
-        ids_remaining = [pid for pid in ids_remaining if pid not in added_set]
-
-    from services.source_of_truth.job_priority import default_priority_for
-
-    job_priority = default_priority_for(job_type)
-    while ids_remaining:
-        chunk = ids_remaining[:batch_size]
-        ids_remaining = ids_remaining[batch_size:]
-        chunk_player_flag = _placeholder_player_merge_flag(chunk, player_metadata_refresh_by_id)
-        job = Job(
-            job_type=job_type,
-            payload={
-                "placeholder_ids": chunk,
-                "player_metadata_refresh": chunk_player_flag,
-                **(payload_extras or {}),
-            },
-            status="PENDING",
-            run_after=run_after,
-            priority=job_priority,
-        )
-        session.add(job)
-        session.flush()
-        touched_job_ids.append(int(job.id))
-        created_jobs += 1
-
-    session.commit()
-
-    logger.debug(
-        f"Queued {job_type} placeholders={len(_normalize_placeholder_ids(placeholder_ids))} "
-        f"jobs_touched={len(touched_job_ids)} jobs_created={created_jobs} jobs_updated={updated_jobs} "
-        f"batch_size={batch_size} debounce_seconds={debounce_seconds:.3f}",
-        extra={"emoji_type": "processing"},
-    )
-
-    return {
-        "ok": True,
-        "job_id": touched_job_ids[0] if touched_job_ids else None,
-        "job_ids": touched_job_ids,
-        "jobs_created": created_jobs,
-        "jobs_updated": updated_jobs,
-        "placeholder_count": len(_normalize_placeholder_ids(placeholder_ids)),
-    }
 
 def _placeholder_display_status(placeholder: Placeholder) -> str | None:
     status = getattr(placeholder, "display_status", None)
@@ -565,13 +430,14 @@ def enqueue_nfo_refresh(
         if not normalized_ids:
             return {"ok": False, "reason": "no_placeholder_ids"}
 
-        return _enqueue_batched_placeholder_job(
+        return enqueue_batched_placeholder_job(
             NFO_REFRESH_JOB_TYPE,
             normalized_ids,
             session,
             player_metadata_refresh_by_id=player_metadata_refresh,
             merge_into_pending=merge_into_pending,
             payload_extras=payload_extras,
+            include_player_metadata_refresh=True,
         )
     except Exception as e:
         logger.error(f"Failed to enqueue NFO refresh job: {e}", exc_info=True)

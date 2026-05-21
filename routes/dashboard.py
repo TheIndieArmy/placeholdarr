@@ -766,6 +766,7 @@ def _humanize_job_type(job_type: str) -> str:
         "materialization": "Placeholder Creation",
         "webhook_event": "Webhook Event",
         "nfo_refresh": "Metadata Refresh",
+        "placeholder_art_refresh": "Art Refresh",
         "import_grace": "Import Grace Check",
         "playback_fallback": "Playback Fallback",
     }
@@ -1011,6 +1012,7 @@ def _is_user_relevant_job(job_type: str, status: str | None = None) -> bool:
     noisy = {
         "webhook_event",
         "nfo_refresh",
+        "placeholder_art_refresh",
         "determination",
         "materialization",
         "status_reconcile",

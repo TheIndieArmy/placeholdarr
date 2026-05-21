@@ -19,11 +19,17 @@ from services.postgres.models import AppConfig
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
 
-# Settings that rewrite existing placeholder NFOs / composited art when changed.
+# Settings that rewrite existing placeholder NFO text when changed.
 NFO_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_STATUS_UPDATES",
         "PLACEHOLDER_STATUS_PROJECTION_MODE",
+    }
+)
+
+# Settings that re-download / re-composite on-disk poster art (decoupled from NFO).
+ART_BACKFILL_SETTING_KEYS = frozenset(
+    {
         "PLACEHOLDER_POSTER_OVERLAY_MODE",
     }
 )
@@ -447,14 +453,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Status Updates",
                 "label": "Placeholder poster overlay",
                 "description": (
-                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Writes composited poster.jpg "
-                    "(and episode thumb images) beside placeholders and points NFOs at local files. "
-                    "Requires a library path refresh after changes."
+                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
+                    "seasonNN-poster.jpg at the series root, and episode thumb JPEGs (composited when a style is "
+                    "selected, raw download when Off). NFOs do not include art tags; players pick up files from "
+                    "disk after a library refresh."
                 ),
                 "type": "choice",
                 "restart_required": False,
                 "options": [
-                    {"value": "off", "label": "Off (remote poster URLs only)"},
+                    {"value": "off", "label": "Off (raw download, no overlay)"},
                     {"value": "grayscale", "label": "Grayscale poster"},
                     {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
                     {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
@@ -1105,6 +1112,16 @@ def save_settings(
             if prev_val != new_val:
                 nfo_backfill_keys_changed.append(key)
 
+        art_backfill_keys_changed: list[str] = []
+        for key in ART_BACKFILL_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                art_backfill_keys_changed.append(key)
+
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
             prev_raw = str(prev_row.value if prev_row and prev_row.value is not None else "") or ""
@@ -1274,6 +1291,16 @@ def save_settings(
                 extra={"emoji_type": "processing"},
             )
 
+        art_backfill_summary: dict[str, Any] | None = None
+        if art_backfill_keys_changed:
+            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
+
+            art_backfill_summary = enqueue_placeholder_art_backfill_all(source="settings_save")
+            logger.info(
+                f"Placeholder art backfill queued after settings save keys={art_backfill_keys_changed}",
+                extra={"emoji_type": "processing"},
+            )
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -1291,6 +1318,8 @@ def save_settings(
             "arr_instance_reconcile": arr_instance_reconcile,
             "nfo_backfill_keys_changed": nfo_backfill_keys_changed,
             "nfo_backfill": backfill_summary,
+            "art_backfill_keys_changed": art_backfill_keys_changed,
+            "art_backfill": art_backfill_summary,
         }
     except Exception as exc:
         session.rollback()

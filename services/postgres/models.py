@@ -535,6 +535,8 @@ class Season(Base):
     sonarrpath = Column(String, nullable=True)
     # ARR-provided synopsis/overview for series-level metadata
     sonarr_season_overview = Column(String, nullable=True)
+    # Remote season poster URL from Sonarr (seasons[].images when includeSeasonImages is set)
+    remote_poster = Column(String, nullable=True)
     # Aggregate per-season file info
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)

@@ -7,16 +7,19 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-### Fixed
-
-- **Plex NFO + placeholder poster overlays**: Local composited art no longer uses bare `poster.jpg` in `<thumb preview>` (Plex expects http(s) URLs there). Remote poster URLs are kept for preview/thumb tags while `<art><poster>` points at the absolute local JPEG path when present, so plot/cast metadata loads again and Plex can pick up the overlay poster after a library refresh.
-- **NFO refresh without Pillow**: When poster overlay mode is enabled but Pillow is missing from the runtime, `nfo_refresh` no longer fails repeatedly; compositing is skipped with a warning and NFO files are still rewritten using remote poster URLs.
-- **Corner badge overlay**: Uses the real Placeholdarr mark exported from `Placeholdarr_yellow.svg` (replacing the temporary block-letter asset) and places the badge in the **bottom-right** corner (avoids Plex’s unwatched-episode count on TV posters). Poster regeneration runs automatically when the logo asset or layout stamp changes.
-- **TV poster overlays**: Series roots also get `folder.jpg` (Plex show poster convention); episode NFOs reference composited `*-thumb.jpg` in `<art>` when local stills exist.
-- **Plex display of composited art**: When `poster.jpg` or episode `*-thumb.jpg` exists, NFO `<thumb>` tags now point at the local absolute path instead of the remote TVDB/TMDB URL so Plex does not keep showing agent art over the on-disk overlay.
-
 ### Added
 
+- **Placeholder art refresh (decoupled from NFO)**: New batched `placeholder_art_refresh` jobs write local `poster.jpg`, `folder.jpg`, `seasonNN-poster.jpg`, and episode `*-thumb.jpg` beside placeholders. Overlay mode controls compositing vs raw download; files are still written when overlay is off. Full sync and overlay setting changes queue a bulk backfill; lite sync scopes art to touched rows; materialization writes art inline on create. When the last bulk batch finishes, Plex TV/movie libraries refresh with forced metadata (`force=1`); Jellyfin and Emby run library scans.
+- **TV season poster art for placeholders**: Sonarr sync requests `includeSeasonImages` and stores per-season `remote_poster` URLs. Art refresh writes Sonarr-style `seasonNN-poster.jpg` (and `season-specials-poster.jpg`) at the series root, with series-poster fallback when a season has no dedicated image.
+
+### Changed
+
+- **NFO sidecars are metadata-only**: Movie, TV show, and episode NFOs no longer include `<thumb>`, `<art>`, `<poster>`, `<fanart>`, or `<banner>` tags. Plex/Jellyfin/Emby pick up local JPEGs via library refresh and Sonarr-style filenames, not NFO art references. Run **Metadata Refresh** only when status templates or text fields change; **Full sync** queues art reconcile separately.
+- **Placeholder poster overlay setting**: Description updated — local art files are always written when remote URLs exist; overlay mode only changes treatment (grayscale/banner/badge vs raw download).
+
+### Fixed
+
+- **Corner badge overlay**: Uses the real Placeholdarr mark exported from `Placeholdarr_yellow.svg` (replacing the temporary block-letter asset) and places the badge in the **bottom-right** corner (avoids Plex’s unwatched-episode count on TV posters). Poster regeneration runs automatically when the logo asset or layout stamp changes.
 - **Task schedule persistence**: Next run times for full/lite sync are stored in AppConfig and survive restarts; manual and scheduled completions reset the interval from completion time (no boot-time stagger).
 - **Task queue progress**: Task history rows expand to show the same phased progress sections as the former System Activity sync cards.
 - **Activity — Tasks, Operations, Placeholders**: Activity splits into three sidebar pages (Placeholders default, Tasks, Operations). Tasks shows *arr-style scheduled full/lite sync (defaults weekly / 12h), run history with startup/manual/scheduled triggers, and Run now confirmations. Lite sync copy notes it includes calendar date refresh and Coming Soon updates. Operations is the live event feed without scheduled sync noise.

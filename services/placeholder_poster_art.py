@@ -1,7 +1,8 @@
-"""Write composited placeholder poster/thumb JPEGs beside media files."""
+"""Write placeholder poster/thumb JPEGs beside media files (decoupled from NFO)."""
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
@@ -12,13 +13,14 @@ from services.poster_overlay import (
     OVERLAY_META_FILENAME,
     composite_poster_from_url,
     logo_asset_stamp,
-    poster_overlay_compositing_available,
     poster_overlay_mode,
     save_jpeg,
+    save_raw_poster_from_url,
 )
 
 POSTER_JPEG = "poster.jpg"
 SERIES_FOLDER_JPEG = "folder.jpg"
+SEASON_POSTER_GLOB = "season*-poster.jpg"
 
 
 @dataclass
@@ -70,7 +72,7 @@ def _publish_series_folder_poster(poster_path: str) -> None:
 
 
 def _apply_art_file_permissions(anchor_path: str, *artifact_paths: str) -> None:
-    """Match placeholder media/NFO open permissions on composited art files."""
+    """Match placeholder media/NFO open permissions on art files."""
     from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
 
     if anchor_path:
@@ -109,7 +111,17 @@ def _needs_regenerate(output_path: str, *, mode: str, source_url: str) -> bool:
     return False
 
 
-def _write_composited(
+def _save_image_to_path(output_path: str, url: str, *, mode: str, landscape: bool) -> bool:
+    """Write JPEG using overlay mode (raw when off or compositing unavailable)."""
+    if mode == "off":
+        return save_raw_poster_from_url(url, output_path)
+    img = composite_poster_from_url(url, mode, landscape=landscape)
+    if img is not None:
+        return save_jpeg(img, output_path)
+    return save_raw_poster_from_url(url, output_path)
+
+
+def _write_art_file(
     output_path: str,
     source_url: str | None,
     *,
@@ -129,10 +141,7 @@ def _write_composited(
             artifacts.append(folder_jpg)
         _apply_art_file_permissions(output_path, *artifacts)
         return True
-    img = composite_poster_from_url(url, mode, landscape=landscape)
-    if img is None:
-        return False
-    if not save_jpeg(img, output_path):
+    if not _save_image_to_path(output_path, url, mode=mode, landscape=landscape):
         return False
     meta = _read_meta(meta_path) or {}
     outputs = dict(meta.get("outputs") or {})
@@ -148,13 +157,49 @@ def _write_composited(
     return True
 
 
+def season_poster_filename(season_number: int) -> str:
+    """Sonarr/Plex local season poster naming at the series root."""
+    sn = int(season_number)
+    if sn <= 0:
+        return "season-specials-poster.jpg"
+    return f"season{sn:02d}-poster.jpg"
+
+
+def _season_poster_meta_key(season_number: int) -> str:
+    sn = int(season_number)
+    if sn <= 0:
+        return "season_specials_poster"
+    return f"season_poster_{sn:02d}"
+
+
 def episode_thumb_filename(media_path: str) -> str:
     base, _ = os.path.splitext(os.path.basename(media_path))
     return f"{base}-thumb.jpg"
 
 
-def remove_placeholder_art_in_dir(directory: str | None, *, media_path: str | None = None) -> bool:
-    """Remove composited art and overlay metadata from a folder."""
+def remove_season_poster_art_in_series_folder(series_folder: str | None) -> bool:
+    """Remove Sonarr-style season poster JPEGs from a TV series root."""
+    if not series_folder:
+        return False
+    folder = os.path.abspath(series_folder)
+    removed = False
+    for path in glob.glob(os.path.join(folder, SEASON_POSTER_GLOB)):
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed = True
+            except OSError:
+                pass
+    return removed
+
+
+def remove_placeholder_art_in_dir(
+    directory: str | None,
+    *,
+    media_path: str | None = None,
+    series_folder: str | None = None,
+) -> bool:
+    """Remove local art and overlay metadata from a folder."""
     if not directory:
         return False
     folder = os.path.abspath(directory)
@@ -173,59 +218,126 @@ def remove_placeholder_art_in_dir(directory: str | None, *, media_path: str | No
                 removed = True
             except OSError:
                 pass
+    if series_folder:
+        removed = remove_season_poster_art_in_series_folder(series_folder) or removed
     return removed
 
 
-def ensure_movie_placeholder_art(movie: Any, media_path: str) -> ArtResult:
+def _season_poster_source_url(season: Any, series: Any) -> str | None:
+    url = str(getattr(season, "remote_poster", None) or "").strip()
+    if url:
+        return url
+    return str(getattr(series, "remote_poster", None) or "").strip() or None
+
+
+def _resolve_series_folder(series: Any, media_path: str | None = None) -> str | None:
+    folder = getattr(series, "placeholder_folder", None)
+    if folder:
+        return os.path.abspath(str(folder))
+    if media_path:
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(media_path))))
+    return None
+
+
+def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
+    """Write movie poster.jpg (overlay or raw)."""
     result = ArtResult()
-    if not poster_overlay_compositing_available():
-        return result
     mode = poster_overlay_mode()
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
     url = getattr(movie, "remote_poster", None)
-    if _write_composited(out_path, url, mode=mode, landscape=False, meta_key="poster"):
+    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="poster"):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
     return result
 
 
-def ensure_series_placeholder_art(series: Any, series_folder: str) -> ArtResult:
+def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult:
+    """Write seasonNN-poster.jpg at the series root."""
     result = ArtResult()
-    if not poster_overlay_compositing_available():
-        return result
     if not series_folder:
         return result
     mode = poster_overlay_mode()
     folder = os.path.abspath(series_folder)
-    out_path = os.path.join(folder, POSTER_JPEG)
-    url = getattr(series, "remote_poster", None)
-    if _write_composited(out_path, url, mode=mode, landscape=False, meta_key="series_poster"):
-        result.local_art.poster = POSTER_JPEG
+    season_number = int(getattr(season, "season_number", 0) or 0)
+    filename = season_poster_filename(season_number)
+    out_path = os.path.join(folder, filename)
+    url = _season_poster_source_url(season, series)
+    if _write_art_file(
+        out_path,
+        url,
+        mode=mode,
+        landscape=False,
+        meta_key=_season_poster_meta_key(season_number),
+    ):
+        result.local_art.poster = filename
         result.wrote_any = True
     return result
 
 
-def ensure_episode_placeholder_art(
+def ensure_series_art(
+    series: Any,
+    series_folder: str | None = None,
+    seasons: list[Any] | None = None,
+) -> ArtResult:
+    """Write series poster/folder.jpg and all season posters for a show."""
+    result = ArtResult()
+    folder = series_folder or _resolve_series_folder(series)
+    if not folder:
+        return result
+    mode = poster_overlay_mode()
+    folder = os.path.abspath(folder)
+    out_path = os.path.join(folder, POSTER_JPEG)
+    url = getattr(series, "remote_poster", None)
+    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="series_poster"):
+        result.local_art.poster = POSTER_JPEG
+        result.wrote_any = True
+
+    rows = seasons
+    if rows is None:
+        from services.postgres.db import session_scope
+        from services.postgres.models import Season
+
+        series_id = getattr(series, "id", None)
+        if series_id:
+            with session_scope() as session:
+                rows = (
+                    session.query(Season)
+                    .filter(Season.series_id == int(series_id), Season.is_deleted == False)  # noqa: E712
+                    .all()
+                )
+    for season in rows or []:
+        one = ensure_season_art(season, series, folder)
+        if one.wrote_any:
+            result.wrote_any = True
+    return result
+
+
+def ensure_episode_still_art(
     episode: Any,
     season: Any,
     series: Any,
     media_path: str,
 ) -> ArtResult:
+    """Write episode *-thumb.jpg beside the placeholder file."""
     result = ArtResult()
-    if not poster_overlay_compositing_available():
-        return result
     mode = poster_overlay_mode()
     folder = os.path.dirname(os.path.abspath(media_path))
-
     thumb_name = episode_thumb_filename(media_path)
     thumb_path = os.path.join(folder, thumb_name)
     still_url = getattr(episode, "sonarr_episode_still", None) or getattr(series, "remote_fanart", None)
-    if _write_composited(thumb_path, still_url, mode=mode, landscape=True, meta_key="episode_thumb"):
+    if _write_art_file(thumb_path, still_url, mode=mode, landscape=True, meta_key="episode_thumb"):
         result.local_art.thumb = thumb_name
         result.wrote_any = True
-
     return result
+
+
+# Backward-compatible aliases (call sites being migrated)
+ensure_movie_placeholder_art = ensure_movie_art
+ensure_season_placeholder_art = ensure_season_art
+ensure_series_season_placeholder_art = ensure_series_art
+ensure_series_placeholder_art = ensure_series_art
+ensure_episode_placeholder_art = ensure_episode_still_art
 
 
 def _is_valid_art_file(path: str) -> bool:
@@ -236,7 +348,7 @@ def _is_valid_art_file(path: str) -> bool:
 
 
 def discover_local_art(media_path: str | None, *, series_folder: str | None = None) -> LocalArtPaths:
-    """Return relative local art paths when composited files exist on disk."""
+    """Return relative local art paths when files exist on disk."""
     art = LocalArtPaths()
     if media_path:
         folder = os.path.dirname(os.path.abspath(media_path))
