@@ -19,6 +19,8 @@ from services.source_of_truth.scheduled_sync import (
     run_scheduled_full_sync,
 )
 from services.task_run_history import (
+    abandon_orphaned_working_task_runs,
+    abandon_task_run,
     get_working_run,
     latest_finished_run,
     list_recent_runs,
@@ -99,6 +101,14 @@ class TaskRunRequest(BaseModel):
     task_key: str = Field(..., description="full_sync | lite_sync | calendar_only")
 
 
+class TaskAbandonRequest(BaseModel):
+    run_id: int | None = Field(
+        None,
+        description="Specific scheduled_task_run id to abandon; omit to abandon all working runs",
+    )
+    reason: str | None = Field(None, description="Stored on the run row (default: abandoned_manually)")
+
+
 @router.get("/api/tasks/scheduled")
 async def tasks_scheduled():
     meta = get_scheduled_task_metadata()
@@ -154,6 +164,23 @@ async def tasks_status():
     if not working:
         return {"working": False, "run": None}
     return {"working": True, "run": _serialize_run(working)}
+
+
+@router.post("/api/tasks/abandon")
+async def tasks_abandon(body: TaskAbandonRequest | None = None):
+    """Mark stuck WORKING task runs failed (e.g. after restart mid-sync) so a new run can start."""
+    body = body or TaskAbandonRequest()
+    reason = str(body.reason or "abandoned_manually").strip() or "abandoned_manually"
+    if body.run_id is not None:
+        ok = abandon_task_run(int(body.run_id), reason=reason)
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task run {body.run_id} is not in working state (or does not exist)",
+            )
+        return {"ok": True, "abandoned": [int(body.run_id)], "reason": reason}
+    abandoned = abandon_orphaned_working_task_runs(reason=reason)
+    return {"ok": True, "abandoned": abandoned, "reason": reason}
 
 
 @router.post("/api/tasks/run")

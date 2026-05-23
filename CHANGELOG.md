@@ -13,6 +13,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **TV season poster art for placeholders**: Sonarr sync requests `includeSeasonImages` and stores per-season `remote_poster` URLs. Art refresh writes Sonarr-style `seasonNN-poster.jpg` (and `season-specials-poster.jpg`) at the series root, with series-poster fallback when a season has no dedicated image.
 - **Full sync phased task runs** (`services/task_run_phases.py`): Full sync records explicit phases — ARR catalog sync, filesystem scan, status determination, placeholder materialization, calendar status, art refresh, and metadata refresh (when template backfill is pending) — with per-phase timings and metrics in `scheduled_task_run.summary`. The task row stays **WORKING** until art (and any NFO backfill) jobs finish, then closes with a single wall-clock end time.
 - **Tasks UI — expandable phase detail**: Queue/history rows expand to show each phase with start/end times, duration, status badge, and metrics (including art batch `N / M` and poster/still counts). In-progress runs show a live elapsed duration; finished runs can show wall-clock duration when art ran after the main sync steps.
+- **Filesystem scan phase metrics**: Show files walked and placeholder media files found (not only “new paths indexed”), with a human **Status** instead of raw `ok`.
+- **ARR catalog sync phase metrics**: Radarr rows show movie counts only; Sonarr rows show series/episode counts only (no misleading zeroes for the other type).
+- **Interrupted task runs**: On app restart, any `scheduled_task_run` left `working` is marked **failed** (`interrupted_by_restart`) so manual sync is not blocked. `POST /api/tasks/abandon` abandons stuck runs without another restart.
 
 ### Changed
 
@@ -24,6 +27,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Fixed
 
+- **Startup task abandon**: Orphaned working runs were not cleared on restart because `Job` was missing from `task_run_history` imports (`name 'Job' is not defined`).
 - **Full sync stuck WORKING after art finished**: Art completion now calls `finalize_art_backfill_phase` (was missing in the art reconciler’s “run complete” path). Follow-up job checks count only **PENDING** / **CLAIMED** jobs, not **WORKING**, so the last art batch no longer blocks itself when closing the task. `accumulate_art_backfill_counts` and `reconcile_stuck_art_backfill_tasks` (on Tasks API load) repair runs where all batches finished but the parent row stayed open, including when the art phase is already **Done** but the task is still **Working**.
 - **Corner badge overlay**: Uses the real Placeholdarr mark exported from `Placeholdarr_yellow.svg` (replacing the temporary block-letter asset) and places the badge in the **bottom-right** corner (avoids Plex’s unwatched-episode count on TV posters). Poster regeneration runs automatically when the logo asset or layout stamp changes.
 - **Task schedule persistence**: Next run times for full/lite sync are stored in AppConfig and survive restarts; manual and scheduled completions reset the interval from completion time (no boot-time stagger).

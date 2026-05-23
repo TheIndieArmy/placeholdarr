@@ -199,24 +199,88 @@ class TaskRunPhaseTracker:
         update_task_run_summary(self.task_run_id, payload)
 
 
+def _arr_instance_kind(inst_key: str, inst: dict[str, Any]) -> str:
+    """``radarr`` | ``sonarr`` | ``unknown`` for task UI formatting."""
+    explicit = str(inst.get("arr_type") or "").strip().lower()
+    if explicit in {"radarr", "sonarr"}:
+        return explicit
+    key = str(inst_key or "").strip().lower()
+    if key.startswith("radarr") or key == "radarr":
+        return "radarr"
+    if key.startswith("sonarr") or key == "sonarr":
+        return "sonarr"
+    return "unknown"
+
+
+def _format_arr_instance_value(inst_key: str, inst: dict[str, Any]) -> str:
+    dur = float(inst.get("duration_seconds") or 0)
+    kind = _arr_instance_kind(inst_key, inst)
+    movies = int(inst.get("movies_updated") or inst.get("movies_seen") or 0)
+    series = int(inst.get("series_updated") or inst.get("series_seen") or 0)
+    episodes = int(inst.get("episodes_updated") or inst.get("episodes_seen") or 0)
+    if kind == "radarr":
+        return f"{movies} movies ({dur:.0f}s)"
+    if kind == "sonarr":
+        return f"{series} series, {episodes} eps ({dur:.0f}s)"
+    parts = []
+    if movies:
+        parts.append(f"{movies} movies")
+    if series or episodes:
+        parts.append(f"{series} series, {episodes} eps")
+    if not parts:
+        parts.append("0 items")
+    parts.append(f"({dur:.0f}s)")
+    return " ".join(parts)
+
+
 def metrics_from_arr_sync(sync_stats: dict[str, Any]) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     total_dur = 0.0
     for inst_key, inst in (sync_stats or {}).items():
         if not isinstance(inst, dict):
             continue
-        dur = float(inst.get("duration_seconds") or 0)
-        total_dur += dur
-        movies = int(inst.get("movies_updated") or inst.get("movies_seen") or 0)
-        series = int(inst.get("series_updated") or inst.get("series_seen") or 0)
-        episodes = int(inst.get("episodes_updated") or inst.get("episodes_seen") or 0)
+        total_dur += float(inst.get("duration_seconds") or 0)
         metrics.append(
             {
                 "label": str(inst_key),
-                "value": f"{movies} movies, {series} series, {episodes} eps ({dur:.0f}s)",
+                "value": _format_arr_instance_value(str(inst_key), inst),
             }
         )
     metrics.insert(0, {"label": "Total ARR sync time", "value": f"{total_dur:.0f}s"})
+    return metrics
+
+
+def _fs_scan_status_label(scan_info: dict[str, Any]) -> str:
+    reason = str(scan_info.get("reason") or "").strip().lower()
+    if reason == "already_claimed":
+        return "Skipped (already ran for this sync)"
+    if reason == "no_roots":
+        return "Skipped (no library roots configured)"
+    if reason == "error":
+        return "Failed"
+    if reason != "ok":
+        return reason or "--"
+    if scan_info.get("incremental"):
+        return "Completed (incremental)"
+    if scan_info.get("full_scan"):
+        return "Completed (full library walk)"
+    return "Completed"
+
+
+def _fs_scan_metrics(scan: dict[str, Any], scan_info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Filesystem phase metrics — ``scan.count`` is new DB rows, not files walked."""
+    metrics: list[dict[str, Any]] = []
+    files_seen = scan_info.get("files_seen")
+    media_candidates = scan_info.get("media_candidates")
+    if files_seen is not None:
+        metrics.append({"label": "Files on disk (walked)", "value": int(files_seen)})
+    if media_candidates is not None:
+        metrics.append({"label": "Placeholder media files", "value": int(media_candidates)})
+    metrics.append({"label": "New paths indexed", "value": int(scan.get("count") or 0)})
+    stale = scan_info.get("stale_marked")
+    if stale is not None and int(stale) > 0:
+        metrics.append({"label": "Marked missing", "value": int(stale)})
+    metrics.append({"label": "Status", "value": _fs_scan_status_label(scan_info)})
     return metrics
 
 
@@ -225,10 +289,7 @@ def metrics_from_pipeline(pipeline: dict[str, Any]) -> dict[str, list[dict[str, 
     out: dict[str, list[dict[str, Any]]] = {}
     scan = pipeline.get("scan") if isinstance(pipeline.get("scan"), dict) else {}
     scan_info = scan.get("info") if isinstance(scan.get("info"), dict) else {}
-    out["fs_scan"] = [
-        {"label": "Paths scanned", "value": int(scan.get("count") or 0)},
-        {"label": "Scan mode", "value": str(scan_info.get("reason") or scan_info.get("mode") or "--")},
-    ]
+    out["fs_scan"] = _fs_scan_metrics(scan, scan_info)
     det = pipeline.get("determination") if isinstance(pipeline.get("determination"), dict) else {}
     out["determination"] = [
         {"label": "Movies evaluated", "value": int(det.get("movies_total") or 0)},

@@ -332,6 +332,16 @@ async def lifespan(app: FastAPI):
                     logger.debug(f"Failed to reset CLAIMED jobs on startup: {e}", extra={'emoji_type': 'debug'})
                 except Exception:
                     pass
+
+            try:
+                from services.task_run_history import abandon_orphaned_working_task_runs
+
+                abandon_orphaned_working_task_runs(reason="interrupted_by_restart")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to abandon orphaned working task runs on startup: {e}",
+                    extra={"emoji_type": "warning"},
+                )
         finally:
             session.close()
 

@@ -7,7 +7,7 @@ from typing import Any
 
 from core.logger import logger
 from services.postgres.db import get_session
-from services.postgres.models import ScheduledTaskRun
+from services.postgres.models import Job, ScheduledTaskRun
 
 
 def _utc_now() -> datetime:
@@ -122,6 +122,133 @@ def record_skipped_task_run(*, task_key: str, trigger: str, skip_reason: str) ->
         raise
     finally:
         session.close()
+
+
+def _cancel_follow_up_jobs_for_task_run(session, task_run_id: int) -> int:
+    """Fail queued art/NFO jobs tied to a task run that will not complete."""
+    from sqlalchemy import String, cast, or_
+
+    tid = str(int(task_run_id))
+    col = Job.payload["full_sync_task_run_id"]
+    legacy = Job.payload["art_backfill_task_run_id"]
+    match = or_(
+        col.as_string() == tid,
+        cast(col, String) == tid,
+        legacy.as_string() == tid,
+        cast(legacy, String) == tid,
+    )
+    rows = (
+        session.query(Job)
+        .filter(
+            Job.job_type.in_(("placeholder_art_refresh", "nfo_refresh")),
+            Job.status.in_(("PENDING", "CLAIMED", "WORKING")),
+            match,
+        )
+        .all()
+    )
+    n = 0
+    for job in rows:
+        job.status = "FAILED"
+        job.error_message = "Parent task run abandoned"
+        session.add(job)
+        n += 1
+    return n
+
+
+def _mark_phases_interrupted(summary: dict[str, Any], *, ended_at: datetime, reason: str) -> dict[str, Any]:
+    out = dict(summary)
+    phases = out.get("phases")
+    if isinstance(phases, list):
+        iso = ended_at.isoformat()
+        updated: list[dict[str, Any]] = []
+        for phase in phases:
+            p = dict(phase) if isinstance(phase, dict) else {}
+            if str(p.get("status") or "").lower() == "working":
+                p["status"] = "failed"
+                if not p.get("ended_at"):
+                    p["ended_at"] = iso
+            updated.append(p)
+        out["phases"] = updated
+    progress = out.get("progress")
+    if isinstance(progress, dict):
+        prog = dict(progress)
+        prog["overall_status"] = "FAILED"
+        inner = prog.get("progress")
+        if isinstance(inner, dict):
+            inner = dict(inner)
+            inner["overall_status"] = "FAILED"
+            sections = inner.get("sections")
+            if isinstance(sections, list):
+                inner["sections"] = [
+                    {
+                        **(s if isinstance(s, dict) else {}),
+                        "status": "failed"
+                        if str((s or {}).get("status") or "").lower() == "working"
+                        else (s or {}).get("status"),
+                    }
+                    for s in sections
+                ]
+            prog["progress"] = inner
+        out["progress"] = prog
+    out["interrupted"] = True
+    out["interruption_reason"] = reason
+    out["wall_clock_ended_at"] = ended_at.isoformat()
+    return out
+
+
+def abandon_task_run(run_id: int, *, reason: str = "interrupted") -> bool:
+    """Mark a stuck in-progress task run failed so new manual/scheduled runs can start."""
+    session = get_session()
+    try:
+        row = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.id == int(run_id)).first()
+        if not row or str(row.status or "").lower() != "working":
+            return False
+        now = _utc_now()
+        summary = row.summary if isinstance(row.summary, dict) else {}
+        summary = _mark_phases_interrupted(summary, ended_at=now, reason=reason)
+        jobs_cancelled = _cancel_follow_up_jobs_for_task_run(session, int(run_id))
+        row.status = "failed"
+        row.ended_at = now
+        row.error_message = str(reason)[:4000]
+        row.summary = summary
+        session.add(row)
+        session.commit()
+        logger.warning(
+            "Abandoned task run id=%s task_key=%s reason=%s follow_up_jobs_failed=%s",
+            run_id,
+            row.task_key,
+            reason,
+            jobs_cancelled,
+            extra={"emoji_type": "warning"},
+        )
+        return True
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def abandon_orphaned_working_task_runs(*, reason: str = "interrupted_by_restart") -> list[int]:
+    """On process start: close any task rows left ``working`` after a crash/restart."""
+    session = get_session()
+    try:
+        rows = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.status == "working").all()
+        ids = [int(r.id) for r in rows if r and r.id is not None]
+    finally:
+        session.close()
+    abandoned: list[int] = []
+    for run_id in ids:
+        if abandon_task_run(run_id, reason=reason):
+            abandoned.append(run_id)
+    if abandoned:
+        logger.warning(
+            "Abandoned %s orphaned working task run(s) after restart: %s",
+            len(abandoned),
+            abandoned,
+            extra={"emoji_type": "warning"},
+        )
+    return abandoned
 
 
 def get_working_run(task_key: str | None = None) -> ScheduledTaskRun | None:
