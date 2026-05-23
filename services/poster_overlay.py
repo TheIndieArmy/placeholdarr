@@ -26,15 +26,20 @@ _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo"})
 
 
 def logo_asset_stamp() -> str:
-    """Change when the bundled logo file or badge layout changes so posters can be regenerated."""
-    try:
-        st = os.stat(_LOGO_PATH)
-        file_stamp = f"{int(st.st_mtime)}:{int(st.st_size)}"
-    except OSError:
-        file_stamp = ""
-    # Bump when corner badge placement changes (e.g. avoid Plex episode-count overlap).
+    """Change when the bundled logo file or badge layout changes so posters can be regenerated.
+
+    Uses file content hash (not mtime) so Docker restarts / image copies do not force a
+    full-library art rebuild when the logo bytes are unchanged.
+    """
+    import hashlib
+
     layout_stamp = "corner-br-v1:prefer-local-nfo-v1"
-    return f"{layout_stamp}:{file_stamp}" if file_stamp else layout_stamp
+    try:
+        data = _LOGO_PATH.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        return f"{layout_stamp}:{digest}:{len(data)}"
+    except OSError:
+        return layout_stamp
 
 _pillow_modules: tuple | bool | None = None
 _pillow_missing_logged = False

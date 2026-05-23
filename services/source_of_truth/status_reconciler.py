@@ -394,6 +394,16 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
     elif template_completion_refresh and template_run_id:
         from services.source_of_truth import template_backfill as template_backfill_mod
 
+        def _after_template_backfill_refresh() -> None:
+            _clear_active_template_backfill_run_standalone(template_run_id)
+            payload = job.payload if isinstance(job.payload, dict) else {}
+            raw_tid = payload.get("full_sync_task_run_id")
+            if raw_tid is not None:
+                from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_full_sync_task_run
+
+                finalize_nfo_backfill_phase(int(raw_tid), template_run_id)
+                try_complete_full_sync_task_run(int(raw_tid))
+
         _nfo_refresh_completion_scan_if_last_batch(
             session,
             job,
@@ -401,7 +411,7 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
             payload_run_id_key="template_backfill_run_id",
             log_prefix="Template backfill",
             only_if=lambda: template_backfill_mod.is_active_template_backfill_run(session, template_run_id),
-            after_refresh=lambda: _clear_active_template_backfill_run_standalone(template_run_id),
+            after_refresh=_after_template_backfill_refresh,
         )
 
     return {

@@ -23,11 +23,13 @@ from services.source_of_truth.idempotency import (
     try_claim_processed_key,
 )
 from services.source_of_truth.placeholder_job_enqueue import enqueue_batched_placeholder_job
+from services.task_run_phases import FULL_SYNC_TASK_RUN_ID_KEY
 
 
 PLACEHOLDER_ART_REFRESH_JOB_TYPE = "placeholder_art_refresh"
 ART_BACKFILL_RUN_ID_KEY = "art_backfill_run_id"
 ART_BACKFILL_REFRESH_ON_COMPLETION_KEY = "art_backfill_refresh_on_completion"
+ART_BACKFILL_TASK_RUN_ID_KEY = "art_backfill_task_run_id"
 
 
 def collect_active_placeholder_ids(session) -> list[int]:
@@ -70,7 +72,7 @@ def enqueue_placeholder_art_refresh(
                 pass
 
 
-def enqueue_placeholder_art_backfill_all(*, source: str = "full_sync") -> dict:
+def enqueue_placeholder_art_backfill_all(*, source: str = "full_sync", task_run_id: int | None = None) -> dict:
     """Queue art refresh for every active placeholder with completion library scan."""
     session = get_session()
     try:
@@ -78,16 +80,36 @@ def enqueue_placeholder_art_backfill_all(*, source: str = "full_sync") -> dict:
         if not ids:
             return {"ok": True, "placeholder_count": 0, "enqueued": False, "source": source}
         run_id = uuid.uuid4().hex
-        return enqueue_placeholder_art_refresh(
+        extras: dict[str, Any] = {
+            ART_BACKFILL_RUN_ID_KEY: run_id,
+            ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: True,
+            "art_backfill_source": source,
+        }
+        if task_run_id is not None:
+            tid = int(task_run_id)
+            extras[FULL_SYNC_TASK_RUN_ID_KEY] = tid
+            extras[ART_BACKFILL_TASK_RUN_ID_KEY] = tid
+        out = enqueue_placeholder_art_refresh(
             ids,
             session=session,
             merge_into_pending=False,
-            payload_extras={
-                ART_BACKFILL_RUN_ID_KEY: run_id,
-                ART_BACKFILL_REFRESH_ON_COMPLETION_KEY: True,
-                "art_backfill_source": source,
-            },
+            payload_extras=extras,
         )
+        batch_count = int(out.get("jobs_created") or 0)
+        if task_run_id is not None and out.get("ok"):
+            from services.task_run_phases import begin_art_backfill_phase
+
+            begin_art_backfill_phase(
+                int(task_run_id),
+                art_run_id=run_id,
+                placeholder_count=int(out.get("placeholder_count") or len(ids)),
+                batch_count=batch_count,
+                source=source,
+            )
+        out["art_backfill_run_id"] = run_id
+        out["batch_count"] = batch_count
+        out["enqueued"] = bool(out.get("ok")) and batch_count > 0
+        return out
     finally:
         session.close()
 
@@ -112,6 +134,16 @@ def _art_refresh_completion_scan_if_last_batch(
     if pending_same_run:
         return
 
+    task_run_id = None
+    try:
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        raw_tid = payload.get(FULL_SYNC_TASK_RUN_ID_KEY) or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
+        if raw_tid is not None:
+            task_run_id = int(raw_tid)
+    except Exception:
+        task_run_id = None
+
+    # Close the worker DB session before long media-server HTTP (same pattern as nfo_refresh).
     try:
         session.commit()
     except Exception:
@@ -120,6 +152,13 @@ def _art_refresh_completion_scan_if_last_batch(
         session.close()
     except Exception:
         pass
+
+    # Mark the full-sync task DONE before Plex/JF/Emby refresh so the Tasks UI does not
+    # sit on WORKING for tens of minutes while library scans run.
+    if task_run_id:
+        from services.task_run_phases import finalize_art_backfill_phase
+
+        finalize_art_backfill_phase(task_run_id, run_id)
 
     try:
         refresh_stats = refresh_all_sections(
@@ -160,9 +199,12 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     except Exception as exc:
         logger.debug(f"placeholder_art_refresh idempotency skipped: {exc}", extra={"emoji_type": "debug"})
 
+    from services.task_run_phases import accumulate_art_backfill_counts, empty_art_counts
+
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     n_total = len(placeholders)
     wrote = 0
+    batch_counts = empty_art_counts()
     refresh_paths: set[str] = set()
     processed_movies: set[int] = set()
     processed_series: set[int] = set()
@@ -205,6 +247,8 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                     result = ensure_movie_art(movie, path)
                     if result.wrote_any:
                         wrote += 1
+                        for k, v in result.art_counts.items():
+                            batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
                     refresh_paths.add(os.path.dirname(os.path.abspath(path)))
                 continue
 
@@ -231,18 +275,28 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                 series_result = ensure_series_art(series, series_folder=series_folder)
                 if series_result.wrote_any:
                     wrote += 1
+                    for k, v in series_result.art_counts.items():
+                        batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
                 if series_folder:
                     refresh_paths.add(os.path.abspath(series_folder))
 
             still_result = ensure_episode_still_art(episode, season, series, path)
             if still_result.wrote_any:
                 wrote += 1
+                for k, v in still_result.art_counts.items():
+                    batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
             refresh_paths.add(os.path.dirname(os.path.abspath(path)))
     finally:
         stop_hb.set()
 
     bulk_completion = bool(payload.get(ART_BACKFILL_REFRESH_ON_COMPLETION_KEY))
     run_id = str(payload.get(ART_BACKFILL_RUN_ID_KEY) or "").strip()
+    task_run_id_raw = payload.get(FULL_SYNC_TASK_RUN_ID_KEY) or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
+    if task_run_id_raw is not None and run_id:
+        try:
+            accumulate_art_backfill_counts(int(task_run_id_raw), run_id, batch_counts)
+        except Exception as exc:
+            logger.debug(f"art backfill phase stats update skipped: {exc}", extra={"emoji_type": "debug"})
 
     if refresh_paths and not bulk_completion:
         try:

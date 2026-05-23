@@ -615,6 +615,8 @@ def run_full_sync(
     types: Tuple[str, ...] = ('movie', 'series'),
     is_4k: bool = False,
     instance_key: str | None = None,
+    *,
+    run_template_backfill: bool = True,
 ):
     """Source-of-truth full sync for ARR -> DB materialization."""
     _ = batch_size  # reserved for future chunking without changing public API
@@ -800,15 +802,18 @@ def run_full_sync(
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
         # If the user saved Status Message changes with "Next full sync", materialize them
         # now so existing placeholders pick up the new templates.
-        try:
-            from services.source_of_truth.template_backfill import run_pending_backfill_if_set
-            backfill = run_pending_backfill_if_set(source='full_sync')
-            stats['template_backfill'] = backfill
-        except Exception as bf_exc:
-            logger.warning(
-                f"Pending template backfill skipped after fullsync: {bf_exc}",
-                extra={'emoji_type': 'warning'},
-            )
+        if run_template_backfill:
+            try:
+                from services.source_of_truth.template_backfill import run_pending_backfill_if_set
+                backfill = run_pending_backfill_if_set(source='full_sync')
+                stats['template_backfill'] = backfill
+            except Exception as bf_exc:
+                logger.warning(
+                    f"Pending template backfill skipped after fullsync: {bf_exc}",
+                    extra={'emoji_type': 'warning'},
+                )
+        else:
+            stats['template_backfill'] = {"ok": True, "ran": False, "reason": "deferred_to_scheduled_sync"}
         return stats
     except Exception as e:
         session.rollback()

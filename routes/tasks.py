@@ -23,6 +23,7 @@ from services.task_run_history import (
     latest_finished_run,
     list_recent_runs,
 )
+from services.task_run_phases import reconcile_stuck_art_backfill_tasks
 
 router = APIRouter()
 
@@ -56,6 +57,25 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
     details = None
     if isinstance(progress, dict):
         details = progress.get("details") or progress.get("display_name")
+    wall_clock_ended = summary.get("wall_clock_ended_at")
+    wall_dur = None
+    if wall_clock_ended and row.started_at:
+        try:
+            end_dt = datetime.fromisoformat(str(wall_clock_ended).replace("Z", "+00:00"))
+            wall_dur = _duration_seconds(row.started_at, end_dt)
+        except Exception:
+            wall_dur = None
+    art_backfill = summary.get("art_backfill") if isinstance(summary.get("art_backfill"), dict) else None
+    art_pending = False
+    if art_backfill and isinstance(progress, dict):
+        inner = progress.get("progress") if isinstance(progress.get("progress"), dict) else {}
+        sections = inner.get("sections") if isinstance(inner.get("sections"), list) else progress.get("sections")
+        if isinstance(sections, list):
+            for sec in sections:
+                if str(sec.get("key") or sec.get("name") or "").lower() in {"art_refresh", "art refresh"}:
+                    if str(sec.get("status") or "").lower() == "working":
+                        art_pending = True
+                    break
     return {
         "id": row.id,
         "task_key": row.task_key,
@@ -65,6 +85,9 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
         "started_at": _iso(row.started_at),
         "ended_at": _iso(row.ended_at),
         "duration_seconds": dur,
+        "sync_duration_seconds": dur,
+        "wall_clock_duration_seconds": wall_dur,
+        "art_backfill_pending": art_pending,
         "error_message": row.error_message,
         "skip_reason": row.skip_reason,
         "details": details,
@@ -85,7 +108,10 @@ async def tasks_scheduled():
         interval = int(sched.get("interval_hours") or 0)
         working = get_working_run(task_key)
         last = latest_finished_run(task_key)
-        last_dur = _duration_seconds(last.started_at, last.ended_at) if last else None
+        if working:
+            last_dur = _duration_seconds(working.started_at, datetime.now(timezone.utc))
+        else:
+            last_dur = _duration_seconds(last.started_at, last.ended_at) if last else None
         rows.append(
             {
                 "task_key": task_key,
@@ -116,12 +142,14 @@ def _interval_label(hours: int) -> str:
 
 @router.get("/api/tasks/history")
 async def tasks_history(limit: int = Query(50, ge=1, le=200)):
+    reconcile_stuck_art_backfill_tasks()
     runs = list_recent_runs(limit=limit)
     return [_serialize_run(r) for r in runs]
 
 
 @router.get("/api/tasks/status")
 async def tasks_status():
+    reconcile_stuck_art_backfill_tasks()
     working = get_working_run()
     if not working:
         return {"working": False, "run": None}

@@ -37,10 +37,21 @@ class LocalArtPaths:
         return out
 
 
+def _empty_art_counts() -> dict[str, int]:
+    return {"movie": 0, "series": 0, "season": 0, "episode": 0}
+
+
 @dataclass
 class ArtResult:
     local_art: LocalArtPaths = field(default_factory=LocalArtPaths)
     wrote_any: bool = False
+    art_counts: dict[str, int] = field(default_factory=_empty_art_counts)
+
+    def merge_counts(self, other: "ArtResult") -> None:
+        for key in ("movie", "series", "season", "episode"):
+            self.art_counts[key] = int(self.art_counts.get(key, 0)) + int(other.art_counts.get(key, 0))
+        if other.wrote_any:
+            self.wrote_any = True
 
 
 def _meta_path_for_output(output_path: str) -> str:
@@ -82,10 +93,85 @@ def _apply_art_file_permissions(anchor_path: str, *artifact_paths: str) -> None:
             _ensure_open_permissions(path)
 
 
-def _write_meta(meta_path: str, *, mode: str, source_url: str, outputs: dict[str, str]) -> None:
+def _normalize_art_url(url: str | None) -> str:
+    return str(url or "").strip()
+
+
+def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
+    """Per-artifact entries: meta_key -> {file, source_url, source_kind?}. Supports legacy string values."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            file_name = str(value.get("file") or "").strip()
+            src = _normalize_art_url(value.get("source_url"))
+            if file_name and src:
+                entry = {"file": file_name, "source_url": src}
+                kind = str(value.get("source_kind") or "").strip()
+                if kind:
+                    entry["source_kind"] = kind
+                out[str(key)] = entry
+        elif isinstance(value, str) and value.strip():
+            out[str(key)] = {"file": value.strip(), "source_url": ""}
+    return out
+
+
+def _season_poster_source(season: Any, series: Any) -> tuple[str, str]:
+    season_url = _normalize_art_url(getattr(season, "remote_poster", None))
+    series_url = _normalize_art_url(getattr(series, "remote_poster", None))
+    if season_url:
+        return season_url, "season"
+    if series_url:
+        return series_url, "series_fallback"
+    return "", "none"
+
+
+def _episode_thumb_source(episode: Any, series: Any) -> tuple[str, str]:
+    still_url = _normalize_art_url(getattr(episode, "sonarr_episode_still", None))
+    fanart_url = _normalize_art_url(getattr(series, "remote_fanart", None))
+    if still_url:
+        return still_url, "still"
+    if fanart_url:
+        return fanart_url, "fanart"
+    return "", "none"
+
+
+def _output_entry(meta: dict | None, meta_key: str, *, legacy_source_url: str = "") -> dict[str, str] | None:
+    if not meta:
+        return None
+    outputs = _normalize_outputs_map(meta.get("outputs"))
+    entry = outputs.get(meta_key)
+    if entry and entry.get("source_url"):
+        return entry
+    # Legacy meta: outputs[meta_key] was a bare filename + top-level source_url
+    if entry and legacy_source_url:
+        return {"file": entry["file"], "source_url": legacy_source_url}
+    legacy_top = str(meta.get("source_url") or "").strip()
+    raw = meta.get("outputs") if isinstance(meta.get("outputs"), dict) else {}
+    bare = raw.get(meta_key) if isinstance(raw, dict) else None
+    if isinstance(bare, str) and bare.strip() and legacy_top:
+        return {"file": bare.strip(), "source_url": legacy_top}
+    return entry
+
+
+def _write_meta(
+    meta_path: str,
+    *,
+    mode: str,
+    meta_key: str,
+    source_url: str,
+    output_basename: str,
+    source_kind: str = "",
+) -> None:
+    existing = _read_meta(meta_path) or {}
+    outputs = _normalize_outputs_map(existing.get("outputs"))
+    entry: dict[str, str] = {"file": output_basename, "source_url": _normalize_art_url(source_url)}
+    if source_kind:
+        entry["source_kind"] = source_kind
+    outputs[meta_key] = entry
     payload = {
         "mode": mode,
-        "source_url": source_url,
         "outputs": outputs,
         "logo_stamp": logo_asset_stamp(),
     }
@@ -96,17 +182,36 @@ def _write_meta(meta_path: str, *, mode: str, source_url: str, outputs: dict[str
         json.dump(payload, f, separators=(",", ":"))
 
 
-def _needs_regenerate(output_path: str, *, mode: str, source_url: str) -> bool:
+def _needs_regenerate(
+    output_path: str,
+    *,
+    mode: str,
+    source_url: str,
+    meta_key: str,
+    source_kind: str = "",
+) -> bool:
+    source_url = _normalize_art_url(source_url)
+    if not source_url:
+        return False
     if not os.path.isfile(output_path):
         return True
-    meta = _read_meta(_meta_path_for_output(output_path))
+    meta_path = _meta_path_for_output(output_path)
+    meta = _read_meta(meta_path)
     if not meta:
         return True
     if str(meta.get("mode") or "") != mode:
         return True
-    if str(meta.get("source_url") or "") != source_url:
-        return True
     if str(meta.get("logo_stamp") or "") != logo_asset_stamp():
+        return True
+    entry = _output_entry(meta, meta_key, legacy_source_url=str(meta.get("source_url") or ""))
+    if not entry:
+        return True
+    if source_kind and str(entry.get("source_kind") or "") != source_kind:
+        return True
+    if _normalize_art_url(entry.get("source_url")) != source_url:
+        return True
+    expected_file = str(entry.get("file") or "").strip()
+    if expected_file and os.path.basename(output_path) != expected_file:
         return True
     return False
 
@@ -128,25 +233,32 @@ def _write_art_file(
     mode: str,
     landscape: bool,
     meta_key: str,
+    source_kind: str = "",
 ) -> bool:
-    url = str(source_url or "").strip()
+    url = _normalize_art_url(source_url)
     if not url:
         return False
     meta_path = _meta_path_for_output(output_path)
-    if not _needs_regenerate(output_path, mode=mode, source_url=url):
+    if not _needs_regenerate(
+        output_path, mode=mode, source_url=url, meta_key=meta_key, source_kind=source_kind
+    ):
         artifacts = [output_path, meta_path]
         folder = os.path.dirname(os.path.abspath(output_path))
         folder_jpg = os.path.join(folder, SERIES_FOLDER_JPEG)
         if meta_key == "series_poster" and os.path.isfile(folder_jpg):
             artifacts.append(folder_jpg)
         _apply_art_file_permissions(output_path, *artifacts)
-        return True
+        return False
     if not _save_image_to_path(output_path, url, mode=mode, landscape=landscape):
         return False
-    meta = _read_meta(meta_path) or {}
-    outputs = dict(meta.get("outputs") or {})
-    outputs[meta_key] = os.path.basename(output_path)
-    _write_meta(meta_path, mode=mode, source_url=url, outputs=outputs)
+    _write_meta(
+        meta_path,
+        mode=mode,
+        meta_key=meta_key,
+        source_url=url,
+        output_basename=os.path.basename(output_path),
+        source_kind=source_kind,
+    )
     artifacts = [output_path, meta_path]
     if meta_key == "series_poster":
         _publish_series_folder_poster(output_path)
@@ -223,11 +335,6 @@ def remove_placeholder_art_in_dir(
     return removed
 
 
-def _season_poster_source_url(season: Any, series: Any) -> str | None:
-    url = str(getattr(season, "remote_poster", None) or "").strip()
-    if url:
-        return url
-    return str(getattr(series, "remote_poster", None) or "").strip() or None
 
 
 def _resolve_series_folder(series: Any, media_path: str | None = None) -> str | None:
@@ -249,6 +356,7 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="poster"):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
+        result.art_counts["movie"] = 1
     return result
 
 
@@ -262,16 +370,18 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
     season_number = int(getattr(season, "season_number", 0) or 0)
     filename = season_poster_filename(season_number)
     out_path = os.path.join(folder, filename)
-    url = _season_poster_source_url(season, series)
+    url, kind = _season_poster_source(season, series)
     if _write_art_file(
         out_path,
         url,
         mode=mode,
         landscape=False,
         meta_key=_season_poster_meta_key(season_number),
+        source_kind=kind,
     ):
         result.local_art.poster = filename
         result.wrote_any = True
+        result.art_counts["season"] = 1
     return result
 
 
@@ -288,10 +398,12 @@ def ensure_series_art(
     mode = poster_overlay_mode()
     folder = os.path.abspath(folder)
     out_path = os.path.join(folder, POSTER_JPEG)
-    url = getattr(series, "remote_poster", None)
-    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="series_poster"):
+    url = _normalize_art_url(getattr(series, "remote_poster", None))
+    kind = "series" if url else "none"
+    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="series_poster", source_kind=kind):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
+        result.art_counts["series"] = 1
 
     rows = seasons
     if rows is None:
@@ -310,6 +422,7 @@ def ensure_series_art(
         one = ensure_season_art(season, series, folder)
         if one.wrote_any:
             result.wrote_any = True
+            result.merge_counts(one)
     return result
 
 
@@ -325,10 +438,11 @@ def ensure_episode_still_art(
     folder = os.path.dirname(os.path.abspath(media_path))
     thumb_name = episode_thumb_filename(media_path)
     thumb_path = os.path.join(folder, thumb_name)
-    still_url = getattr(episode, "sonarr_episode_still", None) or getattr(series, "remote_fanart", None)
-    if _write_art_file(thumb_path, still_url, mode=mode, landscape=True, meta_key="episode_thumb"):
+    still_url, kind = _episode_thumb_source(episode, series)
+    if _write_art_file(thumb_path, still_url, mode=mode, landscape=True, meta_key="episode_thumb", source_kind=kind):
         result.local_art.thumb = thumb_name
         result.wrote_any = True
+        result.art_counts["episode"] = 1
     return result
 
 

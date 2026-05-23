@@ -177,9 +177,28 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
     run_id = f"full_sync:{trigger}:{uuid4()}"
     task_run_id = begin_task_run(task_key="full_sync", trigger=trigger)
     started_at = datetime.now(timezone.utc)
+    from services.task_run_phases import (
+        TaskRunPhaseTracker,
+        _load_summary,
+        mark_follow_up_phase_skipped,
+        metrics_from_arr_sync,
+        metrics_from_pipeline,
+        phases_from_summary,
+        refresh_full_sync_task_progress,
+        try_complete_full_sync_task_run,
+    )
+
+    phases = TaskRunPhaseTracker(task_run_id, started_at=started_at)
     begin_full_sync()
-    result: dict[str, Any] = {"task_run_id": task_run_id, "run_id": run_id}
+    result: dict[str, Any] = {
+        "task_run_id": task_run_id,
+        "run_id": run_id,
+        "mode": "full",
+        "trigger": trigger,
+        "task_run_started_at": started_at.isoformat(),
+    }
     try:
+        phases.begin("arr_sync", "ARR catalog sync")
         sync_stats: dict[str, Any] = {}
         for instance in _configured_arr_instances():
             arr_type = str(instance.get("arr_type") or "").strip().lower()
@@ -190,66 +209,130 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                 batch_size=50,
                 types=("movie",) if arr_type == "radarr" else ("series",),
                 instance_key=str(instance.get("instance_key") or "").strip().lower() or None,
+                run_template_backfill=False,
             )
             sync_stats[str(instance.get("instance_key") or arr_type)] = key
 
         result["arr_sync"] = sync_stats
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="full",
-            started_at=started_at,
-            current_phase="fs_scan",
-            startup_sync_stats=sync_stats,
-            determination_stats=None,
-            materialization_stats=None,
-        )
+        phases.end("arr_sync", metrics=metrics_from_arr_sync(sync_stats))
 
+        pipeline_stats: dict[str, Any] = {"run_id": run_id}
         acquire_pipeline_blocking()
         try:
-            pipeline_stats = _run_self_healing_pipeline_inner(run_id, include_calendar_date_refresh=True)
+            pipeline_stats["calendar_date_refresh"] = run_calendar_date_refresh()
+
+            phases.begin("fs_scan", "Filesystem scan")
+            scan_result = scan_once_if_needed(run_id, prefer_incremental=False)
+            if isinstance(scan_result, tuple):
+                scan_count, scan_info = scan_result
+            else:
+                scan_count, scan_info = scan_result, {"reason": "ok"}
+            pipeline_stats["scan"] = {"count": scan_count, "info": scan_info}
+            pipeline_stats["reconcile"] = run_placeholder_link_reconcile()
+            phases.end("fs_scan", metrics=metrics_from_pipeline(pipeline_stats).get("fs_scan"))
+
+            phases.begin("determination", "Status determination")
+            pipeline_stats["determination"] = run_determination_pass()
+            phases.end("determination", metrics=metrics_from_pipeline(pipeline_stats).get("determination"))
+
+            phases.begin("materialization", "Placeholder materialization")
+            pipeline_stats["materialization"] = run_materialization_pass()
+            phases.end("materialization", metrics=metrics_from_pipeline(pipeline_stats).get("materialization"))
+
+            phases.begin("calendar", "Calendar status")
+            pipeline_stats["calendar"] = run_calendar_phase()
+            pipeline_stats["orphan_placeholders"] = run_orphan_placeholder_cleanup()
+            phases.end("calendar", metrics=metrics_from_pipeline(pipeline_stats).get("calendar"))
+
             result["pipeline"] = pipeline_stats
         finally:
             release_pipeline()
 
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="full",
-            started_at=started_at,
-            current_phase="complete",
-            startup_sync_stats=sync_stats,
-            determination_stats=pipeline_stats.get("determination"),
-            materialization_stats=pipeline_stats.get("materialization"),
-            completed_at=datetime.now(timezone.utc),
-        )
-        completed_at = datetime.now(timezone.utc)
-        finish_task_run(task_run_id, status="done", summary=result)
-        _apply_schedule_after_success("full_sync", trigger)
+        sync_completed_at = datetime.now(timezone.utc)
+        result["sync_completed_at"] = sync_completed_at.isoformat()
+        mat = pipeline_stats.get("materialization") if isinstance(pipeline_stats.get("materialization"), dict) else {}
+        created_n = int(mat.get("created") or 0)
+        deleted_n = int(mat.get("deleted") or 0)
+        phase_list = phases.phases()
+        result["phases"] = phase_list
+        update_task_run_summary(task_run_id, result)
+
+        follow_ups_started = False
+
+        try:
+            from services.source_of_truth.template_backfill import run_pending_backfill_if_set
+
+            nfo_out = run_pending_backfill_if_set(source=f"full_sync:{trigger}", task_run_id=task_run_id)
+            result["template_backfill"] = nfo_out
+            update_task_run_summary(task_run_id, {"template_backfill": nfo_out})
+            nfo_enqueued = bool(nfo_out.get("enqueued")) and int(nfo_out.get("placeholder_count") or 0) > 0
+            if nfo_enqueued:
+                follow_ups_started = True
+            else:
+                mark_follow_up_phase_skipped(
+                    task_run_id,
+                    "metadata_refresh",
+                    "Metadata refresh",
+                    reason=str(nfo_out.get("reason") or "not_requested"),
+                )
+        except Exception as nfo_exc:
+            logger.warning(
+                f"Full sync template/NFO backfill enqueue failed: {nfo_exc}",
+                extra={"emoji_type": "warning"},
+            )
+            mark_follow_up_phase_skipped(
+                task_run_id,
+                "metadata_refresh",
+                "Metadata refresh",
+                reason="enqueue_failed",
+            )
+
         try:
             from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
-            art_out = enqueue_placeholder_art_backfill_all(source=f"full_sync:{trigger}")
+            art_out = enqueue_placeholder_art_backfill_all(
+                source=f"full_sync:{trigger}",
+                task_run_id=task_run_id,
+            )
             result["placeholder_art_backfill"] = art_out
+            update_task_run_summary(task_run_id, {"placeholder_art_backfill": art_out})
+            art_enqueued = bool(art_out.get("enqueued")) and int(art_out.get("placeholder_count") or 0) > 0
+            if art_enqueued:
+                follow_ups_started = True
+            else:
+                mark_follow_up_phase_skipped(
+                    task_run_id,
+                    "art_refresh",
+                    "Art refresh",
+                    reason="no_active_placeholders",
+                )
         except Exception as art_exc:
             logger.warning(
                 f"Full sync art backfill enqueue failed: {art_exc}",
                 extra={"emoji_type": "warning"},
             )
+            mark_follow_up_phase_skipped(
+                task_run_id,
+                "art_refresh",
+                "Art refresh",
+                reason="enqueue_failed",
+            )
+
+        phase_list = phases_from_summary(_load_summary(task_run_id)) or phase_list
+        if follow_ups_started:
+            refresh_full_sync_task_progress(task_run_id, phases=phase_list, overall_status="WORKING")
+        else:
+            try_complete_full_sync_task_run(task_run_id)
         return result
     except Exception as exc:
         logger.exception("Full sync failed run_id=%s", run_id)
-        _record_progress(
-            task_run_id=task_run_id,
-            mode="full",
-            started_at=started_at,
-            current_phase="failed",
-            startup_sync_stats=result.get("arr_sync"),
-            determination_stats=None,
-            materialization_stats=None,
-            completed_at=datetime.now(timezone.utc),
+        for key in list(phases._open.keys()):
+            phases.end(key, failed=True, status="failed")
+        try_complete_full_sync_task_run(
+            task_run_id,
             failed=True,
             error_message=str(exc),
         )
-        finish_task_run(task_run_id, status="failed", summary=result, error_message=str(exc))
         raise
     finally:
         end_full_sync()

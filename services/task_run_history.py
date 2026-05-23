@@ -52,6 +52,24 @@ def update_task_run_summary(run_id: int, summary: dict[str, Any]) -> None:
         session.close()
 
 
+def reopen_task_run(run_id: int) -> None:
+    """Mark a task run in-progress again (e.g. background art backfill after sync phases)."""
+    session = get_session()
+    try:
+        row = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.id == int(run_id)).first()
+        if not row:
+            return
+        row.status = "working"
+        row.ended_at = None
+        session.add(row)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def finish_task_run(
     run_id: int,
     *,

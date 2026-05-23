@@ -2859,34 +2859,50 @@ function taskProgressStatusTokenClass(token: string): string {
   return "text-slate-300 bg-slate-700/20 border-slate-500/30";
 }
 
+function taskRunProgressSections(progress: ActivityRow["progress"] | undefined): Array<any> {
+  if (!progress) return [];
+  const inner = (progress as any).progress;
+  if (inner && Array.isArray(inner.sections)) return inner.sections;
+  if (Array.isArray((progress as any).sections)) return (progress as any).sections;
+  return [];
+}
+
 function TaskSyncProgressSections(props: { progress: ActivityRow["progress"] }) {
-  const sections = Array.isArray(props.progress?.sections) ? props.progress!.sections! : [];
+  const sections = taskRunProgressSections(props.progress);
   if (!sections.length) return null;
   return (
-    <div className="mt-2 mx-auto w-full max-w-[1100px] grid gap-2 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
+    <div className="mt-2 mx-auto w-full max-w-[1100px] space-y-2">
       {sections.map((section: any, sidx: number) => {
         const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
         const sectionStatus = String(section?.status || "pending").toLowerCase();
-        const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped";
+        const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped" || sectionStatus === "working";
+        const phaseDur = section?.duration_seconds;
+        const timing =
+          section?.started_at || section?.ended_at || phaseDur != null
+            ? `${section?.started_at ? new Date(section.started_at).toLocaleTimeString() : "--"} → ${section?.ended_at ? new Date(section.ended_at).toLocaleTimeString() : sectionStatus === "working" ? "…" : "--"}${phaseDur != null ? ` (${formatTaskDuration(Number(phaseDur))})` : ""}`
+            : null;
         return (
-          <div key={`task-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
-            <div className="mb-1 flex items-center justify-between">
+          <div key={`task-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-3">
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
               <span className="text-[12px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
               <span className={`rounded border px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider ${taskProgressStatusTokenClass(sectionStatus)}`}>
                 {String(section?.status || "pending")}
               </span>
             </div>
+            {timing ? <p className="text-[11px] text-slate-500 font-mono mb-2">{timing}</p> : null}
             <div className="space-y-0.5 text-[13px] text-slate-400">
-              {showMetrics ? (
+              {showMetrics && metrics.length > 0 ? (
                 metrics.map((metric: any, midx: number) => (
                   <div key={`task-metric-${sidx}-${midx}`} className="flex justify-between gap-2">
                     <span>{String(metric?.label || "Metric")}</span>
-                    <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
+                    <span className="text-slate-200 text-right">{String(metric?.value ?? "--")}</span>
                   </div>
                 ))
-              ) : (
-                <div className="text-sky-300/80">{sectionStatus === "working" ? "Running..." : "Waiting to start..."}</div>
-              )}
+              ) : sectionStatus === "working" ? (
+                <div className="text-sky-300/80">Running...</div>
+              ) : sectionStatus === "pending" ? (
+                <div className="text-slate-500">Waiting to start...</div>
+              ) : null}
             </div>
           </div>
         );
@@ -2924,7 +2940,7 @@ function TasksPanel(props: {
       const next = { ...prev };
       for (const run of props.history) {
         const key = `task-run-${run.id}`;
-        const hasProgress = Array.isArray(run.progress?.sections) && run.progress!.sections!.length > 0;
+        const hasProgress = taskRunProgressSections(run.progress).length > 0;
         if (!hasProgress) continue;
         if (String(run.status).toUpperCase() === "WORKING" && next[key] === undefined) {
           next[key] = true;
@@ -3040,8 +3056,10 @@ function TasksPanel(props: {
               <tbody className="divide-y divide-[#424753]/15">
                 {props.history.map((run) => {
                   const rowKey = `task-run-${run.id}`;
-                  const hasProgress = Array.isArray(run.progress?.sections) && run.progress!.sections!.length > 0;
+                  const hasProgress = taskRunProgressSections(run.progress).length > 0;
                   const isExpanded = !!historyExpanded[rowKey];
+                  const wallDur = run.wall_clock_duration_seconds;
+                  const showWallDur = wallDur != null && wallDur > (run.duration_seconds ?? 0) + 30;
                   return (
                     <Fragment key={run.id}>
                       <tr className="hover:bg-[#1e2430]/40">
@@ -3067,7 +3085,18 @@ function TasksPanel(props: {
                         <td className="px-3 py-2 text-[14px] text-slate-400 capitalize">{run.trigger}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{timeAgo(run.started_at)}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{run.ended_at ? timeAgo(run.ended_at) : "--"}</td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">{formatTaskDuration(run.duration_seconds)}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">
+                          {String(run.status).toUpperCase() === "WORKING" && run.started_at
+                            ? formatTaskDuration(
+                                Math.max(0, (Date.now() - new Date(run.started_at).getTime()) / 1000),
+                              )
+                            : formatTaskDuration(showWallDur ? wallDur : run.duration_seconds)}
+                          {showWallDur && String(run.status).toUpperCase() !== "WORKING" ? (
+                            <span className="block text-[11px] text-slate-500 font-sans" title="Older run: sync and art were tracked separately">
+                              (includes art)
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="px-3 py-2">
                           <span className={`text-[12px] font-headline uppercase tracking-wider ${statusClass(run.status)}`}>
                             {run.status}

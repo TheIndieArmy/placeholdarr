@@ -26,6 +26,9 @@ export interface TaskRunRow {
   started_at: string | null;
   ended_at: string | null;
   duration_seconds: number | null;
+  sync_duration_seconds?: number | null;
+  wall_clock_duration_seconds?: number | null;
+  art_backfill_pending?: boolean;
   error_message?: string | null;
   skip_reason?: string | null;
   details?: string | null;
@@ -78,6 +81,9 @@ export interface ActivityRow {
     sections?: Array<{
       name: string;
       status: "pending" | "working" | "done" | "failed" | "skipped" | string;
+      started_at?: string | null;
+      ended_at?: string | null;
+      duration_seconds?: number | null;
       metrics?: Array<{ label: string; value: string | number | null | undefined; tooltip?: string }>;
     }>;
     log_file?: string;
