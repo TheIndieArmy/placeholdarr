@@ -142,6 +142,15 @@ def _output_entry(meta: dict | None, meta_key: str, *, legacy_source_url: str = 
         return None
     outputs = _normalize_outputs_map(meta.get("outputs"))
     entry = outputs.get(meta_key)
+    if (not entry or not entry.get("source_url")) and meta_key.startswith("episode_thumb:"):
+        legacy = outputs.get("episode_thumb")
+        thumb_file = meta_key.split(":", 1)[-1]
+        if (
+            isinstance(legacy, dict)
+            and legacy.get("source_url")
+            and str(legacy.get("file") or "").strip() == thumb_file
+        ):
+            entry = legacy
     if entry and entry.get("source_url"):
         return entry
     # Legacy meta: outputs[meta_key] was a bare filename + top-level source_url
@@ -287,6 +296,11 @@ def _season_poster_meta_key(season_number: int) -> str:
 def episode_thumb_filename(media_path: str) -> str:
     base, _ = os.path.splitext(os.path.basename(media_path))
     return f"{base}-thumb.jpg"
+
+
+def episode_thumb_meta_key(thumb_basename: str) -> str:
+    """Per-episode meta slot — season folders share one ``.poster-overlay.json`` file."""
+    return f"episode_thumb:{thumb_basename}"
 
 
 def remove_season_poster_art_in_series_folder(series_folder: str | None) -> bool:
@@ -439,7 +453,8 @@ def ensure_episode_still_art(
     thumb_name = episode_thumb_filename(media_path)
     thumb_path = os.path.join(folder, thumb_name)
     still_url, kind = _episode_thumb_source(episode, series)
-    if _write_art_file(thumb_path, still_url, mode=mode, landscape=True, meta_key="episode_thumb", source_kind=kind):
+    meta_key = episode_thumb_meta_key(thumb_name)
+    if _write_art_file(thumb_path, still_url, mode=mode, landscape=True, meta_key=meta_key, source_kind=kind):
         result.local_art.thumb = thumb_name
         result.wrote_any = True
         result.art_counts["episode"] = 1
