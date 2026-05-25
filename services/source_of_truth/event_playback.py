@@ -1199,11 +1199,7 @@ def _partition_playback_targets(
 
         if is_future and _suppress_search_for_future_episodes():
             continue
-        if (
-            not is_future
-            and bool(getattr(ep, "sonarr_monitored", False))
-            and _suppress_search_for_monitored_episodes()
-        ):
+        if bool(getattr(ep, "sonarr_monitored", False)) and _suppress_search_for_monitored_episodes():
             continue
         search_eligible.append(ep)
 
