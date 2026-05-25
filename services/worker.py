@@ -65,6 +65,10 @@ from services.source_of_truth.entity_materialization_job import (
     ENTITY_MATERIALIZATION_JOB_TYPE,
     process_entity_materialization_job,
 )
+from services.source_of_truth.placeholder_art_reconciler import (
+    PLACEHOLDER_ART_REFRESH_JOB_TYPE,
+    process_placeholder_art_refresh_job,
+)
 from services.source_of_truth.status_reconciler import (
     NFO_REFRESH_JOB_TYPE,
     process_nfo_refresh_job,
@@ -713,6 +717,12 @@ def _process_claimed_job(session, job: Job):
         result = process_nfo_refresh_job(session, job)
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'nfo_refresh_failed'))
+        return
+
+    if job.job_type == PLACEHOLDER_ART_REFRESH_JOB_TYPE:
+        result = process_placeholder_art_refresh_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'placeholder_art_refresh_failed'))
         return
 
     if job.job_type == ENTITY_MATERIALIZATION_JOB_TYPE:

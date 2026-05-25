@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.logger import logger
-from services.placeholder_poster_art import remove_placeholder_art_in_dir
+from services.placeholder_poster_art import remove_placeholder_art_in_dir, remove_season_poster_art_in_series_folder
 from services.placeholders import remove_nfo_sidecar, remove_placeholder_file
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Placeholder, Season
@@ -181,7 +181,8 @@ def cleanup_episode_placeholder_files(
 	if not series_has_placeholders:
 		for folder in sorted(candidate_series_folders):
 			series_nfo_deleted = _remove_series_nfo(folder) or series_nfo_deleted
-			remove_placeholder_art_in_dir(folder)
+			remove_placeholder_art_in_dir(folder, series_folder=folder)
+			remove_season_poster_art_in_series_folder(folder)
 			directories_deleted += _prune_empty_tree(folder)
 			refresh_path = _nearest_existing_dir(folder)
 			if refresh_path:

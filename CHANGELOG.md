@@ -7,16 +7,33 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-### Fixed
-
-- **Plex NFO + placeholder poster overlays**: Local composited art no longer uses bare `poster.jpg` in `<thumb preview>` (Plex expects http(s) URLs there). Remote poster URLs are kept for preview/thumb tags while `<art><poster>` points at the absolute local JPEG path when present, so plot/cast metadata loads again and Plex can pick up the overlay poster after a library refresh.
-- **NFO refresh without Pillow**: When poster overlay mode is enabled but Pillow is missing from the runtime, `nfo_refresh` no longer fails repeatedly; compositing is skipped with a warning and NFO files are still rewritten using remote poster URLs.
-- **Corner badge overlay**: Uses the real Placeholdarr mark exported from `Placeholdarr_yellow.svg` (replacing the temporary block-letter asset) and places the badge in the **bottom-right** corner (avoids Plex’s unwatched-episode count on TV posters). Poster regeneration runs automatically when the logo asset or layout stamp changes.
-- **TV poster overlays**: Series roots also get `folder.jpg` (Plex show poster convention); episode NFOs reference composited `*-thumb.jpg` in `<art>` when local stills exist.
-- **Plex display of composited art**: When `poster.jpg` or episode `*-thumb.jpg` exists, NFO `<thumb>` tags now point at the local absolute path instead of the remote TVDB/TMDB URL so Plex does not keep showing agent art over the on-disk overlay.
-
 ### Added
 
+- **Placeholder art refresh (decoupled from NFO)**: New batched `placeholder_art_refresh` jobs write local `poster.jpg`, `folder.jpg`, `seasonNN-poster.jpg`, and episode `*-thumb.jpg` beside placeholders. Overlay mode controls compositing vs raw download; files are still written when overlay is off. Full sync and overlay setting changes queue a bulk backfill; lite sync scopes art to touched rows; materialization writes art inline on create. When the last bulk batch finishes, Plex TV/movie libraries refresh with forced metadata (`force=1`); Jellyfin and Emby run library scans.
+- **TV season poster art for placeholders**: Sonarr sync requests `includeSeasonImages` and stores per-season `remote_poster` URLs. Art refresh writes Sonarr-style `seasonNN-poster.jpg` (and `season-specials-poster.jpg`) at the series root, with series-poster fallback when a season has no dedicated image.
+- **Full sync phased task runs** (`services/task_run_phases.py`): Full sync records explicit phases — ARR catalog sync, filesystem scan, status determination, placeholder materialization, calendar status, art refresh, and metadata refresh (when template backfill is pending) — with per-phase timings and metrics in `scheduled_task_run.summary`. The task row stays **WORKING** until art (and any NFO backfill) jobs finish, then closes with a single wall-clock end time.
+- **Tasks UI — expandable phase detail**: Queue/history rows expand to show each phase with start/end times, duration, status badge, and metrics (including art batch `N / M` and poster/still counts). In-progress runs show a live elapsed duration; finished runs can show wall-clock duration when art ran after the main sync steps.
+- **Filesystem scan phase metrics**: Show files walked and placeholder media files found (not only “new paths indexed”), with a human **Status** instead of raw `ok`.
+- **ARR catalog sync phase metrics**: Radarr rows show movie counts only; Sonarr rows show series/episode counts only (no misleading zeroes for the other type).
+- **Interrupted task runs**: On app restart, any `scheduled_task_run` left `working` is marked **failed** (`interrupted_by_restart`) so manual sync is not blocked. `POST /api/tasks/abandon` abandons stuck runs without another restart.
+
+### Changed
+
+- **NFO sidecars are metadata-only**: Movie, TV show, and episode NFOs no longer include `<thumb>`, `<art>`, `<poster>`, `<fanart>`, or `<banner>` tags. Plex/Jellyfin/Emby pick up local JPEGs via library refresh and Sonarr-style filenames, not NFO art references. Run **Metadata Refresh** only when status templates or text fields change; **Full sync** queues art reconcile separately.
+- **Placeholder poster overlay setting**: Description updated — local art files are always written when remote URLs exist; overlay mode only changes treatment (grayscale/banner/badge vs raw download).
+- **Full sync pipeline layout**: Calendar date refresh, filesystem scan, determination, materialization, and calendar/orphan cleanup run as separate tracked phases instead of one opaque “self-healing” block. Template/NFO backfill on full sync is optional (pending flag only); art backfill is always queued when active placeholders exist.
+- **Art skip / regen stability**: `.poster-overlay.json` tracks per-artifact `source_url` and `source_kind` (still vs fanart, season vs series fallback) so episode stills are not regenerated when only the DB URL field changes from fanart to still. Logo overlay stamp uses a **content hash** of the SVG (not file mtime) so container restarts do not force a full poster rewrite.
+- **Art bulk completion order**: Last art batch marks the full-sync task **DONE** before firing Plex/Jellyfin/Emby section refresh HTTP (refresh is fire-and-forget; we do not wait for Plex library scans to finish).
+
+### Fixed
+
+- **Startup task abandon**: Orphaned working runs were not cleared on restart because `Job` was missing from `task_run_history` imports (`name 'Job' is not defined`).
+- **Episode art skip**: Episode stills in the same season folder shared one `episode_thumb` entry in `.poster-overlay.json`, so each run rewrote ~10k thumbs; meta keys are now per file (`episode_thumb:<basename>-thumb.jpg`).
+- **Full sync stuck WORKING after art finished**: Art completion now calls `finalize_art_backfill_phase` (was missing in the art reconciler’s “run complete” path). Follow-up job checks count only **PENDING** / **CLAIMED** jobs, not **WORKING**, so the last art batch no longer blocks itself when closing the task. `accumulate_art_backfill_counts` and `reconcile_stuck_art_backfill_tasks` (on Tasks API load) repair runs where all batches finished but the parent row stayed open, including when the art phase is already **Done** but the task is still **Working**.
+- **Corner badge overlay**: Uses the real Placeholdarr mark exported from `Placeholdarr_yellow.svg` (replacing the temporary block-letter asset) and places the badge in the **bottom-right** corner (avoids Plex’s unwatched-episode count on TV posters). Poster regeneration runs automatically when the logo asset or layout stamp changes.
+- **Task schedule persistence**: Next run times for full/lite sync are stored in AppConfig and survive restarts; manual and scheduled completions reset the interval from completion time (no boot-time stagger).
+- **Task queue progress**: Task history rows expand to show phased progress sections (nested `progress.progress.sections` supported). Scheduled-task cards show elapsed time while a run is still working.
+- **Activity — Tasks, Operations, Placeholders**: Activity splits into three sidebar pages (Placeholders default, Tasks, Operations). Tasks shows *arr-style scheduled full/lite sync (defaults weekly / 12h), run history with startup/manual/scheduled triggers, and Run now confirmations. Lite sync copy notes it includes calendar date refresh and Coming Soon updates. Operations is the live event feed without scheduled sync noise.
 - **Poster overlay style previews**: Settings → Status Updates includes an expandable **Overlay style examples** panel (sample TMDB poster with grayscale, top banner, and corner-badge treatments) so you can compare modes before triggering NFO refresh.
 - **Onboarding — Look and feel**: New wizard step for placeholder status updates, projection mode, and poster overlay mode (with the same overlay previews). Defaults: status updates **All**, project status into **Both**.
 

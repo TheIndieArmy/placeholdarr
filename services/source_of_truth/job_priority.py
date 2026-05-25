@@ -28,6 +28,7 @@ _PRIORITY_BY_TYPE: dict[str, int] = {
     "webhook_event": PRIORITY_INTERACTIVE,
     "playback_fallback": PRIORITY_INTERACTIVE,
     "nfo_refresh": PRIORITY_SEMI_INTERACTIVE,
+    "placeholder_art_refresh": PRIORITY_SEMI_INTERACTIVE,
     "queue_monitor": PRIORITY_SEMI_INTERACTIVE,
     "entity_materialization": PRIORITY_BACKGROUND_LIGHT,
     "import_grace": PRIORITY_BACKGROUND_LIGHT,

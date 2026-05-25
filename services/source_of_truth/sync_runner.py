@@ -261,6 +261,32 @@ def _movie_folder_name(title: str, year: int, tmdbid: int) -> str:
     return f"{_sanitize_name(title)} {{tmdb-{tmdbid}}}"
 
 
+def _season_poster_url_from_series_entry(series_entry: Dict, season_number: int) -> str | None:
+    """Read per-season poster URL from Sonarr series payload (requires includeSeasonImages)."""
+    if not isinstance(series_entry, dict):
+        return None
+    target = int(season_number)
+    for item in series_entry.get('seasons') or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            if int(item.get('seasonNumber')) != target:
+                continue
+        except (TypeError, ValueError):
+            continue
+        url = _extract_poster_url(item)
+        if url:
+            return url
+    return None
+
+
+def _apply_season_remote_posters(season_rows_by_number: Dict[int, Season], series_entry: Dict) -> None:
+    for season_number, season_row in season_rows_by_number.items():
+        url = _season_poster_url_from_series_entry(series_entry, season_number)
+        if url:
+            season_row.remote_poster = url
+
+
 def _extract_poster_url(entry: Dict) -> str | None:
     """Extract poster URL from an ARR entry via fallback chain.
 
@@ -589,6 +615,8 @@ def run_full_sync(
     types: Tuple[str, ...] = ('movie', 'series'),
     is_4k: bool = False,
     instance_key: str | None = None,
+    *,
+    run_template_backfill: bool = True,
 ):
     """Source-of-truth full sync for ARR -> DB materialization."""
     _ = batch_size  # reserved for future chunking without changing public API
@@ -716,6 +744,7 @@ def run_full_sync(
                         else:
                             stats['episodes_updated'] += 1
 
+                    _apply_season_remote_posters(season_rows_by_number, series_entry)
                     for season_number, season_row in season_rows_by_number.items():
                         rollup = season_rollups.get(season_number) or {}
                         files_count = int(rollup.get('files') or 0)
@@ -773,15 +802,18 @@ def run_full_sync(
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
         # If the user saved Status Message changes with "Next full sync", materialize them
         # now so existing placeholders pick up the new templates.
-        try:
-            from services.source_of_truth.template_backfill import run_pending_backfill_if_set
-            backfill = run_pending_backfill_if_set(source='full_sync')
-            stats['template_backfill'] = backfill
-        except Exception as bf_exc:
-            logger.warning(
-                f"Pending template backfill skipped after fullsync: {bf_exc}",
-                extra={'emoji_type': 'warning'},
-            )
+        if run_template_backfill:
+            try:
+                from services.source_of_truth.template_backfill import run_pending_backfill_if_set
+                backfill = run_pending_backfill_if_set(source='full_sync')
+                stats['template_backfill'] = backfill
+            except Exception as bf_exc:
+                logger.warning(
+                    f"Pending template backfill skipped after fullsync: {bf_exc}",
+                    extra={'emoji_type': 'warning'},
+                )
+        else:
+            stats['template_backfill'] = {"ok": True, "ran": False, "reason": "deferred_to_scheduled_sync"}
         return stats
     except Exception as e:
         session.rollback()
@@ -1059,6 +1091,7 @@ def sync_sonarr_series_specials_season0_backfill(
                         extra={"emoji_type": "debug"},
                     )
 
+            _apply_season_remote_posters(season_rows_by_number, series_entry)
             for season_number, srow in season_rows_by_number.items():
                 rollup = season_rollups.get(season_number) or {}
                 files_count = int(rollup.get("files") or 0)
@@ -1185,6 +1218,7 @@ def sync_sonarr_series_by_ids(
                 continue
 
             s_fields = _series_fields(series_entry, inferred_secondary, effective_instance_key)
+            s_fields = _fill_missing_series_art(s_fields, series_entry, base_url, api_key)
             if not s_fields['tvdbid']:
                 logger.info(
                     f'Series {series_idx}/{total_series} — {label} — skipped (no TVDB id) · {time.monotonic() - t_series:.1f}s',
@@ -1279,6 +1313,7 @@ def sync_sonarr_series_by_ids(
                         extra={'emoji_type': 'info'},
                     )
 
+            _apply_season_remote_posters(season_rows_by_number, series_entry)
             for season_number, season_row in season_rows_by_number.items():
                 rollup = season_rollups.get(season_number) or {}
                 files_count = int(rollup.get('files') or 0)

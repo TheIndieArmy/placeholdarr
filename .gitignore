@@ -92,3 +92,11 @@ Thumbs.db
 node_modules/
 dist/
 build/
+frontend/dist/
+
+# Local Node.js on NAS/dev (production Docker builds frontend in node:20-alpine)
+# .nvm = Node Version Manager scripts; .nvm/versions/ = downloaded Node binaries — not for GitHub
+.nvm/
+.nvmrc
+bin/
+env.sh

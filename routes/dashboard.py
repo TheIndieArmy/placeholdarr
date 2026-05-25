@@ -498,6 +498,11 @@ async def dashboard_activity_page():
     return _serve_dashboard_index()
 
 
+@router.get("/activity/{path:path}", response_class=HTMLResponse)
+async def dashboard_activity_nested(path: str):
+    return _serve_dashboard_index()
+
+
 @router.get("/library", response_class=HTMLResponse)
 async def dashboard_library_page():
     return _serve_dashboard_index()
@@ -761,6 +766,7 @@ def _humanize_job_type(job_type: str) -> str:
         "materialization": "Placeholder Creation",
         "webhook_event": "Webhook Event",
         "nfo_refresh": "Metadata Refresh",
+        "placeholder_art_refresh": "Art Refresh",
         "import_grace": "Import Grace Check",
         "playback_fallback": "Playback Fallback",
     }
@@ -1006,6 +1012,7 @@ def _is_user_relevant_job(job_type: str, status: str | None = None) -> bool:
     noisy = {
         "webhook_event",
         "nfo_refresh",
+        "placeholder_art_refresh",
         "determination",
         "materialization",
         "status_reconcile",
@@ -2302,12 +2309,46 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
     return top[:limit]
 
 
-@router.get("/api/activity")
-async def activity(limit: int = Query(50, ge=1, le=200)):
-    """Return recent user-relevant activity (materialized ``system_activity_history`` + live sync/queue rows)."""
+_OPERATIONS_EXCLUDED_JOB_TYPES = frozenset(
+    {
+        "full_sync_progress",
+        "lite_sync_progress",
+        "calendar_sync_progress",
+        "full_sync",
+        "lite_sync",
+        "calendar_date_refresh",
+    }
+)
+
+
+def _activity_operations_feed(session, *, limit: int) -> list[dict[str, Any]]:
+    """Live/event feed: exclude scheduled maintenance progress and sync job rows."""
+    rows = _activity_feed_from_history(session, limit=max(limit * 2, limit))
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        jt = str(row.get("job_type") or "").strip().lower()
+        if jt in _OPERATIONS_EXCLUDED_JOB_TYPES:
+            continue
+        out.append(row)
+    return out[:limit]
+
+
+@router.get("/api/activity/operations")
+async def activity_operations(limit: int = Query(50, ge=1, le=200)):
+    """Return live operations feed (webhooks, imports, queue monitor — not scheduled sync runs)."""
     session = get_session()
     try:
-        return _activity_feed_from_history(session, limit=limit)
+        return _activity_operations_feed(session, limit=limit)
+    finally:
+        session.close()
+
+
+@router.get("/api/activity")
+async def activity(limit: int = Query(50, ge=1, le=200)):
+    """Alias for operations feed (backward compatibility)."""
+    session = get_session()
+    try:
+        return _activity_operations_feed(session, limit=limit)
     finally:
         session.close()
 

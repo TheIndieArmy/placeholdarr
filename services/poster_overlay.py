@@ -26,15 +26,20 @@ _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo"})
 
 
 def logo_asset_stamp() -> str:
-    """Change when the bundled logo file or badge layout changes so posters can be regenerated."""
-    try:
-        st = os.stat(_LOGO_PATH)
-        file_stamp = f"{int(st.st_mtime)}:{int(st.st_size)}"
-    except OSError:
-        file_stamp = ""
-    # Bump when corner badge placement changes (e.g. avoid Plex episode-count overlap).
+    """Change when the bundled logo file or badge layout changes so posters can be regenerated.
+
+    Uses file content hash (not mtime) so Docker restarts / image copies do not force a
+    full-library art rebuild when the logo bytes are unchanged.
+    """
+    import hashlib
+
     layout_stamp = "corner-br-v1:prefer-local-nfo-v1"
-    return f"{layout_stamp}:{file_stamp}" if file_stamp else layout_stamp
+    try:
+        data = _LOGO_PATH.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        return f"{layout_stamp}:{digest}:{len(data)}"
+    except OSError:
+        return layout_stamp
 
 _pillow_modules: tuple | bool | None = None
 _pillow_missing_logged = False
@@ -64,7 +69,7 @@ def _log_pillow_missing_once() -> None:
     _pillow_missing_logged = True
     logger.warning(
         "Placeholder poster overlay mode is enabled but Pillow is not installed. "
-        "Skipping composited poster art; NFO refresh will still use remote poster URLs. "
+        "Falling back to raw poster downloads for local art files. "
         "Install with: pip install -r requirements.txt (or rebuild the Docker image).",
         extra={"emoji_type": "warning"},
     )
@@ -262,6 +267,29 @@ def apply_overlay(img, mode: str, *, landscape: bool = False):
     if want == "corner_logo":
         return _apply_corner_logo(base)
     return base
+
+
+def save_raw_poster_from_url(url: str | None, path: str, *, quality: int = 88) -> bool:
+    """Download remote art and save as JPEG without compositing."""
+    data = download_poster_bytes(url or "")
+    if not data:
+        return False
+    mods = _pillow()
+    if mods is None:
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError as exc:
+            logger.warning(f"Failed to write raw poster {path!r}: {exc}", extra={"emoji_type": "warning"})
+            return False
+    img = load_image_from_bytes(data)
+    if img is None:
+        return False
+    return save_jpeg(img, path, quality=quality)
 
 
 def composite_poster_from_url(url: str | None, mode: str, *, landscape: bool = False):

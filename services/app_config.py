@@ -19,11 +19,17 @@ from services.postgres.models import AppConfig
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
 
-# Settings that rewrite existing placeholder NFOs / composited art when changed.
+# Settings that rewrite existing placeholder NFO text when changed.
 NFO_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_STATUS_UPDATES",
         "PLACEHOLDER_STATUS_PROJECTION_MODE",
+    }
+)
+
+# Settings that re-download / re-composite on-disk poster art (decoupled from NFO).
+ART_BACKFILL_SETTING_KEYS = frozenset(
+    {
         "PLACEHOLDER_POSTER_OVERLAY_MODE",
     }
 )
@@ -225,7 +231,22 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Library sync",
                 "label": "Scheduled full sync interval (hours)",
-                "description": "How often to schedule a full ARR/database reconciliation. Set to 0 to disable recurring full sync jobs.",
+                "description": "How often to schedule a full ARR/database reconciliation (default 168 = weekly). Set to 0 to disable recurring full sync jobs.",
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "LITE_SYNC_INTERVAL_HOURS",
+            {
+                "section": "Library sync",
+                "label": "Scheduled lite sync interval (hours)",
+                "description": (
+                    "How often to run lite sync: ARR catalog diff, targeted sync for changes, calendar date refresh, "
+                    "Coming Soon status updates, and scoped placeholder work. Default 12 hours. Set to 0 to disable. "
+                    "Includes calendar maintenance; a separate calendar interval is only used when lite sync is off."
+                ),
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
@@ -239,6 +260,36 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "description": "Include specials when creating and reconciling episode placeholder flows.",
                 "type": "bool",
                 "restart_required": True,
+            },
+        ),
+        (
+            "SKIP_PLACEHOLDERS_WHEN_MONITORED",
+            {
+                "section": "Library sync",
+                "label": "Skip placeholders for monitored titles",
+                "description": (
+                    "When enabled, do not create placeholder files for movies or episodes that are monitored in "
+                    "Radarr or Sonarr (and have no real file). Existing placeholders are removed on the next ARR sync "
+                    "after monitoring is detected. Import still removes placeholders when a real file arrives. "
+                    "Manual monitor toggles in Radarr/Sonarr may take until the next full sync to apply."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED",
+            {
+                "section": "Library sync",
+                "label": "TV: skip when series is monitored (Sonarr)",
+                "description": (
+                    "When the series is monitored in Sonarr, do not create placeholders for any episode in that show—even "
+                    "when individual seasons or episodes are unmonitored. Movies are unchanged."
+                ),
+                "type": "bool",
+                "restart_required": False,
+                "depends_on": "SKIP_PLACEHOLDERS_WHEN_MONITORED",
+                "nested": True,
             },
         ),
         (
@@ -259,8 +310,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "CALENDAR_SYNC_INTERVAL_HOURS",
             {
                 "section": "Calendar",
-                "label": "Calendar sync interval (hours)",
-                "description": "How often the calendar/date refresh job runs. Set to 0 to disable this scheduler.",
+                "label": "Calendar sync interval (hours, legacy)",
+                "description": (
+                    "Only used when lite sync interval is 0. When lite sync is enabled, calendar date refresh and "
+                    "status updates run as part of lite sync instead. Set to 0 to disable."
+                ),
                 "type": "int",
                 "min": 0,
                 "restart_required": True,
@@ -320,6 +374,50 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+            {
+                "section": "Lookahead",
+                "label": "Suppress search when aired targets are already monitored",
+                "description": (
+                    "When enabled, playback will not trigger a Sonarr search if every non-future target episode "
+                    "(for your search mode) is already monitored. Unmonitored future episodes can still be marked "
+                    "monitored without searching. Ignored when Monitor only on playback is enabled."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+            {
+                "section": "Lookahead",
+                "label": "Do not search future episodes on playback",
+                "description": (
+                    "When enabled, playback target episodes that have not aired yet (or unknown air dates outside "
+                    "the calendar window) are marked monitored if needed but are excluded from Sonarr searches. "
+                    "When some aired episodes still need acquisition, only those episodes are searched. "
+                    "Applies to Episode, Season, and Series search modes."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLAYBACK_MONITOR_ONLY_NO_SEARCH",
+            {
+                "section": "Lookahead",
+                "label": "Monitor only on playback (no search)",
+                "description": (
+                    "When enabled, playback never triggers Sonarr searches or SEARCHING placeholder status. "
+                    "Unmonitored target episodes (per your search mode) are still marked monitored in Sonarr. "
+                    "Use with Episode, Season, or Series search mode; takes priority over the other playback "
+                    "search suppression options."
+                ),
+                "type": "bool",
+                "restart_required": False,
+            },
+        ),
+        (
             "PLACEHOLDER_STATUS_UPDATES",
             {
                 "section": "Status Updates",
@@ -355,14 +453,15 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Status Updates",
                 "label": "Placeholder poster overlay",
                 "description": (
-                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Writes composited poster.jpg "
-                    "(and episode thumb images) beside placeholders and points NFOs at local files. "
-                    "Requires a library path refresh after changes."
+                    "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
+                    "seasonNN-poster.jpg at the series root, and episode thumb JPEGs (composited when a style is "
+                    "selected, raw download when Off). NFOs do not include art tags; players pick up files from "
+                    "disk after a library refresh."
                 ),
                 "type": "choice",
                 "restart_required": False,
                 "options": [
-                    {"value": "off", "label": "Off (remote poster URLs only)"},
+                    {"value": "off", "label": "Off (raw download, no overlay)"},
                     {"value": "grayscale", "label": "Grayscale poster"},
                     {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
                     {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
@@ -911,6 +1010,10 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             }
             if meta["type"] == "choice":
                 entry["options"] = list(meta.get("options") or [])
+            if meta.get("depends_on"):
+                entry["depends_on"] = str(meta["depends_on"])
+            if meta.get("nested"):
+                entry["nested"] = True
             grouped[meta["section"]].append(entry)
         return {
             "status": get_onboarding_status(session=session),
@@ -1008,6 +1111,16 @@ def save_settings(
             new_val = str(validated.get(key) or "").strip()
             if prev_val != new_val:
                 nfo_backfill_keys_changed.append(key)
+
+        art_backfill_keys_changed: list[str] = []
+        for key in ART_BACKFILL_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                art_backfill_keys_changed.append(key)
 
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
@@ -1178,6 +1291,16 @@ def save_settings(
                 extra={"emoji_type": "processing"},
             )
 
+        art_backfill_summary: dict[str, Any] | None = None
+        if art_backfill_keys_changed:
+            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
+
+            art_backfill_summary = enqueue_placeholder_art_backfill_all(source="settings_save")
+            logger.info(
+                f"Placeholder art backfill queued after settings save keys={art_backfill_keys_changed}",
+                extra={"emoji_type": "processing"},
+            )
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -1195,6 +1318,8 @@ def save_settings(
             "arr_instance_reconcile": arr_instance_reconcile,
             "nfo_backfill_keys_changed": nfo_backfill_keys_changed,
             "nfo_backfill": backfill_summary,
+            "art_backfill_keys_changed": art_backfill_keys_changed,
+            "art_backfill": art_backfill_summary,
         }
     except Exception as exc:
         session.rollback()

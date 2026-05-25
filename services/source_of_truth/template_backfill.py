@@ -209,7 +209,7 @@ def clear_pending_template_backfill() -> dict[str, Any]:
             pass
 
 
-def enqueue_template_backfill(*, source: str = "user_save") -> dict[str, Any]:
+def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | None = None) -> dict[str, Any]:
     """Queue an NFO refresh covering every active placeholder.
 
     Returns a small status dict describing how many placeholders were enqueued. The worker
@@ -244,25 +244,45 @@ def enqueue_template_backfill(*, source: str = "user_save") -> dict[str, Any]:
         started = datetime.now(timezone.utc).isoformat()
         _set_active_template_run_id(session, run_id)
 
+        extras: dict[str, Any] = {
+            "template_backfill_source": source,
+            "template_backfill_started_at": started,
+            "template_backfill_run_id": run_id,
+            "template_backfill_refresh_on_completion": True,
+        }
+        if task_run_id is not None:
+            from services.task_run_phases import FULL_SYNC_TASK_RUN_ID_KEY
+
+            extras[FULL_SYNC_TASK_RUN_ID_KEY] = int(task_run_id)
+
         out = enqueue_nfo_refresh(
             ids,
             session=session,
             merge_into_pending=False,
             player_metadata_refresh={int(pid): False for pid in ids},
-            payload_extras={
-                "template_backfill_source": source,
-                "template_backfill_started_at": started,
-                "template_backfill_run_id": run_id,
-                "template_backfill_refresh_on_completion": True,
-            },
+            payload_extras=extras,
         )
         if not isinstance(out, dict) or not out.get("ok"):
             return out if isinstance(out, dict) else {"ok": False, "reason": "enqueue_failed"}
 
+        batch_count = int(out.get("jobs_created") or len(out.get("job_ids") or []))
+        if task_run_id is not None:
+            from services.task_run_phases import begin_nfo_backfill_phase
+
+            begin_nfo_backfill_phase(
+                int(task_run_id),
+                nfo_run_id=run_id,
+                placeholder_count=len(ids),
+                batch_count=batch_count,
+                source=source,
+            )
+
         out["placeholder_count"] = len(ids)
-        out["enqueued"] = True
+        out["enqueued"] = batch_count > 0
+        out["batch_count"] = batch_count
         out["source"] = source
         out["superseded_pending_jobs"] = superseded
+        out["template_backfill_run_id"] = run_id
         logger.info(
             f"Template backfill ({source}) queued for {len(ids)} placeholders (run_id={run_id}).",
             extra={"emoji_type": "processing"},
@@ -282,7 +302,7 @@ def enqueue_template_backfill(*, source: str = "user_save") -> dict[str, Any]:
             pass
 
 
-def run_pending_backfill_if_set(*, source: str = "full_sync") -> dict[str, Any]:
+def run_pending_backfill_if_set(*, source: str = "full_sync", task_run_id: int | None = None) -> dict[str, Any]:
     """If the pending flag is set, enqueue the backfill and clear the flag.
 
     Called from ``run_full_sync`` (and at startup as a safety net) so user saves that
@@ -291,7 +311,7 @@ def run_pending_backfill_if_set(*, source: str = "full_sync") -> dict[str, Any]:
     if not is_template_backfill_pending():
         return {"ok": True, "ran": False, "reason": "no_pending_flag"}
 
-    out = enqueue_template_backfill(source=source)
+    out = enqueue_template_backfill(source=source, task_run_id=task_run_id)
     if out.get("ok"):
         clear_pending_template_backfill()
         out["ran"] = True

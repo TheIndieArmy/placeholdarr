@@ -11,15 +11,6 @@ from xml.sax.saxutils import escape
 
 from core.config import settings
 from services.messages.context import build_projection_context
-from services.placeholder_poster_art import (
-    LocalArtPaths,
-    discover_local_art,
-    ensure_episode_placeholder_art,
-    ensure_movie_placeholder_art,
-    ensure_series_placeholder_art,
-    remove_placeholder_art_in_dir,
-)
-from services.poster_overlay import poster_overlay_compositing_available, poster_overlay_enabled
 from services.status_projection import project_summary, project_title
 
 
@@ -598,12 +589,7 @@ def _append_people_as_tag(lines: list[str], tag_name: str, values: Any) -> None:
             lines.append(f"  <{tag_name}>{escape(text)}</{tag_name}>")
 
 
-def _movie_nfo_xml(
-    movie: Any,
-    *,
-    local_art: LocalArtPaths | None = None,
-    art_base_dir: str | None = None,
-) -> str:
+def _movie_nfo_xml(movie: Any) -> str:
     status = str(getattr(movie, "placeholder_status", "") or "REQUEST")
     raw_title = str(getattr(movie, "title", "") or "")
     year = getattr(movie, "year", None)
@@ -629,8 +615,6 @@ def _movie_nfo_xml(
     )
     tmdbid = getattr(movie, "tmdbid", None)
     imdbid = getattr(movie, "imdbid", None)
-    remote_poster = str(getattr(movie, "remote_poster", "") or "")
-    remote_fanart = str(getattr(movie, "remote_fanart", "") or "")
     certification = str(getattr(movie, "radarr_certification", "") or "").strip()
     genres = _to_list(getattr(movie, "radarr_genres", None))
     studio = str(getattr(movie, "radarr_studio", "") or "").strip()
@@ -681,13 +665,6 @@ def _movie_nfo_xml(
         lines.append(f"  <uniqueid type=\"imdb\">{escape(str(imdbid))}</uniqueid>")
     if runtime:
         lines.append(f"  <runtime>{runtime}</runtime>")
-    _append_movie_art_tags(
-        lines,
-        local_art=local_art,
-        remote_poster=remote_poster,
-        remote_fanart=remote_fanart,
-        art_base_dir=art_base_dir,
-    )
     if certification:
         lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
     for genre in genres:
@@ -720,14 +697,7 @@ def _movie_nfo_xml(
     return "\n".join(lines)
 
 
-def _episode_nfo_xml(
-    episode: Any,
-    season: Any,
-    series: Any,
-    *,
-    local_art: LocalArtPaths | None = None,
-    art_base_dir: str | None = None,
-) -> str:
+def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     status = str(getattr(episode, "placeholder_status", "") or "REQUEST")
     raw_series_title = str(getattr(series, "title", "") or "")
     raw_episode_title = str(getattr(episode, "title", "") or "")
@@ -767,9 +737,6 @@ def _episode_nfo_xml(
     tvdbid = getattr(episode, "sonarr_episode_tvdbid", None) or getattr(series, "tvdbid", None)
     imdbid = getattr(series, "imdbid", None)
     sonarrid = getattr(episode, "sonarrid", None)
-    remote_still = str(getattr(episode, "sonarr_episode_still", "") or "") or str(
-        getattr(series, "remote_fanart", "") or ""
-    )
     certification = str(getattr(series, "sonarr_certification", "") or "").strip()
     network = str(getattr(series, "sonarr_network", "") or "").strip()
     directors = getattr(episode, "sonarr_episode_directors", None)
@@ -806,12 +773,6 @@ def _episode_nfo_xml(
         lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
     if network:
         lines.append(f"  <studio>{escape(network)}</studio>")
-    _append_episode_still_tags(
-        lines,
-        local_art=local_art,
-        remote_still=remote_still,
-        art_base_dir=art_base_dir,
-    )
     _append_people_as_tag(lines, 'credits', credits)
     _append_people_as_tag(lines, 'director', directors)
     lines.append("  <watched>false</watched>")
@@ -821,54 +782,17 @@ def _episode_nfo_xml(
 
 
 def ensure_movie_nfo(media_path: str, movie: Any) -> bool:
-    folder = os.path.dirname(os.path.abspath(media_path))
-    if poster_overlay_compositing_available():
-        ensure_movie_placeholder_art(movie, media_path)
-        local_art = discover_local_art(media_path)
-    elif poster_overlay_enabled():
-        local_art = discover_local_art(media_path)
-    else:
-        remove_placeholder_art_in_dir(folder)
-        local_art = LocalArtPaths()
-    return _atomic_write_text(
-        nfo_sidecar_path(media_path),
-        _movie_nfo_xml(movie, local_art=local_art, art_base_dir=folder),
-    )
+    return _atomic_write_text(nfo_sidecar_path(media_path), _movie_nfo_xml(movie))
 
 
 def ensure_episode_nfo(media_path: str, episode: Any, season: Any, series: Any) -> bool:
-    series_folder = getattr(series, "placeholder_folder", None)
-    if not series_folder:
-        series_folder = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(media_path))))
-    if poster_overlay_compositing_available():
-        ensure_episode_placeholder_art(episode, season, series, media_path)
-        ensure_series_placeholder_art(series, series_folder)
-        local_art = discover_local_art(media_path, series_folder=series_folder)
-    elif poster_overlay_enabled():
-        local_art = discover_local_art(media_path, series_folder=series_folder)
-    else:
-        remove_placeholder_art_in_dir(os.path.dirname(os.path.abspath(media_path)), media_path=media_path)
-        remove_placeholder_art_in_dir(series_folder)
-        local_art = LocalArtPaths()
-    episode_folder = os.path.dirname(os.path.abspath(media_path))
     return _atomic_write_text(
         nfo_sidecar_path(media_path),
-        _episode_nfo_xml(
-            episode,
-            season,
-            series,
-            local_art=local_art,
-            art_base_dir=episode_folder,
-        ),
+        _episode_nfo_xml(episode, season, series),
     )
 
 
-def _series_nfo_xml(
-    series: Any,
-    *,
-    local_art: LocalArtPaths | None = None,
-    art_base_dir: str | None = None,
-) -> str:
+def _series_nfo_xml(series: Any) -> str:
     """Render a tvshow.nfo XML for a series object."""
     status = str(getattr(series, "placeholder_status", "") or "REQUEST")
     raw_title = str(getattr(series, "title", "") or "")
@@ -895,9 +819,6 @@ def _series_nfo_xml(
     ratings = _ratings_entries(getattr(series, "sonarr_ratings", None))
     genres = _to_list(getattr(series, "sonarr_genres", None))
     actors = getattr(series, "sonarr_actors", None)
-    remote_poster = str(getattr(series, "remote_poster", "") or "")
-    remote_fanart = str(getattr(series, "remote_fanart", "") or "")
-    remote_banner = str(getattr(series, "remote_banner", "") or "")
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
@@ -929,14 +850,6 @@ def _series_nfo_xml(
         lines.append(f"  <uniqueid type=\"tvmaze\">{escape(str(tvmazeid))}</uniqueid>")
     if runtime:
         lines.append(f"  <runtime>{runtime}</runtime>")
-    _append_series_art_tags(
-        lines,
-        local_art=local_art,
-        remote_poster=remote_poster,
-        remote_fanart=remote_fanart,
-        remote_banner=remote_banner,
-        art_base_dir=art_base_dir,
-    )
     if certification:
         lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
     for genre in genres:
@@ -995,20 +908,8 @@ def ensure_series_nfo(series: Any, folder: str | None = None) -> bool:
         os.makedirs(target_folder, exist_ok=True)
     except Exception:
         pass
-    # Build path for tvshow.nfo
-    if poster_overlay_compositing_available():
-        ensure_series_placeholder_art(series, target_folder)
-        local_art = discover_local_art(None, series_folder=target_folder)
-    elif poster_overlay_enabled():
-        local_art = discover_local_art(None, series_folder=target_folder)
-    else:
-        remove_placeholder_art_in_dir(target_folder)
-        local_art = LocalArtPaths()
     nfo_path = os.path.join(target_folder, "tvshow.nfo")
-    return _atomic_write_text(
-        nfo_path,
-        _series_nfo_xml(series, local_art=local_art, art_base_dir=target_folder),
-    )
+    return _atomic_write_text(nfo_path, _series_nfo_xml(series))
 
 
 def remove_nfo_sidecar(media_path: str | None) -> bool:

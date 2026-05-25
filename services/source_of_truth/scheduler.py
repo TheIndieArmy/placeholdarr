@@ -1,62 +1,44 @@
 import logging
-import threading
-from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from datetime import datetime, timezone
+from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from core.config import settings
-from services.source_of_truth.determiner import run_determination_pass, run_placeholder_link_reconcile
-from services.source_of_truth.filesystem import scan_once_if_needed
-from services.source_of_truth.calendar_phase import run_calendar_phase
-from services.source_of_truth.calendar_date_refresh import run_calendar_date_refresh
-from services.source_of_truth.materializer import run_materialization_pass
-from services.source_of_truth.placeholder_cleanup import run_orphan_placeholder_cleanup
-from services.source_of_truth.sync_runner import run_full_sync
+from services.source_of_truth.scheduled_sync import run_lite_sync, run_scheduled_full_sync
+from services.task_schedule_state import (
+    bump_next_run_after_run,
+    get_persisted_next_run,
+    persist_next_run,
+    resolve_next_run_time,
+)
 
 
-logger = logging.getLogger('services.source_of_truth.scheduler')
-_scheduler = None
-_pipeline_lock = threading.Lock()
+logger = logging.getLogger("services.source_of_truth.scheduler")
+_scheduler: BackgroundScheduler | None = None
+
+JOB_ID_FULL = "source_of_truth:all_arrs"
+JOB_ID_LITE = "source_of_truth:lite_sync"
+JOB_ID_CALENDAR = "source_of_truth:calendar_date_refresh"
 
 
-def _run_self_healing_pipeline(run_id: str) -> None:
-    """Run reconcile → determine → materialize → calendar → reconcile_statuses, serialized by a process-wide lock.
-
-    If a pipeline run is already in progress (e.g. a concurrent scheduled job),
-    the incoming run is skipped rather than blocked — the next interval will catch up.
-    """
-    if not _pipeline_lock.acquire(blocking=False):
-        logger.warning(
-            f"Pipeline already running, skipping scheduled run_id={run_id}",
-            extra={'emoji_type': 'warning'},
-        )
-        return
-    try:
-        scan_result = scan_once_if_needed(run_id, prefer_incremental=False)
-        if isinstance(scan_result, tuple):
-            scan_count, scan_info = scan_result
-        else:
-            scan_count, scan_info = scan_result, {'reason': 'ok'}
-
-        reconcile_stats = run_placeholder_link_reconcile()
-        determination_stats = run_determination_pass()
-        materialization_stats = run_materialization_pass()
-        calendar_stats = run_calendar_phase()
-        orphan_placeholder_stats = run_orphan_placeholder_cleanup()
-        logger.info(
-            "Scheduled self-heal completed "
-            f"run_id={run_id} scan_count={scan_count} scan_info={scan_info} "
-            f"reconcile={reconcile_stats} determination={determination_stats} "
-            f"materialization={materialization_stats} calendar={calendar_stats} "
-            f"orphan_placeholders={orphan_placeholder_stats}"
-        )
-    finally:
-        _pipeline_lock.release()
+def _interval_hours_for(task_key: str) -> int:
+    if task_key == "full_sync":
+        return max(0, int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0))
+    if task_key == "lite_sync":
+        return max(0, int(getattr(settings, "LITE_SYNC_INTERVAL_HOURS", 0) or 0))
+    return 0
 
 
-
-def _start_interval(interval_hours, target, label, disable_hint: str = 'FULL_SYNC_INTERVAL_HOURS'):
+def _start_interval(
+    task_key: str,
+    interval_hours: int,
+    target,
+    label: str,
+    *,
+    job_id: str,
+    disable_hint: str,
+) -> None:
     if interval_hours <= 0:
         logger.info(f"{label} scheduler disabled ({disable_hint} <= 0)")
         return
@@ -71,88 +53,147 @@ def _start_interval(interval_hours, target, label, disable_hint: str = 'FULL_SYN
             f"{label} interval clamped from {interval_hours}h to {safe_interval_hours}h (minimum is 1h)"
         )
 
-    next_run = datetime.now(timezone.utc) + timedelta(hours=safe_interval_hours)
-    job_id = f"source_of_truth:{label.lower().replace(' ', '_').replace('(', '').replace(')', '')}"
+    next_run_time = resolve_next_run_time(task_key, safe_interval_hours)
+
     try:
         _scheduler.add_job(
             target,
-            'interval',
+            "interval",
             hours=safe_interval_hours,
             id=job_id,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
-            next_run_time=next_run,
+            next_run_time=next_run_time,
         )
-        logger.info(f"{label} scheduler started with interval: every {safe_interval_hours}h")
+        logger.info(
+            f"{label} scheduler started: every {safe_interval_hours}h, next_run={next_run_time.isoformat()}",
+        )
     except Exception:
         logger.exception(f"Failed to start scheduler for {label}")
 
 
-def _run_all_syncs():
-    """Run all configured ARR syncs sequentially then execute the shared self-healing pipeline once.
-
-    Only syncs for ARR instances that have both a URL and API key configured are run,
-    so unconfigured instances (e.g. 4K when no 4K Radarr/Sonarr is set up) are silently skipped.
-    """
-    run_id = f'scheduled:all:{uuid4()}'
+def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | None = None) -> None:
+    """Persist and apply the next run time after manual or scheduled completion."""
+    hours = _interval_hours_for(task_key)
+    if hours <= 0:
+        return
+    nxt = bump_next_run_after_run(task_key, hours, completed_at=completed_at)
+    if _scheduler is None:
+        return
+    job_id = JOB_ID_FULL if task_key == "full_sync" else JOB_ID_LITE if task_key == "lite_sync" else None
+    if not job_id:
+        return
     try:
-        for instance in (getattr(settings, 'configured_arr_instances', []) or []):
-            arr_type = str(instance.get('arr_type') or '').strip().lower()
-            if arr_type not in {'radarr', 'sonarr'}:
-                continue
-            run_full_sync(
-                dry_run=False,
-                batch_size=50,
-                types=('movie',) if arr_type == 'radarr' else ('series',),
-                instance_key=str(instance.get('instance_key') or '').strip().lower() or None,
-            )
-        _run_self_healing_pipeline(run_id)
-    except Exception:
-        logger.exception('Scheduled full-sync failed')
-
-
-def _run_calendar_only_syncs():
-    """Run lightweight date refresh + calendar lifecycle/status reconciliation without full ARR sync."""
-    run_id = f'scheduled:calendar:{uuid4()}'
-    try:
-        if not _pipeline_lock.acquire(blocking=False):
-            logger.warning(
-                f"Pipeline already running, skipping calendar-only run_id={run_id}",
-                extra={'emoji_type': 'warning'},
-            )
-            return
-        try:
-            date_refresh_stats = run_calendar_date_refresh()
-            determination_stats = run_determination_pass()
-            materialization_stats = run_materialization_pass()
-            calendar_stats = run_calendar_phase()
-            orphan_placeholder_stats = run_orphan_placeholder_cleanup()
+        job = _scheduler.get_job(job_id)
+        if job:
+            job.reschedule(trigger="interval", hours=max(1, hours), next_run_time=nxt)
             logger.info(
-                "Scheduled calendar-only sync completed "
-                f"run_id={run_id} date_refresh={date_refresh_stats} "
-                f"determination={determination_stats} materialization={materialization_stats} "
-                f"calendar={calendar_stats} orphan_placeholders={orphan_placeholder_stats}"
+                "Rescheduled %s after completion: next_run=%s",
+                task_key,
+                nxt.isoformat(),
+                extra={"emoji_type": "info"},
             )
-        finally:
-            _pipeline_lock.release()
     except Exception:
-        logger.exception('Scheduled calendar-only sync failed')
+        logger.exception("Failed to reschedule job %s", job_id)
+
+
+def _run_all_syncs_scheduled():
+    run_scheduled_full_sync(trigger="scheduled")
+
+
+def _run_lite_sync_scheduled():
+    run_lite_sync(trigger="scheduled")
 
 
 def schedule_all_syncs():
-    """Schedule a single interval-based source-of-truth fullsync job covering all configured ARR services."""
-    interval_hours = getattr(settings, 'FULL_SYNC_INTERVAL_HOURS', 0)
-    _start_interval(interval_hours, _run_all_syncs, 'All ARRs', 'FULL_SYNC_INTERVAL_HOURS')
+    """Schedule interval-based full and lite sync jobs using persisted next-run times."""
+    global _scheduler
 
-    calendar_interval_hours = getattr(settings, 'CALENDAR_SYNC_INTERVAL_HOURS', 0)
+    full_hours = int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0)
     _start_interval(
-        calendar_interval_hours,
-        _run_calendar_only_syncs,
-        'Calendar Date Refresh',
-        'CALENDAR_SYNC_INTERVAL_HOURS',
+        "full_sync",
+        full_hours,
+        _run_all_syncs_scheduled,
+        "All ARRs (full sync)",
+        job_id=JOB_ID_FULL,
+        disable_hint="FULL_SYNC_INTERVAL_HOURS",
     )
 
-    global _scheduler
+    lite_hours = int(getattr(settings, "LITE_SYNC_INTERVAL_HOURS", 0) or 0)
+    _start_interval(
+        "lite_sync",
+        lite_hours,
+        _run_lite_sync_scheduled,
+        "Lite sync",
+        job_id=JOB_ID_LITE,
+        disable_hint="LITE_SYNC_INTERVAL_HOURS",
+    )
+
+    calendar_hours = int(getattr(settings, "CALENDAR_SYNC_INTERVAL_HOURS", 0) or 0)
+    if lite_hours <= 0 and calendar_hours > 0:
+        from services.source_of_truth.scheduled_sync import run_calendar_only_maintenance
+
+        def _legacy_calendar_scheduled():
+            run_calendar_only_maintenance(trigger="scheduled")
+
+        if _scheduler is None:
+            _scheduler = BackgroundScheduler()
+        safe_calendar = max(1, int(calendar_hours))
+        cal_next = resolve_next_run_time("lite_sync", safe_calendar)
+        try:
+            _scheduler.add_job(
+                _legacy_calendar_scheduled,
+                "interval",
+                hours=safe_calendar,
+                id=JOB_ID_CALENDAR,
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=cal_next,
+            )
+        except Exception:
+            logger.exception("Failed to start legacy calendar scheduler")
+    elif calendar_hours > 0 and lite_hours > 0:
+        logger.info(
+            "CALENDAR_SYNC_INTERVAL_HOURS ignored while LITE_SYNC_INTERVAL_HOURS is enabled "
+            "(lite sync includes calendar date refresh and calendar phase)",
+            extra={"emoji_type": "info"},
+        )
+
     if _scheduler and not _scheduler.running:
         _scheduler.start()
+
+
+def get_scheduled_task_metadata() -> dict[str, Any]:
+    """Expose interval and next-run for Tasks UI (persisted + live job)."""
+    out: dict[str, Any] = {
+        "full_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
+        "lite_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
+    }
+    for task_key in ("full_sync", "lite_sync"):
+        hours = _interval_hours_for(task_key)
+        out[task_key]["interval_hours"] = hours
+        out[task_key]["enabled"] = hours > 0
+
+        persisted = get_persisted_next_run(task_key)
+        if persisted:
+            nrt = persisted
+            if nrt.tzinfo is None:
+                nrt = nrt.replace(tzinfo=timezone.utc)
+            out[task_key]["next_run"] = nrt.astimezone(timezone.utc).isoformat()
+
+        if _scheduler is not None:
+            job_id = JOB_ID_FULL if task_key == "full_sync" else JOB_ID_LITE
+            try:
+                job = _scheduler.get_job(job_id)
+                if job and job.next_run_time:
+                    nrt = job.next_run_time
+                    if getattr(nrt, "tzinfo", None) is None:
+                        nrt = nrt.replace(tzinfo=timezone.utc)
+                    iso = nrt.astimezone(timezone.utc).isoformat()
+                    out[task_key]["next_run"] = iso
+                    persist_next_run(task_key, nrt)
+            except Exception:
+                pass
+    return out
