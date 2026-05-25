@@ -205,28 +205,6 @@ function snapshotLookaheadFilters(values: Record<string, unknown>): Record<strin
   };
 }
 
-function renderSettingsFieldDescription(
-  field: SettingsField,
-  className: string,
-  options?: { spacing?: "settings" | "wizard" },
-) {
-  if (!field.description || isPlexSectionIdField(field.key)) return null;
-  const lines = field.description.split("\n").map((line) => line.trim()).filter(Boolean);
-  if (lines.length <= 1) {
-    return <p className={className}>{field.description}</p>;
-  }
-  const gap = options?.spacing === "wizard" ? "mb-2" : "mt-1";
-  return (
-    <>
-      {lines.map((line, index) => (
-        <p key={`${field.key}-desc-${index}`} className={index === 0 ? className : `${className} ${gap}`}>
-          {line}
-        </p>
-      ))}
-    </>
-  );
-}
-
 function settingsFieldDisplayValue(
   field: SettingsField,
   values: Record<string, unknown>,
@@ -6890,9 +6868,9 @@ function SettingsPanel(props: {
                 <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
-              ) : (
-                renderSettingsFieldDescription(field, "ui-field-description mt-1", { spacing: "settings" })
-              )}
+              ) : field.description && !isPlexSectionIdField(field.key) ? (
+                <p className="ui-field-description mt-1">{field.description}</p>
+              ) : null)}
             {getPlexLibraryIdNote(field.key) ? (
               <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p>
             ) : null}
@@ -9393,9 +9371,9 @@ function OnboardingWizard(props: {
             <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
-          ) : (
-            renderSettingsFieldDescription(field, "ui-field-description mb-2 leading-relaxed", { spacing: "wizard" })
-          )}
+          ) : field.description ? (
+            <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
+          ) : null)}
         {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
           <p className="ui-field-description ui-field-description-accent3 mb-2 mt-1 leading-relaxed">
             If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.

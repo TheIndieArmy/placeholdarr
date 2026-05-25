@@ -380,8 +380,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Monitor only on playback (no search)",
                 "description": (
                     "When enabled, playback marks unmonitored target episodes monitored in Sonarr but never runs "
-                    "a search or SEARCHING placeholder updates.\n"
-                    "While this is on, the two search filters below have no effect."
+                    "a search or SEARCHING placeholder updates. While this is on, the two search filters below "
+                    "have no effect."
                 ),
                 "type": "bool",
                 "restart_required": False,
