@@ -413,6 +413,8 @@ export interface SettingsField {
   options?: SettingsFieldOption[];
   /** When set, the field is only interactive if the parent setting is enabled (bool). */
   depends_on?: string;
+  /** When set, the field is non-interactive while the parent bool setting is enabled. */
+  disabled_when?: string;
   /** Indent under the parent setting in the settings UI. */
   nested?: boolean;
 }

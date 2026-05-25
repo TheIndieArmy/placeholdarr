@@ -27,6 +27,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Fixed
 
+- **Playback search suppression toggles**: “Do not search already-monitored episodes” only applies when that setting is enabled (default off searches the full target set again). Lookahead settings are reordered (Monitor only first); the two filters grey out while monitor-only is on and restore their prior on/off state when monitor-only is turned off.
 - **Startup task abandon**: Orphaned working runs were not cleared on restart because `Job` was missing from `task_run_history` imports (`name 'Job' is not defined`).
 - **Episode art skip**: Episode stills in the same season folder shared one `episode_thumb` entry in `.poster-overlay.json`, so each run rewrote ~10k thumbs; meta keys are now per file (`episode_thumb:<basename>-thumb.jpg`).
 - **Full sync stuck WORKING after art finished**: Art completion now calls `finalize_art_backfill_phase` (was missing in the art reconciler’s “run complete” path). Follow-up job checks count only **PENDING** / **CLAIMED** jobs, not **WORKING**, so the last art batch no longer blocks itself when closing the task. `accumulate_art_backfill_counts` and `reconcile_stuck_art_backfill_tasks` (on Tasks API load) repair runs where all batches finished but the parent row stayed open, including when the art phase is already **Done** but the task is still **Working**.

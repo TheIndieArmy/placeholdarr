@@ -1153,7 +1153,7 @@ def _episode_season_number(session, episode: Episode) -> int:
     return int(getattr(season_row, "season_number", 0) or 0) if season_row else 0
 
 
-def _suppress_search_when_all_eligible_monitored() -> bool:
+def _suppress_search_for_monitored_episodes() -> bool:
     return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED", False))
 
 
@@ -1199,26 +1199,22 @@ def _partition_playback_targets(
 
         if is_future and _suppress_search_for_future_episodes():
             continue
-        if bool(getattr(ep, "sonarr_monitored", False)):
+        if (
+            not is_future
+            and bool(getattr(ep, "sonarr_monitored", False))
+            and _suppress_search_for_monitored_episodes()
+        ):
             continue
         search_eligible.append(ep)
 
     skipped_search_reason: str | None = None
-    if _suppress_search_when_all_eligible_monitored():
-        non_future = [ep for ep, fut in zip(targets, is_future_by_episode) if not fut]
-        if non_future and all(bool(getattr(ep, "sonarr_monitored", False)) for ep in non_future):
-            skipped_search_reason = "all_eligible_monitored"
-            search_eligible = []
-
     if not search_eligible and targets:
-        if skipped_search_reason:
-            pass
-        elif future_episodes and _suppress_search_for_future_episodes():
+        if future_episodes and _suppress_search_for_future_episodes():
             skipped_search_reason = "future_only"
         elif not to_monitor:
             skipped_search_reason = "no_unmonitored_search_targets"
-        else:
-            skipped_search_reason = "monitor_only"
+        elif _suppress_search_for_monitored_episodes():
+            skipped_search_reason = "suppressed_monitored"
 
     monitor_ids = [int(ep.sonarrid) for ep in to_monitor if getattr(ep, "sonarrid", None)]
     return {

@@ -171,10 +171,124 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   "Advanced": "advanced",
 };
 
-function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+const LOOKAHEAD_FILTER_KEYS = [
+  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+] as const;
+
+function settingsFieldInteractionDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+  const disabledWhen = field.disabled_when;
+  if (disabledWhen) {
+    return Boolean(values[disabledWhen]);
+  }
   const parentKey = field.depends_on;
   if (!parentKey) return false;
   return !Boolean(values[parentKey]);
+}
+
+function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+  return settingsFieldInteractionDisabled(field, values);
+}
+
+function isLookaheadFilterFieldKey(key: string): boolean {
+  return (LOOKAHEAD_FILTER_KEYS as readonly string[]).includes(key);
+}
+
+function snapshotLookaheadFilters(values: Record<string, unknown>): Record<string, boolean> {
+  return {
+    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: Boolean(
+      values.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
+    ),
+    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: Boolean(
+      values.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES,
+    ),
+  };
+}
+
+function renderSettingsFieldDescription(
+  field: SettingsField,
+  className: string,
+  options?: { spacing?: "settings" | "wizard" },
+) {
+  if (!field.description || isPlexSectionIdField(field.key)) return null;
+  const lines = field.description.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length <= 1) {
+    return <p className={className}>{field.description}</p>;
+  }
+  const gap = options?.spacing === "wizard" ? "mb-2" : "mt-1";
+  return (
+    <>
+      {lines.map((line, index) => (
+        <p key={`${field.key}-desc-${index}`} className={index === 0 ? className : `${className} ${gap}`}>
+          {line}
+        </p>
+      ))}
+    </>
+  );
+}
+
+function settingsFieldDisplayValue(
+  field: SettingsField,
+  values: Record<string, unknown>,
+  lookaheadFilterSnapshot: Record<string, boolean> | null,
+): unknown {
+  if (
+    lookaheadFilterSnapshot &&
+    Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH) &&
+    isLookaheadFilterFieldKey(field.key)
+  ) {
+    return lookaheadFilterSnapshot[field.key as keyof typeof lookaheadFilterSnapshot];
+  }
+  return values[field.key];
+}
+
+function usePlaybackLookaheadFieldControls(
+  values: Record<string, unknown>,
+  onValueChange: (key: string, value: unknown) => void,
+) {
+  const [lookaheadFilterSnapshot, setLookaheadFilterSnapshot] = useState<Record<string, boolean> | null>(null);
+  const monitorOnlyEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
+
+  useEffect(() => {
+    if (!monitorOnlyEnabled) {
+      setLookaheadFilterSnapshot(null);
+      return;
+    }
+    setLookaheadFilterSnapshot((prev) => prev ?? snapshotLookaheadFilters(values));
+  }, [monitorOnlyEnabled]);
+
+  const handleValueChange = useCallback(
+    (key: string, value: unknown) => {
+      if (key === "PLAYBACK_MONITOR_ONLY_NO_SEARCH") {
+        const enabling = Boolean(value);
+        const wasEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
+        if (enabling && !wasEnabled) {
+          setLookaheadFilterSnapshot(snapshotLookaheadFilters(values));
+          onValueChange(key, value);
+          return;
+        }
+        if (!enabling && wasEnabled) {
+          const snap = lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values);
+          setLookaheadFilterSnapshot(null);
+          onValueChange(key, false);
+          onValueChange(
+            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+            snap.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
+          );
+          onValueChange("PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", snap.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES);
+          return;
+        }
+      }
+      onValueChange(key, value);
+    },
+    [values, onValueChange, lookaheadFilterSnapshot],
+  );
+
+  const effectiveSnapshot = monitorOnlyEnabled
+    ? (lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values))
+    : null;
+
+  return { handleValueChange, effectiveSnapshot };
 }
 
 function settingsFieldIsNested(field: SettingsField): boolean {
@@ -6659,6 +6773,8 @@ function SettingsPanel(props: {
     serviceId: "tautulli" | "jellyfin" | "emby";
     instanceParam: string;
   } | null>(null);
+  const { handleValueChange: handleSettingsValueChange, effectiveSnapshot: lookaheadEffectiveSnapshot } =
+    usePlaybackLookaheadFieldControls(props.values, props.onValueChange);
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
@@ -6740,7 +6856,7 @@ function SettingsPanel(props: {
 
   function renderStandardField(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
-    const value = props.values[field.key];
+    const value = settingsFieldDisplayValue(field, props.values, lookaheadEffectiveSnapshot);
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
@@ -6774,9 +6890,9 @@ function SettingsPanel(props: {
                 <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
-              ) : field.description && !isPlexSectionIdField(field.key) ? (
-                <p className="ui-field-description mt-1">{field.description}</p>
-              ) : null)}
+              ) : (
+                renderSettingsFieldDescription(field, "ui-field-description mt-1", { spacing: "settings" })
+              )}
             {getPlexLibraryIdNote(field.key) ? (
               <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p>
             ) : null}
@@ -6794,7 +6910,7 @@ function SettingsPanel(props: {
               className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
               style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
               onClick={() => {
-                if (!interactionLocked) props.onValueChange(field.key, !Boolean(value));
+                if (!interactionLocked) handleSettingsValueChange(field.key, !Boolean(value));
               }}
             >
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
@@ -6810,7 +6926,7 @@ function SettingsPanel(props: {
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
               return raw;
             })()}
-            onChange={(e) => props.onValueChange(field.key, e.target.value)}
+            onChange={(e) => handleSettingsValueChange(field.key, e.target.value)}
           >
             {field.options.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -6824,7 +6940,7 @@ function SettingsPanel(props: {
               disabled={interactionLocked}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-              onChange={e => props.onValueChange(field.key, e.target.value)}
+              onChange={e => handleSettingsValueChange(field.key, e.target.value)}
             />
             {testTarget && (
               <button type="button" onClick={() => runTest(field)}
@@ -9119,6 +9235,8 @@ function OnboardingWizard(props: {
   } | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
+  const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
+    usePlaybackLookaheadFieldControls(props.values, props.onChange);
 
   const hasUnlockedSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
@@ -9248,6 +9366,7 @@ function OnboardingWizard(props: {
 
   function wizardFieldRow(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
+    const displayValue = settingsFieldDisplayValue(field, props.values, wizardLookaheadSnapshot);
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const focus = getBrandFocusClass(props.brand, wizardUiTheme);
@@ -9274,9 +9393,9 @@ function OnboardingWizard(props: {
             <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
-          ) : field.description ? (
-            <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
-          ) : null)}
+          ) : (
+            renderSettingsFieldDescription(field, "ui-field-description mb-2 leading-relaxed", { spacing: "wizard" })
+          )}
         {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
           <p className="ui-field-description ui-field-description-accent3 mb-2 mt-1 leading-relaxed">
             If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
@@ -9285,26 +9404,26 @@ function OnboardingWizard(props: {
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
             <div
-              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
-              style={Boolean(props.values[field.key]) ? { backgroundColor: accent.hex } : undefined}
+              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(displayValue) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
+              style={Boolean(displayValue) ? { backgroundColor: accent.hex } : undefined}
               onClick={() => {
-                if (!interactionLocked) props.onChange(field.key, !Boolean(props.values[field.key]));
+                if (!interactionLocked) handleWizardValueChange(field.key, !Boolean(displayValue));
               }}
             >
-              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values[field.key]) ? "translate-x-5" : "translate-x-0"}`} />
+              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(displayValue) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(displayValue) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
             className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
             disabled={interactionLocked}
             value={(() => {
-              const raw = String(props.values[field.key] ?? field.options[0]?.value ?? "");
+              const raw = String(displayValue ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
               return raw;
             })()}
-            onChange={(e) => props.onChange(field.key, e.target.value)}
+            onChange={(e) => handleWizardValueChange(field.key, e.target.value)}
           >
             {field.options.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -9316,9 +9435,9 @@ function OnboardingWizard(props: {
               className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
               disabled={interactionLocked}
-              value={String(props.values[field.key] ?? "")}
+              value={String(displayValue ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-              onChange={(e) => props.onChange(field.key, e.target.value)}
+              onChange={(e) => handleWizardValueChange(field.key, e.target.value)}
             />
             {testTarget && (
               <button type="button" onClick={() => runTest(field)}
