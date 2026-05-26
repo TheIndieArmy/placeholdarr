@@ -7683,6 +7683,11 @@ function normalizeTitleSuffixTemplate(rowKey: string, value: string): string {
   return withPlaceholderLiteral.replace(/^\+\s*/, "");
 }
 
+/** Normalize API default/override text to the suffix-only string shown in the UI input. */
+function titleSuffixUiValue(rowKey: string, raw: string): string {
+  return normalizeTitleSuffixTemplate(rowKey, raw);
+}
+
 function titleSuffixHardPrefix(rowKey: string): string {
   const m: Record<string, string> = {
     "title.suffix.movie": "{Title}",
@@ -7920,8 +7925,8 @@ function StatusMessagesPanel(props: {
       for (const row of data.registry) {
         const currentRaw = row.has_override ? row.value : row.default;
         const defaultRaw = row.default;
-        next[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, currentRaw) : currentRaw;
-        def[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, defaultRaw) : defaultRaw;
+        next[row.key] = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, currentRaw) : currentRaw;
+        def[row.key] = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, defaultRaw) : defaultRaw;
       }
       setValues(next);
       setDefaults(def);
@@ -7969,7 +7974,8 @@ function StatusMessagesPanel(props: {
     if ((payload.wrapper_close ?? "") !== wrapperClose) return true;
     for (const row of payload.registry ?? []) {
       const current = values[row.key] ?? "";
-      const initial = row.has_override ? row.value : row.default;
+      const initialRaw = row.has_override ? row.value : row.default;
+      const initial = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, initialRaw) : initialRaw;
       if (current !== initial) return true;
     }
     return false;
@@ -8018,42 +8024,8 @@ function StatusMessagesPanel(props: {
     setValues((prev) => ({ ...prev, [key]: defaults[key] ?? "" }));
   }
 
-  const runMessagesSaveFlow = useCallback(
-    async (preselectedScope?: ApplyScope) => {
-      if (!payload) return;
-      if (!dirty) return;
-      if (hasValidationErrors) {
-        throw new Error("Fix status message template validation errors before saving.");
-      }
-      let scope = preselectedScope;
-      if (!scope) {
-        setFeedback(null);
-        let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
-        try {
-          data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
-        } catch {
-          data = { placeholder_count: 0, pending_full_sync_backfill: false };
-        }
-        scope = await new Promise<ApplyScope>((resolve, reject) => {
-          scopeFlowWaitersRef.current = { resolve, reject };
-          setScopeModal({
-            placeholderCount: Number(data?.placeholder_count ?? 0),
-            pending: !!data?.pending_full_sync_backfill,
-          });
-        });
-      }
-      await handleSave(scope);
-    },
-    [payload, dirty, hasValidationErrors],
-  );
-
-  useEffect(() => {
-    if (!props.registerSaveFlow) return;
-    props.registerSaveFlow(runMessagesSaveFlow);
-    return () => props.registerSaveFlow?.(null);
-  }, [props.registerSaveFlow, runMessagesSaveFlow]);
-
-  async function handleSave(applyScope: ApplyScope) {
+  const handleSave = useCallback(
+    async (applyScope: ApplyScope) => {
     if (!payload) return;
     setSaving(true);
     setFeedback(null);
@@ -8062,7 +8034,10 @@ function StatusMessagesPanel(props: {
       for (const row of payload.registry ?? []) {
         const raw = values[row.key] ?? "";
         const v = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, raw) : raw;
-        if (v.trim() && v !== row.default) overrides[row.key] = v;
+        const defaultNorm = isTitleSuffixRowKey(row.key)
+          ? titleSuffixUiValue(row.key, row.default)
+          : row.default;
+        if (v.trim() && v !== defaultNorm) overrides[row.key] = v;
       }
       const resp = await fetch("/api/messages/templates", {
         method: "POST",
@@ -8115,7 +8090,44 @@ function StatusMessagesPanel(props: {
     } finally {
       setSaving(false);
     }
-  }
+  },
+    [payload, values, separator, caseMode, wrapperPreset, wrapperOpen, wrapperClose],
+  );
+
+  const runMessagesSaveFlow = useCallback(
+    async (preselectedScope?: ApplyScope) => {
+      if (!payload) return;
+      if (!dirty) return;
+      if (hasValidationErrors) {
+        throw new Error("Fix status message template validation errors before saving.");
+      }
+      let scope = preselectedScope;
+      if (!scope) {
+        setFeedback(null);
+        let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+        try {
+          data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+        } catch {
+          data = { placeholder_count: 0, pending_full_sync_backfill: false };
+        }
+        scope = await new Promise<ApplyScope>((resolve, reject) => {
+          scopeFlowWaitersRef.current = { resolve, reject };
+          setScopeModal({
+            placeholderCount: Number(data?.placeholder_count ?? 0),
+            pending: !!data?.pending_full_sync_backfill,
+          });
+        });
+      }
+      await handleSave(scope);
+    },
+    [payload, dirty, hasValidationErrors, handleSave],
+  );
+
+  useEffect(() => {
+    if (!props.registerSaveFlow) return;
+    props.registerSaveFlow(runMessagesSaveFlow);
+    return () => props.registerSaveFlow?.(null);
+  }, [props.registerSaveFlow, runMessagesSaveFlow]);
 
   async function handleResetAll() {
     if (!payload) return;
@@ -8299,7 +8311,9 @@ function StatusMessagesPanel(props: {
                     {sub && <h4 className="text-[13px] font-headline uppercase tracking-wider text-slate-400">{sub}</h4>}
                     {rows.map((row) => {
                       const value = values[row.key] ?? "";
-                      const isOverride = value !== row.default;
+                      const isOverride = isTitleSuffixRowKey(row.key)
+                        ? value !== titleSuffixUiValue(row.key, row.default)
+                        : value !== row.default;
                       const sampleCtx: Record<string, string> = {};
                       for (const t of row.allowed_tokens ?? []) {
                         if (t in tokenSamplesByName) sampleCtx[t] = tokenSamplesByName[t];
