@@ -184,11 +184,15 @@ def _write_meta(
         "outputs": outputs,
         "logo_stamp": logo_asset_stamp(),
     }
+    from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
     parent = os.path.dirname(meta_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    _apply_dir_chain_permissions(meta_path)
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"))
+    _ensure_open_permissions(meta_path)
 
 
 def _needs_regenerate(

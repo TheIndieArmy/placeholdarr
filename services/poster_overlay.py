@@ -277,11 +277,15 @@ def save_raw_poster_from_url(url: str | None, path: str, *, quality: int = 88) -
     mods = _pillow()
     if mods is None:
         try:
+            from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
+            _apply_dir_chain_permissions(path)
             with open(path, "wb") as f:
                 f.write(data)
+            _ensure_open_permissions(path)
             return os.path.isfile(path) and os.path.getsize(path) > 0
         except OSError as exc:
             logger.warning(f"Failed to write raw poster {path!r}: {exc}", extra={"emoji_type": "warning"})
@@ -312,11 +316,15 @@ def save_jpeg(img, path: str, *, quality: int = 88) -> bool:
         return False
     Image = mods[0]
     try:
+        from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        _apply_dir_chain_permissions(path)
         rgb = img.convert("RGB")
         rgb.save(path, format="JPEG", quality=quality, optimize=True)
+        _ensure_open_permissions(path)
         return True
     except Exception as exc:
         logger.warning(f"Failed to write poster JPEG {path!r}: {exc}", extra={"emoji_type": "warning"})

@@ -630,6 +630,25 @@ def _is_non_retriable_webhook_error(error: Exception) -> bool:
     return False
 
 
+def _try_complete_full_sync_task_after_job(descriptor: ClaimedJobDescriptor) -> None:
+    """Close a full-sync task run after the last linked follow-up job is marked DONE."""
+    if descriptor.job_type not in (PLACEHOLDER_ART_REFRESH_JOB_TYPE, NFO_REFRESH_JOB_TYPE):
+        return
+    payload = descriptor.payload if isinstance(descriptor.payload, dict) else {}
+    raw_tid = payload.get("full_sync_task_run_id") or payload.get("art_backfill_task_run_id")
+    if raw_tid is None:
+        return
+    try:
+        from services.task_run_phases import try_complete_full_sync_task_run
+
+        try_complete_full_sync_task_run(int(raw_tid))
+    except Exception as exc:
+        logger.debug(
+            f"full_sync completion check after job_id={descriptor.id} skipped: {exc}",
+            extra={"emoji_type": "debug"},
+        )
+
+
 def _mark_descriptor_done(session, descriptor: ClaimedJobDescriptor) -> None:
     """Mark a CLAIMED job DONE in a session, conditional on the claim_token.
 
@@ -925,6 +944,7 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
 
                 if handler_error is None:
                     _mark_descriptor_done(finish_session, descriptor)
+                    _try_complete_full_sync_task_after_job(descriptor)
                 else:
                     _mark_descriptor_failed(finish_session, descriptor, handler_error)
                     logger.error(

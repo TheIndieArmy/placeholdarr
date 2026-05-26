@@ -354,27 +354,25 @@ def _task_run_id_payload_match(task_run_id: int):
     )
 
 
-def _pending_jobs_for_full_sync_task(task_run_id: int) -> bool:
+def _pending_jobs_for_full_sync_task(task_run_id: int, *, exclude_job_id: int | None = None) -> bool:
     """True while any follow-up job is still queued or claimed for this full-sync run.
 
-    Intentionally excludes WORKING: the last art batch calls ``finalize_art_backfill_phase``
-    from inside its own handler while its row is still WORKING (the worker marks DONE only
-    after the handler returns). Counting WORKING would make that job block itself forever.
+    Pass ``exclude_job_id`` when checking from inside a follow-up job handler: the worker
+    keeps that row ``CLAIMED`` until the handler returns, so counting it would block
+    ``try_complete_full_sync_task_run`` forever on the last art/NFO batch.
     """
     from services.postgres.models import Job
 
     session = get_session()
     try:
-        pending = (
-            session.query(Job.id)
-            .filter(
-                Job.job_type.in_(("placeholder_art_refresh", "nfo_refresh")),
-                Job.status.in_(["PENDING", "CLAIMED"]),
-                _task_run_id_payload_match(task_run_id),
-            )
-            .first()
+        q = session.query(Job.id).filter(
+            Job.job_type.in_(("placeholder_art_refresh", "nfo_refresh")),
+            Job.status.in_(["PENDING", "CLAIMED"]),
+            _task_run_id_payload_match(task_run_id),
         )
-        return pending is not None
+        if exclude_job_id is not None:
+            q = q.filter(Job.id != int(exclude_job_id))
+        return q.first() is not None
     finally:
         session.close()
 
@@ -424,9 +422,15 @@ def refresh_full_sync_task_progress(
     update_task_run_summary(task_run_id, {**summary, "phases": phase_list, "progress": progress})
 
 
-def try_complete_full_sync_task_run(task_run_id: int, *, failed: bool = False, error_message: str | None = None) -> bool:
+def try_complete_full_sync_task_run(
+    task_run_id: int,
+    *,
+    failed: bool = False,
+    error_message: str | None = None,
+    exclude_job_id: int | None = None,
+) -> bool:
     """Finish the task run once all full-sync follow-up jobs (art, NFO) have drained."""
-    if _pending_jobs_for_full_sync_task(task_run_id):
+    if _pending_jobs_for_full_sync_task(task_run_id, exclude_job_id=exclude_job_id):
         logger.debug(
             f"full_sync task_run_id={task_run_id} still waiting on follow-up jobs",
             extra={"emoji_type": "debug"},
@@ -542,7 +546,13 @@ def finalize_nfo_backfill_phase(task_run_id: int, nfo_run_id: str, *, failed: bo
     _save_phases(task_run_id, phases, extra=summary)
 
 
-def accumulate_art_backfill_counts(task_run_id: int, art_run_id: str, batch_counts: dict[str, Any]) -> None:
+def accumulate_art_backfill_counts(
+    task_run_id: int,
+    art_run_id: str,
+    batch_counts: dict[str, Any],
+    *,
+    exclude_job_id: int | None = None,
+) -> None:
     summary = _load_summary(task_run_id)
     if not isinstance(summary, dict):
         return
@@ -565,7 +575,11 @@ def accumulate_art_backfill_counts(task_run_id: int, art_run_id: str, batch_coun
             )
             batch_total = int(art.get("batch_count", 0))
             batch_done = int(art.get("batches_done", 0))
-            if batch_total > 0 and batch_done >= batch_total and not _pending_jobs_for_full_sync_task(task_run_id):
+            if (
+                batch_total > 0
+                and batch_done >= batch_total
+                and not _pending_jobs_for_full_sync_task(task_run_id, exclude_job_id=exclude_job_id)
+            ):
                 phase["status"] = "done"
                 if not phase.get("ended_at"):
                     phase["ended_at"] = _iso(_utc_now())
@@ -577,9 +591,9 @@ def accumulate_art_backfill_counts(task_run_id: int, art_run_id: str, batch_coun
         run_id
         and batch_total > 0
         and batch_done >= batch_total
-        and not _pending_jobs_for_full_sync_task(task_run_id)
+        and not _pending_jobs_for_full_sync_task(task_run_id, exclude_job_id=exclude_job_id)
     ):
-        finalize_art_backfill_phase(task_run_id, run_id)
+        finalize_art_backfill_phase(task_run_id, run_id, exclude_job_id=exclude_job_id)
 
 
 def complete_full_sync_task_run(
@@ -690,7 +704,13 @@ def reconcile_stuck_art_backfill_tasks() -> int:
     return fixed
 
 
-def finalize_art_backfill_phase(task_run_id: int, art_run_id: str, *, failed: bool = False) -> None:
+def finalize_art_backfill_phase(
+    task_run_id: int,
+    art_run_id: str,
+    *,
+    failed: bool = False,
+    exclude_job_id: int | None = None,
+) -> None:
     summary = _load_summary(task_run_id)
     art = summary.get("art_backfill") if isinstance(summary, dict) and isinstance(summary.get("art_backfill"), dict) else {}
     if str(art.get("run_id") or "") != str(art_run_id):
@@ -718,7 +738,7 @@ def finalize_art_backfill_phase(task_run_id: int, art_run_id: str, *, failed: bo
     art["status"] = "failed" if failed else "done"
     summary = {**summary, "art_backfill": art}
     _save_phases(task_run_id, phases, extra=summary)
-    if not try_complete_full_sync_task_run(task_run_id, failed=failed):
+    if not try_complete_full_sync_task_run(task_run_id, failed=failed, exclude_job_id=exclude_job_id):
         logger.info(
             f"full_sync task_run_id={task_run_id} art phase closed; task row still open "
             f"(follow-up jobs may remain)",

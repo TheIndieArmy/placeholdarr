@@ -158,7 +158,7 @@ def _art_refresh_completion_scan_if_last_batch(
     if task_run_id:
         from services.task_run_phases import finalize_art_backfill_phase
 
-        finalize_art_backfill_phase(task_run_id, run_id)
+        finalize_art_backfill_phase(task_run_id, run_id, exclude_job_id=int(job.id))
 
     try:
         refresh_stats = refresh_all_sections(
@@ -294,7 +294,12 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
     task_run_id_raw = payload.get(FULL_SYNC_TASK_RUN_ID_KEY) or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
     if task_run_id_raw is not None and run_id:
         try:
-            accumulate_art_backfill_counts(int(task_run_id_raw), run_id, batch_counts)
+            accumulate_art_backfill_counts(
+                int(task_run_id_raw),
+                run_id,
+                batch_counts,
+                exclude_job_id=int(job.id),
+            )
         except Exception as exc:
             logger.debug(f"art backfill phase stats update skipped: {exc}", extra={"emoji_type": "debug"})
 

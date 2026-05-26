@@ -1295,12 +1295,12 @@ def save_settings(
             )
 
         art_backfill_summary: dict[str, Any] | None = None
-        if art_backfill_keys_changed:
-            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
+        if art_backfill_keys_changed and apply_scope:
+            from services.source_of_truth.art_backfill import execute_art_backfill_apply_scope
 
-            art_backfill_summary = enqueue_placeholder_art_backfill_all(source="settings_save")
+            art_backfill_summary = execute_art_backfill_apply_scope(str(apply_scope))
             logger.info(
-                f"Placeholder art backfill queued after settings save keys={art_backfill_keys_changed}",
+                f"Art backfill after settings save scope={apply_scope} keys={art_backfill_keys_changed}",
                 extra={"emoji_type": "processing"},
             )
 

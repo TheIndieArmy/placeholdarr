@@ -288,6 +288,13 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             )
 
         try:
+            from services.source_of_truth.art_backfill import clear_pending_art_backfill_if_set
+
+            clear_pending_art_backfill_if_set()
+        except Exception:
+            pass
+
+        try:
             from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
             art_out = enqueue_placeholder_art_backfill_all(

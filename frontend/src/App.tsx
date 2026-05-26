@@ -1693,8 +1693,7 @@ export function App() {
 
               /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
-                const settingsBackfillScope =
-                  statusKeysChanged && !messagesDirty ? applyScope : undefined;
+                const settingsBackfillScope = statusKeysChanged ? applyScope : undefined;
                 const result = await saveSettings(
                   buildPersistableSettingsValues(fieldValues, settingsPayload),
                   false,
@@ -1711,8 +1710,18 @@ export function App() {
                 const restartKeys = result.restart_required_keys || [];
                 let baseMsg =
                   restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.";
-                if (settingsBackfillScope && (result.nfo_backfill?.enqueued || result.nfo_backfill_keys_changed?.length)) {
-                  baseMsg += " Library backfill queued.";
+                if (
+                  settingsBackfillScope &&
+                  (result.nfo_backfill?.enqueued ||
+                    result.art_backfill?.enqueued ||
+                    result.nfo_backfill_keys_changed?.length ||
+                    result.art_backfill_keys_changed?.length)
+                ) {
+                  if (settingsBackfillScope === "now") {
+                    baseMsg += " Library backfill queued.";
+                  } else if (settingsBackfillScope === "next_full_sync") {
+                    baseMsg += " Backfill scheduled for the next full sync.";
+                  }
                 }
                 if (messagesDirty && statusMessagesSaveRef.current) {
                   await statusMessagesSaveRef.current(applyScope);

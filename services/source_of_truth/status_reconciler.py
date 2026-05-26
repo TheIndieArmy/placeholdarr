@@ -402,7 +402,7 @@ def process_nfo_refresh_job(session, job: Job) -> dict:
                 from services.task_run_phases import finalize_nfo_backfill_phase, try_complete_full_sync_task_run
 
                 finalize_nfo_backfill_phase(int(raw_tid), template_run_id)
-                try_complete_full_sync_task_run(int(raw_tid))
+                try_complete_full_sync_task_run(int(raw_tid), exclude_job_id=int(job.id))
 
         _nfo_refresh_completion_scan_if_last_batch(
             session,

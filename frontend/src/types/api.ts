@@ -446,6 +446,8 @@ export interface SaveSettingsResponse {
   status?: SettingsStatus;
   nfo_backfill_keys_changed?: string[];
   nfo_backfill?: { ok?: boolean; enqueued?: boolean; scope?: string };
+  art_backfill_keys_changed?: string[];
+  art_backfill?: { ok?: boolean; enqueued?: boolean; scope?: string; pending?: boolean };
 }
 
 export interface IntegrationTestResponse {
