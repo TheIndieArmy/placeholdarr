@@ -147,6 +147,20 @@ def clear_pending_intent() -> dict[str, Any]:
         session.close()
 
 
+def _refresh_enqueue_committed(result: Any) -> bool:
+    """True when an enqueue helper completed successfully (work queued or nothing to do)."""
+    if not isinstance(result, dict):
+        return False
+    if not bool(result.get("ok")):
+        return False
+    if bool(result.get("enqueued")):
+        return True
+    try:
+        return int(result.get("placeholder_count") or 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def clear_pending_intent_domains(
     *,
     metadata: bool = False,
@@ -244,6 +258,8 @@ def execute_placeholder_refresh_apply_scope(
         return out
 
     # scope == "now"
+    metadata_committed = False
+    art_committed = False
     out: dict[str, Any] = {
         "ok": True,
         "scope": "now",
@@ -256,22 +272,37 @@ def execute_placeholder_refresh_apply_scope(
 
         nfo_out = enqueue_template_backfill(source=f"{source}:apply_now")
         out["nfo_backfill"] = nfo_out
-        out["enqueued"] = bool(out["enqueued"] or nfo_out.get("enqueued"))
+        metadata_committed = _refresh_enqueue_committed(nfo_out)
+        out["enqueued"] = bool(out["enqueued"] or metadata_committed and bool(nfo_out.get("enqueued")))
     if requested_art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
         art_out = enqueue_placeholder_art_backfill_all(source=f"{source}:apply_now")
         out["art_backfill"] = art_out
-        out["enqueued"] = bool(out["enqueued"] or art_out.get("enqueued"))
-    try:
-        cleared = clear_pending_intent_domains(
-            metadata=requested_metadata,
-            art=requested_art,
-            templates=bool(templates),
-        )
-        out["pending"] = bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates"))
-    except Exception as exc:
-        logger.warning(f"Failed clearing pending placeholder refresh intent: {exc}", extra={"emoji_type": "warning"})
+        art_committed = _refresh_enqueue_committed(art_out)
+        out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
+
+    clear_metadata = bool(requested_metadata and metadata_committed)
+    clear_art = bool(requested_art and art_committed)
+    if clear_metadata or clear_art:
+        try:
+            if clear_metadata and clear_art:
+                cleared = clear_pending_intent()
+            else:
+                cleared = clear_pending_intent_domains(
+                    metadata=clear_metadata,
+                    art=clear_art,
+                    templates=bool(templates) and clear_metadata,
+                )
+            out["pending"] = bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates"))
+        except Exception as exc:
+            logger.warning(f"Failed clearing pending placeholder refresh intent: {exc}", extra={"emoji_type": "warning"})
+    else:
+        out["pending"] = has_pending_intent()
+
+    if (requested_metadata and not metadata_committed) or (requested_art and not art_committed):
+        out["ok"] = False
+        out["reason"] = "enqueue_failed"
     return out
 
 
@@ -528,22 +559,43 @@ def run_placeholder_refresh_if_pending(*, source: str, task_run_id: int) -> dict
     if not metadata and not art:
         return {"ok": True, "enqueued": False, "reason": "not_requested"}
 
+    metadata_committed = False
+    art_committed = False
     out: dict[str, Any] = {"ok": True, "enqueued": False, "metadata": metadata, "art": art}
     if metadata:
         from services.source_of_truth.template_backfill import enqueue_template_backfill
 
         nfo_out = enqueue_template_backfill(source=source, task_run_id=task_run_id)
         out["nfo_backfill"] = nfo_out
-        out["enqueued"] = bool(out["enqueued"] or nfo_out.get("enqueued"))
+        metadata_committed = _refresh_enqueue_committed(nfo_out)
+        out["enqueued"] = bool(out["enqueued"] or metadata_committed and bool(nfo_out.get("enqueued")))
     if art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
         art_out = enqueue_placeholder_art_backfill_all(source=source, task_run_id=task_run_id)
         out["art_backfill"] = art_out
-        out["enqueued"] = bool(out["enqueued"] or art_out.get("enqueued"))
+        art_committed = _refresh_enqueue_committed(art_out)
+        out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
 
-    try:
-        clear_pending_intent()
-    except Exception as exc:
-        logger.warning(f"Failed clearing pending intent after full sync consume: {exc}", extra={"emoji_type": "warning"})
+    clear_metadata = bool(metadata and metadata_committed)
+    clear_art = bool(art and art_committed)
+    if clear_metadata or clear_art:
+        try:
+            if clear_metadata and clear_art:
+                cleared = clear_pending_intent()
+            else:
+                cleared = clear_pending_intent_domains(
+                    metadata=clear_metadata,
+                    art=clear_art,
+                    templates=clear_metadata,
+                )
+            out["pending"] = bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates"))
+        except Exception as exc:
+            logger.warning(f"Failed clearing pending intent after full sync consume: {exc}", extra={"emoji_type": "warning"})
+    else:
+        out["pending"] = has_pending_intent()
+
+    if (metadata and not metadata_committed) or (art and not art_committed):
+        out["ok"] = False
+        out["reason"] = "enqueue_failed"
     return out
