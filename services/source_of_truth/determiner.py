@@ -992,8 +992,11 @@ def run_determination_for_entities_with_siblings_in_session(
 def run_determination_for_entities_with_siblings(
     movie_ids: list[int] | None = None,
     episode_ids: list[int] | None = None,
+    log_subject: str | None = None,
 ) -> dict:
     """Committing wrapper for scoped determination with sibling expansion."""
+    subject = str(log_subject or "").strip()
+    subject_part = f" · {subject}" if subject else ""
     session = get_session()
     try:
         stats = run_determination_for_entities_with_siblings_in_session(
@@ -1003,13 +1006,16 @@ def run_determination_for_entities_with_siblings(
         )
         session.commit()
         logger.info(
-            f"Determination · scoped_with_siblings · complete: {stats}",
+            f"Determination · scoped_with_siblings{subject_part} · complete: {stats}",
             extra={'emoji_type': 'success'},
         )
         return stats
     except Exception as e:
         session.rollback()
-        logger.error(f"Determination · scoped_with_siblings · failed: {e}", extra={'emoji_type': 'error'})
+        logger.error(
+            f"Determination · scoped_with_siblings{subject_part} · failed: {e}",
+            extra={'emoji_type': 'error'},
+        )
         raise
     finally:
         session.close()

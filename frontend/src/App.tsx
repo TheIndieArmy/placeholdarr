@@ -1,6 +1,8 @@
 import {
   Fragment,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -21,9 +23,11 @@ import {
   getLogs,
   getMovieDetail,
   getPlaceholderActivity,
+  getEntityReconcileStatus,
   refreshEpisodePlaceholder,
   refreshMoviePlaceholder,
   refreshSeriesPlaceholder,
+  type EntityReconcileStartResponse,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
@@ -1891,6 +1895,7 @@ export function App() {
     : `linear-gradient(to right, ${studioTopBarBlue} 0%, ${studioTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
 
   return (
+    <LibraryReconcileProvider>
       <div
         className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
         style={{
@@ -1902,7 +1907,7 @@ export function App() {
       >
         {/* Sidebar */}
         <aside
-          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-6 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
+          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-0 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
           style={isStudioGlass ? { borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: brandSemantic.glassBorder } : { backgroundColor: studioLightChrome.sidebar, borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: studioLightChrome.border }}
         >
           <div
@@ -1918,7 +1923,7 @@ export function App() {
           </div>
 
           {/* Nav */}
-          <nav className="flex-1 space-y-1 font-brand-label pt-4">
+          <nav className="flex-1 space-y-1 font-brand-label pt-4 pb-6">
             {(() => {
               const navActiveClass =
                 "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200 border-l-4";
@@ -2081,6 +2086,7 @@ export function App() {
             ) : null}
           </nav>
 
+          <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
         </aside>
 
         {/* Main area */}
@@ -2370,6 +2376,7 @@ export function App() {
           />
         ) : null}
       </div>
+    </LibraryReconcileProvider>
   );
 }
 
@@ -3614,6 +3621,193 @@ function LibraryPanel(props: {
   );
 }
 
+type LibraryReconcileSidebarStatus = {
+  message: string | null;
+  kind: "info" | "success" | "error";
+  busy: boolean;
+};
+
+type LibraryReconcileContextValue = {
+  status: LibraryReconcileSidebarStatus;
+  runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
+};
+
+const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
+
+function useLibraryReconcile(): LibraryReconcileContextValue {
+  const ctx = useContext(LibraryReconcileContext);
+  if (!ctx) {
+    throw new Error("useLibraryReconcile must be used within LibraryReconcileProvider");
+  }
+  return ctx;
+}
+
+function LibraryReconcileProvider(props: { children: ReactNode }) {
+  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>({
+    message: null,
+    kind: "info",
+    busy: false,
+  });
+  const [pollingJobId, setPollingJobId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (status.kind !== "success" || !status.message) return;
+    const clearTimer = window.setTimeout(() => {
+      setStatus({ message: null, kind: "info", busy: false });
+    }, 3000);
+    return () => window.clearTimeout(clearTimer);
+  }, [status.kind, status.message]);
+
+  useEffect(() => {
+    if (pollingJobId == null) return;
+
+    let stopped = false;
+
+    const poll = async () => {
+      try {
+        const jobStatus = await getEntityReconcileStatus(pollingJobId);
+        if (stopped) return;
+
+        if (jobStatus.status === "failed") {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "error",
+            message: jobStatus.error_message || "Refresh failed",
+          });
+          return;
+        }
+
+        if (jobStatus.status === "done") {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "success",
+            message: "Refresh complete",
+          });
+          return;
+        }
+
+        setStatus({
+          busy: true,
+          kind: "info",
+          message: jobStatus.step_label || "Working…",
+        });
+      } catch (e) {
+        if (!stopped) {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "error",
+            message: e instanceof Error ? e.message : "Could not load refresh status",
+          });
+        }
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 1500);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, [pollingJobId]);
+
+  const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
+    setPollingJobId(null);
+    setStatus({ busy: true, kind: "info", message: "Refresh queued…" });
+    try {
+      const out = await startReconcile();
+      if (!out.ok || out.job_id == null) {
+        throw new Error(out.message || "Failed to start refresh");
+      }
+      setStatus({
+        busy: true,
+        kind: "info",
+        message: out.step_label || "Refresh queued…",
+      });
+      setPollingJobId(out.job_id);
+    } catch (e) {
+      setStatus({
+        busy: false,
+        kind: "error",
+        message: e instanceof Error ? e.message : "Failed to start refresh",
+      });
+    }
+  }, []);
+
+  const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
+
+  return (
+    <LibraryReconcileContext.Provider value={value}>
+      {props.children}
+    </LibraryReconcileContext.Provider>
+  );
+}
+
+function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
+  const ctx = useContext(LibraryReconcileContext);
+  const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
+  if (!message && !busy) return null;
+
+  const textClass =
+    kind === "error"
+      ? "text-red-400"
+      : kind === "success"
+        ? "text-emerald-400"
+        : props.isStudioGlass
+          ? "text-slate-400"
+          : "text-slate-600";
+
+  return (
+    <div
+      className={`mt-auto w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
+      aria-live="polite"
+    >
+      <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
+        {busy ? (
+          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
+            progress_activity
+          </span>
+        ) : kind === "success" ? (
+          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+            check_circle
+          </span>
+        ) : kind === "error" ? (
+          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+            error
+          </span>
+        ) : null}
+        <span className="line-clamp-3">{message || "Working…"}</span>
+      </div>
+    </div>
+  );
+}
+
+function LibraryReconcileControl(props: {
+  label: string;
+  startReconcile: () => Promise<EntityReconcileStartResponse>;
+  buttonClassName?: string;
+}) {
+  const { status, runReconcile } = useLibraryReconcile();
+
+  return (
+    <button
+      type="button"
+      disabled={status.busy}
+      onClick={() => {
+        void runReconcile(props.startReconcile);
+      }}
+      className={
+        props.buttonClassName
+          ?? "px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
+      }
+    >
+      {props.label}
+    </button>
+  );
+}
+
 function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollContainerRef: React.RefObject<HTMLElement | null> }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -3623,9 +3817,6 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   const [openSeasons, setOpenSeasons] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [refreshBusy, setRefreshBusy] = useState(false);
-  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
-
   const pathParts = location.pathname.split("/");
   const entityType = pathParts[2] || "";
   const itemId = pathParts[3] || "";
@@ -3729,58 +3920,14 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
           themeMode={props.themeMode}
           openSeasons={openSeasons}
           onToggleSeason={(seasonId) => setOpenSeasons((prev) => (prev.includes(seasonId) ? prev.filter((id) => id !== seasonId) : [...prev, seasonId]))}
-          onRefreshEpisode={async (episodeId) => {
-            setRefreshBusy(true);
-            setRefreshMessage(null);
-            try {
-              await refreshEpisodePlaceholder(episodeId);
-              setRefreshMessage("Episode placeholder refresh queued.");
-            } catch (e) {
-              setRefreshMessage(e instanceof Error ? e.message : "Failed to queue episode refresh.");
-            } finally {
-              setRefreshBusy(false);
-            }
-          }}
-          onRefreshSeries={async (seriesId) => {
-            setRefreshBusy(true);
-            setRefreshMessage(null);
-            try {
-              await refreshSeriesPlaceholder(seriesId);
-              setRefreshMessage("Series placeholder refresh queued.");
-            } catch (e) {
-              setRefreshMessage(e instanceof Error ? e.message : "Failed to queue series refresh.");
-            } finally {
-              setRefreshBusy(false);
-            }
-          }}
         />
       ) : null}
       {!loading && !error && payload?.type === "movie" ? (
         <div className="px-6 md:px-10 pb-6">
-          <button
-            type="button"
-            disabled={refreshBusy}
-            onClick={async () => {
-              setRefreshBusy(true);
-              setRefreshMessage(null);
-              try {
-                await refreshMoviePlaceholder(payload.id);
-                setRefreshMessage("Movie placeholder refresh queued.");
-              } catch (e) {
-                setRefreshMessage(e instanceof Error ? e.message : "Failed to queue movie refresh.");
-              } finally {
-                setRefreshBusy(false);
-              }
-            }}
-            className="px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
-          >
-            Refresh placeholder
-          </button>
-        </div>
-      ) : null}
-      {refreshMessage ? (
-        <div className="px-6 md:px-10 pb-6">
-          <p className="text-[13px] text-slate-400">{refreshMessage}</p>
+          <LibraryReconcileControl
+            label="Refresh placeholder"
+            startReconcile={() => refreshMoviePlaceholder(payload.id)}
+          />
         </div>
       ) : null}
     </div>
@@ -4100,8 +4247,6 @@ function SeriesDetail(props: {
   themeMode: ThemeMode;
   openSeasons: number[];
   onToggleSeason: (seasonId: number) => void;
-  onRefreshSeries: (seriesId: number) => Promise<void> | void;
-  onRefreshEpisode: (episodeId: number) => Promise<void> | void;
 }) {
   const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
@@ -4154,13 +4299,10 @@ function SeriesDetail(props: {
           sonarrIconSrc={sonarrIcon}
         />
         <div className="mb-6">
-          <button
-            type="button"
-            onClick={() => props.onRefreshSeries(payload.id)}
-            className="px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
-          >
-            Refresh series placeholders
-          </button>
+          <LibraryReconcileControl
+            label="Refresh series placeholders"
+            startReconcile={() => refreshSeriesPlaceholder(payload.id)}
+          />
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
@@ -4216,13 +4358,11 @@ function SeriesDetail(props: {
                               : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
                           }
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => props.onRefreshEpisode(ep.id)}
-                          className="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200"
-                        >
-                          Refresh
-                        </button>
+                        <LibraryReconcileControl
+                          label="Refresh"
+                          startReconcile={() => refreshEpisodePlaceholder(ep.id)}
+                          buttonClassName="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                        />
                       </div>
                     ))}
                   </div>

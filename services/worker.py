@@ -65,6 +65,10 @@ from services.source_of_truth.entity_materialization_job import (
     ENTITY_MATERIALIZATION_JOB_TYPE,
     process_entity_materialization_job,
 )
+from services.source_of_truth.entity_reconcile import (
+    ENTITY_RECONCILE_JOB_TYPE,
+    process_entity_reconcile_job,
+)
 from services.source_of_truth.placeholder_art_reconciler import (
     PLACEHOLDER_ART_REFRESH_JOB_TYPE,
     process_placeholder_art_refresh_job,
@@ -758,6 +762,12 @@ def _process_claimed_job(session, job: Job):
         result = process_entity_materialization_job(session, job)
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'entity_materialization_failed'))
+        return
+
+    if job.job_type == ENTITY_RECONCILE_JOB_TYPE:
+        result = process_entity_reconcile_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'entity_reconcile_failed'))
         return
 
     if job.job_type == IMPORT_GRACE_JOB_TYPE:

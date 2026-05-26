@@ -9,6 +9,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Added
 
+- **Library entity reconcile (scan & refresh)**: Movie, series, and episode detail **Refresh placeholder** now enqueues a forced `entity_reconcile` job: Radarr/Sonarr **Refresh** + **Rescan** (with command polling), always syncs that title from *arr, then runs scoped placeholder truth, determination, materialization, NFO/art sidecars, path-scoped media-server refresh, and per-item player metadata — without requiring an existing placeholder or triggering a full-library Plex `force=1` scan. The UI polls `GET /api/library/reconcile-jobs/{job_id}` and shows live `step_label` text beside the button.
 - **Unified placeholder refresh intent and tasking**: Added `PLACEHOLDER_REFRESH_PENDING` (JSON) to merge metadata/art/template refresh intent across settings and message saves, with `future`/`next_full_sync`/`now` apply-scope handling routed through one backend entry point.
 - **Manual and scoped placeholder refresh actions**: Added manual `placeholder_refresh` task runs (`metadata`, `art`, or both) plus library-scoped POST actions for movie/series/episode detail views to queue targeted refreshes without forcing a full sync.
 - **Placeholder art refresh (decoupled from NFO)**: New batched `placeholder_art_refresh` jobs write local `poster.jpg`, `folder.jpg`, `seasonNN-poster.jpg`, and episode `*-thumb.jpg` beside placeholders. Overlay mode controls compositing vs raw download; files are still written when overlay is off. Full sync and overlay setting changes queue a bulk backfill; lite sync scopes art to touched rows; materialization writes art inline on create. When the last bulk batch finishes, Plex TV/movie libraries refresh with forced metadata (`force=1`); Jellyfin and Emby run library scans.
@@ -21,6 +22,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
+- **Library entity reconcile logs**: Reconcile jobs now log with the title in view (`Library reconcile · Movie · …`) at each step, and scoped determination/materialization lines include the same subject when triggered from library refresh.
 - **Full sync follow-up policy**: Full sync now consumes unified pending placeholder refresh intent instead of always forcing art refresh plus separate metadata flag paths, reducing duplicate backfill trees and keeping follow-up behavior consistent.
 - **NFO sidecars are metadata-only**: Movie, TV show, and episode NFOs no longer include `<thumb>`, `<art>`, `<poster>`, `<fanart>`, or `<banner>` tags. Plex/Jellyfin/Emby pick up local JPEGs via library refresh and Sonarr-style filenames, not NFO art references. Run **Metadata Refresh** only when status templates or text fields change; **Full sync** queues art reconcile separately.
 - **Placeholder poster overlay setting**: Description updated — local art files are always written when remote URLs exist; overlay mode only changes treatment (grayscale/banner/badge vs raw download).

@@ -3386,21 +3386,21 @@ async def refresh_movie_placeholder(movie_id: int):
         movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
         if not movie:
             return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-        ids = _scoped_movie_placeholder_ids(session, int(movie_id))
     finally:
         session.close()
-    if not ids:
-        return JSONResponse({"ok": False, "message": "No active placeholder found for this movie"}, status_code=404)
-    from services.source_of_truth.placeholder_refresh import enqueue_scoped_placeholder_refresh
+    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
 
-    out = enqueue_scoped_placeholder_refresh(
-        placeholder_ids=ids,
+    out = enqueue_entity_reconcile(
+        entity_type="movie",
+        entity_id=int(movie_id),
         source=f"library_movie:{movie_id}",
-        metadata=True,
-        art=True,
-        player_metadata_refresh=True,
     )
-    return {"ok": bool(out.get("ok", True)), "placeholder_count": len(ids), "refresh": out}
+    return {
+        "ok": bool(out.get("ok", True)),
+        "job_id": out.get("job_id"),
+        "step_label": out.get("step_label"),
+        "reused": bool(out.get("reused")),
+    }
 
 
 @router.post("/api/library/series/{series_id}/refresh-placeholder")
@@ -3410,21 +3410,21 @@ async def refresh_series_placeholder(series_id: int):
         series = session.query(Series).filter(Series.id == int(series_id), Series.is_deleted == False).first()  # noqa: E712
         if not series:
             return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
-        ids = _scoped_series_placeholder_ids(session, int(series_id))
     finally:
         session.close()
-    if not ids:
-        return JSONResponse({"ok": False, "message": "No active placeholders found for this series"}, status_code=404)
-    from services.source_of_truth.placeholder_refresh import enqueue_scoped_placeholder_refresh
+    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
 
-    out = enqueue_scoped_placeholder_refresh(
-        placeholder_ids=ids,
+    out = enqueue_entity_reconcile(
+        entity_type="series",
+        entity_id=int(series_id),
         source=f"library_series:{series_id}",
-        metadata=True,
-        art=True,
-        player_metadata_refresh=True,
     )
-    return {"ok": bool(out.get("ok", True)), "placeholder_count": len(ids), "refresh": out}
+    return {
+        "ok": bool(out.get("ok", True)),
+        "job_id": out.get("job_id"),
+        "step_label": out.get("step_label"),
+        "reused": bool(out.get("reused")),
+    }
 
 
 @router.post("/api/library/episode/{episode_id}/refresh-placeholder")
@@ -3434,21 +3434,39 @@ async def refresh_episode_placeholder(episode_id: int):
         episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
         if not episode:
             return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
-        ids = _scoped_episode_placeholder_ids(session, int(episode_id))
     finally:
         session.close()
-    if not ids:
-        return JSONResponse({"ok": False, "message": "No active placeholder found for this episode"}, status_code=404)
-    from services.source_of_truth.placeholder_refresh import enqueue_scoped_placeholder_refresh
+    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
 
-    out = enqueue_scoped_placeholder_refresh(
-        placeholder_ids=ids,
+    out = enqueue_entity_reconcile(
+        entity_type="episode",
+        entity_id=int(episode_id),
         source=f"library_episode:{episode_id}",
-        metadata=True,
-        art=True,
-        player_metadata_refresh=True,
     )
-    return {"ok": bool(out.get("ok", True)), "placeholder_count": len(ids), "refresh": out}
+    return {
+        "ok": bool(out.get("ok", True)),
+        "job_id": out.get("job_id"),
+        "step_label": out.get("step_label"),
+        "reused": bool(out.get("reused")),
+    }
+
+
+@router.get("/api/library/reconcile-jobs/{job_id}")
+async def get_entity_reconcile_job(job_id: int):
+    session = get_session()
+    try:
+        from services.postgres.models import Job
+        from services.source_of_truth.entity_reconcile import (
+            ENTITY_RECONCILE_JOB_TYPE,
+            reconcile_job_status_view,
+        )
+
+        job = session.query(Job).filter(Job.id == int(job_id)).first()
+        if not job or str(job.job_type) != ENTITY_RECONCILE_JOB_TYPE:
+            return JSONResponse({"ok": False, "message": "Reconcile job not found"}, status_code=404)
+        return reconcile_job_status_view(job)
+    finally:
+        session.close()
 
 
 @router.get("/api/calendar")

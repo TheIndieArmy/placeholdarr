@@ -46,25 +46,47 @@ export function getSeriesDetail(seriesId: number): Promise<DetailResponse> {
   return fetchJson<DetailResponse>(`/api/detail/series/${seriesId}`);
 }
 
-export function refreshMoviePlaceholder(movieId: number): Promise<{ ok: boolean; message?: string }> {
-  return fetchJson<{ ok: boolean; message?: string }>(`/api/library/movie/${movieId}/refresh-placeholder`, {
+export type EntityReconcileStartResponse = {
+  ok: boolean;
+  job_id?: number;
+  step_label?: string;
+  reused?: boolean;
+  message?: string;
+};
+
+export type EntityReconcileStatusResponse = {
+  ok: boolean;
+  status: "working" | "done" | "failed";
+  step?: string;
+  step_label?: string;
+  error_message?: string | null;
+  entity_type?: string;
+  entity_id?: number;
+};
+
+export function refreshMoviePlaceholder(movieId: number): Promise<EntityReconcileStartResponse> {
+  return fetchJson<EntityReconcileStartResponse>(`/api/library/movie/${movieId}/refresh-placeholder`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
   });
 }
 
-export function refreshSeriesPlaceholder(seriesId: number): Promise<{ ok: boolean; message?: string }> {
-  return fetchJson<{ ok: boolean; message?: string }>(`/api/library/series/${seriesId}/refresh-placeholder`, {
+export function refreshSeriesPlaceholder(seriesId: number): Promise<EntityReconcileStartResponse> {
+  return fetchJson<EntityReconcileStartResponse>(`/api/library/series/${seriesId}/refresh-placeholder`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
   });
 }
 
-export function refreshEpisodePlaceholder(episodeId: number): Promise<{ ok: boolean; message?: string }> {
-  return fetchJson<{ ok: boolean; message?: string }>(`/api/library/episode/${episodeId}/refresh-placeholder`, {
+export function refreshEpisodePlaceholder(episodeId: number): Promise<EntityReconcileStartResponse> {
+  return fetchJson<EntityReconcileStartResponse>(`/api/library/episode/${episodeId}/refresh-placeholder`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
   });
+}
+
+export function getEntityReconcileStatus(jobId: number): Promise<EntityReconcileStatusResponse> {
+  return fetchJson<EntityReconcileStatusResponse>(`/api/library/reconcile-jobs/${jobId}`);
 }
 
 export function getCalendar(month: string): Promise<CalendarResponse | CalendarErrorResponse> {
