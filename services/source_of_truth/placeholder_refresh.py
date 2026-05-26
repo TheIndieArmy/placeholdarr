@@ -147,6 +147,57 @@ def clear_pending_intent() -> dict[str, Any]:
         session.close()
 
 
+def clear_pending_intent_domains(
+    *,
+    metadata: bool = False,
+    art: bool = False,
+    templates: bool = False,
+) -> dict[str, Any]:
+    """Clear only the requested pending refresh domains; leave other flags intact."""
+    if not metadata and not art and not templates:
+        return get_pending_intent()
+
+    session = get_session()
+    try:
+        row = _get_pending_row(session)
+        merged = _normalize_intent(row.value if row else None)
+        if metadata or templates:
+            merged["metadata"] = False
+            merged["templates"] = False
+        if art:
+            merged["art"] = False
+        merged["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _set_pending_intent(session, merged)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if metadata or templates:
+        try:
+            from services.source_of_truth.template_backfill import clear_pending_template_backfill
+
+            clear_pending_template_backfill()
+        except Exception as exc:
+            logger.warning(
+                f"Failed clearing legacy template backfill pending flag: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+    if art:
+        try:
+            from services.source_of_truth.art_backfill import clear_pending_art_backfill
+
+            clear_pending_art_backfill()
+        except Exception as exc:
+            logger.warning(
+                f"Failed clearing legacy art backfill pending flag: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+    return merged
+
+
 def execute_placeholder_refresh_apply_scope(
     *,
     apply_scope: str,
@@ -162,14 +213,25 @@ def execute_placeholder_refresh_apply_scope(
     requested_metadata = bool(metadata or templates)
     requested_art = bool(art)
     if not requested_metadata and not requested_art:
-        out = clear_pending_intent()
-        out.update({"ok": True, "scope": scope, "enqueued": False})
-        return out
+        return {
+            "ok": True,
+            "scope": scope,
+            "enqueued": False,
+            "pending": has_pending_intent(),
+        }
 
     if scope == "future":
-        out = clear_pending_intent()
-        out.update({"ok": True, "scope": "future", "enqueued": False})
-        return out
+        cleared = clear_pending_intent_domains(
+            metadata=requested_metadata,
+            art=requested_art,
+            templates=bool(templates),
+        )
+        return {
+            "ok": True,
+            "scope": "future",
+            "enqueued": False,
+            "pending": bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates")),
+        }
 
     if scope == "next_full_sync":
         out = merge_pending_intent(
@@ -202,7 +264,12 @@ def execute_placeholder_refresh_apply_scope(
         out["art_backfill"] = art_out
         out["enqueued"] = bool(out["enqueued"] or art_out.get("enqueued"))
     try:
-        clear_pending_intent()
+        cleared = clear_pending_intent_domains(
+            metadata=requested_metadata,
+            art=requested_art,
+            templates=bool(templates),
+        )
+        out["pending"] = bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates"))
     except Exception as exc:
         logger.warning(f"Failed clearing pending placeholder refresh intent: {exc}", extra={"emoji_type": "warning"})
     return out
