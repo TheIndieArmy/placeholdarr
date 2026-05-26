@@ -21,6 +21,9 @@ import {
   getLogs,
   getMovieDetail,
   getPlaceholderActivity,
+  refreshEpisodePlaceholder,
+  refreshMoviePlaceholder,
+  refreshSeriesPlaceholder,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
@@ -1535,6 +1538,23 @@ export function App() {
               setTaskRunError(null);
               setTaskRunModal(kind);
             }}
+            onRequestRefresh={async (kind) => {
+              setTaskRunError(null);
+              setTaskRunPending(true);
+              try {
+                if (kind === "metadata") {
+                  await postTaskRun("placeholder_refresh", { metadata: true, art: false });
+                } else if (kind === "art") {
+                  await postTaskRun("placeholder_refresh", { metadata: false, art: true });
+                } else {
+                  await postTaskRun("placeholder_refresh", { metadata: true, art: true });
+                }
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start placeholder refresh");
+              } finally {
+                setTaskRunPending(false);
+              }
+            }}
           />
         );
       }
@@ -3030,6 +3050,7 @@ function TasksPanel(props: {
   themeMode: ThemeMode;
   onOpenLibraryFilter?: (f: LibraryFilter) => void;
   onRequestRun: (kind: "full" | "lite") => void;
+  onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
 }) {
   const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
@@ -3081,6 +3102,30 @@ function TasksPanel(props: {
         <div className="px-4 py-3 border-b border-[#424753]/30">
           <h2 className="text-[20px] font-bold text-white font-headline">Scheduled</h2>
           <p className="text-[13px] text-slate-400 mt-0.5">Recurring library maintenance</p>
+        </div>
+        <div className="px-4 py-3 border-b border-[#424753]/20 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("metadata")}
+            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh metadata
+          </button>
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("art")}
+            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh art
+          </button>
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("both")}
+            className="px-3 py-1.5 rounded-lg text-[12px] uppercase tracking-wider text-white"
+            style={{ backgroundColor: accent.hex }}
+          >
+            Refresh all placeholders
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-[640px] w-full">
@@ -3578,6 +3623,8 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   const [openSeasons, setOpenSeasons] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
 
   const pathParts = location.pathname.split("/");
   const entityType = pathParts[2] || "";
@@ -3682,7 +3729,59 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
           themeMode={props.themeMode}
           openSeasons={openSeasons}
           onToggleSeason={(seasonId) => setOpenSeasons((prev) => (prev.includes(seasonId) ? prev.filter((id) => id !== seasonId) : [...prev, seasonId]))}
+          onRefreshEpisode={async (episodeId) => {
+            setRefreshBusy(true);
+            setRefreshMessage(null);
+            try {
+              await refreshEpisodePlaceholder(episodeId);
+              setRefreshMessage("Episode placeholder refresh queued.");
+            } catch (e) {
+              setRefreshMessage(e instanceof Error ? e.message : "Failed to queue episode refresh.");
+            } finally {
+              setRefreshBusy(false);
+            }
+          }}
+          onRefreshSeries={async (seriesId) => {
+            setRefreshBusy(true);
+            setRefreshMessage(null);
+            try {
+              await refreshSeriesPlaceholder(seriesId);
+              setRefreshMessage("Series placeholder refresh queued.");
+            } catch (e) {
+              setRefreshMessage(e instanceof Error ? e.message : "Failed to queue series refresh.");
+            } finally {
+              setRefreshBusy(false);
+            }
+          }}
         />
+      ) : null}
+      {!loading && !error && payload?.type === "movie" ? (
+        <div className="px-6 md:px-10 pb-6">
+          <button
+            type="button"
+            disabled={refreshBusy}
+            onClick={async () => {
+              setRefreshBusy(true);
+              setRefreshMessage(null);
+              try {
+                await refreshMoviePlaceholder(payload.id);
+                setRefreshMessage("Movie placeholder refresh queued.");
+              } catch (e) {
+                setRefreshMessage(e instanceof Error ? e.message : "Failed to queue movie refresh.");
+              } finally {
+                setRefreshBusy(false);
+              }
+            }}
+            className="px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
+          >
+            Refresh placeholder
+          </button>
+        </div>
+      ) : null}
+      {refreshMessage ? (
+        <div className="px-6 md:px-10 pb-6">
+          <p className="text-[13px] text-slate-400">{refreshMessage}</p>
+        </div>
       ) : null}
     </div>
   );
@@ -3995,7 +4094,15 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
   );
 }
 
-function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; themeMode: ThemeMode; openSeasons: number[]; onToggleSeason: (seasonId: number) => void }) {
+function SeriesDetail(props: {
+  payload: SeriesDetailResponse;
+  brand: Brand;
+  themeMode: ThemeMode;
+  openSeasons: number[];
+  onToggleSeason: (seasonId: number) => void;
+  onRefreshSeries: (seriesId: number) => Promise<void> | void;
+  onRefreshEpisode: (episodeId: number) => Promise<void> | void;
+}) {
   const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
@@ -4046,6 +4153,15 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           accentHex={accent.hex}
           sonarrIconSrc={sonarrIcon}
         />
+        <div className="mb-6">
+          <button
+            type="button"
+            onClick={() => props.onRefreshSeries(payload.id)}
+            className="px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh series placeholders
+          </button>
+        </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
           {[
@@ -4100,6 +4216,13 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                               : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
                           }
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => props.onRefreshEpisode(ep.id)}
+                          className="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200"
+                        >
+                          Refresh
+                        </button>
                       </div>
                     ))}
                   </div>

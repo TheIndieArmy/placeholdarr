@@ -631,22 +631,32 @@ def _is_non_retriable_webhook_error(error: Exception) -> bool:
 
 
 def _try_complete_full_sync_task_after_job(descriptor: ClaimedJobDescriptor) -> None:
-    """Close a full-sync task run after the last linked follow-up job is marked DONE."""
+    """Close linked task runs after the last follow-up job is marked DONE."""
     if descriptor.job_type not in (PLACEHOLDER_ART_REFRESH_JOB_TYPE, NFO_REFRESH_JOB_TYPE):
         return
     payload = descriptor.payload if isinstance(descriptor.payload, dict) else {}
     raw_tid = payload.get("full_sync_task_run_id") or payload.get("art_backfill_task_run_id")
-    if raw_tid is None:
-        return
-    try:
-        from services.task_run_phases import try_complete_full_sync_task_run
+    if raw_tid is not None:
+        try:
+            from services.task_run_phases import try_complete_full_sync_task_run
 
-        try_complete_full_sync_task_run(int(raw_tid))
-    except Exception as exc:
-        logger.debug(
-            f"full_sync completion check after job_id={descriptor.id} skipped: {exc}",
-            extra={"emoji_type": "debug"},
-        )
+            try_complete_full_sync_task_run(int(raw_tid))
+        except Exception as exc:
+            logger.debug(
+                f"full_sync completion check after job_id={descriptor.id} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+    raw_refresh_tid = payload.get("placeholder_refresh_task_run_id")
+    if raw_refresh_tid is not None:
+        try:
+            from services.source_of_truth.placeholder_refresh import try_complete_placeholder_refresh_task_run
+
+            try_complete_placeholder_refresh_task_run(int(raw_refresh_tid))
+        except Exception as exc:
+            logger.debug(
+                f"placeholder_refresh completion check after job_id={descriptor.id} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
 
 
 def _mark_descriptor_done(session, descriptor: ClaimedJobDescriptor) -> None:

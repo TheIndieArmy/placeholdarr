@@ -9,6 +9,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Added
 
+- **Unified placeholder refresh intent and tasking**: Added `PLACEHOLDER_REFRESH_PENDING` (JSON) to merge metadata/art/template refresh intent across settings and message saves, with `future`/`next_full_sync`/`now` apply-scope handling routed through one backend entry point.
+- **Manual and scoped placeholder refresh actions**: Added manual `placeholder_refresh` task runs (`metadata`, `art`, or both) plus library-scoped POST actions for movie/series/episode detail views to queue targeted refreshes without forcing a full sync.
 - **Placeholder art refresh (decoupled from NFO)**: New batched `placeholder_art_refresh` jobs write local `poster.jpg`, `folder.jpg`, `seasonNN-poster.jpg`, and episode `*-thumb.jpg` beside placeholders. Overlay mode controls compositing vs raw download; files are still written when overlay is off. Full sync and overlay setting changes queue a bulk backfill; lite sync scopes art to touched rows; materialization writes art inline on create. When the last bulk batch finishes, Plex TV/movie libraries refresh with forced metadata (`force=1`); Jellyfin and Emby run library scans.
 - **TV season poster art for placeholders**: Sonarr sync requests `includeSeasonImages` and stores per-season `remote_poster` URLs. Art refresh writes Sonarr-style `seasonNN-poster.jpg` (and `season-specials-poster.jpg`) at the series root, with series-poster fallback when a season has no dedicated image.
 - **Full sync phased task runs** (`services/task_run_phases.py`): Full sync records explicit phases — ARR catalog sync, filesystem scan, status determination, placeholder materialization, calendar status, art refresh, and metadata refresh (when template backfill is pending) — with per-phase timings and metrics in `scheduled_task_run.summary`. The task row stays **WORKING** until art (and any NFO backfill) jobs finish, then closes with a single wall-clock end time.
@@ -19,10 +21,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
+- **Full sync follow-up policy**: Full sync now consumes unified pending placeholder refresh intent instead of always forcing art refresh plus separate metadata flag paths, reducing duplicate backfill trees and keeping follow-up behavior consistent.
 - **NFO sidecars are metadata-only**: Movie, TV show, and episode NFOs no longer include `<thumb>`, `<art>`, `<poster>`, `<fanart>`, or `<banner>` tags. Plex/Jellyfin/Emby pick up local JPEGs via library refresh and Sonarr-style filenames, not NFO art references. Run **Metadata Refresh** only when status templates or text fields change; **Full sync** queues art reconcile separately.
 - **Placeholder poster overlay setting**: Description updated — local art files are always written when remote URLs exist; overlay mode only changes treatment (grayscale/banner/badge vs raw download).
 - **Full sync pipeline layout**: Calendar date refresh, filesystem scan, determination, materialization, and calendar/orphan cleanup run as separate tracked phases instead of one opaque “self-healing” block. Template/NFO backfill on full sync is optional (pending flag only); art backfill is always queued when active placeholders exist.
 - **Art skip / regen stability**: `.poster-overlay.json` tracks per-artifact `source_url` and `source_kind` (still vs fanart, season vs series fallback) so episode stills are not regenerated when only the DB URL field changes from fanart to still. Logo overlay stamp uses a **content hash** of the SVG (not file mtime) so container restarts do not force a full poster rewrite.
+- **Top banner overlay typography**: Bundles **Space Grotesk Bold** (same family as onboarding `font-headline`) in the image so top-banner “PLACEHOLDER” text renders at the requested size instead of Pillow’s tiny default bitmap font on slim Python images. Banner proportions are slightly larger for legibility in Plex grids; changing the font or layout bumps the overlay stamp so art refresh can regenerate posters.
 - **Art bulk completion order**: Last art batch marks the full-sync task **DONE** before firing Plex/Jellyfin/Emby section refresh HTTP (refresh is fire-and-forget; we do not wait for Plex library scans to finish).
 
 ### Fixed

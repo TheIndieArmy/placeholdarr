@@ -46,6 +46,27 @@ export function getSeriesDetail(seriesId: number): Promise<DetailResponse> {
   return fetchJson<DetailResponse>(`/api/detail/series/${seriesId}`);
 }
 
+export function refreshMoviePlaceholder(movieId: number): Promise<{ ok: boolean; message?: string }> {
+  return fetchJson<{ ok: boolean; message?: string }>(`/api/library/movie/${movieId}/refresh-placeholder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+  });
+}
+
+export function refreshSeriesPlaceholder(seriesId: number): Promise<{ ok: boolean; message?: string }> {
+  return fetchJson<{ ok: boolean; message?: string }>(`/api/library/series/${seriesId}/refresh-placeholder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+  });
+}
+
+export function refreshEpisodePlaceholder(episodeId: number): Promise<{ ok: boolean; message?: string }> {
+  return fetchJson<{ ok: boolean; message?: string }>(`/api/library/episode/${episodeId}/refresh-placeholder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+  });
+}
+
 export function getCalendar(month: string): Promise<CalendarResponse | CalendarErrorResponse> {
   return fetchJson<CalendarResponse | CalendarErrorResponse>(`/api/calendar?month=${encodeURIComponent(month)}`);
 }

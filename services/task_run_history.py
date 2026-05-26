@@ -131,11 +131,14 @@ def _cancel_follow_up_jobs_for_task_run(session, task_run_id: int) -> int:
     tid = str(int(task_run_id))
     col = Job.payload["full_sync_task_run_id"]
     legacy = Job.payload["art_backfill_task_run_id"]
+    refresh = Job.payload["placeholder_refresh_task_run_id"]
     match = or_(
         col.as_string() == tid,
         cast(col, String) == tid,
         legacy.as_string() == tid,
         cast(legacy, String) == tid,
+        refresh.as_string() == tid,
+        cast(refresh, String) == tid,
     )
     rows = (
         session.query(Job)

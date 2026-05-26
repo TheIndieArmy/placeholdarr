@@ -3341,6 +3341,116 @@ async def series_detail(series_id: int):
         session.close()
 
 
+def _scoped_movie_placeholder_ids(session, movie_id: int) -> list[int]:
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.movie_id == int(movie_id),
+            Placeholder.has_placeholder == True,  # noqa: E712
+        )
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def _scoped_episode_placeholder_ids(session, episode_id: int) -> list[int]:
+    rows = (
+        session.query(Placeholder.id)
+        .filter(
+            Placeholder.episode_id == int(episode_id),
+            Placeholder.has_placeholder == True,  # noqa: E712
+        )
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def _scoped_series_placeholder_ids(session, series_id: int) -> list[int]:
+    rows = (
+        session.query(Placeholder.id)
+        .join(Episode, Episode.id == Placeholder.episode_id)
+        .join(Season, Season.id == Episode.season_id)
+        .filter(
+            Season.series_id == int(series_id),
+            Placeholder.has_placeholder == True,  # noqa: E712
+        )
+        .all()
+    )
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+@router.post("/api/library/movie/{movie_id}/refresh-placeholder")
+async def refresh_movie_placeholder(movie_id: int):
+    session = get_session()
+    try:
+        movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
+        if not movie:
+            return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
+        ids = _scoped_movie_placeholder_ids(session, int(movie_id))
+    finally:
+        session.close()
+    if not ids:
+        return JSONResponse({"ok": False, "message": "No active placeholder found for this movie"}, status_code=404)
+    from services.source_of_truth.placeholder_refresh import enqueue_scoped_placeholder_refresh
+
+    out = enqueue_scoped_placeholder_refresh(
+        placeholder_ids=ids,
+        source=f"library_movie:{movie_id}",
+        metadata=True,
+        art=True,
+        player_metadata_refresh=True,
+    )
+    return {"ok": bool(out.get("ok", True)), "placeholder_count": len(ids), "refresh": out}
+
+
+@router.post("/api/library/series/{series_id}/refresh-placeholder")
+async def refresh_series_placeholder(series_id: int):
+    session = get_session()
+    try:
+        series = session.query(Series).filter(Series.id == int(series_id), Series.is_deleted == False).first()  # noqa: E712
+        if not series:
+            return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
+        ids = _scoped_series_placeholder_ids(session, int(series_id))
+    finally:
+        session.close()
+    if not ids:
+        return JSONResponse({"ok": False, "message": "No active placeholders found for this series"}, status_code=404)
+    from services.source_of_truth.placeholder_refresh import enqueue_scoped_placeholder_refresh
+
+    out = enqueue_scoped_placeholder_refresh(
+        placeholder_ids=ids,
+        source=f"library_series:{series_id}",
+        metadata=True,
+        art=True,
+        player_metadata_refresh=True,
+    )
+    return {"ok": bool(out.get("ok", True)), "placeholder_count": len(ids), "refresh": out}
+
+
+@router.post("/api/library/episode/{episode_id}/refresh-placeholder")
+async def refresh_episode_placeholder(episode_id: int):
+    session = get_session()
+    try:
+        episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
+        if not episode:
+            return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
+        ids = _scoped_episode_placeholder_ids(session, int(episode_id))
+    finally:
+        session.close()
+    if not ids:
+        return JSONResponse({"ok": False, "message": "No active placeholder found for this episode"}, status_code=404)
+    from services.source_of_truth.placeholder_refresh import enqueue_scoped_placeholder_refresh
+
+    out = enqueue_scoped_placeholder_refresh(
+        placeholder_ids=ids,
+        source=f"library_episode:{episode_id}",
+        metadata=True,
+        art=True,
+        player_metadata_refresh=True,
+    )
+    return {"ok": bool(out.get("ok", True)), "placeholder_count": len(ids), "refresh": out}
+
+
 @router.get("/api/calendar")
 async def calendar_view(month: str = Query("")):
     try:

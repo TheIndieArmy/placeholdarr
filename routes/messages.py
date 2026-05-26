@@ -341,41 +341,39 @@ def post_templates(body: dict[str, Any]) -> JSONResponse:
 
 
 def _get_pending_backfill_flag() -> bool:
-    """Read the ``PLACEHOLDER_TEMPLATE_BACKFILL_PENDING`` flag from app_config."""
+    """Read unified pending placeholder-refresh intent."""
     try:
-        from services.postgres.db import get_session
-        from services.postgres.models import AppConfig
-        from services.source_of_truth.template_backfill import PENDING_FLAG_KEY
+        from services.source_of_truth.placeholder_refresh import has_pending_intent
     except Exception:
         return False
-
-    session = get_session()
-    try:
-        row = session.query(AppConfig).filter(AppConfig.key == PENDING_FLAG_KEY).first()
-        return bool(row and row.value)
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+    return bool(has_pending_intent())
 
 
 def _execute_apply_scope(apply_scope: str) -> dict[str, Any]:
-    from services.source_of_truth.template_backfill import execute_nfo_backfill_apply_scope
+    from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
-    return execute_nfo_backfill_apply_scope(apply_scope)
+    out = execute_placeholder_refresh_apply_scope(
+        apply_scope=apply_scope,
+        metadata=True,
+        templates=True,
+        source="messages_save",
+    )
+    nfo = out.get("nfo_backfill") if isinstance(out.get("nfo_backfill"), dict) else {}
+    merged = dict(nfo) if nfo else {"ok": bool(out.get("ok", True))}
+    merged.setdefault("scope", out.get("scope"))
+    merged.setdefault("enqueued", bool(out.get("enqueued")))
+    return merged
 
 
 @router.get("/templates/apply_estimate")
 def get_apply_estimate() -> JSONResponse:
     """How many placeholders an immediate ``Apply now`` save would refresh."""
     try:
-        from services.source_of_truth.template_backfill import (
-            is_template_backfill_pending,
-            placeholder_count_for_apply_now,
-        )
+        from services.source_of_truth.template_backfill import placeholder_count_for_apply_now
+        from services.source_of_truth.placeholder_refresh import has_pending_intent
+
         count = placeholder_count_for_apply_now()
-        pending = is_template_backfill_pending()
+        pending = has_pending_intent()
     except Exception as exc:
         logger.warning(f"Apply estimate unavailable: {exc}", extra={"emoji_type": "warning"})
         return JSONResponse({"placeholder_count": 0, "pending_full_sync_backfill": False})

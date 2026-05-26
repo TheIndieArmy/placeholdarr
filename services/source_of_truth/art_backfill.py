@@ -45,6 +45,12 @@ def _read_pending_flag(session) -> bool:
 
 
 def is_art_backfill_pending() -> bool:
+    try:
+        from services.source_of_truth.placeholder_refresh import get_pending_intent
+
+        return bool(get_pending_intent().get("art"))
+    except Exception:
+        pass
     session = get_session()
     try:
         return _read_pending_flag(session)
@@ -103,31 +109,28 @@ def clear_pending_art_backfill() -> dict[str, Any]:
 
 def execute_art_backfill_apply_scope(apply_scope: str) -> dict[str, Any]:
     """Materialize the user's apply policy after poster overlay settings change."""
-    scope = str(apply_scope or "future").strip().lower()
-    if scope not in {"now", "next_full_sync", "future"}:
-        scope = "future"
+    from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
-    if scope == "now":
-        from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
-
-        out = enqueue_placeholder_art_backfill_all(source="user_apply_now")
-        out.setdefault("scope", "now")
-        try:
+    out = execute_placeholder_refresh_apply_scope(
+        apply_scope=apply_scope,
+        art=True,
+        source="settings_save",
+    )
+    scope = str(out.get("scope") or "").strip().lower()
+    try:
+        if scope == "next_full_sync":
+            mark_art_backfill_pending()
+        elif scope in {"future", "now"}:
             clear_pending_art_backfill()
-        except Exception:
-            pass
-        return out
-
-    if scope == "next_full_sync":
-        out = mark_art_backfill_pending()
-        out.setdefault("scope", "next_full_sync")
-        out.setdefault("enqueued", False)
-        return out
-
-    out = clear_pending_art_backfill()
-    out.setdefault("scope", "future")
-    out.setdefault("enqueued", False)
-    return out
+    except Exception:
+        pass
+    art = out.get("art_backfill") if isinstance(out.get("art_backfill"), dict) else {}
+    merged = dict(art) if art else {"ok": bool(out.get("ok", True))}
+    merged.setdefault("scope", out.get("scope"))
+    merged.setdefault("enqueued", bool(out.get("enqueued")))
+    if out.get("pending") is not None:
+        merged["pending"] = bool(out.get("pending"))
+    return merged
 
 
 def clear_pending_art_backfill_if_set() -> None:

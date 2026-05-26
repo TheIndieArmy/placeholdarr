@@ -423,7 +423,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Placeholder status updates",
-                "description": "",
+                "description": (
+                    "Choose which placeholder lifecycle states are projected into title/summary metadata. "
+                    "Changes can be applied immediately via Placeholder refresh, scheduled for next full sync, "
+                    "or left for future transitions only."
+                ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -438,7 +442,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Project status into",
-                "description": "Choose where bracketed placeholder status appears in media library metadata.",
+                "description": (
+                    "Choose where bracketed placeholder status appears in media library metadata. "
+                    "Changing this can trigger a metadata placeholder refresh (now or next full sync)."
+                ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -457,7 +464,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
                     "seasonNN-poster.jpg at the series root, and episode thumb JPEGs (composited when a style is "
                     "selected, raw download when Off). NFOs do not include art tags; players pick up files from "
-                    "disk after a library refresh."
+                    "disk after a library refresh. Changing this can trigger an art placeholder refresh now or "
+                    "at the next full sync."
                 ),
                 "type": "choice",
                 "restart_required": False,
@@ -1285,22 +1293,37 @@ def save_settings(
                 )
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
         backfill_summary: dict[str, Any] | None = None
-        if nfo_backfill_keys_changed and apply_scope:
-            from services.source_of_truth.template_backfill import execute_nfo_backfill_apply_scope
-
-            backfill_summary = execute_nfo_backfill_apply_scope(str(apply_scope))
-            logger.info(
-                f"NFO backfill after settings save scope={apply_scope} keys={nfo_backfill_keys_changed}",
-                extra={"emoji_type": "processing"},
-            )
-
         art_backfill_summary: dict[str, Any] | None = None
-        if art_backfill_keys_changed and apply_scope:
-            from services.source_of_truth.art_backfill import execute_art_backfill_apply_scope
+        if (nfo_backfill_keys_changed or art_backfill_keys_changed) and apply_scope:
+            from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
-            art_backfill_summary = execute_art_backfill_apply_scope(str(apply_scope))
+            refresh_out = execute_placeholder_refresh_apply_scope(
+                apply_scope=str(apply_scope),
+                metadata=bool(nfo_backfill_keys_changed),
+                art=bool(art_backfill_keys_changed),
+                templates=False,
+                source="settings_save",
+            )
+            if isinstance(refresh_out.get("nfo_backfill"), dict):
+                backfill_summary = dict(refresh_out["nfo_backfill"])
+            else:
+                backfill_summary = {
+                    "ok": bool(refresh_out.get("ok", True)),
+                    "scope": str(refresh_out.get("scope") or ""),
+                    "enqueued": bool(refresh_out.get("enqueued")),
+                }
+            if isinstance(refresh_out.get("art_backfill"), dict):
+                art_backfill_summary = dict(refresh_out["art_backfill"])
+            else:
+                art_backfill_summary = {
+                    "ok": bool(refresh_out.get("ok", True)),
+                    "scope": str(refresh_out.get("scope") or ""),
+                    "enqueued": bool(refresh_out.get("enqueued")),
+                    "pending": bool(refresh_out.get("pending")),
+                }
             logger.info(
-                f"Art backfill after settings save scope={apply_scope} keys={art_backfill_keys_changed}",
+                f"Placeholder refresh after settings save scope={apply_scope} "
+                f"metadata_keys={nfo_backfill_keys_changed} art_keys={art_backfill_keys_changed}",
                 extra={"emoji_type": "processing"},
             )
 
