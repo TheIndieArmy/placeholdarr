@@ -3008,12 +3008,109 @@ def _merge_series_library_rows(
     return out
 
 
+_POSTER_JPEG = "poster.jpg"
+_LIBRARY_POSTER_CACHE = "public, max-age=604800, immutable"
+
+
+def _local_poster_file_for_movie(movie: Movie) -> str | None:
+    if not bool(getattr(movie, "has_placeholder", False)):
+        return None
+    fp = str(getattr(movie, "placeholder_filepath", "") or "").strip()
+    if fp:
+        candidate = os.path.join(os.path.dirname(os.path.abspath(fp)), _POSTER_JPEG)
+        if os.path.isfile(candidate):
+            return candidate
+    try:
+        from services.placeholders import movie_placeholder_path
+
+        folder = os.path.dirname(os.path.abspath(movie_placeholder_path(movie)))
+        candidate = os.path.join(folder, _POSTER_JPEG)
+        if os.path.isfile(candidate):
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _local_poster_file_for_series(series: Series) -> str | None:
+    folder = str(getattr(series, "placeholder_folder", "") or "").strip()
+    if not folder:
+        return None
+    candidate = os.path.join(os.path.abspath(folder), _POSTER_JPEG)
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
+def _library_poster_api_url(item_type: str, item_id: int, entity: Movie | Series) -> str | None:
+    if item_type == "movie":
+        if not _local_poster_file_for_movie(entity):
+            return None
+    elif item_type == "series":
+        if not _local_poster_file_for_series(entity):
+            return None
+    else:
+        return None
+    return f"/api/library/poster/{item_type}/{int(item_id)}"
+
+
+def _effective_library_poster_url(item_type: str, item_id: int, entity: Movie | Series, remote: str | None) -> str | None:
+    local_url = _library_poster_api_url(item_type, item_id, entity)
+    if local_url:
+        return local_url
+    return remote
+
+
+@router.get("/api/library/poster/{item_type}/{item_id}")
+async def library_poster(item_type: str, item_id: int):
+    """Serve on-disk placeholder poster.jpg for library grids (browser-cacheable)."""
+    kind = str(item_type or "").strip().lower()
+    session = get_session()
+    try:
+        if kind == "movie":
+            movie = session.query(Movie).filter(Movie.id == int(item_id), Movie.is_deleted == False).first()  # noqa: E712
+            if not movie:
+                return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
+            path = _local_poster_file_for_movie(movie)
+        elif kind == "series":
+            series = session.query(Series).filter(Series.id == int(item_id), Series.is_deleted == False).first()  # noqa: E712
+            if not series:
+                return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
+            path = _local_poster_file_for_series(series)
+        else:
+            return JSONResponse({"ok": False, "message": "invalid item type"}, status_code=400)
+
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"ok": False, "message": "poster not found"}, status_code=404)
+
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": _LIBRARY_POSTER_CACHE},
+        )
+    finally:
+        session.close()
+
+
 @router.get("/api/library")
-async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(False)):
+async def library(
+    limit: int = Query(300, ge=1, le=1000),
+    summary: bool = Query(False),
+    media_type: str | None = Query(None, description="Optional filter: movie or series"),
+):
     """Return mixed movie/series library rows with poster and placeholder stats.
 
     When ``summary`` is true, omit large text fields (``overview``, ``backdrop_url``) to shrink JSON for grid polling.
+    When ``media_type`` is set, only query that shelf (faster load for Movies vs TV pages).
     """
+    want_movies = True
+    want_series = True
+    mt = str(media_type or "").strip().lower()
+    if mt in {"movie", "movies"}:
+        want_series = False
+    elif mt in {"series", "tv"}:
+        want_movies = False
+
     session = get_session()
     try:
         series_episode_counts = {
@@ -3055,17 +3152,20 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
             .join(Episode, Episode.season_id == Season.id)
             .group_by(Season.series_id)
             .all()
-        }
+        } if want_series else {}
 
         movie_entries: list[tuple[Movie, dict]] = []
 
-        movies = (
-            session.query(Movie)
-            .filter(Movie.is_deleted == False)
-            .order_by(Movie.updated_at.desc(), Movie.title.asc())
-            .limit(limit)
-            .all()
-        )
+        if want_movies:
+            movies = (
+                session.query(Movie)
+                .filter(Movie.is_deleted == False)
+                .order_by(Movie.updated_at.desc(), Movie.title.asc())
+                .limit(limit)
+                .all()
+            )
+        else:
+            movies = []
         for movie in movies:
             instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
             movie_unresolved = (not bool(movie.has_file)) and (not bool(movie.has_placeholder))
@@ -3084,7 +3184,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
                 "type": "movie",
                 "title": movie.title,
                 "year": movie.year,
-                "poster_url": movie.remote_poster,
+                "poster_url": _effective_library_poster_url("movie", int(movie.id), movie, movie.remote_poster),
                 "backdrop_url": movie.remote_fanart,
                 "is_4k": _legacy_is_4k(instance_meta),
                 "instance_key": movie.instance_key,
@@ -3112,13 +3212,16 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
 
         series_entries: list[tuple[Series, dict]] = []
 
-        series_rows = (
-            session.query(Series)
-            .filter(Series.is_deleted == False)
-            .order_by(Series.updated_at.desc(), Series.title.asc())
-            .limit(limit)
-            .all()
-        )
+        if want_series:
+            series_rows = (
+                session.query(Series)
+                .filter(Series.is_deleted == False)
+                .order_by(Series.updated_at.desc(), Series.title.asc())
+                .limit(limit)
+                .all()
+            )
+        else:
+            series_rows = []
         for series in series_rows:
             instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
             counts = series_episode_counts.get(
@@ -3150,7 +3253,7 @@ async def library(limit: int = Query(300, ge=1, le=1000), summary: bool = Query(
                 "type": "series",
                 "title": series.title,
                 "year": series.year,
-                "poster_url": series.remote_poster,
+                "poster_url": _effective_library_poster_url("series", int(series.id), series, series.remote_poster),
                 "backdrop_url": series.remote_fanart or series.remote_banner,
                 "is_4k": _legacy_is_4k(instance_meta),
                 "instance_key": series.instance_key,

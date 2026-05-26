@@ -967,7 +967,9 @@ export function App() {
         } else if (currentTab === "library") {
           const searchTrim = titleSearchRef.current.trim();
           const useSummary = searchTrim.length === 0;
-          const payload = await getLibrary(1000, { summary: useSummary });
+          const shelf = getLibraryListShelf(location.pathname);
+          const mediaType = shelf === "movies" ? "movie" : shelf === "tv" ? "series" : undefined;
+          const payload = await getLibrary(1000, { summary: useSummary, mediaType });
           const next = payload.items || [];
           const digest = digestLibraryItems(next);
           if (digest !== libraryDigestRef.current) {
@@ -3523,6 +3525,8 @@ function LibraryPanel(props: {
                         <img
                           src={item.poster_url}
                           alt=""
+                          loading="lazy"
+                          decoding="async"
                           className="absolute inset-0 h-full w-full object-cover scale-[1.01]"
                         />
                       ) : null}

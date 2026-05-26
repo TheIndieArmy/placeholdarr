@@ -31,10 +31,15 @@ export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivity
   return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
 }
 
-export function getLibrary(limit = 1000, opts?: { summary?: boolean }): Promise<LibraryResponse> {
+export function getLibrary(
+  limit = 1000,
+  opts?: { summary?: boolean; mediaType?: "movie" | "series" },
+): Promise<LibraryResponse> {
   const summary = opts?.summary === true;
   const q = new URLSearchParams({ limit: String(limit) });
   if (summary) q.set("summary", "true");
+  if (opts?.mediaType === "movie") q.set("media_type", "movie");
+  if (opts?.mediaType === "series") q.set("media_type", "series");
   return fetchJson<LibraryResponse>(`/api/library?${q.toString()}`);
 }
 
