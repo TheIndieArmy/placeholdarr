@@ -3009,10 +3009,13 @@ def _merge_series_library_rows(
 
 
 _POSTER_JPEG = "poster.jpg"
-_LIBRARY_POSTER_CACHE = "public, max-age=604800, immutable"
+_LIBRARY_POSTER_CACHE = "public, max-age=604800"
 
 
-def _local_poster_file_for_movie(movie: Movie) -> str | None:
+def _movie_poster_jpeg_path(movie: Movie) -> str | None:
+    """Absolute path to placeholder ``poster.jpg`` when the title has on-disk placeholder media."""
+    from services.placeholder_poster_art import POSTER_JPEG
+
     if not bool(getattr(movie, "has_placeholder", False)):
         return None
     fp = str(getattr(movie, "placeholder_filepath", "") or "").strip()
@@ -3023,8 +3026,7 @@ def _local_poster_file_for_movie(movie: Movie) -> str | None:
     try:
         from services.placeholders import movie_placeholder_path
 
-        folder = os.path.dirname(os.path.abspath(movie_placeholder_path(movie)))
-        candidate = os.path.join(folder, _POSTER_JPEG)
+        candidate = os.path.join(os.path.dirname(os.path.abspath(movie_placeholder_path(movie))), _POSTER_JPEG)
         if os.path.isfile(candidate):
             return candidate
     except Exception:
@@ -3032,38 +3034,74 @@ def _local_poster_file_for_movie(movie: Movie) -> str | None:
     return None
 
 
+def _local_poster_file_for_movie(movie: Movie) -> str | None:
+    from services.placeholder_poster_art import resolve_library_grid_poster_path
+
+    candidate = _movie_poster_jpeg_path(movie)
+    if not candidate:
+        return None
+    return resolve_library_grid_poster_path(
+        candidate,
+        meta_key="poster",
+        catalog_poster_url=getattr(movie, "remote_poster", None),
+    )
+
+
 def _local_poster_file_for_series(series: Series) -> str | None:
+    from services.placeholder_poster_art import POSTER_JPEG, resolve_library_grid_poster_path
+
     folder = str(getattr(series, "placeholder_folder", "") or "").strip()
     if not folder:
         return None
     candidate = os.path.join(os.path.abspath(folder), _POSTER_JPEG)
-    if os.path.isfile(candidate):
-        return candidate
+    if not os.path.isfile(candidate):
+        return None
+    return resolve_library_grid_poster_path(
+        candidate,
+        meta_key="series_poster",
+        catalog_poster_url=getattr(series, "remote_poster", None),
+    )
+
+
+def _library_poster_local_file(item_type: str, entity: Movie | Series) -> str | None:
+    if item_type == "movie":
+        return _local_poster_file_for_movie(entity)
+    if item_type == "series":
+        return _local_poster_file_for_series(entity)
     return None
 
 
+def _library_poster_cache_token(path: str) -> int:
+    try:
+        return int(os.path.getmtime(path))
+    except OSError:
+        return 0
+
+
 def _library_poster_api_url(item_type: str, item_id: int, entity: Movie | Series) -> str | None:
-    if item_type == "movie":
-        if not _local_poster_file_for_movie(entity):
-            return None
-    elif item_type == "series":
-        if not _local_poster_file_for_series(entity):
-            return None
-    else:
+    local_path = _library_poster_local_file(item_type, entity)
+    if not local_path:
         return None
-    return f"/api/library/poster/{item_type}/{int(item_id)}"
+    token = _library_poster_cache_token(local_path)
+    return f"/api/library/poster/{item_type}/{int(item_id)}?v={token}"
 
 
 def _effective_library_poster_url(item_type: str, item_id: int, entity: Movie | Series, remote: str | None) -> str | None:
+    """Library grids use cacheable ``/api/library/poster`` (``poster-grid.jpg`` when overlays are on)."""
     local_url = _library_poster_api_url(item_type, item_id, entity)
     if local_url:
         return local_url
+    # Placeholder rows must not fall back to remote TMDB URLs in the browser.
+    if item_type == "movie" and bool(getattr(entity, "has_placeholder", False)):
+        return None
+    if item_type == "series" and str(getattr(entity, "placeholder_folder", "") or "").strip():
+        return None
     return remote
 
 
 @router.get("/api/library/poster/{item_type}/{item_id}")
 async def library_poster(item_type: str, item_id: int):
-    """Serve on-disk placeholder poster.jpg for library grids (browser-cacheable)."""
+    """Serve on-disk library poster (poster-grid.jpg or raw poster.jpg; browser-cacheable)."""
     kind = str(item_type or "").strip().lower()
     session = get_session()
     try:
@@ -3083,10 +3121,14 @@ async def library_poster(item_type: str, item_id: int):
         if not path or not os.path.isfile(path):
             return JSONResponse({"ok": False, "message": "poster not found"}, status_code=404)
 
+        cache_token = _library_poster_cache_token(path)
         return FileResponse(
             path,
             media_type="image/jpeg",
-            headers={"Cache-Control": _LIBRARY_POSTER_CACHE},
+            headers={
+                "Cache-Control": _LIBRARY_POSTER_CACHE,
+                "ETag": f'"{cache_token}"',
+            },
         )
     finally:
         session.close()

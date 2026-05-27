@@ -1,4 +1,12 @@
-"""Radarr/Sonarr command API: Refresh, Rescan, and poll until complete."""
+"""Radarr/Sonarr command API: metadata Refresh, optional Rescan, and poll until complete.
+
+`RefreshMovie` / `RefreshSeries` match the *arr UI entity **Refresh** action (metadata from
+the upstream proxy). Whether a disk rescan runs afterward is controlled by each instance's
+"Rescan … folder after refresh" setting — not by Placeholdarr.
+
+`RescanMovie` / `RescanSeries` match **Refresh & Scan** / an explicit rescan; use only when
+a disk scan is intentionally required.
+"""
 
 from __future__ import annotations
 
@@ -113,6 +121,7 @@ def wait_arr_commands(
 
 
 def trigger_refresh_movie(*, base_url: str, api_key: str, movie_id: int) -> int:
+    """Radarr UI Refresh — metadata only; may chain to rescan per instance settings."""
     return post_arr_command(
         base_url=base_url,
         api_key=api_key,
@@ -122,6 +131,7 @@ def trigger_refresh_movie(*, base_url: str, api_key: str, movie_id: int) -> int:
 
 
 def trigger_rescan_movie(*, base_url: str, api_key: str, movie_id: int) -> int:
+    """Explicit disk rescan (Radarr **Refresh & Scan** rescan half)."""
     return post_arr_command(
         base_url=base_url,
         api_key=api_key,
@@ -131,6 +141,7 @@ def trigger_rescan_movie(*, base_url: str, api_key: str, movie_id: int) -> int:
 
 
 def trigger_refresh_series(*, base_url: str, api_key: str, series_id: int) -> int:
+    """Sonarr UI Refresh — metadata only; may chain to rescan per instance settings."""
     return post_arr_command(
         base_url=base_url,
         api_key=api_key,
@@ -140,6 +151,7 @@ def trigger_refresh_series(*, base_url: str, api_key: str, series_id: int) -> in
 
 
 def trigger_rescan_series(*, base_url: str, api_key: str, series_id: int) -> int:
+    """Explicit disk rescan (Sonarr **Refresh & Scan** rescan half)."""
     return post_arr_command(
         base_url=base_url,
         api_key=api_key,

@@ -1,4 +1,4 @@
-"""Single-title entity reconcile: *arr Refresh+Rescan, forced sync, scoped downstream."""
+"""Single-title entity reconcile: *arr metadata Refresh (UI-equivalent), forced sync, scoped downstream."""
 
 from __future__ import annotations
 
@@ -23,8 +23,6 @@ from services.source_of_truth.arr_commands import (
     ArrCommandError,
     trigger_refresh_movie,
     trigger_refresh_series,
-    trigger_rescan_movie,
-    trigger_rescan_series,
     wait_arr_commands,
 )
 from services.source_of_truth.determiner import run_determination_for_entities_with_siblings
@@ -134,8 +132,6 @@ def _log_reconcile_warning(entity_type: str, display_title: str, detail: str, *,
 _STEP_LOG_DETAIL: dict[str, str] = {
     "arr_refresh": "Asking {arr} to refresh metadata",
     "arr_wait_refresh": "Waiting for {arr} metadata refresh to finish",
-    "arr_rescan": "Asking {arr} to rescan files on disk",
-    "arr_wait_rescan": "Waiting for {arr} disk scan to finish",
     "sync_catalog": "Syncing catalog from {arr}",
     "filesystem": "Checking placeholder files on disk",
     "determination": "Updating placeholder status",
@@ -161,8 +157,6 @@ def _step_label_for(step: str, *, arr_label: str = "Radarr") -> str:
         STEP_QUEUED: "Queued…",
         "arr_refresh": f"Asking {arr_label} for updates…",
         "arr_wait_refresh": "Waiting for metadata refresh…",
-        "arr_rescan": "Scanning files on disk…",
-        "arr_wait_rescan": "Waiting for disk scan…",
         "sync_catalog": "Syncing catalog…",
         "filesystem": "Checking placeholder files…",
         "determination": "Updating status…",
@@ -557,22 +551,6 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                 on_tick=_on_refresh_tick,
             )
 
-            _step("arr_rescan")
-            rescan_cmd = trigger_rescan_movie(
-                base_url=targets.base_url, api_key=targets.api_key, movie_id=targets.arr_id
-            )
-            _step("arr_wait_rescan")
-
-            def _on_rescan_tick(_statuses: dict[int, str]) -> None:
-                _set_job_step(session, job, "arr_wait_rescan", arr_label=targets.arr_label)
-
-            wait_arr_commands(
-                base_url=targets.base_url,
-                api_key=targets.api_key,
-                command_ids=[rescan_cmd],
-                on_tick=_on_rescan_tick,
-            )
-
             _step("sync_catalog")
             sync_radarr_movies_by_ids(
                 [targets.arr_id],
@@ -590,16 +568,6 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                 base_url=targets.base_url,
                 api_key=targets.api_key,
                 command_ids=[refresh_cmd],
-            )
-            _step("arr_rescan")
-            rescan_cmd = trigger_rescan_series(
-                base_url=targets.base_url, api_key=targets.api_key, series_id=targets.arr_id
-            )
-            _step("arr_wait_rescan")
-            wait_arr_commands(
-                base_url=targets.base_url,
-                api_key=targets.api_key,
-                command_ids=[rescan_cmd],
             )
             _step("sync_catalog")
             sync_sonarr_series_by_ids(

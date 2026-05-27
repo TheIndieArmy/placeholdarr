@@ -634,8 +634,13 @@ def _is_non_retriable_webhook_error(error: Exception) -> bool:
     return False
 
 
-def _try_complete_full_sync_task_after_job(descriptor: ClaimedJobDescriptor) -> None:
-    """Close linked task runs after the last follow-up job is marked DONE."""
+def _try_complete_task_runs_after_job_commit(
+    descriptor: ClaimedJobDescriptor,
+    *,
+    failed: bool = False,
+    error_message: str | None = None,
+) -> None:
+    """Close linked task runs after a follow-up job finish has committed."""
     if descriptor.job_type not in (PLACEHOLDER_ART_REFRESH_JOB_TYPE, NFO_REFRESH_JOB_TYPE):
         return
     payload = descriptor.payload if isinstance(descriptor.payload, dict) else {}
@@ -644,7 +649,11 @@ def _try_complete_full_sync_task_after_job(descriptor: ClaimedJobDescriptor) -> 
         try:
             from services.task_run_phases import try_complete_full_sync_task_run
 
-            try_complete_full_sync_task_run(int(raw_tid))
+            try_complete_full_sync_task_run(
+                int(raw_tid),
+                failed=bool(failed),
+                error_message=str(error_message or "") or None,
+            )
         except Exception as exc:
             logger.debug(
                 f"full_sync completion check after job_id={descriptor.id} skipped: {exc}",
@@ -655,7 +664,11 @@ def _try_complete_full_sync_task_after_job(descriptor: ClaimedJobDescriptor) -> 
         try:
             from services.source_of_truth.placeholder_refresh import try_complete_placeholder_refresh_task_run
 
-            try_complete_placeholder_refresh_task_run(int(raw_refresh_tid))
+            try_complete_placeholder_refresh_task_run(
+                int(raw_refresh_tid),
+                failed=bool(failed),
+                error_message=str(error_message or "") or None,
+            )
         except Exception as exc:
             logger.debug(
                 f"placeholder_refresh completion check after job_id={descriptor.id} skipped: {exc}",
@@ -964,7 +977,6 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
 
                 if handler_error is None:
                     _mark_descriptor_done(finish_session, descriptor)
-                    _try_complete_full_sync_task_after_job(descriptor)
                 else:
                     _mark_descriptor_failed(finish_session, descriptor, handler_error)
                     logger.error(
@@ -979,6 +991,11 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
                     finish_session.commit()
                 finally:
                     hb_fin.set()
+                _try_complete_task_runs_after_job_commit(
+                    descriptor,
+                    failed=handler_error is not None,
+                    error_message=str(handler_error) if handler_error is not None else None,
+                )
             except StaleJobClaimError as stale:
                 try:
                     finish_session.rollback()

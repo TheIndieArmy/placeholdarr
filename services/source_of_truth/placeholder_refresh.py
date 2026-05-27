@@ -380,6 +380,8 @@ def run_placeholder_refresh_task(
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         out: dict[str, Any] = {"ok": True, "task_run_id": task_run_id, "enqueued": False, "run_id": run_id}
+        metadata_committed = False
+        art_committed = False
         if metadata:
             from services.source_of_truth.status_reconciler import enqueue_nfo_refresh
 
@@ -398,7 +400,8 @@ def run_placeholder_refresh_task(
                 payload_extras=nfo_extras,
             )
             out["nfo_backfill"] = nfo_out
-            out["enqueued"] = bool(out["enqueued"] or nfo_out.get("enqueued"))
+            metadata_committed = _refresh_enqueue_committed(nfo_out)
+            out["enqueued"] = bool(out["enqueued"] or (metadata_committed and bool(nfo_out.get("enqueued"))))
         if art:
             from services.source_of_truth.placeholder_art_reconciler import (
                 ART_BACKFILL_REFRESH_ON_COMPLETION_KEY,
@@ -420,7 +423,24 @@ def run_placeholder_refresh_task(
                 payload_extras=art_extras,
             )
             out["art_backfill"] = art_out
-            out["enqueued"] = bool(out["enqueued"] or art_out.get("enqueued"))
+            art_committed = _refresh_enqueue_committed(art_out)
+            out["enqueued"] = bool(out["enqueued"] or (art_committed and bool(art_out.get("enqueued"))))
+
+        if (metadata and not metadata_committed) or (art and not art_committed):
+            out["ok"] = False
+            out["reason"] = "enqueue_failed"
+            failed_summary = dict(summary)
+            if metadata and not metadata_committed:
+                failed_summary = _mark_phase_failed(failed_summary, "metadata_refresh", reason="enqueue_failed")
+            if art and not art_committed:
+                failed_summary = _mark_phase_failed(failed_summary, "art_refresh", reason="enqueue_failed")
+            finish_task_run(
+                task_run_id,
+                status="failed",
+                summary={**failed_summary, **out},
+                error_message="enqueue_failed",
+            )
+            return out
         update_task_run_summary(task_run_id, {**summary, **out})
         return out
     except Exception as exc:
@@ -445,6 +465,8 @@ def enqueue_scoped_placeholder_refresh(
         return {"ok": False, "reason": "no_placeholder_ids"}
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     out: dict[str, Any] = {"ok": True, "enqueued": False, "run_id": run_id}
+    metadata_committed = False
+    art_committed = False
     session = get_session()
     try:
         if metadata:
@@ -463,7 +485,8 @@ def enqueue_scoped_placeholder_refresh(
                 },
             )
             out["nfo_backfill"] = nfo_out
-            out["enqueued"] = bool(out["enqueued"] or nfo_out.get("enqueued"))
+            metadata_committed = _refresh_enqueue_committed(nfo_out)
+            out["enqueued"] = bool(out["enqueued"] or (metadata_committed and bool(nfo_out.get("enqueued"))))
         if art:
             from services.source_of_truth.placeholder_art_reconciler import (
                 ART_BACKFILL_REFRESH_ON_COMPLETION_KEY,
@@ -483,7 +506,11 @@ def enqueue_scoped_placeholder_refresh(
                 },
             )
             out["art_backfill"] = art_out
-            out["enqueued"] = bool(out["enqueued"] or art_out.get("enqueued"))
+            art_committed = _refresh_enqueue_committed(art_out)
+            out["enqueued"] = bool(out["enqueued"] or (art_committed and bool(art_out.get("enqueued"))))
+        if (metadata and not metadata_committed) or (art and not art_committed):
+            out["ok"] = False
+            out["reason"] = "enqueue_failed"
         return out
     finally:
         session.close()
@@ -503,27 +530,58 @@ def _mark_phase_done(summary: dict[str, Any], phase_key: str) -> dict[str, Any]:
     return summary
 
 
-def try_complete_placeholder_refresh_task_run(task_run_id: int, *, exclude_job_id: int | None = None) -> bool:
+def _mark_phase_failed(summary: dict[str, Any], phase_key: str, *, reason: str | None = None) -> dict[str, Any]:
+    phases = list(summary.get("phases") or [])
+    now = datetime.now(timezone.utc).isoformat()
+    for p in phases:
+        if str(p.get("key") or "") != phase_key:
+            continue
+        if str(p.get("status") or "").lower() == "skipped":
+            continue
+        p["status"] = "failed"
+        p["ended_at"] = now
+        if reason:
+            metrics = list(p.get("metrics") or [])
+            metrics.append({"label": "Reason", "value": str(reason)})
+            p["metrics"] = metrics
+    summary["phases"] = phases
+    return summary
+
+
+def try_complete_placeholder_refresh_task_run(
+    task_run_id: int,
+    *,
+    failed: bool = False,
+    error_message: str | None = None,
+    exclude_job_id: int | None = None,
+) -> bool:
     from sqlalchemy import String, cast
     from services.postgres.models import Job, ScheduledTaskRun
 
     session = get_session()
     try:
         tid = str(int(task_run_id))
-        q = session.query(Job.id).filter(
+        q = session.query(Job.status).filter(
             Job.job_type.in_(("placeholder_art_refresh", "nfo_refresh")),
-            Job.status.in_(("PENDING", "CLAIMED")),
             cast(Job.payload[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY], String) == tid,
         )
         if exclude_job_id is not None:
             q = q.filter(Job.id != int(exclude_job_id))
-        if q.first():
+        statuses = [str(r[0] or "").upper() for r in q.all() if r and r[0] is not None]
+        if any(s in ("PENDING", "CLAIMED") for s in statuses):
             return False
 
         row = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.id == int(task_run_id)).first()
         if not row or str(row.status or "").lower() != "working":
             return False
         summary = row.summary if isinstance(row.summary, dict) else {}
+        has_failed_job = any(s == "FAILED" for s in statuses)
+        if failed or has_failed_job:
+            fail_reason = str(error_message or "linked_refresh_job_failed")
+            summary = _mark_phase_failed(summary, "metadata_refresh", reason=fail_reason)
+            summary = _mark_phase_failed(summary, "art_refresh", reason=fail_reason)
+            finish_task_run(task_run_id, status="failed", summary=summary, error_message=fail_reason)
+            return True
         summary = _mark_phase_done(summary, "metadata_refresh")
         summary = _mark_phase_done(summary, "art_refresh")
         finish_task_run(task_run_id, status="done", summary=summary)
