@@ -145,6 +145,25 @@ def clear_pending_intent() -> dict[str, Any]:
         raise
     finally:
         session.close()
+    try:
+        from services.source_of_truth.template_backfill import clear_pending_template_backfill
+
+        clear_pending_template_backfill()
+    except Exception as exc:
+        logger.warning(
+            f"Failed clearing legacy template backfill pending flag: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+    try:
+        from services.source_of_truth.art_backfill import clear_pending_art_backfill
+
+        clear_pending_art_backfill()
+    except Exception as exc:
+        logger.warning(
+            f"Failed clearing legacy art backfill pending flag: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+    return intent
 
 
 def _refresh_enqueue_committed(result: Any) -> bool:

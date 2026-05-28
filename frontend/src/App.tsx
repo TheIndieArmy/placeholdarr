@@ -144,7 +144,10 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
 
 function digestLibraryItems(items: LibraryItem[]): string {
   return items
-    .map((i) => `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.overview ?? ""}`)
+    .map(
+      (i) =>
+        `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.overview ?? ""}`,
+    )
     .join("\n");
 }
 

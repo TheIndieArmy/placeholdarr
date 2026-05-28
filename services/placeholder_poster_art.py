@@ -271,8 +271,6 @@ def resolve_library_grid_poster_path(
         return None
     folder = os.path.dirname(poster_abs)
     grid = os.path.join(folder, POSTER_GRID_JPEG)
-    if os.path.isfile(grid):
-        return grid
 
     meta = _read_meta(_meta_path_for_output(poster_abs))
     entry = _output_entry(meta, meta_key, legacy_source_url=str((meta or {}).get("source_url") or ""))
@@ -282,6 +280,8 @@ def resolve_library_grid_poster_path(
 
     composited = _poster_on_disk_is_composited(poster_abs) or poster_overlay_mode() != "off"
     if composited:
+        if os.path.isfile(grid):
+            return grid
         if src and write_library_grid_poster(folder, src) and os.path.isfile(grid):
             return grid
         # Do not fall back to composited poster.jpg for library grids.
