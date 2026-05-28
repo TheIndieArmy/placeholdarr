@@ -224,8 +224,9 @@ def clear_pending_intent_domains(
     try:
         row = _get_pending_row(session)
         merged = _normalize_intent(row.value if row else None)
-        if metadata or templates:
+        if metadata:
             merged["metadata"] = False
+        if templates:
             merged["templates"] = False
         if art:
             merged["art"] = False
@@ -274,6 +275,7 @@ def execute_placeholder_refresh_apply_scope(
     if scope not in {"now", "next_full_sync", "future"}:
         scope = "future"
 
+    requested_templates = bool(templates)
     requested_metadata = bool(metadata or templates)
     requested_art = bool(art)
     if not requested_metadata and not requested_art:
@@ -286,9 +288,9 @@ def execute_placeholder_refresh_apply_scope(
 
     if scope == "future":
         cleared = clear_pending_intent_domains(
-            metadata=requested_metadata,
+            metadata=bool(metadata),
             art=requested_art,
-            templates=bool(templates),
+            templates=requested_templates,
         )
         return {
             "ok": True,
@@ -353,6 +355,24 @@ def execute_placeholder_refresh_apply_scope(
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
 
+    clear_metadata = bool(requested_metadata and metadata_committed)
+    clear_art = bool(requested_art and art_committed)
+    if clear_metadata or clear_art:
+        try:
+            if clear_metadata and clear_art:
+                cleared = clear_pending_intent()
+            else:
+                cleared = clear_pending_intent_domains(
+                    metadata=clear_metadata,
+                    art=clear_art,
+                    templates=requested_templates and clear_metadata,
+                )
+            out["pending"] = bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates"))
+        except Exception as exc:
+            logger.warning(f"Failed clearing pending placeholder refresh intent: {exc}", extra={"emoji_type": "warning"})
+    else:
+        out["pending"] = has_pending_intent()
+
     if task_run_id is not None and task_summary is not None:
         if (requested_metadata and not metadata_committed) or (requested_art and not art_committed):
             return _finalize_placeholder_refresh_enqueue(
@@ -381,24 +401,6 @@ def execute_placeholder_refresh_apply_scope(
             task_run_id, {**task_summary, **out}, overall_status="WORKING"
         )
         update_task_run_summary(task_run_id, merged)
-
-    clear_metadata = bool(requested_metadata and metadata_committed)
-    clear_art = bool(requested_art and art_committed)
-    if clear_metadata or clear_art:
-        try:
-            if clear_metadata and clear_art:
-                cleared = clear_pending_intent()
-            else:
-                cleared = clear_pending_intent_domains(
-                    metadata=clear_metadata,
-                    art=clear_art,
-                    templates=bool(templates) and clear_metadata,
-                )
-            out["pending"] = bool(cleared.get("metadata") or cleared.get("art") or cleared.get("templates"))
-        except Exception as exc:
-            logger.warning(f"Failed clearing pending placeholder refresh intent: {exc}", extra={"emoji_type": "warning"})
-    else:
-        out["pending"] = has_pending_intent()
 
     if (requested_metadata and not metadata_committed) or (requested_art and not art_committed):
         out["ok"] = False
