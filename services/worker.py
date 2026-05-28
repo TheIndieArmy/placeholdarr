@@ -65,6 +65,10 @@ from services.source_of_truth.entity_materialization_job import (
     ENTITY_MATERIALIZATION_JOB_TYPE,
     process_entity_materialization_job,
 )
+from services.source_of_truth.entity_reconcile import (
+    ENTITY_RECONCILE_JOB_TYPE,
+    process_entity_reconcile_job,
+)
 from services.source_of_truth.placeholder_art_reconciler import (
     PLACEHOLDER_ART_REFRESH_JOB_TYPE,
     process_placeholder_art_refresh_job,
@@ -630,6 +634,48 @@ def _is_non_retriable_webhook_error(error: Exception) -> bool:
     return False
 
 
+def _try_complete_task_runs_after_job_commit(
+    descriptor: ClaimedJobDescriptor,
+    *,
+    failed: bool = False,
+    error_message: str | None = None,
+) -> None:
+    """Close linked task runs after a follow-up job finish has committed."""
+    if descriptor.job_type not in (PLACEHOLDER_ART_REFRESH_JOB_TYPE, NFO_REFRESH_JOB_TYPE):
+        return
+    payload = descriptor.payload if isinstance(descriptor.payload, dict) else {}
+    raw_tid = payload.get("full_sync_task_run_id") or payload.get("art_backfill_task_run_id")
+    if raw_tid is not None:
+        try:
+            from services.task_run_phases import try_complete_full_sync_task_run
+
+            try_complete_full_sync_task_run(
+                int(raw_tid),
+                failed=bool(failed),
+                error_message=str(error_message or "") or None,
+            )
+        except Exception as exc:
+            logger.debug(
+                f"full_sync completion check after job_id={descriptor.id} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+    raw_refresh_tid = payload.get("placeholder_refresh_task_run_id")
+    if raw_refresh_tid is not None:
+        try:
+            from services.source_of_truth.placeholder_refresh import try_complete_placeholder_refresh_task_run
+
+            try_complete_placeholder_refresh_task_run(
+                int(raw_refresh_tid),
+                failed=bool(failed),
+                error_message=str(error_message or "") or None,
+            )
+        except Exception as exc:
+            logger.debug(
+                f"placeholder_refresh completion check after job_id={descriptor.id} skipped: {exc}",
+                extra={"emoji_type": "debug"},
+            )
+
+
 def _mark_descriptor_done(session, descriptor: ClaimedJobDescriptor) -> None:
     """Mark a CLAIMED job DONE in a session, conditional on the claim_token.
 
@@ -729,6 +775,12 @@ def _process_claimed_job(session, job: Job):
         result = process_entity_materialization_job(session, job)
         if not result.get('ok', False):
             raise ValueError(str(result.get('reason') or 'entity_materialization_failed'))
+        return
+
+    if job.job_type == ENTITY_RECONCILE_JOB_TYPE:
+        result = process_entity_reconcile_job(session, job)
+        if not result.get('ok', False):
+            raise ValueError(str(result.get('reason') or 'entity_reconcile_failed'))
         return
 
     if job.job_type == IMPORT_GRACE_JOB_TYPE:
@@ -939,6 +991,11 @@ def _process_one_descriptor(descriptor: ClaimedJobDescriptor) -> None:
                     finish_session.commit()
                 finally:
                     hb_fin.set()
+                _try_complete_task_runs_after_job_commit(
+                    descriptor,
+                    failed=handler_error is not None,
+                    error_message=str(handler_error) if handler_error is not None else None,
+                )
             except StaleJobClaimError as stale:
                 try:
                     finish_session.rollback()

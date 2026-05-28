@@ -2,7 +2,7 @@ export type DashboardTab = "activity" | "library" | "calendar" | "errors" | "log
 
 export type ActivitySubPage = "placeholders" | "tasks" | "operations";
 
-export type TaskKey = "full_sync" | "lite_sync" | "calendar_only";
+export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh";
 
 export interface ScheduledTaskRow {
   task_key: TaskKey;
@@ -158,6 +158,8 @@ export interface LibraryItem {
   type: LibraryItemType;
   title: string;
   year: number;
+  /** Series network (Sonarr). */
+  network?: string | null;
   poster_url?: string | null;
   backdrop_url?: string | null;
   is_4k: boolean;
@@ -446,6 +448,8 @@ export interface SaveSettingsResponse {
   status?: SettingsStatus;
   nfo_backfill_keys_changed?: string[];
   nfo_backfill?: { ok?: boolean; enqueued?: boolean; scope?: string };
+  art_backfill_keys_changed?: string[];
+  art_backfill?: { ok?: boolean; enqueued?: boolean; scope?: string; pending?: boolean };
 }
 
 export interface IntegrationTestResponse {

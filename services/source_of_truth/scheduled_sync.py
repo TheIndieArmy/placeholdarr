@@ -258,26 +258,38 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
         update_task_run_summary(task_run_id, result)
 
         follow_ups_started = False
-
+        refresh_out: dict[str, Any] | None = None
         try:
-            from services.source_of_truth.template_backfill import run_pending_backfill_if_set
+            from services.source_of_truth.placeholder_refresh import run_placeholder_refresh_if_pending
 
-            nfo_out = run_pending_backfill_if_set(source=f"full_sync:{trigger}", task_run_id=task_run_id)
-            result["template_backfill"] = nfo_out
-            update_task_run_summary(task_run_id, {"template_backfill": nfo_out})
-            nfo_enqueued = bool(nfo_out.get("enqueued")) and int(nfo_out.get("placeholder_count") or 0) > 0
-            if nfo_enqueued:
-                follow_ups_started = True
-            else:
+            refresh_out = run_placeholder_refresh_if_pending(
+                source=f"full_sync:{trigger}",
+                task_run_id=task_run_id,
+            )
+            result["placeholder_refresh"] = refresh_out
+            update_task_run_summary(task_run_id, {"placeholder_refresh": refresh_out})
+            nfo_out = refresh_out.get("nfo_backfill") if isinstance(refresh_out.get("nfo_backfill"), dict) else None
+            art_out = refresh_out.get("art_backfill") if isinstance(refresh_out.get("art_backfill"), dict) else None
+            if nfo_out is None:
                 mark_follow_up_phase_skipped(
                     task_run_id,
                     "metadata_refresh",
                     "Metadata refresh",
-                    reason=str(nfo_out.get("reason") or "not_requested"),
+                    reason=str(refresh_out.get("reason") or "not_requested"),
                 )
-        except Exception as nfo_exc:
+            if art_out is None:
+                mark_follow_up_phase_skipped(
+                    task_run_id,
+                    "art_refresh",
+                    "Art refresh",
+                    reason=str(refresh_out.get("reason") or "not_requested"),
+                )
+            nfo_enqueued = bool(nfo_out and nfo_out.get("enqueued"))
+            art_enqueued = bool(art_out and art_out.get("enqueued"))
+            follow_ups_started = bool(nfo_enqueued or art_enqueued)
+        except Exception as refresh_exc:
             logger.warning(
-                f"Full sync template/NFO backfill enqueue failed: {nfo_exc}",
+                f"Full sync placeholder refresh enqueue failed: {refresh_exc}",
                 extra={"emoji_type": "warning"},
             )
             mark_follow_up_phase_skipped(
@@ -285,31 +297,6 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                 "metadata_refresh",
                 "Metadata refresh",
                 reason="enqueue_failed",
-            )
-
-        try:
-            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
-
-            art_out = enqueue_placeholder_art_backfill_all(
-                source=f"full_sync:{trigger}",
-                task_run_id=task_run_id,
-            )
-            result["placeholder_art_backfill"] = art_out
-            update_task_run_summary(task_run_id, {"placeholder_art_backfill": art_out})
-            art_enqueued = bool(art_out.get("enqueued")) and int(art_out.get("placeholder_count") or 0) > 0
-            if art_enqueued:
-                follow_ups_started = True
-            else:
-                mark_follow_up_phase_skipped(
-                    task_run_id,
-                    "art_refresh",
-                    "Art refresh",
-                    reason="no_active_placeholders",
-                )
-        except Exception as art_exc:
-            logger.warning(
-                f"Full sync art backfill enqueue failed: {art_exc}",
-                extra={"emoji_type": "warning"},
             )
             mark_follow_up_phase_skipped(
                 task_run_id,

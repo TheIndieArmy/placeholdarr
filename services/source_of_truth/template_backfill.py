@@ -81,6 +81,14 @@ def _read_pending_flag(session) -> bool:
 
 def is_template_backfill_pending() -> bool:
     """True when a template-backfill is queued to run on the next full sync."""
+    try:
+        from services.source_of_truth.placeholder_refresh import get_pending_intent
+
+        intent = get_pending_intent()
+        if bool(intent.get("metadata") or intent.get("templates")):
+            return True
+    except Exception:
+        pass
     session = get_session()
     try:
         return _read_pending_flag(session)
@@ -209,7 +217,12 @@ def clear_pending_template_backfill() -> dict[str, Any]:
             pass
 
 
-def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | None = None) -> dict[str, Any]:
+def enqueue_template_backfill(
+    *,
+    source: str = "user_save",
+    task_run_id: int | None = None,
+    placeholder_refresh_task_run_id: int | None = None,
+) -> dict[str, Any]:
     """Queue an NFO refresh covering every active placeholder.
 
     Returns a small status dict describing how many placeholders were enqueued. The worker
@@ -254,6 +267,10 @@ def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | N
             from services.task_run_phases import FULL_SYNC_TASK_RUN_ID_KEY
 
             extras[FULL_SYNC_TASK_RUN_ID_KEY] = int(task_run_id)
+        if placeholder_refresh_task_run_id is not None:
+            from services.source_of_truth.placeholder_refresh import PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY
+
+            extras[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY] = int(placeholder_refresh_task_run_id)
 
         out = enqueue_nfo_refresh(
             ids,
@@ -266,11 +283,12 @@ def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | N
             return out if isinstance(out, dict) else {"ok": False, "reason": "enqueue_failed"}
 
         batch_count = int(out.get("jobs_created") or len(out.get("job_ids") or []))
-        if task_run_id is not None:
+        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        if phase_task_run_id is not None:
             from services.task_run_phases import begin_nfo_backfill_phase
 
             begin_nfo_backfill_phase(
-                int(task_run_id),
+                int(phase_task_run_id),
                 nfo_run_id=run_id,
                 placeholder_count=len(ids),
                 batch_count=batch_count,
@@ -308,8 +326,15 @@ def run_pending_backfill_if_set(*, source: str = "full_sync", task_run_id: int |
     Called from ``run_full_sync`` (and at startup as a safety net) so user saves that
     chose ``next_full_sync`` get materialized exactly once per scheduled / manual sync.
     """
-    if not is_template_backfill_pending():
-        return {"ok": True, "ran": False, "reason": "no_pending_flag"}
+    try:
+        from services.source_of_truth.placeholder_refresh import get_pending_intent
+
+        intent = get_pending_intent()
+        if not bool(intent.get("metadata") or intent.get("templates")) and not is_template_backfill_pending():
+            return {"ok": True, "ran": False, "reason": "no_pending_flag"}
+    except Exception:
+        if not is_template_backfill_pending():
+            return {"ok": True, "ran": False, "reason": "no_pending_flag"}
 
     out = enqueue_template_backfill(source=source, task_run_id=task_run_id)
     if out.get("ok"):
@@ -327,27 +352,21 @@ def execute_nfo_backfill_apply_scope(apply_scope: str) -> dict[str, Any]:
     - ``next_full_sync``: set the pending flag for the next full sync.
     - ``future``: clear pending flag; no retroactive work.
     """
-    scope = str(apply_scope or "future").strip().lower()
-    if scope not in {"now", "next_full_sync", "future"}:
-        scope = "future"
+    from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
-    if scope == "now":
-        out = enqueue_template_backfill(source="user_apply_now")
-        out.setdefault("scope", "now")
-        try:
-            clear_pending_template_backfill()
-        except Exception:
-            pass
-        return out
-
-    if scope == "next_full_sync":
-        out = mark_template_backfill_pending()
-        out.setdefault("scope", "next_full_sync")
-        return out
-
-    out = clear_pending_template_backfill()
-    out.setdefault("scope", "future")
-    return out
+    out = execute_placeholder_refresh_apply_scope(
+        apply_scope=apply_scope,
+        metadata=True,
+        templates=True,
+        source="messages_save",
+    )
+    nfo = out.get("nfo_backfill") if isinstance(out.get("nfo_backfill"), dict) else {}
+    merged = dict(nfo) if nfo else {"ok": bool(out.get("ok", True))}
+    merged.setdefault("scope", out.get("scope"))
+    merged.setdefault("enqueued", bool(out.get("enqueued")))
+    if out.get("pending") is not None:
+        merged["pending"] = bool(out.get("pending"))
+    return merged
 
 
 def placeholder_count_for_apply_now() -> int:

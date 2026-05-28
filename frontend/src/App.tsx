@@ -1,6 +1,8 @@
 import {
   Fragment,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -21,6 +23,11 @@ import {
   getLogs,
   getMovieDetail,
   getPlaceholderActivity,
+  getEntityReconcileStatus,
+  refreshEpisodePlaceholder,
+  refreshMoviePlaceholder,
+  refreshSeriesPlaceholder,
+  type EntityReconcileStartResponse,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
@@ -61,15 +68,37 @@ import type {
   SettingsStatus,
   StatsResponse,
 } from "./types/api";
+import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
+import { LibraryCardControls } from "./library/LibraryCardControls";
+import { LibraryGridCard } from "./library/LibraryGridCard";
+import { LibraryListRow } from "./library/LibraryListRow";
+import {
+  LIBRARY_CARD_PREVIEW_PATH,
+  libraryListStyle,
+  libraryPosterGridItemClassName,
+  libraryPosterGridItemStyle,
+  libraryPosterGridStyle,
+  readLibraryCardSettings,
+  writeLibraryCardSettings,
+} from "./library/cardSettings";
 
 const REFRESH_MS_VISIBLE = 5000;
 const REFRESH_MS_HIDDEN = 30000;
+/** Post-save banner only — never shown while the form still has unsaved edits. */
+function formatSettingsSaveSuccessMessage(restartRequiredKeys?: string[] | null): string {
+  if (restartRequiredKeys && restartRequiredKeys.length > 0) {
+    return "Saved · restart recommended";
+  }
+  return "Saved";
+}
 const LIBRARY_MOVIES_PATH = "/library";
 const LIBRARY_TV_PATH = "/library/tv";
 const ACTIVITY_PLACEHOLDERS_PATH = "/activity/placeholders";
 const ACTIVITY_TASKS_PATH = "/activity/tasks";
 const ACTIVITY_OPERATIONS_PATH = "/activity/operations";
 const ACTIVITY_DEFAULT_PATH = ACTIVITY_PLACEHOLDERS_PATH;
+/** Default home after onboarding / root redirect. */
+const HOME_PATH = LIBRARY_MOVIES_PATH;
 const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
 const LIBRARY_TV_FILTER_KEY = "placeholdarr:library-shelf-filter:tv";
 /** Legacy single key (pre split movies / TV pages). */
@@ -115,7 +144,10 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
 
 function digestLibraryItems(items: LibraryItem[]): string {
   return items
-    .map((i) => `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.overview ?? ""}`)
+    .map(
+      (i) =>
+        `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.overview ?? ""}`,
+    )
     .join("\n");
 }
 
@@ -516,6 +548,7 @@ function SetupBootShell(props: {
   accentHex: string;
   appLabel: string;
   errorMessage?: string | null;
+  statusMessage?: string;
 }) {
   const err = props.errorMessage?.trim();
   return (
@@ -541,7 +574,7 @@ function SetupBootShell(props: {
             <span className="material-symbols-outlined animate-spin text-slate-500" style={{ fontSize: 16 }}>
               progress_activity
             </span>
-            <span className="animate-pulse">Preparing setup…</span>
+            <span className="animate-pulse">{props.statusMessage ?? "Preparing setup…"}</span>
           </div>
         )}
       </div>
@@ -651,6 +684,14 @@ export function App() {
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTaskRow[]>([]);
   const [taskHistory, setTaskHistory] = useState<TaskRunRow[]>([]);
+  const refreshTaskHistory = useCallback(async () => {
+    try {
+      const hist = await getTasksHistory(50);
+      setTaskHistory(hist || []);
+    } catch {
+      /* Activity poll will retry. */
+    }
+  }, []);
   const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
   const [taskRunPending, setTaskRunPending] = useState(false);
   const [taskRunError, setTaskRunError] = useState<string | null>(null);
@@ -705,6 +746,29 @@ export function App() {
   useEffect(() => {
     setupCompleteRef.current = setupStatus?.setup_complete;
   }, [setupStatus]);
+
+  /** Light status probe first — avoids routing to /setup and waiting on full settings before we know onboarding is done. */
+  useEffect(() => {
+    let cancelled = false;
+    void getSettingsStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setSetupStatus(status);
+        setOnboardingVisible(!status.setup_complete);
+        if (status.setup_complete) {
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setErrorMessage(err instanceof Error ? err.message : "Unable to reach the API");
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -745,9 +809,8 @@ export function App() {
   }, [settingsPayload]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
-  /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
-  const defaultLandingPath =
-    setupStatus != null && setupStatus.setup_complete ? ACTIVITY_DEFAULT_PATH : "/setup";
+  const homeRedirectPath =
+    setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
@@ -767,6 +830,18 @@ export function App() {
   );
   const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
   const hasUnsavedChangesRef = useRef(false);
+  useEffect(() => {
+    if (!combinedSettingsDirty) return;
+    if (settingsFeedbackKind !== "success") return;
+    setSettingsFeedback("");
+    setSettingsFeedbackKind("");
+  }, [combinedSettingsDirty, settingsFeedbackKind]);
+
+  useEffect(() => {
+    if (currentTab === "settings") return;
+    setSettingsFeedback("");
+    setSettingsFeedbackKind("");
+  }, [currentTab]);
   const registerStatusMessagesSaveFlow = useCallback(
     (fn: ((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null) => {
       statusMessagesSaveRef.current = fn;
@@ -902,6 +977,12 @@ export function App() {
                   setSetupStatus(status);
                 }
               }
+            } else if (setupCompleteRef.current === true) {
+              const status = await getSettingsStatus();
+              if (!stopped) {
+                setSetupStatus(status);
+                setOnboardingVisible(false);
+              }
             } else if (!settingsPayloadRef.current) {
               await loadSettings(stopped);
             } else {
@@ -960,7 +1041,9 @@ export function App() {
         } else if (currentTab === "library") {
           const searchTrim = titleSearchRef.current.trim();
           const useSummary = searchTrim.length === 0;
-          const payload = await getLibrary(1000, { summary: useSummary });
+          const shelf = getLibraryListShelf(location.pathname);
+          const mediaType = shelf === "movies" ? "movie" : shelf === "tv" ? "series" : undefined;
+          const payload = await getLibrary(1000, { summary: useSummary, mediaType });
           const next = payload.items || [];
           const digest = digestLibraryItems(next);
           if (digest !== libraryDigestRef.current) {
@@ -1385,8 +1468,7 @@ export function App() {
     const payload = await getSettingsCurrent();
     setSettingsPayload(payload);
     setSetupStatus(payload.status);
-    const restartKeys = result.restart_required_keys || [];
-    setSettingsFeedback(restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved.");
+    setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
     setSettingsFeedbackKind("success");
   }
 
@@ -1535,6 +1617,23 @@ export function App() {
               setTaskRunError(null);
               setTaskRunModal(kind);
             }}
+            onRequestRefresh={async (kind) => {
+              setTaskRunError(null);
+              setTaskRunPending(true);
+              try {
+                if (kind === "metadata") {
+                  await postTaskRun("placeholder_refresh", { metadata: true, art: false });
+                } else if (kind === "art") {
+                  await postTaskRun("placeholder_refresh", { metadata: false, art: true });
+                } else {
+                  await postTaskRun("placeholder_refresh", { metadata: true, art: true });
+                }
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start placeholder refresh");
+              } finally {
+                setTaskRunPending(false);
+              }
+            }}
           />
         );
       }
@@ -1559,6 +1658,16 @@ export function App() {
     }
 
     if (currentTab === "library") {
+      if (location.pathname === LIBRARY_CARD_PREVIEW_PATH) {
+        return (
+          <LibraryCardStylePreview
+            items={filteredLibrary}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onBack={() => navigate(LIBRARY_MOVIES_PATH)}
+          />
+        );
+      }
       const shelf = libraryListShelf;
       if (shelf === "movies" || shelf === "tv") {
         return (
@@ -1574,7 +1683,8 @@ export function App() {
               }
             }}
             onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-            brand={brand}
+            onOpenCardStylePreview={() => navigate(LIBRARY_CARD_PREVIEW_PATH)}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
             themeMode={themeMode}
           />
         );
@@ -1693,8 +1803,7 @@ export function App() {
 
               /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
-                const settingsBackfillScope =
-                  statusKeysChanged && !messagesDirty ? applyScope : undefined;
+                const settingsBackfillScope = statusKeysChanged ? applyScope : undefined;
                 const result = await saveSettings(
                   buildPersistableSettingsValues(fieldValues, settingsPayload),
                   false,
@@ -1708,30 +1817,31 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                const restartKeys = result.restart_required_keys || [];
-                let baseMsg =
-                  restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.";
-                if (settingsBackfillScope && (result.nfo_backfill?.enqueued || result.nfo_backfill_keys_changed?.length)) {
-                  baseMsg += " Library backfill queued.";
-                }
+                const backfillQueuedNow =
+                  applyScope === "now" &&
+                  Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
+                const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
                 if (messagesDirty && statusMessagesSaveRef.current) {
                   await statusMessagesSaveRef.current(applyScope);
-                  if (applyScope === "now" || applyScope === "next_full_sync") {
-                    baseMsg += statusKeysChanged ? "" : " Library backfill queued.";
-                  }
-                  setSettingsFeedback(`${baseMsg} Message templates saved.`);
+                  setSettingsFeedback(saveMsg);
                 } else {
-                  setSettingsFeedback(baseMsg);
+                  setSettingsFeedback(saveMsg);
                 }
                 setSettingsFeedbackKind("success");
+                if (backfillQueuedNow || applyScope === "now") {
+                  void refreshTaskHistory();
+                }
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
                 setOnboardingVisible(!payload.status.setup_complete);
               } else if (messagesDirty && statusMessagesSaveRef.current) {
                 await statusMessagesSaveRef.current(applyScope);
-                setSettingsFeedback("Message templates saved and applied.");
+                setSettingsFeedback("Saved");
                 setSettingsFeedbackKind("success");
+                if (applyScope === "now") {
+                  void refreshTaskHistory();
+                }
               } else {
                 setSettingsFeedback("");
                 setSettingsFeedbackKind("");
@@ -1777,9 +1887,10 @@ export function App() {
   if (setupRouteActive) {
     const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
     if (setupStatus?.setup_complete && !onboardingPreviewRoute) {
-      return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
+      return <Navigate to={HOME_PATH} replace />;
     }
-    if (loading || !setupStatus || !settingsPayload) {
+    const needsSetupWizard = setupStatus != null && !setupStatus.setup_complete;
+    if (!setupStatus || (needsSetupWizard && (loading || !settingsPayload))) {
       return (
         <SetupBootShell
           setupShellClass={setupShellClass}
@@ -1788,6 +1899,7 @@ export function App() {
           accentHex={brandAccent.hex}
           appLabel={brandMeta.label}
           errorMessage={errorMessage}
+          statusMessage={setupStatus == null ? "Loading…" : "Preparing setup…"}
         />
       );
     }
@@ -1813,7 +1925,7 @@ export function App() {
                 return testIntegrationConnection({ service, url, credential });
               }
         }
-        onExitPreview={onboardingPreviewRoute ? () => navigate(ACTIVITY_DEFAULT_PATH, { replace: true }) : undefined}
+        onExitPreview={onboardingPreviewRoute ? () => navigate(HOME_PATH, { replace: true }) : undefined}
         onSave={
           onboardingPreviewRoute
             ? undefined
@@ -1828,7 +1940,7 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                setSettingsFeedback("Saved and applied.");
+                setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
                 setSettingsFeedbackKind("success");
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
@@ -1862,6 +1974,7 @@ export function App() {
     : `linear-gradient(to right, ${studioTopBarBlue} 0%, ${studioTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
 
   return (
+    <LibraryReconcileProvider>
       <div
         className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
         style={{
@@ -1873,7 +1986,7 @@ export function App() {
       >
         {/* Sidebar */}
         <aside
-          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-6 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
+          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-0 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
           style={isStudioGlass ? { borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: brandSemantic.glassBorder } : { backgroundColor: studioLightChrome.sidebar, borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: studioLightChrome.border }}
         >
           <div
@@ -1889,7 +2002,7 @@ export function App() {
           </div>
 
           {/* Nav */}
-          <nav className="flex-1 space-y-1 font-brand-label pt-4">
+          <nav className="flex-1 space-y-1 font-brand-label pt-4 pb-6">
             {(() => {
               const navActiveClass =
                 "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200 border-l-4";
@@ -1926,6 +2039,42 @@ export function App() {
 
               return (
                 <>
+                  {librarySectionActive ? (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  )}
+                  {currentTab === "library" ? (
+                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
+                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          movie
+                        </span>
+                        <span className="truncate">Movies</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
+                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          tv_gen
+                        </span>
+                        <span className="truncate">TV</span>
+                      </button>
+                    </div>
+                  ) : null}
+
                   {isActive("/activity") ? (
                     <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass} style={navActiveStyle}>
                       <span className="material-symbols-outlined">analytics</span>
@@ -1961,42 +2110,6 @@ export function App() {
                           </button>
                         );
                       })}
-                    </div>
-                  ) : null}
-
-                  {librarySectionActive ? (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
-                      <span className="material-symbols-outlined">movie_filter</span>
-                      <span>Library</span>
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
-                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
-                      <span>Library</span>
-                    </button>
-                  )}
-                  {currentTab === "library" ? (
-                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
-                      <button
-                        type="button"
-                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
-                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                          movie
-                        </span>
-                        <span className="truncate">Movies</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
-                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                          tv_gen
-                        </span>
-                        <span className="truncate">TV</span>
-                      </button>
                     </div>
                   ) : null}
 
@@ -2052,6 +2165,7 @@ export function App() {
             ) : null}
           </nav>
 
+          <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
         </aside>
 
         {/* Main area */}
@@ -2274,7 +2388,24 @@ export function App() {
         </div>
 
         <Routes>
-          <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
+          <Route
+            path="/"
+            element={
+              homeRedirectPath ? (
+                <Navigate to={homeRedirectPath} replace />
+              ) : (
+                <SetupBootShell
+                  setupShellClass={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`}
+                  surfaceStyle={setupLoadingShellStyle}
+                  brand={brand}
+                  accentHex={brandAccent.hex}
+                  appLabel={brandMeta.label}
+                  errorMessage={errorMessage}
+                  statusMessage="Loading…"
+                />
+              )
+            }
+          />
           <Route path="*" element={null} />
         </Routes>
 
@@ -2341,6 +2472,7 @@ export function App() {
           />
         ) : null}
       </div>
+    </LibraryReconcileProvider>
   );
 }
 
@@ -3013,6 +3145,13 @@ function formatTaskDuration(seconds: number | null | undefined): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+function formatTaskTrigger(trigger: string | null | undefined): string {
+  const normalized = String(trigger || "").trim().toLowerCase();
+  if (normalized === "settings_change") return "Settings Change";
+  if (!normalized) return "--";
+  return normalized.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
 function TasksPanel(props: {
   scheduled: ScheduledTaskRow[];
   history: TaskRunRow[];
@@ -3021,6 +3160,7 @@ function TasksPanel(props: {
   themeMode: ThemeMode;
   onOpenLibraryFilter?: (f: LibraryFilter) => void;
   onRequestRun: (kind: "full" | "lite") => void;
+  onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
 }) {
   const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
@@ -3072,6 +3212,30 @@ function TasksPanel(props: {
         <div className="px-4 py-3 border-b border-[#424753]/30">
           <h2 className="text-[20px] font-bold text-white font-headline">Scheduled</h2>
           <p className="text-[13px] text-slate-400 mt-0.5">Recurring library maintenance</p>
+        </div>
+        <div className="px-4 py-3 border-b border-[#424753]/20 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("metadata")}
+            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh metadata
+          </button>
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("art")}
+            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh art
+          </button>
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("both")}
+            className="px-3 py-1.5 rounded-lg text-[12px] uppercase tracking-wider text-white"
+            style={{ backgroundColor: accent.hex }}
+          >
+            Refresh all placeholders
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-[640px] w-full">
@@ -3174,7 +3338,7 @@ function TasksPanel(props: {
                             <span>{run.task_label}</span>
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400 capitalize">{run.trigger}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400">{formatTaskTrigger(run.trigger)}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{timeAgo(run.started_at)}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{run.ended_at ? timeAgo(run.ended_at) : "--"}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">
@@ -3318,10 +3482,17 @@ function LibraryPanel(props: {
   activeFilter: LibraryShelfFilter;
   onFilterChange: (value: LibraryShelfFilter) => void;
   onOpenDetail: (item: LibraryItem) => void;
-  brand: Brand; themeMode: ThemeMode;
+  onOpenCardStylePreview: () => void;
+  accent: { hex: string; icon: string };
+  themeMode: ThemeMode;
 }) {
-  const accent = getBrandAccent(props.brand, props.themeMode);
+  const accent = props.accent;
   const isLight = props.themeMode === "light";
+  const [cardSettings, setCardSettings] = useState(readLibraryCardSettings);
+  const handleCardSettings = useCallback((next: ReturnType<typeof readLibraryCardSettings>) => {
+    setCardSettings(next);
+    writeLibraryCardSettings(next);
+  }, []);
   const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
     { id: "all", label: "All" },
     { id: "placeholders", label: "Placeholders" },
@@ -3345,58 +3516,10 @@ function LibraryPanel(props: {
     return { groups, letters };
   }, [props.items]);
 
-  function statusBadge(item: LibraryItem) {
-    if (item.has_missing) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-red-50 text-red-800 border-red-200" : "bg-red-600 text-white border-transparent"
-          }`}
-        >
-          Missing
-        </span>
-      );
-    }
-    if (item.has_placeholder) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-teal-50 text-teal-900 border-teal-200" : "bg-teal-700 text-white border-transparent"
-          }`}
-        >
-          Placeholder
-        </span>
-      );
-    }
-    if (item.is_future) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-600 text-white border-transparent"
-          }`}
-        >
-          Future
-        </span>
-      );
-    }
-    if (item.has_file) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-500 text-white border-transparent"
-          }`}
-        >
-          1080p
-        </span>
-      );
-    }
-    return null;
-  }
-
   return (
     <div>
       {/* Header + filter tabs */}
-      <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
+      <div className="flex flex-wrap justify-between items-end gap-4 mb-4">
         <div>
           <h2 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
           <p className={`text-[16px] mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
@@ -3422,20 +3545,28 @@ function LibraryPanel(props: {
           ))}
         </div>
       </div>
+      <div className="mb-6">
+        <LibraryCardControls
+          settings={cardSettings}
+          onChange={handleCardSettings}
+          accent={accent}
+          themeMode={props.themeMode}
+          onOpenPreview={props.onOpenCardStylePreview}
+        />
+      </div>
 
       {/* Poster grid with alphabet sections */}
       {props.items.length === 0 ? (
         <div className={`text-center py-16 ${isLight ? "text-slate-600" : "text-slate-500"}`}>No library items match the current filter.</div>
       ) : (
         <div className="flex items-start gap-4 mb-8">
-          <div className="flex-1 space-y-8">
+          <div className="flex-1 space-y-8 overflow-visible">
             {groupedItems.letters.map((letter) => (
               <div
                 key={letter}
                 ref={(el) => {
                   sectionRefs.current[letter] = el;
                 }}
-                style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
               >
                 <div
                   className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
@@ -3444,44 +3575,40 @@ function LibraryPanel(props: {
                 >
                   {letter}
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                  {(groupedItems.groups[letter] || []).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => props.onOpenDetail(item)}
-                      className={`relative isolate rounded-xl overflow-hidden group cursor-pointer text-left transition-transform hover:scale-[1.02] ${
-                        isLight ? "bg-white shadow-md shadow-slate-900/8" : "bg-[#1e2430]"
-                      }`}
-                      style={{
-                        aspectRatio: "2/3",
-                        border: `2px solid ${accent.hex}`,
-                      }}
-                    >
-                      {item.poster_url ? (
-                        <img
-                          src={item.poster_url}
-                          alt=""
-                          className="absolute inset-0 h-full w-full object-cover scale-[1.01]"
-                        />
-                      ) : null}
-                      <div
-                        className={`absolute pointer-events-none bottom-0 left-0 right-0 ${isLight ? "h-[48%]" : "h-[34%]"}`}
-                        style={{
-                          background: isLight
-                            ? "linear-gradient(180deg, rgba(238,243,248,0) 0%, rgba(238,243,248,0.42) 38%, rgba(238,243,248,0.88) 68%, rgba(238,243,248,1) 88%, rgba(238,243,248,1) 100%)"
-                            : "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
-                        }}
+                <div className="overflow-visible">
+                {cardSettings.viewMode === "list" ? (
+                  <div style={libraryListStyle()}>
+                    {(groupedItems.groups[letter] || []).map((item) => (
+                      <LibraryListRow
+                        key={item.id}
+                        item={item}
+                        posterWidthPx={cardSettings.posterWidthPx}
+                        accent={accent}
+                        themeMode={props.themeMode}
+                        onClick={() => props.onOpenDetail(item)}
                       />
-                      <div className="absolute top-2 left-2">{statusBadge(item)}</div>
-                      <div className={`absolute bottom-0 left-0 right-0 flex flex-col gap-1 px-3 ${isLight ? "pb-3 pt-12" : "pb-3 pt-8"}`}>
-                        <div className="text-[14px] font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
-                          {item.year || "—"}
-                        </div>
-                        <div className={`font-bold text-[16px] leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={libraryPosterGridStyle(cardSettings.posterWidthPx)}>
+                    {(groupedItems.groups[letter] || []).map((item) => (
+                      <div
+                        key={item.id}
+                        className={libraryPosterGridItemClassName}
+                        style={libraryPosterGridItemStyle()}
+                      >
+                        <LibraryGridCard
+                          item={item}
+                          variant={cardSettings.variant}
+                          posterWidthPx={cardSettings.posterWidthPx}
+                          accent={accent}
+                          themeMode={props.themeMode}
+                          onClick={() => props.onOpenDetail(item)}
+                        />
                       </div>
-                    </button>
-                  ))}
+                    ))}
+                  </div>
+                )}
                 </div>
               </div>
             ))}
@@ -3560,6 +3687,193 @@ function LibraryPanel(props: {
   );
 }
 
+type LibraryReconcileSidebarStatus = {
+  message: string | null;
+  kind: "info" | "success" | "error";
+  busy: boolean;
+};
+
+type LibraryReconcileContextValue = {
+  status: LibraryReconcileSidebarStatus;
+  runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
+};
+
+const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
+
+function useLibraryReconcile(): LibraryReconcileContextValue {
+  const ctx = useContext(LibraryReconcileContext);
+  if (!ctx) {
+    throw new Error("useLibraryReconcile must be used within LibraryReconcileProvider");
+  }
+  return ctx;
+}
+
+function LibraryReconcileProvider(props: { children: ReactNode }) {
+  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>({
+    message: null,
+    kind: "info",
+    busy: false,
+  });
+  const [pollingJobId, setPollingJobId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (status.kind !== "success" || !status.message) return;
+    const clearTimer = window.setTimeout(() => {
+      setStatus({ message: null, kind: "info", busy: false });
+    }, 3000);
+    return () => window.clearTimeout(clearTimer);
+  }, [status.kind, status.message]);
+
+  useEffect(() => {
+    if (pollingJobId == null) return;
+
+    let stopped = false;
+
+    const poll = async () => {
+      try {
+        const jobStatus = await getEntityReconcileStatus(pollingJobId);
+        if (stopped) return;
+
+        if (jobStatus.status === "failed") {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "error",
+            message: jobStatus.error_message || "Refresh failed",
+          });
+          return;
+        }
+
+        if (jobStatus.status === "done") {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "success",
+            message: "Refresh complete",
+          });
+          return;
+        }
+
+        setStatus({
+          busy: true,
+          kind: "info",
+          message: jobStatus.step_label || "Working…",
+        });
+      } catch (e) {
+        if (!stopped) {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "error",
+            message: e instanceof Error ? e.message : "Could not load refresh status",
+          });
+        }
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 1500);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, [pollingJobId]);
+
+  const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
+    setPollingJobId(null);
+    setStatus({ busy: true, kind: "info", message: "Refresh queued…" });
+    try {
+      const out = await startReconcile();
+      if (!out.ok || out.job_id == null) {
+        throw new Error(out.message || "Failed to start refresh");
+      }
+      setStatus({
+        busy: true,
+        kind: "info",
+        message: out.step_label || "Refresh queued…",
+      });
+      setPollingJobId(out.job_id);
+    } catch (e) {
+      setStatus({
+        busy: false,
+        kind: "error",
+        message: e instanceof Error ? e.message : "Failed to start refresh",
+      });
+    }
+  }, []);
+
+  const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
+
+  return (
+    <LibraryReconcileContext.Provider value={value}>
+      {props.children}
+    </LibraryReconcileContext.Provider>
+  );
+}
+
+function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
+  const ctx = useContext(LibraryReconcileContext);
+  const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
+  if (!message && !busy) return null;
+
+  const textClass =
+    kind === "error"
+      ? "text-red-400"
+      : kind === "success"
+        ? "text-emerald-400"
+        : props.isStudioGlass
+          ? "text-slate-400"
+          : "text-slate-600";
+
+  return (
+    <div
+      className={`mt-auto w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
+      aria-live="polite"
+    >
+      <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
+        {busy ? (
+          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
+            progress_activity
+          </span>
+        ) : kind === "success" ? (
+          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+            check_circle
+          </span>
+        ) : kind === "error" ? (
+          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+            error
+          </span>
+        ) : null}
+        <span className="line-clamp-3">{message || "Working…"}</span>
+      </div>
+    </div>
+  );
+}
+
+function LibraryReconcileControl(props: {
+  label: string;
+  startReconcile: () => Promise<EntityReconcileStartResponse>;
+  buttonClassName?: string;
+}) {
+  const { status, runReconcile } = useLibraryReconcile();
+
+  return (
+    <button
+      type="button"
+      disabled={status.busy}
+      onClick={() => {
+        void runReconcile(props.startReconcile);
+      }}
+      className={
+        props.buttonClassName
+          ?? "px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
+      }
+    >
+      {props.label}
+    </button>
+  );
+}
+
 function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollContainerRef: React.RefObject<HTMLElement | null> }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -3569,7 +3883,6 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   const [openSeasons, setOpenSeasons] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
   const pathParts = location.pathname.split("/");
   const entityType = pathParts[2] || "";
   const itemId = pathParts[3] || "";
@@ -3674,6 +3987,14 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
           openSeasons={openSeasons}
           onToggleSeason={(seasonId) => setOpenSeasons((prev) => (prev.includes(seasonId) ? prev.filter((id) => id !== seasonId) : [...prev, seasonId]))}
         />
+      ) : null}
+      {!loading && !error && payload?.type === "movie" ? (
+        <div className="px-6 md:px-10 pb-6">
+          <LibraryReconcileControl
+            label="Refresh placeholder"
+            startReconcile={() => refreshMoviePlaceholder(payload.id)}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -3986,7 +4307,13 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
   );
 }
 
-function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; themeMode: ThemeMode; openSeasons: number[]; onToggleSeason: (seasonId: number) => void }) {
+function SeriesDetail(props: {
+  payload: SeriesDetailResponse;
+  brand: Brand;
+  themeMode: ThemeMode;
+  openSeasons: number[];
+  onToggleSeason: (seasonId: number) => void;
+}) {
   const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
@@ -4037,6 +4364,12 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           accentHex={accent.hex}
           sonarrIconSrc={sonarrIcon}
         />
+        <div className="mb-6">
+          <LibraryReconcileControl
+            label="Refresh series placeholders"
+            startReconcile={() => refreshSeriesPlaceholder(payload.id)}
+          />
+        </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
           {[
@@ -4091,6 +4424,11 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                               : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
                           }
                         </div>
+                        <LibraryReconcileControl
+                          label="Refresh"
+                          startReconcile={() => refreshEpisodePlaceholder(ep.id)}
+                          buttonClassName="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                        />
                       </div>
                     ))}
                   </div>
@@ -6988,7 +7326,9 @@ function SettingsPanel(props: {
               Unsaved changes
             </span>
           )}
-          {props.feedback && !isVirtualActive && (
+          {props.feedback &&
+            !isVirtualActive &&
+            !(props.hasUnsavedChanges && props.feedbackKind === "success") && (
             <span className={`text-[14px] font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
               {props.feedback}
             </span>
@@ -7551,6 +7891,11 @@ function normalizeTitleSuffixTemplate(rowKey: string, value: string): string {
   return withPlaceholderLiteral.replace(/^\+\s*/, "");
 }
 
+/** Normalize API default/override text to the suffix-only string shown in the UI input. */
+function titleSuffixUiValue(rowKey: string, raw: string): string {
+  return normalizeTitleSuffixTemplate(rowKey, raw);
+}
+
 function titleSuffixHardPrefix(rowKey: string): string {
   const m: Record<string, string> = {
     "title.suffix.movie": "{Title}",
@@ -7788,8 +8133,8 @@ function StatusMessagesPanel(props: {
       for (const row of data.registry) {
         const currentRaw = row.has_override ? row.value : row.default;
         const defaultRaw = row.default;
-        next[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, currentRaw) : currentRaw;
-        def[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, defaultRaw) : defaultRaw;
+        next[row.key] = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, currentRaw) : currentRaw;
+        def[row.key] = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, defaultRaw) : defaultRaw;
       }
       setValues(next);
       setDefaults(def);
@@ -7837,7 +8182,8 @@ function StatusMessagesPanel(props: {
     if ((payload.wrapper_close ?? "") !== wrapperClose) return true;
     for (const row of payload.registry ?? []) {
       const current = values[row.key] ?? "";
-      const initial = row.has_override ? row.value : row.default;
+      const initialRaw = row.has_override ? row.value : row.default;
+      const initial = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, initialRaw) : initialRaw;
       if (current !== initial) return true;
     }
     return false;
@@ -7886,42 +8232,8 @@ function StatusMessagesPanel(props: {
     setValues((prev) => ({ ...prev, [key]: defaults[key] ?? "" }));
   }
 
-  const runMessagesSaveFlow = useCallback(
-    async (preselectedScope?: ApplyScope) => {
-      if (!payload) return;
-      if (!dirty) return;
-      if (hasValidationErrors) {
-        throw new Error("Fix status message template validation errors before saving.");
-      }
-      let scope = preselectedScope;
-      if (!scope) {
-        setFeedback(null);
-        let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
-        try {
-          data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
-        } catch {
-          data = { placeholder_count: 0, pending_full_sync_backfill: false };
-        }
-        scope = await new Promise<ApplyScope>((resolve, reject) => {
-          scopeFlowWaitersRef.current = { resolve, reject };
-          setScopeModal({
-            placeholderCount: Number(data?.placeholder_count ?? 0),
-            pending: !!data?.pending_full_sync_backfill,
-          });
-        });
-      }
-      await handleSave(scope);
-    },
-    [payload, dirty, hasValidationErrors],
-  );
-
-  useEffect(() => {
-    if (!props.registerSaveFlow) return;
-    props.registerSaveFlow(runMessagesSaveFlow);
-    return () => props.registerSaveFlow?.(null);
-  }, [props.registerSaveFlow, runMessagesSaveFlow]);
-
-  async function handleSave(applyScope: ApplyScope) {
+  const handleSave = useCallback(
+    async (applyScope: ApplyScope) => {
     if (!payload) return;
     setSaving(true);
     setFeedback(null);
@@ -7930,7 +8242,10 @@ function StatusMessagesPanel(props: {
       for (const row of payload.registry ?? []) {
         const raw = values[row.key] ?? "";
         const v = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, raw) : raw;
-        if (v.trim() && v !== row.default) overrides[row.key] = v;
+        const defaultNorm = isTitleSuffixRowKey(row.key)
+          ? titleSuffixUiValue(row.key, row.default)
+          : row.default;
+        if (v.trim() && v !== defaultNorm) overrides[row.key] = v;
       }
       const resp = await fetch("/api/messages/templates", {
         method: "POST",
@@ -7983,7 +8298,44 @@ function StatusMessagesPanel(props: {
     } finally {
       setSaving(false);
     }
-  }
+  },
+    [payload, values, separator, caseMode, wrapperPreset, wrapperOpen, wrapperClose],
+  );
+
+  const runMessagesSaveFlow = useCallback(
+    async (preselectedScope?: ApplyScope) => {
+      if (!payload) return;
+      if (!dirty) return;
+      if (hasValidationErrors) {
+        throw new Error("Fix status message template validation errors before saving.");
+      }
+      let scope = preselectedScope;
+      if (!scope) {
+        setFeedback(null);
+        let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+        try {
+          data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+        } catch {
+          data = { placeholder_count: 0, pending_full_sync_backfill: false };
+        }
+        scope = await new Promise<ApplyScope>((resolve, reject) => {
+          scopeFlowWaitersRef.current = { resolve, reject };
+          setScopeModal({
+            placeholderCount: Number(data?.placeholder_count ?? 0),
+            pending: !!data?.pending_full_sync_backfill,
+          });
+        });
+      }
+      await handleSave(scope);
+    },
+    [payload, dirty, hasValidationErrors, handleSave],
+  );
+
+  useEffect(() => {
+    if (!props.registerSaveFlow) return;
+    props.registerSaveFlow(runMessagesSaveFlow);
+    return () => props.registerSaveFlow?.(null);
+  }, [props.registerSaveFlow, runMessagesSaveFlow]);
 
   async function handleResetAll() {
     if (!payload) return;
@@ -8167,7 +8519,9 @@ function StatusMessagesPanel(props: {
                     {sub && <h4 className="text-[13px] font-headline uppercase tracking-wider text-slate-400">{sub}</h4>}
                     {rows.map((row) => {
                       const value = values[row.key] ?? "";
-                      const isOverride = value !== row.default;
+                      const isOverride = isTitleSuffixRowKey(row.key)
+                        ? value !== titleSuffixUiValue(row.key, row.default)
+                        : value !== row.default;
                       const sampleCtx: Record<string, string> = {};
                       for (const t of row.allowed_tokens ?? []) {
                         if (t in tokenSamplesByName) sampleCtx[t] = tokenSamplesByName[t];
@@ -10204,7 +10558,7 @@ function getTabFromPath(pathname: string): DashboardTab {
   if (pathname.startsWith("/errors")) return "errors";
   if (pathname.startsWith("/logs")) return "logs";
   if (pathname.startsWith("/settings")) return "settings";
-  return "activity";
+  return "library";
 }
 
 function timeUntil(iso: string | null): string {

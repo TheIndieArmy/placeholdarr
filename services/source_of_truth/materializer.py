@@ -1524,6 +1524,7 @@ def run_materialization_for_entities(
     movie_ids: list[int] | None = None,
     episode_ids: list[int] | None = None,
     observation_source: str = "event_materialization",
+    log_subject: str | None = None,
 ) -> dict[str, Any]:
     """Run materialization only for targeted entities.
 
@@ -1532,6 +1533,8 @@ def run_materialization_for_entities(
     """
     movie_ids = [int(mid) for mid in (movie_ids or []) if mid is not None]
     episode_ids = [int(eid) for eid in (episode_ids or []) if eid is not None]
+    subject = str(log_subject or "").strip()
+    subject_part = f" · {subject}" if subject else ""
 
     session = get_session()
     stop_scoped_hb = threading.Event()
@@ -1553,7 +1556,7 @@ def run_materialization_for_entities(
     _scoped_t = None
     if movie_ids or episode_ids:
         logger.info(
-            f"Scoped materialization starting: observation_source={observation_source} "
+            f"Scoped materialization starting{subject_part}: observation_source={observation_source} "
             f"movies={len(movie_ids)} episodes={len(episode_ids)}",
             extra={"emoji_type": "info"},
         )
@@ -1572,7 +1575,7 @@ def run_materialization_for_entities(
         )
         if movie_ids or episode_ids:
             logger.info(
-                f"Scoped materialization persisting: observation_source={observation_source} "
+                f"Scoped materialization persisting{subject_part}: observation_source={observation_source} "
                 f"(if this line is followed by a long silence, commit is usually waiting on a row lock)",
                 extra={"emoji_type": "info"},
             )
@@ -1583,11 +1586,17 @@ def run_materialization_for_entities(
             session.commit()
         finally:
             v_hb.set()
-        logger.info(f"Scoped materialization complete: {stats}", extra={"emoji_type": "success"})
+        logger.info(
+            f"Scoped materialization complete{subject_part}: {stats}",
+            extra={"emoji_type": "success"},
+        )
         return stats
     except Exception as e:
         session.rollback()
-        logger.error(f"Scoped materialization failed: {e}", extra={"emoji_type": "error"})
+        logger.error(
+            f"Scoped materialization failed{subject_part}: {e}",
+            extra={"emoji_type": "error"},
+        )
         raise
     finally:
         stop_scoped_hb.set()

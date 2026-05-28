@@ -18,6 +18,11 @@ from services.source_of_truth.scheduled_sync import (
     run_lite_sync,
     run_scheduled_full_sync,
 )
+from services.source_of_truth.placeholder_refresh import (
+    placeholder_refresh_task_label,
+    reconcile_stuck_placeholder_refresh_tasks,
+    run_placeholder_refresh_task,
+)
 from services.task_run_history import (
     abandon_orphaned_working_task_runs,
     abandon_task_run,
@@ -33,6 +38,7 @@ TASK_LABELS = {
     "full_sync": "Full ARR sync",
     "lite_sync": "Lite sync",
     "calendar_only": "Calendar only",
+    "placeholder_refresh": "Metadata & art refresh",
 }
 
 
@@ -56,6 +62,21 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
     dur = _duration_seconds(row.started_at, row.ended_at)
     summary = row.summary if isinstance(row.summary, dict) else {}
     progress = summary.get("progress") if isinstance(summary.get("progress"), dict) else None
+    phases = summary.get("phases") if isinstance(summary.get("phases"), list) else None
+    if not progress and phases:
+        from services.task_run_phases import build_progress_from_phases
+
+        started = row.started_at or datetime.now(timezone.utc)
+        if getattr(started, "tzinfo", None) is None:
+            started = started.replace(tzinfo=timezone.utc)
+        progress = build_progress_from_phases(
+            task_run_id=int(row.id),
+            mode=str(summary.get("mode") or row.task_key or "full"),
+            started_at=started,
+            phases=phases,
+            overall_status=str(row.status or "DONE").upper(),
+            error_message=row.error_message,
+        )
     details = None
     if isinstance(progress, dict):
         details = progress.get("details") or progress.get("display_name")
@@ -78,10 +99,13 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
                     if str(sec.get("status") or "").lower() == "working":
                         art_pending = True
                     break
+    task_label = TASK_LABELS.get(row.task_key, row.task_key)
+    if row.task_key == "placeholder_refresh":
+        task_label = placeholder_refresh_task_label(summary)
     return {
         "id": row.id,
         "task_key": row.task_key,
-        "task_label": TASK_LABELS.get(row.task_key, row.task_key),
+        "task_label": task_label,
         "trigger": row.trigger,
         "status": str(row.status or "").upper(),
         "started_at": _iso(row.started_at),
@@ -98,7 +122,9 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
 
 
 class TaskRunRequest(BaseModel):
-    task_key: str = Field(..., description="full_sync | lite_sync | calendar_only")
+    task_key: str = Field(..., description="full_sync | lite_sync | calendar_only | placeholder_refresh")
+    metadata: bool | None = Field(None, description="When task_key=placeholder_refresh, run metadata refresh phase")
+    art: bool | None = Field(None, description="When task_key=placeholder_refresh, run art refresh phase")
 
 
 class TaskAbandonRequest(BaseModel):
@@ -153,6 +179,7 @@ def _interval_label(hours: int) -> str:
 @router.get("/api/tasks/history")
 async def tasks_history(limit: int = Query(50, ge=1, le=200)):
     reconcile_stuck_art_backfill_tasks()
+    reconcile_stuck_placeholder_refresh_tasks()
     runs = list_recent_runs(limit=limit)
     return [_serialize_run(r) for r in runs]
 
@@ -160,6 +187,7 @@ async def tasks_history(limit: int = Query(50, ge=1, le=200)):
 @router.get("/api/tasks/status")
 async def tasks_status():
     reconcile_stuck_art_backfill_tasks()
+    reconcile_stuck_placeholder_refresh_tasks()
     working = get_working_run()
     if not working:
         return {"working": False, "run": None}
@@ -186,7 +214,7 @@ async def tasks_abandon(body: TaskAbandonRequest | None = None):
 @router.post("/api/tasks/run")
 async def tasks_run(body: TaskRunRequest):
     key = str(body.task_key or "").strip().lower()
-    if key not in {"full_sync", "lite_sync", "calendar_only"}:
+    if key not in {"full_sync", "lite_sync", "calendar_only", "placeholder_refresh"}:
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
@@ -199,6 +227,12 @@ async def tasks_run(body: TaskRunRequest):
     elif key == "lite_sync":
         if get_working_run("lite_sync") or get_working_run("full_sync"):
             raise HTTPException(status_code=409, detail="Task already running: lite or full sync in progress")
+    elif key == "placeholder_refresh":
+        if get_working_run("placeholder_refresh") or get_working_run("full_sync"):
+            raise HTTPException(
+                status_code=409,
+                detail="Task already running: placeholder refresh or full sync in progress",
+            )
     else:
         if get_working_run() or get_working_run("full_sync"):
             raise HTTPException(status_code=409, detail="Another maintenance task is already running")
@@ -209,6 +243,13 @@ async def tasks_run(body: TaskRunRequest):
                 run_scheduled_full_sync(trigger="manual")
             elif key == "lite_sync":
                 run_lite_sync(trigger="manual")
+            elif key == "placeholder_refresh":
+                run_placeholder_refresh_task(
+                    trigger="manual",
+                    source="manual_task",
+                    metadata=bool(True if body.metadata is None else body.metadata),
+                    art=bool(True if body.art is None else body.art),
+                )
             else:
                 run_calendar_only_maintenance(trigger="manual")
         except Exception as exc:

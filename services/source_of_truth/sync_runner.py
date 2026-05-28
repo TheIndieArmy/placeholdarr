@@ -616,7 +616,7 @@ def run_full_sync(
     is_4k: bool = False,
     instance_key: str | None = None,
     *,
-    run_template_backfill: bool = True,
+    run_template_backfill: bool = False,
 ):
     """Source-of-truth full sync for ARR -> DB materialization."""
     _ = batch_size  # reserved for future chunking without changing public API

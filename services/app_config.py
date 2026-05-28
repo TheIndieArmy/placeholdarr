@@ -423,7 +423,11 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Placeholder status updates",
-                "description": "",
+                "description": (
+                    "Choose which placeholder lifecycle states are projected into title/summary metadata. "
+                    "Changes can be applied immediately via Placeholder refresh, scheduled for next full sync, "
+                    "or left for future transitions only."
+                ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -438,7 +442,10 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Status Updates",
                 "label": "Project status into",
-                "description": "Choose where bracketed placeholder status appears in media library metadata.",
+                "description": (
+                    "Choose where bracketed placeholder status appears in media library metadata. "
+                    "Changing this can trigger a metadata placeholder refresh (now or next full sync)."
+                ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
@@ -457,7 +464,8 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     "How placeholder posters appear in Plex, Jellyfin, and Emby. Always writes local poster.jpg, "
                     "seasonNN-poster.jpg at the series root, and episode thumb JPEGs (composited when a style is "
                     "selected, raw download when Off). NFOs do not include art tags; players pick up files from "
-                    "disk after a library refresh."
+                    "disk after a library refresh. Changing this can trigger an art placeholder refresh now or "
+                    "at the next full sync."
                 ),
                 "type": "choice",
                 "restart_required": False,
@@ -687,6 +695,27 @@ def _coerce_int(value: Any) -> int:
 
 def _is_blank(value: Any) -> bool:
     return value is None or str(value).strip() == ""
+
+
+def _normalized_stored_setting_value(key: str, value: Any) -> str:
+    """Stable string compare for whether a setting value actually changed on save."""
+    if value is None:
+        return ""
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    value_type = str(meta.get("type") or "").strip().lower()
+    if value_type == "bool":
+        try:
+            return "1" if _coerce_bool(value) else "0"
+        except ValueError:
+            return str(value).strip().lower()
+    if value_type == "int":
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return str(value).strip()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value).strip()
 
 
 def _coerce_url(value: Any) -> str:
@@ -1211,6 +1240,7 @@ def save_settings(
         for key, value in validated.items():
             meta = SETTINGS_SCHEMA[key]
             row = _get_row(session, key)
+            prev_value = row.value if row else None
             if key == "INCLUDE_SPECIALS":
                 if row is not None:
                     specials_before = _coerce_bool(row.value)
@@ -1234,7 +1264,9 @@ def save_settings(
                 session.add(row)
             _set_runtime_value(key, value)
             saved_keys.append(key)
-            if bool(meta.get("restart_required", False)):
+            if bool(meta.get("restart_required", False)) and _normalized_stored_setting_value(
+                key, prev_value
+            ) != _normalized_stored_setting_value(key, value):
                 restart_required_keys.append(key)
 
         # Only mark onboarding as completed when this is not a partial save.
@@ -1285,22 +1317,38 @@ def save_settings(
                 )
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
         backfill_summary: dict[str, Any] | None = None
-        if nfo_backfill_keys_changed and apply_scope:
-            from services.source_of_truth.template_backfill import execute_nfo_backfill_apply_scope
-
-            backfill_summary = execute_nfo_backfill_apply_scope(str(apply_scope))
-            logger.info(
-                f"NFO backfill after settings save scope={apply_scope} keys={nfo_backfill_keys_changed}",
-                extra={"emoji_type": "processing"},
-            )
-
         art_backfill_summary: dict[str, Any] | None = None
-        if art_backfill_keys_changed:
-            from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
+        if (nfo_backfill_keys_changed or art_backfill_keys_changed) and apply_scope:
+            from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
-            art_backfill_summary = enqueue_placeholder_art_backfill_all(source="settings_save")
+            refresh_out = execute_placeholder_refresh_apply_scope(
+                apply_scope=str(apply_scope),
+                metadata=bool(nfo_backfill_keys_changed),
+                art=bool(art_backfill_keys_changed),
+                templates=False,
+                source="settings_save",
+                task_run_trigger="settings_change" if str(apply_scope) == "now" else None,
+            )
+            if isinstance(refresh_out.get("nfo_backfill"), dict):
+                backfill_summary = dict(refresh_out["nfo_backfill"])
+            else:
+                backfill_summary = {
+                    "ok": bool(refresh_out.get("ok", True)),
+                    "scope": str(refresh_out.get("scope") or ""),
+                    "enqueued": bool(refresh_out.get("enqueued")),
+                }
+            if isinstance(refresh_out.get("art_backfill"), dict):
+                art_backfill_summary = dict(refresh_out["art_backfill"])
+            else:
+                art_backfill_summary = {
+                    "ok": bool(refresh_out.get("ok", True)),
+                    "scope": str(refresh_out.get("scope") or ""),
+                    "enqueued": bool(refresh_out.get("enqueued")),
+                    "pending": bool(refresh_out.get("pending")),
+                }
             logger.info(
-                f"Placeholder art backfill queued after settings save keys={art_backfill_keys_changed}",
+                f"Placeholder refresh after settings save scope={apply_scope} "
+                f"metadata_keys={nfo_backfill_keys_changed} art_keys={art_backfill_keys_changed}",
                 extra={"emoji_type": "processing"},
             )
 

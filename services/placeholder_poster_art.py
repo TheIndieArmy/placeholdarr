@@ -9,18 +9,24 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.logger import logger
 from services.poster_overlay import (
     OVERLAY_META_FILENAME,
     composite_poster_from_url,
     logo_asset_stamp,
+    normalize_poster_url,
     poster_overlay_mode,
     save_jpeg,
     save_raw_poster_from_url,
 )
 
 POSTER_JPEG = "poster.jpg"
+"""Raw catalog art for dashboard library grids — no overlay; Plex/Jellyfin keep using ``poster.jpg``."""
+POSTER_GRID_JPEG = "poster-grid.jpg"
 SERIES_FOLDER_JPEG = "folder.jpg"
 SEASON_POSTER_GLOB = "season*-poster.jpg"
+
+_GRID_META_KEYS = frozenset({"poster", "series_poster"})
 
 
 @dataclass
@@ -184,11 +190,15 @@ def _write_meta(
         "outputs": outputs,
         "logo_stamp": logo_asset_stamp(),
     }
+    from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
     parent = os.path.dirname(meta_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    _apply_dir_chain_permissions(meta_path)
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"))
+    _ensure_open_permissions(meta_path)
 
 
 def _needs_regenerate(
@@ -225,6 +235,61 @@ def _needs_regenerate(
     return False
 
 
+def write_library_grid_poster(folder: str, source_url: str | None) -> bool:
+    """Write ``poster-grid.jpg`` (raw catalog art) beside composited ``poster.jpg``."""
+    url = normalize_poster_url(_normalize_art_url(source_url))
+    if not url:
+        return False
+    out = os.path.join(os.path.abspath(folder), POSTER_GRID_JPEG)
+    if not save_raw_poster_from_url(url, out):
+        logger.debug(
+            f"library grid poster download failed for {out!r} (source set={bool(source_url)})",
+            extra={"emoji_type": "debug"},
+        )
+        return False
+    _apply_art_file_permissions(out)
+    return os.path.isfile(out)
+
+
+def _poster_on_disk_is_composited(poster_jpeg_path: str) -> bool:
+    meta = _read_meta(_meta_path_for_output(poster_jpeg_path))
+    if not meta:
+        return False
+    mode = str(meta.get("mode") or "off").strip().lower()
+    return mode not in ("", "off")
+
+
+def resolve_library_grid_poster_path(
+    poster_jpeg_path: str,
+    *,
+    meta_key: str = "poster",
+    catalog_poster_url: str | None = None,
+) -> str | None:
+    """Local JPEG path for dashboard library grids — never composited ``poster.jpg`` when overlays apply."""
+    poster_abs = os.path.abspath(poster_jpeg_path)
+    if not os.path.isfile(poster_abs):
+        return None
+    folder = os.path.dirname(poster_abs)
+    grid = os.path.join(folder, POSTER_GRID_JPEG)
+
+    meta = _read_meta(_meta_path_for_output(poster_abs))
+    entry = _output_entry(meta, meta_key, legacy_source_url=str((meta or {}).get("source_url") or ""))
+    meta_src = _normalize_art_url((entry or {}).get("source_url"))
+    catalog_src = _normalize_art_url(catalog_poster_url)
+    src = catalog_src or meta_src
+
+    composited = _poster_on_disk_is_composited(poster_abs) or poster_overlay_mode() != "off"
+    if composited:
+        if os.path.isfile(grid):
+            return grid
+        if src and write_library_grid_poster(folder, src) and os.path.isfile(grid):
+            return grid
+        # Do not fall back to composited poster.jpg for library grids.
+        return None
+
+    return poster_abs
+
+
 def _save_image_to_path(output_path: str, url: str, *, mode: str, landscape: bool) -> bool:
     """Write JPEG using overlay mode (raw when off or compositing unavailable)."""
     if mode == "off":
@@ -256,6 +321,11 @@ def _write_art_file(
         folder_jpg = os.path.join(folder, SERIES_FOLDER_JPEG)
         if meta_key == "series_poster" and os.path.isfile(folder_jpg):
             artifacts.append(folder_jpg)
+        if mode != "off" and meta_key in _GRID_META_KEYS:
+            grid_path = os.path.join(folder, POSTER_GRID_JPEG)
+            if not os.path.isfile(grid_path):
+                if write_library_grid_poster(folder, url):
+                    artifacts.append(grid_path)
         _apply_art_file_permissions(output_path, *artifacts)
         return False
     if not _save_image_to_path(output_path, url, mode=mode, landscape=landscape):
@@ -274,6 +344,10 @@ def _write_art_file(
         folder_copy = os.path.join(os.path.dirname(os.path.abspath(output_path)), SERIES_FOLDER_JPEG)
         if os.path.isfile(folder_copy):
             artifacts.append(folder_copy)
+    if mode != "off" and meta_key in _GRID_META_KEYS:
+        grid_path = os.path.join(os.path.dirname(os.path.abspath(output_path)), POSTER_GRID_JPEG)
+        if write_library_grid_poster(os.path.dirname(output_path), url):
+            artifacts.append(grid_path)
     _apply_art_file_permissions(output_path, *artifacts)
     return True
 
@@ -332,6 +406,7 @@ def remove_placeholder_art_in_dir(
     removed = False
     candidates = [
         os.path.join(folder, POSTER_JPEG),
+        os.path.join(folder, POSTER_GRID_JPEG),
         os.path.join(folder, SERIES_FOLDER_JPEG),
         os.path.join(folder, OVERLAY_META_FILENAME),
     ]
@@ -360,6 +435,30 @@ def _resolve_series_folder(series: Any, media_path: str | None = None) -> str | 
     return None
 
 
+def ensure_library_grid_poster_for_movie(movie: Any, media_path: str) -> bool:
+    """Ensure ``poster-grid.jpg`` exists for dashboard library (server-side catalog download)."""
+    folder = os.path.dirname(os.path.abspath(media_path))
+    poster_path = os.path.join(folder, POSTER_JPEG)
+    resolved = resolve_library_grid_poster_path(
+        poster_path,
+        meta_key="poster",
+        catalog_poster_url=getattr(movie, "remote_poster", None),
+    )
+    return bool(resolved and os.path.isfile(resolved))
+
+
+def ensure_library_grid_poster_for_series(series: Any, series_folder: str) -> bool:
+    poster_path = os.path.join(os.path.abspath(series_folder), POSTER_JPEG)
+    if not os.path.isfile(poster_path):
+        return False
+    resolved = resolve_library_grid_poster_path(
+        poster_path,
+        meta_key="series_poster",
+        catalog_poster_url=getattr(series, "remote_poster", None),
+    )
+    return bool(resolved and os.path.isfile(resolved))
+
+
 def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     """Write movie poster.jpg (overlay or raw)."""
     result = ArtResult()
@@ -371,6 +470,8 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
         result.art_counts["movie"] = 1
+    if ensure_library_grid_poster_for_movie(movie, media_path):
+        result.wrote_any = True
     return result
 
 
@@ -437,6 +538,8 @@ def ensure_series_art(
         if one.wrote_any:
             result.wrote_any = True
             result.merge_counts(one)
+    if ensure_library_grid_poster_for_series(series, folder):
+        result.wrote_any = True
     return result
 
 
