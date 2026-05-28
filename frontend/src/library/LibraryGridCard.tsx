@@ -496,13 +496,17 @@ export function LibraryGridCard(props: LibraryGridCardProps) {
       <LibraryCardScaleButton
         onClick={props.onClick}
         className={`group relative flex w-full flex-col rounded-2xl text-left cursor-pointer transition-transform hover:scale-[1.02] hover:z-30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 overflow-visible ${
-          isLight ? "bg-slate-950 text-white" : "bg-black text-white"
+          isLight
+            ? "bg-[var(--brand-chrome-main,#eef3f8)] text-slate-900 shadow-md shadow-slate-900/8 border border-slate-300/70"
+            : "bg-black text-white"
         }`}
         style={{ ...cardStyle, borderColor: "transparent", aspectRatio: "2 / 3" }}
         clipClassName="relative flex w-full min-h-0 flex-col overflow-hidden rounded-[14px]"
       >
         <div
-          className="pointer-events-none absolute left-1/2 top-[18%] h-[50%] w-[85%] -translate-x-1/2 rounded-full opacity-50 blur-3xl"
+          className={`pointer-events-none absolute left-1/2 top-[18%] h-[50%] w-[85%] -translate-x-1/2 rounded-full blur-3xl ${
+            isLight ? "opacity-35" : "opacity-50"
+          }`}
           style={{ backgroundColor: accent.hex }}
           aria-hidden
         />
@@ -510,7 +514,11 @@ export function LibraryGridCard(props: LibraryGridCardProps) {
         <div className="relative z-[1] flex min-h-0 flex-1 flex-col px-[calc(8px*var(--library-card-scale))] pt-[calc(8px*var(--library-card-scale))] pb-[calc(4px*var(--library-card-scale))]">
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <div
-              className="relative w-[92%] overflow-hidden rounded-xl shadow-[0_12px_40px_rgba(0,0,0,0.55)] ring-1 ring-white/15"
+              className={`relative w-[92%] overflow-hidden rounded-xl ring-1 ${
+                isLight
+                  ? "shadow-[0_10px_24px_rgba(15,23,42,0.18)] ring-slate-900/10"
+                  : "shadow-[0_12px_40px_rgba(0,0,0,0.55)] ring-white/15"
+              }`}
               style={{ aspectRatio: "2 / 3", maxHeight: "100%" }}
             >
               {posterImage(props.item)}
@@ -526,7 +534,9 @@ export function LibraryGridCard(props: LibraryGridCardProps) {
               {props.item.title}
             </div>
             <div
-              className="mt-1 flex items-center justify-center gap-2 font-headline uppercase tracking-wider opacity-55"
+              className={`mt-1 flex items-center justify-center gap-2 font-headline uppercase tracking-wider ${
+                isLight ? "text-slate-600" : "opacity-55"
+              }`}
               style={{ fontSize: `clamp(8px, calc(9px * var(--library-card-scale)), 10px)` }}
             >
               <span>{props.item.type === "series" ? "Series" : "Film"}</span>
