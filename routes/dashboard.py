@@ -3034,40 +3034,100 @@ def _movie_poster_jpeg_path(movie: Movie) -> str | None:
     return None
 
 
-def _local_poster_file_for_movie(movie: Movie) -> str | None:
-    from services.placeholder_poster_art import resolve_library_grid_poster_path
-
-    candidate = _movie_poster_jpeg_path(movie)
-    if not candidate:
-        return None
-    return resolve_library_grid_poster_path(
-        candidate,
-        meta_key="poster",
-        catalog_poster_url=getattr(movie, "remote_poster", None),
+def _local_poster_file_for_movie(movie: Movie, *, try_catalog_download: bool = False) -> str | None:
+    from services.placeholder_poster_art import (
+        POSTER_GRID_JPEG,
+        resolve_library_grid_poster_path,
+        write_library_grid_poster,
     )
 
+    candidate = _movie_poster_jpeg_path(movie)
+    if candidate:
+        return resolve_library_grid_poster_path(
+            candidate,
+            meta_key="poster",
+            catalog_poster_url=getattr(movie, "remote_poster", None),
+        )
+    if not try_catalog_download:
+        return None
+    remote = getattr(movie, "remote_poster", None)
+    fp = str(getattr(movie, "placeholder_filepath", "") or "").strip()
+    if not remote or not fp:
+        return None
+    folder = os.path.dirname(os.path.abspath(fp))
+    if not folder:
+        return None
+    grid = os.path.join(folder, POSTER_GRID_JPEG)
+    if os.path.isfile(grid):
+        return grid
+    if write_library_grid_poster(folder, remote) and os.path.isfile(grid):
+        return grid
+    return None
 
-def _local_poster_file_for_series(series: Series) -> str | None:
-    from services.placeholder_poster_art import POSTER_JPEG, resolve_library_grid_poster_path
+
+def _local_poster_file_for_series(series: Series, *, try_catalog_download: bool = False) -> str | None:
+    from services.placeholder_poster_art import (
+        POSTER_GRID_JPEG,
+        resolve_library_grid_poster_path,
+        write_library_grid_poster,
+    )
 
     folder = str(getattr(series, "placeholder_folder", "") or "").strip()
     if not folder:
         return None
-    candidate = os.path.join(os.path.abspath(folder), _POSTER_JPEG)
-    if not os.path.isfile(candidate):
+    folder_abs = os.path.abspath(folder)
+    candidate = os.path.join(folder_abs, _POSTER_JPEG)
+    if os.path.isfile(candidate):
+        return resolve_library_grid_poster_path(
+            candidate,
+            meta_key="series_poster",
+            catalog_poster_url=getattr(series, "remote_poster", None),
+        )
+    if not try_catalog_download:
         return None
-    return resolve_library_grid_poster_path(
-        candidate,
-        meta_key="series_poster",
-        catalog_poster_url=getattr(series, "remote_poster", None),
-    )
+    grid = os.path.join(folder_abs, POSTER_GRID_JPEG)
+    if os.path.isfile(grid):
+        return grid
+    remote = getattr(series, "remote_poster", None)
+    if remote and write_library_grid_poster(folder_abs, remote) and os.path.isfile(grid):
+        return grid
+    return None
 
 
-def _library_poster_local_file(item_type: str, entity: Movie | Series) -> str | None:
+def _placeholder_poster_blocks_remote(item_type: str, entity: Movie | Series) -> bool:
+    """Block raw TMDB URLs only when composited placeholder poster.jpg exists without a grid file."""
+    from services.placeholder_poster_art import _poster_on_disk_is_composited, poster_overlay_mode
+
+    poster_path: str | None
     if item_type == "movie":
-        return _local_poster_file_for_movie(entity)
+        poster_path = _movie_poster_jpeg_path(entity)
+    elif item_type == "series":
+        folder = str(getattr(entity, "placeholder_folder", "") or "").strip()
+        if not folder:
+            return False
+        poster_path = os.path.join(os.path.abspath(folder), _POSTER_JPEG)
+        if not os.path.isfile(poster_path):
+            return False
+    else:
+        return False
+
+    if not poster_path or not os.path.isfile(poster_path):
+        return False
+    if _poster_on_disk_is_composited(poster_path):
+        return True
+    return poster_overlay_mode() != "off"
+
+
+def _library_poster_local_file(
+    item_type: str,
+    entity: Movie | Series,
+    *,
+    try_catalog_download: bool = False,
+) -> str | None:
+    if item_type == "movie":
+        return _local_poster_file_for_movie(entity, try_catalog_download=try_catalog_download)
     if item_type == "series":
-        return _local_poster_file_for_series(entity)
+        return _local_poster_file_for_series(entity, try_catalog_download=try_catalog_download)
     return None
 
 
@@ -3078,8 +3138,14 @@ def _library_poster_cache_token(path: str) -> int:
         return 0
 
 
-def _library_poster_api_url(item_type: str, item_id: int, entity: Movie | Series) -> str | None:
-    local_path = _library_poster_local_file(item_type, entity)
+def _library_poster_api_url(
+    item_type: str,
+    item_id: int,
+    entity: Movie | Series,
+    *,
+    try_catalog_download: bool = False,
+) -> str | None:
+    local_path = _library_poster_local_file(item_type, entity, try_catalog_download=try_catalog_download)
     if not local_path:
         return None
     token = _library_poster_cache_token(local_path)
@@ -3091,10 +3157,8 @@ def _effective_library_poster_url(item_type: str, item_id: int, entity: Movie | 
     local_url = _library_poster_api_url(item_type, item_id, entity)
     if local_url:
         return local_url
-    # Placeholder rows must not fall back to remote TMDB URLs in the browser.
-    if item_type == "movie" and bool(getattr(entity, "has_placeholder", False)):
-        return None
-    if item_type == "series" and str(getattr(entity, "placeholder_folder", "") or "").strip():
+    # Catalog-only rows (no poster.jpg yet) may use remote_poster; composited placeholder art must not.
+    if _placeholder_poster_blocks_remote(item_type, entity):
         return None
     return remote
 
@@ -3109,12 +3173,12 @@ async def library_poster(item_type: str, item_id: int):
             movie = session.query(Movie).filter(Movie.id == int(item_id), Movie.is_deleted == False).first()  # noqa: E712
             if not movie:
                 return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-            path = _local_poster_file_for_movie(movie)
+            path = _local_poster_file_for_movie(movie, try_catalog_download=True)
         elif kind == "series":
             series = session.query(Series).filter(Series.id == int(item_id), Series.is_deleted == False).first()  # noqa: E712
             if not series:
                 return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
-            path = _local_poster_file_for_series(series)
+            path = _local_poster_file_for_series(series, try_catalog_download=True)
         else:
             return JSONResponse({"ok": False, "message": "invalid item type"}, status_code=400)
 
@@ -3295,6 +3359,7 @@ async def library(
                 "type": "series",
                 "title": series.title,
                 "year": series.year,
+                "network": getattr(series, "sonarr_network", None),
                 "poster_url": _effective_library_poster_url("series", int(series.id), series, series.remote_poster),
                 "backdrop_url": series.remote_fanart or series.remote_banner,
                 "is_4k": _legacy_is_4k(instance_meta),

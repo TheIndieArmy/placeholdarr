@@ -19,6 +19,7 @@ from services.source_of_truth.scheduled_sync import (
     run_scheduled_full_sync,
 )
 from services.source_of_truth.placeholder_refresh import (
+    placeholder_refresh_task_label,
     reconcile_stuck_placeholder_refresh_tasks,
     run_placeholder_refresh_task,
 )
@@ -37,7 +38,7 @@ TASK_LABELS = {
     "full_sync": "Full ARR sync",
     "lite_sync": "Lite sync",
     "calendar_only": "Calendar only",
-    "placeholder_refresh": "Placeholder refresh",
+    "placeholder_refresh": "Metadata & art refresh",
 }
 
 
@@ -61,6 +62,21 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
     dur = _duration_seconds(row.started_at, row.ended_at)
     summary = row.summary if isinstance(row.summary, dict) else {}
     progress = summary.get("progress") if isinstance(summary.get("progress"), dict) else None
+    phases = summary.get("phases") if isinstance(summary.get("phases"), list) else None
+    if not progress and phases:
+        from services.task_run_phases import build_progress_from_phases
+
+        started = row.started_at or datetime.now(timezone.utc)
+        if getattr(started, "tzinfo", None) is None:
+            started = started.replace(tzinfo=timezone.utc)
+        progress = build_progress_from_phases(
+            task_run_id=int(row.id),
+            mode=str(summary.get("mode") or row.task_key or "full"),
+            started_at=started,
+            phases=phases,
+            overall_status=str(row.status or "DONE").upper(),
+            error_message=row.error_message,
+        )
     details = None
     if isinstance(progress, dict):
         details = progress.get("details") or progress.get("display_name")
@@ -83,10 +99,13 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
                     if str(sec.get("status") or "").lower() == "working":
                         art_pending = True
                     break
+    task_label = TASK_LABELS.get(row.task_key, row.task_key)
+    if row.task_key == "placeholder_refresh":
+        task_label = placeholder_refresh_task_label(summary)
     return {
         "id": row.id,
         "task_key": row.task_key,
-        "task_label": TASK_LABELS.get(row.task_key, row.task_key),
+        "task_label": task_label,
         "trigger": row.trigger,
         "status": str(row.status or "").upper(),
         "started_at": _iso(row.started_at),

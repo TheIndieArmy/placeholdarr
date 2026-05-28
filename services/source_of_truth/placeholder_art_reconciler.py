@@ -72,7 +72,12 @@ def enqueue_placeholder_art_refresh(
                 pass
 
 
-def enqueue_placeholder_art_backfill_all(*, source: str = "full_sync", task_run_id: int | None = None) -> dict:
+def enqueue_placeholder_art_backfill_all(
+    *,
+    source: str = "full_sync",
+    task_run_id: int | None = None,
+    placeholder_refresh_task_run_id: int | None = None,
+) -> dict:
     """Queue art refresh for every active placeholder with completion library scan."""
     session = get_session()
     try:
@@ -89,6 +94,10 @@ def enqueue_placeholder_art_backfill_all(*, source: str = "full_sync", task_run_
             tid = int(task_run_id)
             extras[FULL_SYNC_TASK_RUN_ID_KEY] = tid
             extras[ART_BACKFILL_TASK_RUN_ID_KEY] = tid
+        if placeholder_refresh_task_run_id is not None:
+            from services.source_of_truth.placeholder_refresh import PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY
+
+            extras[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY] = int(placeholder_refresh_task_run_id)
         out = enqueue_placeholder_art_refresh(
             ids,
             session=session,
@@ -96,11 +105,12 @@ def enqueue_placeholder_art_backfill_all(*, source: str = "full_sync", task_run_
             payload_extras=extras,
         )
         batch_count = int(out.get("jobs_created") or 0)
-        if task_run_id is not None and out.get("ok"):
+        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        if phase_task_run_id is not None and out.get("ok"):
             from services.task_run_phases import begin_art_backfill_phase
 
             begin_art_backfill_phase(
-                int(task_run_id),
+                int(phase_task_run_id),
                 art_run_id=run_id,
                 placeholder_count=int(out.get("placeholder_count") or len(ids)),
                 batch_count=batch_count,
@@ -137,7 +147,11 @@ def _art_refresh_completion_scan_if_last_batch(
     task_run_id = None
     try:
         payload = job.payload if isinstance(job.payload, dict) else {}
-        raw_tid = payload.get(FULL_SYNC_TASK_RUN_ID_KEY) or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
+        raw_tid = (
+            payload.get(FULL_SYNC_TASK_RUN_ID_KEY)
+            or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
+            or payload.get("placeholder_refresh_task_run_id")
+        )
         if raw_tid is not None:
             task_run_id = int(raw_tid)
     except Exception:
@@ -291,7 +305,11 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
 
     bulk_completion = bool(payload.get(ART_BACKFILL_REFRESH_ON_COMPLETION_KEY))
     run_id = str(payload.get(ART_BACKFILL_RUN_ID_KEY) or "").strip()
-    task_run_id_raw = payload.get(FULL_SYNC_TASK_RUN_ID_KEY) or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
+    task_run_id_raw = (
+        payload.get(FULL_SYNC_TASK_RUN_ID_KEY)
+        or payload.get(ART_BACKFILL_TASK_RUN_ID_KEY)
+        or payload.get("placeholder_refresh_task_run_id")
+    )
     if task_run_id_raw is not None and run_id:
         try:
             accumulate_art_backfill_counts(

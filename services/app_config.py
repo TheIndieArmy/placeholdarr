@@ -697,6 +697,27 @@ def _is_blank(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
 
+def _normalized_stored_setting_value(key: str, value: Any) -> str:
+    """Stable string compare for whether a setting value actually changed on save."""
+    if value is None:
+        return ""
+    meta = SETTINGS_SCHEMA.get(key) or {}
+    value_type = str(meta.get("type") or "").strip().lower()
+    if value_type == "bool":
+        try:
+            return "1" if _coerce_bool(value) else "0"
+        except ValueError:
+            return str(value).strip().lower()
+    if value_type == "int":
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return str(value).strip()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value).strip()
+
+
 def _coerce_url(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1219,6 +1240,7 @@ def save_settings(
         for key, value in validated.items():
             meta = SETTINGS_SCHEMA[key]
             row = _get_row(session, key)
+            prev_value = row.value if row else None
             if key == "INCLUDE_SPECIALS":
                 if row is not None:
                     specials_before = _coerce_bool(row.value)
@@ -1242,7 +1264,9 @@ def save_settings(
                 session.add(row)
             _set_runtime_value(key, value)
             saved_keys.append(key)
-            if bool(meta.get("restart_required", False)):
+            if bool(meta.get("restart_required", False)) and _normalized_stored_setting_value(
+                key, prev_value
+            ) != _normalized_stored_setting_value(key, value):
                 restart_required_keys.append(key)
 
         # Only mark onboarding as completed when this is not a partial save.
@@ -1303,6 +1327,7 @@ def save_settings(
                 art=bool(art_backfill_keys_changed),
                 templates=False,
                 source="settings_save",
+                task_run_trigger="settings_change" if str(apply_scope) == "now" else None,
             )
             if isinstance(refresh_out.get("nfo_backfill"), dict):
                 backfill_summary = dict(refresh_out["nfo_backfill"])

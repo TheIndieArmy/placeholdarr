@@ -68,15 +68,37 @@ import type {
   SettingsStatus,
   StatsResponse,
 } from "./types/api";
+import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
+import { LibraryCardControls } from "./library/LibraryCardControls";
+import { LibraryGridCard } from "./library/LibraryGridCard";
+import { LibraryListRow } from "./library/LibraryListRow";
+import {
+  LIBRARY_CARD_PREVIEW_PATH,
+  libraryListStyle,
+  libraryPosterGridItemClassName,
+  libraryPosterGridItemStyle,
+  libraryPosterGridStyle,
+  readLibraryCardSettings,
+  writeLibraryCardSettings,
+} from "./library/cardSettings";
 
 const REFRESH_MS_VISIBLE = 5000;
 const REFRESH_MS_HIDDEN = 30000;
+/** Post-save banner only — never shown while the form still has unsaved edits. */
+function formatSettingsSaveSuccessMessage(restartRequiredKeys?: string[] | null): string {
+  if (restartRequiredKeys && restartRequiredKeys.length > 0) {
+    return "Saved · restart recommended";
+  }
+  return "Saved";
+}
 const LIBRARY_MOVIES_PATH = "/library";
 const LIBRARY_TV_PATH = "/library/tv";
 const ACTIVITY_PLACEHOLDERS_PATH = "/activity/placeholders";
 const ACTIVITY_TASKS_PATH = "/activity/tasks";
 const ACTIVITY_OPERATIONS_PATH = "/activity/operations";
 const ACTIVITY_DEFAULT_PATH = ACTIVITY_PLACEHOLDERS_PATH;
+/** Default home after onboarding / root redirect. */
+const HOME_PATH = LIBRARY_MOVIES_PATH;
 const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
 const LIBRARY_TV_FILTER_KEY = "placeholdarr:library-shelf-filter:tv";
 /** Legacy single key (pre split movies / TV pages). */
@@ -523,6 +545,7 @@ function SetupBootShell(props: {
   accentHex: string;
   appLabel: string;
   errorMessage?: string | null;
+  statusMessage?: string;
 }) {
   const err = props.errorMessage?.trim();
   return (
@@ -548,7 +571,7 @@ function SetupBootShell(props: {
             <span className="material-symbols-outlined animate-spin text-slate-500" style={{ fontSize: 16 }}>
               progress_activity
             </span>
-            <span className="animate-pulse">Preparing setup…</span>
+            <span className="animate-pulse">{props.statusMessage ?? "Preparing setup…"}</span>
           </div>
         )}
       </div>
@@ -658,6 +681,14 @@ export function App() {
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTaskRow[]>([]);
   const [taskHistory, setTaskHistory] = useState<TaskRunRow[]>([]);
+  const refreshTaskHistory = useCallback(async () => {
+    try {
+      const hist = await getTasksHistory(50);
+      setTaskHistory(hist || []);
+    } catch {
+      /* Activity poll will retry. */
+    }
+  }, []);
   const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
   const [taskRunPending, setTaskRunPending] = useState(false);
   const [taskRunError, setTaskRunError] = useState<string | null>(null);
@@ -712,6 +743,29 @@ export function App() {
   useEffect(() => {
     setupCompleteRef.current = setupStatus?.setup_complete;
   }, [setupStatus]);
+
+  /** Light status probe first — avoids routing to /setup and waiting on full settings before we know onboarding is done. */
+  useEffect(() => {
+    let cancelled = false;
+    void getSettingsStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setSetupStatus(status);
+        setOnboardingVisible(!status.setup_complete);
+        if (status.setup_complete) {
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setErrorMessage(err instanceof Error ? err.message : "Unable to reach the API");
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -752,9 +806,8 @@ export function App() {
   }, [settingsPayload]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
-  /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
-  const defaultLandingPath =
-    setupStatus != null && setupStatus.setup_complete ? ACTIVITY_DEFAULT_PATH : "/setup";
+  const homeRedirectPath =
+    setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
@@ -774,6 +827,18 @@ export function App() {
   );
   const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
   const hasUnsavedChangesRef = useRef(false);
+  useEffect(() => {
+    if (!combinedSettingsDirty) return;
+    if (settingsFeedbackKind !== "success") return;
+    setSettingsFeedback("");
+    setSettingsFeedbackKind("");
+  }, [combinedSettingsDirty, settingsFeedbackKind]);
+
+  useEffect(() => {
+    if (currentTab === "settings") return;
+    setSettingsFeedback("");
+    setSettingsFeedbackKind("");
+  }, [currentTab]);
   const registerStatusMessagesSaveFlow = useCallback(
     (fn: ((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null) => {
       statusMessagesSaveRef.current = fn;
@@ -908,6 +973,12 @@ export function App() {
                 if (!stopped) {
                   setSetupStatus(status);
                 }
+              }
+            } else if (setupCompleteRef.current === true) {
+              const status = await getSettingsStatus();
+              if (!stopped) {
+                setSetupStatus(status);
+                setOnboardingVisible(false);
               }
             } else if (!settingsPayloadRef.current) {
               await loadSettings(stopped);
@@ -1394,8 +1465,7 @@ export function App() {
     const payload = await getSettingsCurrent();
     setSettingsPayload(payload);
     setSetupStatus(payload.status);
-    const restartKeys = result.restart_required_keys || [];
-    setSettingsFeedback(restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved.");
+    setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
     setSettingsFeedbackKind("success");
   }
 
@@ -1585,6 +1655,16 @@ export function App() {
     }
 
     if (currentTab === "library") {
+      if (location.pathname === LIBRARY_CARD_PREVIEW_PATH) {
+        return (
+          <LibraryCardStylePreview
+            items={filteredLibrary}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onBack={() => navigate(LIBRARY_MOVIES_PATH)}
+          />
+        );
+      }
       const shelf = libraryListShelf;
       if (shelf === "movies" || shelf === "tv") {
         return (
@@ -1600,7 +1680,8 @@ export function App() {
               }
             }}
             onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-            brand={brand}
+            onOpenCardStylePreview={() => navigate(LIBRARY_CARD_PREVIEW_PATH)}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
             themeMode={themeMode}
           />
         );
@@ -1733,40 +1814,31 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                const restartKeys = result.restart_required_keys || [];
-                let baseMsg =
-                  restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.";
-                if (
-                  settingsBackfillScope &&
-                  (result.nfo_backfill?.enqueued ||
-                    result.art_backfill?.enqueued ||
-                    result.nfo_backfill_keys_changed?.length ||
-                    result.art_backfill_keys_changed?.length)
-                ) {
-                  if (settingsBackfillScope === "now") {
-                    baseMsg += " Library backfill queued.";
-                  } else if (settingsBackfillScope === "next_full_sync") {
-                    baseMsg += " Backfill scheduled for the next full sync.";
-                  }
-                }
+                const backfillQueuedNow =
+                  applyScope === "now" &&
+                  Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
+                const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
                 if (messagesDirty && statusMessagesSaveRef.current) {
                   await statusMessagesSaveRef.current(applyScope);
-                  if (applyScope === "now" || applyScope === "next_full_sync") {
-                    baseMsg += statusKeysChanged ? "" : " Library backfill queued.";
-                  }
-                  setSettingsFeedback(`${baseMsg} Message templates saved.`);
+                  setSettingsFeedback(saveMsg);
                 } else {
-                  setSettingsFeedback(baseMsg);
+                  setSettingsFeedback(saveMsg);
                 }
                 setSettingsFeedbackKind("success");
+                if (backfillQueuedNow || applyScope === "now") {
+                  void refreshTaskHistory();
+                }
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
                 setOnboardingVisible(!payload.status.setup_complete);
               } else if (messagesDirty && statusMessagesSaveRef.current) {
                 await statusMessagesSaveRef.current(applyScope);
-                setSettingsFeedback("Message templates saved and applied.");
+                setSettingsFeedback("Saved");
                 setSettingsFeedbackKind("success");
+                if (applyScope === "now") {
+                  void refreshTaskHistory();
+                }
               } else {
                 setSettingsFeedback("");
                 setSettingsFeedbackKind("");
@@ -1812,9 +1884,10 @@ export function App() {
   if (setupRouteActive) {
     const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
     if (setupStatus?.setup_complete && !onboardingPreviewRoute) {
-      return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
+      return <Navigate to={HOME_PATH} replace />;
     }
-    if (loading || !setupStatus || !settingsPayload) {
+    const needsSetupWizard = setupStatus != null && !setupStatus.setup_complete;
+    if (!setupStatus || (needsSetupWizard && (loading || !settingsPayload))) {
       return (
         <SetupBootShell
           setupShellClass={setupShellClass}
@@ -1823,6 +1896,7 @@ export function App() {
           accentHex={brandAccent.hex}
           appLabel={brandMeta.label}
           errorMessage={errorMessage}
+          statusMessage={setupStatus == null ? "Loading…" : "Preparing setup…"}
         />
       );
     }
@@ -1848,7 +1922,7 @@ export function App() {
                 return testIntegrationConnection({ service, url, credential });
               }
         }
-        onExitPreview={onboardingPreviewRoute ? () => navigate(ACTIVITY_DEFAULT_PATH, { replace: true }) : undefined}
+        onExitPreview={onboardingPreviewRoute ? () => navigate(HOME_PATH, { replace: true }) : undefined}
         onSave={
           onboardingPreviewRoute
             ? undefined
@@ -1863,7 +1937,7 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                setSettingsFeedback("Saved and applied.");
+                setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
                 setSettingsFeedbackKind("success");
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
@@ -1962,6 +2036,42 @@ export function App() {
 
               return (
                 <>
+                  {librarySectionActive ? (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
+                      <span>Library</span>
+                    </button>
+                  )}
+                  {currentTab === "library" ? (
+                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
+                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          movie
+                        </span>
+                        <span className="truncate">Movies</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
+                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                          tv_gen
+                        </span>
+                        <span className="truncate">TV</span>
+                      </button>
+                    </div>
+                  ) : null}
+
                   {isActive("/activity") ? (
                     <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass} style={navActiveStyle}>
                       <span className="material-symbols-outlined">analytics</span>
@@ -1997,42 +2107,6 @@ export function App() {
                           </button>
                         );
                       })}
-                    </div>
-                  ) : null}
-
-                  {librarySectionActive ? (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
-                      <span className="material-symbols-outlined">movie_filter</span>
-                      <span>Library</span>
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navInactiveClass}>
-                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">movie_filter</span>
-                      <span>Library</span>
-                    </button>
-                  )}
-                  {currentTab === "library" ? (
-                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
-                      <button
-                        type="button"
-                        onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)}
-                        className={subBase + (moviesSubActive ? subActiveClass : subInactiveClass)}
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                          movie
-                        </span>
-                        <span className="truncate">Movies</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => tryNavigate(LIBRARY_TV_PATH)}
-                        className={subBase + (tvSubActive ? subActiveClass : subInactiveClass)}
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
-                          tv_gen
-                        </span>
-                        <span className="truncate">TV</span>
-                      </button>
                     </div>
                   ) : null}
 
@@ -2311,7 +2385,24 @@ export function App() {
         </div>
 
         <Routes>
-          <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
+          <Route
+            path="/"
+            element={
+              homeRedirectPath ? (
+                <Navigate to={homeRedirectPath} replace />
+              ) : (
+                <SetupBootShell
+                  setupShellClass={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`}
+                  surfaceStyle={setupLoadingShellStyle}
+                  brand={brand}
+                  accentHex={brandAccent.hex}
+                  appLabel={brandMeta.label}
+                  errorMessage={errorMessage}
+                  statusMessage="Loading…"
+                />
+              )
+            }
+          />
           <Route path="*" element={null} />
         </Routes>
 
@@ -3051,6 +3142,13 @@ function formatTaskDuration(seconds: number | null | undefined): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+function formatTaskTrigger(trigger: string | null | undefined): string {
+  const normalized = String(trigger || "").trim().toLowerCase();
+  if (normalized === "settings_change") return "Settings Change";
+  if (!normalized) return "--";
+  return normalized.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
 function TasksPanel(props: {
   scheduled: ScheduledTaskRow[];
   history: TaskRunRow[];
@@ -3237,7 +3335,7 @@ function TasksPanel(props: {
                             <span>{run.task_label}</span>
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400 capitalize">{run.trigger}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400">{formatTaskTrigger(run.trigger)}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{timeAgo(run.started_at)}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{run.ended_at ? timeAgo(run.ended_at) : "--"}</td>
                         <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">
@@ -3381,10 +3479,17 @@ function LibraryPanel(props: {
   activeFilter: LibraryShelfFilter;
   onFilterChange: (value: LibraryShelfFilter) => void;
   onOpenDetail: (item: LibraryItem) => void;
-  brand: Brand; themeMode: ThemeMode;
+  onOpenCardStylePreview: () => void;
+  accent: { hex: string; icon: string };
+  themeMode: ThemeMode;
 }) {
-  const accent = getBrandAccent(props.brand, props.themeMode);
+  const accent = props.accent;
   const isLight = props.themeMode === "light";
+  const [cardSettings, setCardSettings] = useState(readLibraryCardSettings);
+  const handleCardSettings = useCallback((next: ReturnType<typeof readLibraryCardSettings>) => {
+    setCardSettings(next);
+    writeLibraryCardSettings(next);
+  }, []);
   const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
     { id: "all", label: "All" },
     { id: "placeholders", label: "Placeholders" },
@@ -3408,58 +3513,10 @@ function LibraryPanel(props: {
     return { groups, letters };
   }, [props.items]);
 
-  function statusBadge(item: LibraryItem) {
-    if (item.has_missing) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-red-50 text-red-800 border-red-200" : "bg-red-600 text-white border-transparent"
-          }`}
-        >
-          Missing
-        </span>
-      );
-    }
-    if (item.has_placeholder) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-teal-50 text-teal-900 border-teal-200" : "bg-teal-700 text-white border-transparent"
-          }`}
-        >
-          Placeholder
-        </span>
-      );
-    }
-    if (item.is_future) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-600 text-white border-transparent"
-          }`}
-        >
-          Future
-        </span>
-      );
-    }
-    if (item.has_file) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-500 text-white border-transparent"
-          }`}
-        >
-          1080p
-        </span>
-      );
-    }
-    return null;
-  }
-
   return (
     <div>
       {/* Header + filter tabs */}
-      <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
+      <div className="flex flex-wrap justify-between items-end gap-4 mb-4">
         <div>
           <h2 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
           <p className={`text-[16px] mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
@@ -3485,20 +3542,28 @@ function LibraryPanel(props: {
           ))}
         </div>
       </div>
+      <div className="mb-6">
+        <LibraryCardControls
+          settings={cardSettings}
+          onChange={handleCardSettings}
+          accent={accent}
+          themeMode={props.themeMode}
+          onOpenPreview={props.onOpenCardStylePreview}
+        />
+      </div>
 
       {/* Poster grid with alphabet sections */}
       {props.items.length === 0 ? (
         <div className={`text-center py-16 ${isLight ? "text-slate-600" : "text-slate-500"}`}>No library items match the current filter.</div>
       ) : (
         <div className="flex items-start gap-4 mb-8">
-          <div className="flex-1 space-y-8">
+          <div className="flex-1 space-y-8 overflow-visible">
             {groupedItems.letters.map((letter) => (
               <div
                 key={letter}
                 ref={(el) => {
                   sectionRefs.current[letter] = el;
                 }}
-                style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
               >
                 <div
                   className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
@@ -3507,46 +3572,40 @@ function LibraryPanel(props: {
                 >
                   {letter}
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                  {(groupedItems.groups[letter] || []).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => props.onOpenDetail(item)}
-                      className={`relative isolate rounded-xl overflow-hidden group cursor-pointer text-left transition-transform hover:scale-[1.02] ${
-                        isLight ? "bg-white shadow-md shadow-slate-900/8" : "bg-[#1e2430]"
-                      }`}
-                      style={{
-                        aspectRatio: "2/3",
-                        border: `2px solid ${accent.hex}`,
-                      }}
-                    >
-                      {item.poster_url ? (
-                        <img
-                          src={item.poster_url}
-                          alt=""
-                          loading="lazy"
-                          decoding="async"
-                          className="absolute inset-0 h-full w-full object-cover scale-[1.01]"
-                        />
-                      ) : null}
-                      <div
-                        className={`absolute pointer-events-none bottom-0 left-0 right-0 ${isLight ? "h-[48%]" : "h-[34%]"}`}
-                        style={{
-                          background: isLight
-                            ? "linear-gradient(180deg, rgba(238,243,248,0) 0%, rgba(238,243,248,0.42) 38%, rgba(238,243,248,0.88) 68%, rgba(238,243,248,1) 88%, rgba(238,243,248,1) 100%)"
-                            : "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
-                        }}
+                <div className="overflow-visible">
+                {cardSettings.viewMode === "list" ? (
+                  <div style={libraryListStyle()}>
+                    {(groupedItems.groups[letter] || []).map((item) => (
+                      <LibraryListRow
+                        key={item.id}
+                        item={item}
+                        posterWidthPx={cardSettings.posterWidthPx}
+                        accent={accent}
+                        themeMode={props.themeMode}
+                        onClick={() => props.onOpenDetail(item)}
                       />
-                      <div className="absolute top-2 left-2">{statusBadge(item)}</div>
-                      <div className={`absolute bottom-0 left-0 right-0 flex flex-col gap-1 px-3 ${isLight ? "pb-3 pt-12" : "pb-3 pt-8"}`}>
-                        <div className="text-[14px] font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
-                          {item.year || "—"}
-                        </div>
-                        <div className={`font-bold text-[16px] leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={libraryPosterGridStyle(cardSettings.posterWidthPx)}>
+                    {(groupedItems.groups[letter] || []).map((item) => (
+                      <div
+                        key={item.id}
+                        className={libraryPosterGridItemClassName}
+                        style={libraryPosterGridItemStyle()}
+                      >
+                        <LibraryGridCard
+                          item={item}
+                          variant={cardSettings.variant}
+                          posterWidthPx={cardSettings.posterWidthPx}
+                          accent={accent}
+                          themeMode={props.themeMode}
+                          onClick={() => props.onOpenDetail(item)}
+                        />
                       </div>
-                    </button>
-                  ))}
+                    ))}
+                  </div>
+                )}
                 </div>
               </div>
             ))}
@@ -7264,7 +7323,9 @@ function SettingsPanel(props: {
               Unsaved changes
             </span>
           )}
-          {props.feedback && !isVirtualActive && (
+          {props.feedback &&
+            !isVirtualActive &&
+            !(props.hasUnsavedChanges && props.feedbackKind === "success") && (
             <span className={`text-[14px] font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
               {props.feedback}
             </span>
@@ -10494,7 +10555,7 @@ function getTabFromPath(pathname: string): DashboardTab {
   if (pathname.startsWith("/errors")) return "errors";
   if (pathname.startsWith("/logs")) return "logs";
   if (pathname.startsWith("/settings")) return "settings";
-  return "activity";
+  return "library";
 }
 
 function timeUntil(iso: string | null): string {

@@ -74,6 +74,7 @@ def build_progress_from_phases(
     """Build nested progress blob stored under summary.progress for Tasks UI."""
     display_mode = str(mode or "full").strip().lower() or "full"
     is_lite = display_mode == "lite"
+    is_placeholder_refresh = display_mode == "placeholder_refresh"
     _order = {
         "arr_sync": 0,
         "fs_scan": 1,
@@ -91,22 +92,40 @@ def build_progress_from_phases(
     any_working = any(str(s.get("status") or "").lower() == "working" for s in sections)
     running = overall_status.upper() == "WORKING" or any_working
     if not details:
-        mat = next((p for p in phases if p.get("key") == "materialization"), None)
-        if mat and isinstance(mat.get("metrics"), list):
-            created = next((m for m in mat["metrics"] if m.get("label") == "Placeholders created"), None)
-            removed = next((m for m in mat["metrics"] if m.get("label") == "Placeholders removed"), None)
-            c = created.get("value") if created else 0
-            r = removed.get("value") if removed else 0
-            details = f"Created {c} placeholders • removed {r} placeholders • Mode {display_mode}"
+        if is_placeholder_refresh:
+            meta = next((p for p in phases if p.get("key") == "metadata_refresh"), None)
+            art = next((p for p in phases if p.get("key") == "art_refresh"), None)
+            parts: list[str] = []
+            if meta and str(meta.get("status") or "").lower() != "skipped":
+                parts.append("metadata")
+            if art and str(art.get("status") or "").lower() != "skipped":
+                parts.append("art")
+            details = f"{' + '.join(parts) or 'placeholder'} refresh" if parts else "Placeholder refresh"
         else:
-            details = f"Mode {display_mode}"
+            mat = next((p for p in phases if p.get("key") == "materialization"), None)
+            if mat and isinstance(mat.get("metrics"), list):
+                created = next((m for m in mat["metrics"] if m.get("label") == "Placeholders created"), None)
+                removed = next((m for m in mat["metrics"] if m.get("label") == "Placeholders removed"), None)
+                c = created.get("value") if created else 0
+                r = removed.get("value") if removed else 0
+                details = f"Created {c} placeholders • removed {r} placeholders • Mode {display_mode}"
+            else:
+                details = f"Mode {display_mode}"
 
     sort_anchor = completed_at if completed_at else started_at
     return {
         "id": f"task-run-{task_run_id}",
         "type": "job",
-        "job_type": "lite_sync_progress" if is_lite else "full_sync_progress",
-        "display_name": "Lite Sync Progress" if is_lite else "Full Sync Progress",
+        "job_type": (
+            "placeholder_refresh_progress"
+            if is_placeholder_refresh
+            else ("lite_sync_progress" if is_lite else "full_sync_progress")
+        ),
+        "display_name": (
+            "Placeholder Refresh Progress"
+            if is_placeholder_refresh
+            else ("Lite Sync Progress" if is_lite else "Full Sync Progress")
+        ),
         "status": overall_status.upper(),
         "details": details,
         "error": error_message,
@@ -354,12 +373,29 @@ def _task_run_id_payload_match(task_run_id: int):
     )
 
 
+def _placeholder_refresh_task_run_id_payload_match(task_run_id: int):
+    from sqlalchemy import String, cast, or_
+
+    from services.postgres.models import Job
+    from services.source_of_truth.placeholder_refresh import PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY
+
+    tid = str(int(task_run_id))
+    col = Job.payload[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY]
+    return or_(col.as_string() == tid, cast(col, String) == tid)
+
+
+def _linked_task_run_job_match(task_run_id: int):
+    from sqlalchemy import or_
+
+    return or_(_task_run_id_payload_match(task_run_id), _placeholder_refresh_task_run_id_payload_match(task_run_id))
+
+
 def _pending_jobs_for_full_sync_task(task_run_id: int, *, exclude_job_id: int | None = None) -> bool:
-    """True while any follow-up job is still queued or claimed for this full-sync run.
+    """True while any follow-up job is still queued or claimed for this task run.
 
     Pass ``exclude_job_id`` when checking from inside a follow-up job handler: the worker
     keeps that row ``CLAIMED`` until the handler returns, so counting it would block
-    ``try_complete_full_sync_task_run`` forever on the last art/NFO batch.
+    parent task completion forever on the last art/NFO batch.
     """
     from services.postgres.models import Job
 
@@ -368,13 +404,48 @@ def _pending_jobs_for_full_sync_task(task_run_id: int, *, exclude_job_id: int | 
         q = session.query(Job.id).filter(
             Job.job_type.in_(("placeholder_art_refresh", "nfo_refresh")),
             Job.status.in_(["PENDING", "CLAIMED"]),
-            _task_run_id_payload_match(task_run_id),
+            _linked_task_run_job_match(task_run_id),
         )
         if exclude_job_id is not None:
             q = q.filter(Job.id != int(exclude_job_id))
         return q.first() is not None
     finally:
         session.close()
+
+
+def _task_run_key(task_run_id: int) -> str:
+    from services.postgres.models import ScheduledTaskRun
+
+    session = get_session()
+    try:
+        row = session.query(ScheduledTaskRun).filter(ScheduledTaskRun.id == int(task_run_id)).first()
+        return str(row.task_key or "").strip().lower() if row else ""
+    finally:
+        session.close()
+
+
+def try_complete_linked_task_run(
+    task_run_id: int,
+    *,
+    failed: bool = False,
+    error_message: str | None = None,
+    exclude_job_id: int | None = None,
+) -> bool:
+    if _task_run_key(task_run_id) == "placeholder_refresh":
+        from services.source_of_truth.placeholder_refresh import try_complete_placeholder_refresh_task_run
+
+        return try_complete_placeholder_refresh_task_run(
+            int(task_run_id),
+            failed=failed,
+            error_message=error_message,
+            exclude_job_id=exclude_job_id,
+        )
+    return try_complete_full_sync_task_run(
+        int(task_run_id),
+        failed=failed,
+        error_message=error_message,
+        exclude_job_id=exclude_job_id,
+    )
 
 
 def get_session():
@@ -738,9 +809,9 @@ def finalize_art_backfill_phase(
     art["status"] = "failed" if failed else "done"
     summary = {**summary, "art_backfill": art}
     _save_phases(task_run_id, phases, extra=summary)
-    if not try_complete_full_sync_task_run(task_run_id, failed=failed, exclude_job_id=exclude_job_id):
+    if not try_complete_linked_task_run(task_run_id, failed=failed, exclude_job_id=exclude_job_id):
         logger.info(
-            f"full_sync task_run_id={task_run_id} art phase closed; task row still open "
+            f"task_run_id={task_run_id} art phase closed; task row still open "
             f"(follow-up jobs may remain)",
             extra={"emoji_type": "info"},
         )

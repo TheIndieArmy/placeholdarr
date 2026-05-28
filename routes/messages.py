@@ -357,6 +357,7 @@ def _execute_apply_scope(apply_scope: str) -> dict[str, Any]:
         metadata=True,
         templates=True,
         source="messages_save",
+        task_run_trigger="settings_change" if str(apply_scope) == "now" else None,
     )
     nfo = out.get("nfo_backfill") if isinstance(out.get("nfo_backfill"), dict) else {}
     merged = dict(nfo) if nfo else {"ok": bool(out.get("ok", True))}

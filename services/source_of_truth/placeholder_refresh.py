@@ -156,9 +156,58 @@ def _refresh_enqueue_committed(result: Any) -> bool:
     if bool(result.get("enqueued")):
         return True
     try:
+        if int(result.get("jobs_created") or 0) > 0:
+            return True
+        if int(result.get("jobs_updated") or 0) > 0:
+            return True
+        job_ids = result.get("job_ids")
+        if isinstance(job_ids, list) and len(job_ids) > 0:
+            return True
+        if result.get("job_id") is not None:
+            return True
         return int(result.get("placeholder_count") or 0) == 0
     except (TypeError, ValueError):
         return False
+
+
+def _finalize_placeholder_refresh_enqueue(
+    *,
+    task_run_id: int,
+    summary: dict[str, Any],
+    out: dict[str, Any],
+    metadata: bool,
+    art: bool,
+    metadata_committed: bool,
+    art_committed: bool,
+) -> dict[str, Any]:
+    """Close the task run only when every requested domain failed to enqueue; otherwise stay working."""
+    metadata_failed = bool(metadata and not metadata_committed)
+    art_failed = bool(art and not art_committed)
+    if not metadata_failed and not art_failed:
+        return out
+
+    merged = dict(summary)
+    if metadata_failed:
+        merged = _mark_phase_failed(merged, "metadata_refresh", reason="enqueue_failed")
+    if art_failed:
+        merged = _mark_phase_failed(merged, "art_refresh", reason="enqueue_failed")
+
+    any_committed = (bool(metadata) and metadata_committed) or (bool(art) and art_committed)
+    if not any_committed:
+        out = {**out, "ok": False, "reason": "enqueue_failed"}
+        merged = _persist_placeholder_refresh_progress(task_run_id, {**merged, **out}, overall_status="FAILED")
+        finish_task_run(task_run_id, status="failed", summary=merged, error_message="enqueue_failed")
+        return out
+
+    # Partial enqueue: keep task working for domains that did queue work.
+    out = {**out, "ok": True, "partial_enqueue_failure": True}
+    if metadata_failed:
+        out["metadata_enqueue_failed"] = True
+    if art_failed:
+        out["art_enqueue_failed"] = True
+    merged = _persist_placeholder_refresh_progress(task_run_id, {**merged, **out}, overall_status="WORKING")
+    update_task_run_summary(task_run_id, merged)
+    return out
 
 
 def clear_pending_intent_domains(
@@ -219,6 +268,7 @@ def execute_placeholder_refresh_apply_scope(
     art: bool = False,
     templates: bool = False,
     source: str = "settings_save",
+    task_run_trigger: str | None = None,
 ) -> dict[str, Any]:
     scope = str(apply_scope or "future").strip().lower()
     if scope not in {"now", "next_full_sync", "future"}:
@@ -260,6 +310,20 @@ def execute_placeholder_refresh_apply_scope(
     # scope == "now"
     metadata_committed = False
     art_committed = False
+    task_run_id: int | None = None
+    task_summary: dict[str, Any] | None = None
+    track_task_run = bool(str(task_run_trigger or "").strip())
+    if track_task_run:
+        trigger = str(task_run_trigger).strip().lower()
+        task_run_id = begin_task_run(task_key="placeholder_refresh", trigger=trigger)
+        task_summary = _initial_refresh_summary(
+            metadata=requested_metadata,
+            art=requested_art,
+            source=source,
+            trigger=trigger,
+        )
+        task_summary = _persist_placeholder_refresh_progress(task_run_id, task_summary, overall_status="WORKING")
+
     out: dict[str, Any] = {
         "ok": True,
         "scope": "now",
@@ -267,20 +331,56 @@ def execute_placeholder_refresh_apply_scope(
         "metadata_requested": requested_metadata,
         "art_requested": requested_art,
     }
+    if task_run_id is not None:
+        out["task_run_id"] = task_run_id
+
+    enqueue_kwargs: dict[str, Any] = {}
+    if task_run_id is not None:
+        enqueue_kwargs["placeholder_refresh_task_run_id"] = int(task_run_id)
+
     if requested_metadata:
         from services.source_of_truth.template_backfill import enqueue_template_backfill
 
-        nfo_out = enqueue_template_backfill(source=f"{source}:apply_now")
+        nfo_out = enqueue_template_backfill(source=f"{source}:apply_now", **enqueue_kwargs)
         out["nfo_backfill"] = nfo_out
         metadata_committed = _refresh_enqueue_committed(nfo_out)
         out["enqueued"] = bool(out["enqueued"] or metadata_committed and bool(nfo_out.get("enqueued")))
     if requested_art:
         from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_backfill_all
 
-        art_out = enqueue_placeholder_art_backfill_all(source=f"{source}:apply_now")
+        art_out = enqueue_placeholder_art_backfill_all(source=f"{source}:apply_now", **enqueue_kwargs)
         out["art_backfill"] = art_out
         art_committed = _refresh_enqueue_committed(art_out)
         out["enqueued"] = bool(out["enqueued"] or art_committed and bool(art_out.get("enqueued")))
+
+    if task_run_id is not None and task_summary is not None:
+        if (requested_metadata and not metadata_committed) or (requested_art and not art_committed):
+            return _finalize_placeholder_refresh_enqueue(
+                task_run_id=task_run_id,
+                summary=task_summary,
+                out=out,
+                metadata=requested_metadata,
+                art=requested_art,
+                metadata_committed=metadata_committed,
+                art_committed=art_committed,
+            )
+        if not out["enqueued"]:
+            phases = list(task_summary.get("phases") or [])
+            for phase in phases:
+                if str(phase.get("status") or "").lower() == "working":
+                    phase["status"] = "skipped"
+                    phase["metrics"] = [{"label": "Reason", "value": "no_active_placeholders"}]
+            done_summary = _persist_placeholder_refresh_progress(
+                task_run_id,
+                {**task_summary, "phases": phases, **out},
+                overall_status="DONE",
+            )
+            finish_task_run(task_run_id, status="done", summary=done_summary)
+            return out
+        merged = _persist_placeholder_refresh_progress(
+            task_run_id, {**task_summary, **out}, overall_status="WORKING"
+        )
+        update_task_run_summary(task_run_id, merged)
 
     clear_metadata = bool(requested_metadata and metadata_committed)
     clear_art = bool(requested_art and art_committed)
@@ -316,6 +416,38 @@ def _collect_active_placeholder_ids(session) -> list[int]:
         .all()
     )
     return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def placeholder_refresh_task_label(summary: dict[str, Any] | None) -> str:
+    """Human label for Tasks queue rows."""
+    if not isinstance(summary, dict):
+        return "Metadata & art refresh"
+    metadata = bool(summary.get("metadata_requested"))
+    art = bool(summary.get("art_requested"))
+    if metadata and art:
+        return "Metadata & art refresh"
+    if metadata:
+        return "Metadata refresh"
+    if art:
+        return "Art refresh"
+    return "Placeholder refresh"
+
+
+def _persist_placeholder_refresh_progress(
+    task_run_id: int,
+    summary: dict[str, Any],
+    *,
+    overall_status: str | None = None,
+) -> dict[str, Any]:
+    from services.task_run_phases import _save_phases, phases_from_summary
+
+    phases = phases_from_summary(summary) or list(summary.get("phases") or [])
+    any_working = any(str(p.get("status") or "").lower() == "working" for p in phases)
+    status = overall_status or ("WORKING" if any_working else "DONE")
+    _save_phases(int(task_run_id), phases, extra=summary)
+    merged = dict(summary)
+    merged["phases"] = phases
+    return merged
 
 
 def _initial_refresh_summary(*, metadata: bool, art: bool, source: str, trigger: str) -> dict[str, Any]:
@@ -360,7 +492,7 @@ def run_placeholder_refresh_task(
     art = bool(art)
     task_run_id = begin_task_run(task_key="placeholder_refresh", trigger=trigger)
     summary = _initial_refresh_summary(metadata=metadata, art=art, source=source, trigger=trigger)
-    update_task_run_summary(task_run_id, summary)
+    summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="WORKING")
 
     if not metadata and not art:
         finish_task_run(task_run_id, status="done", summary=summary)
@@ -375,7 +507,9 @@ def run_placeholder_refresh_task(
                 if str(p.get("status") or "").lower() == "working":
                     p["status"] = "skipped"
                     p["metrics"] = [{"label": "Reason", "value": "no_active_placeholders"}]
-            finish_task_run(task_run_id, status="done", summary={**summary, "phases": phases})
+            summary = {**summary, "phases": phases}
+            summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="DONE")
+            finish_task_run(task_run_id, status="done", summary=summary)
             return {"ok": True, "task_run_id": task_run_id, "enqueued": False, "reason": "no_active_placeholders"}
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -402,6 +536,17 @@ def run_placeholder_refresh_task(
             out["nfo_backfill"] = nfo_out
             metadata_committed = _refresh_enqueue_committed(nfo_out)
             out["enqueued"] = bool(out["enqueued"] or (metadata_committed and bool(nfo_out.get("enqueued"))))
+            if metadata_committed:
+                from services.task_run_phases import begin_nfo_backfill_phase
+
+                batch_count = int(nfo_out.get("jobs_created") or len(nfo_out.get("job_ids") or []) or 0)
+                begin_nfo_backfill_phase(
+                    int(task_run_id),
+                    nfo_run_id=f"placeholder_refresh:{run_id}",
+                    placeholder_count=len(ids),
+                    batch_count=batch_count,
+                    source=source,
+                )
         if art:
             from services.source_of_truth.placeholder_art_reconciler import (
                 ART_BACKFILL_REFRESH_ON_COMPLETION_KEY,
@@ -425,23 +570,30 @@ def run_placeholder_refresh_task(
             out["art_backfill"] = art_out
             art_committed = _refresh_enqueue_committed(art_out)
             out["enqueued"] = bool(out["enqueued"] or (art_committed and bool(art_out.get("enqueued"))))
+            if art_committed:
+                from services.task_run_phases import begin_art_backfill_phase
+
+                batch_count = int(art_out.get("jobs_created") or art_out.get("batch_count") or 0)
+                begin_art_backfill_phase(
+                    int(task_run_id),
+                    art_run_id=f"placeholder_refresh:{run_id}",
+                    placeholder_count=len(ids),
+                    batch_count=batch_count,
+                    source=source,
+                )
 
         if (metadata and not metadata_committed) or (art and not art_committed):
-            out["ok"] = False
-            out["reason"] = "enqueue_failed"
-            failed_summary = dict(summary)
-            if metadata and not metadata_committed:
-                failed_summary = _mark_phase_failed(failed_summary, "metadata_refresh", reason="enqueue_failed")
-            if art and not art_committed:
-                failed_summary = _mark_phase_failed(failed_summary, "art_refresh", reason="enqueue_failed")
-            finish_task_run(
-                task_run_id,
-                status="failed",
-                summary={**failed_summary, **out},
-                error_message="enqueue_failed",
+            return _finalize_placeholder_refresh_enqueue(
+                task_run_id=task_run_id,
+                summary=summary,
+                out=out,
+                metadata=metadata,
+                art=art,
+                metadata_committed=metadata_committed,
+                art_committed=art_committed,
             )
-            return out
-        update_task_run_summary(task_run_id, {**summary, **out})
+        merged = _persist_placeholder_refresh_progress(task_run_id, {**summary, **out}, overall_status="WORKING")
+        update_task_run_summary(task_run_id, merged)
         return out
     except Exception as exc:
         session.rollback()
@@ -580,10 +732,12 @@ def try_complete_placeholder_refresh_task_run(
             fail_reason = str(error_message or "linked_refresh_job_failed")
             summary = _mark_phase_failed(summary, "metadata_refresh", reason=fail_reason)
             summary = _mark_phase_failed(summary, "art_refresh", reason=fail_reason)
+            summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="FAILED")
             finish_task_run(task_run_id, status="failed", summary=summary, error_message=fail_reason)
             return True
         summary = _mark_phase_done(summary, "metadata_refresh")
         summary = _mark_phase_done(summary, "art_refresh")
+        summary = _persist_placeholder_refresh_progress(task_run_id, summary, overall_status="DONE")
         finish_task_run(task_run_id, status="done", summary=summary)
         return True
     finally:

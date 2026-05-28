@@ -158,6 +158,8 @@ export interface LibraryItem {
   type: LibraryItemType;
   title: string;
   year: number;
+  /** Series network (Sonarr). */
+  network?: string | null;
   poster_url?: string | null;
   backdrop_url?: string | null;
   is_4k: boolean;

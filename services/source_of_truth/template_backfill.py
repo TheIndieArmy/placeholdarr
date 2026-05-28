@@ -217,7 +217,12 @@ def clear_pending_template_backfill() -> dict[str, Any]:
             pass
 
 
-def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | None = None) -> dict[str, Any]:
+def enqueue_template_backfill(
+    *,
+    source: str = "user_save",
+    task_run_id: int | None = None,
+    placeholder_refresh_task_run_id: int | None = None,
+) -> dict[str, Any]:
     """Queue an NFO refresh covering every active placeholder.
 
     Returns a small status dict describing how many placeholders were enqueued. The worker
@@ -262,6 +267,10 @@ def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | N
             from services.task_run_phases import FULL_SYNC_TASK_RUN_ID_KEY
 
             extras[FULL_SYNC_TASK_RUN_ID_KEY] = int(task_run_id)
+        if placeholder_refresh_task_run_id is not None:
+            from services.source_of_truth.placeholder_refresh import PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY
+
+            extras[PLACEHOLDER_REFRESH_TASK_RUN_ID_KEY] = int(placeholder_refresh_task_run_id)
 
         out = enqueue_nfo_refresh(
             ids,
@@ -274,11 +283,12 @@ def enqueue_template_backfill(*, source: str = "user_save", task_run_id: int | N
             return out if isinstance(out, dict) else {"ok": False, "reason": "enqueue_failed"}
 
         batch_count = int(out.get("jobs_created") or len(out.get("job_ids") or []))
-        if task_run_id is not None:
+        phase_task_run_id = task_run_id if task_run_id is not None else placeholder_refresh_task_run_id
+        if phase_task_run_id is not None:
             from services.task_run_phases import begin_nfo_backfill_phase
 
             begin_nfo_backfill_phase(
-                int(task_run_id),
+                int(phase_task_run_id),
                 nfo_run_id=run_id,
                 placeholder_count=len(ids),
                 batch_count=batch_count,
