@@ -188,7 +188,9 @@ class Settings(BaseSettings):
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
     STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = "live"
-    FULL_SYNC_INTERVAL_HOURS: int = 0
+    FULL_SYNC_INTERVAL_HOURS: int = 168
+    # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
+    LITE_SYNC_INTERVAL_HOURS: int = 12
 
     # Library Paths
     LIBRARY_ROOT: str = ""
@@ -237,8 +239,10 @@ class Settings(BaseSettings):
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
     EPISODES_LOOKAHEAD: int = 5
     
-    # Playback-related settings
-    
+    # Playback-related settings (all default off: mark unmonitored + search full target set)
+    PLAYBACK_MONITOR_ONLY_NO_SEARCH: bool = False
+    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: bool = False
+    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = False
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
     # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:
@@ -266,7 +270,7 @@ class Settings(BaseSettings):
     CALENDAR_LOOKAHEAD_DAYS: int = 30
     # Calendar scheduler cadence (independent from full sync).
     # <= 0 disables independent calendar scheduler.
-    CALENDAR_SYNC_INTERVAL_HOURS: int = 12
+    CALENDAR_SYNC_INTERVAL_HOURS: int = 0
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True
     # Deprecated: always treated as "coming_soon" (Coming Soon dummy when set, else standard dummy). Retained for env/back-compat only.
@@ -274,6 +278,11 @@ class Settings(BaseSettings):
 
     # Include specials (season 0) when creating episode subflows
     INCLUDE_SPECIALS: bool = False
+    # When True, skip creating placeholders for Radarr/Sonarr-monitored titles and remove
+    # stale placeholders when monitoring is learned during sync (import flow unchanged).
+    SKIP_PLACEHOLDERS_WHEN_MONITORED: bool = False
+    # TV only: when skip-for-monitored is on, treat the whole show as skip if Sonarr series is monitored.
+    SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED: bool = False
 
     # Postgres
     DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()

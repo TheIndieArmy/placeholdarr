@@ -22,19 +22,36 @@ BRAND_BLUE_HEX = "#0b111b"
 OVERLAY_META_FILENAME = ".poster-overlay.json"
 
 _LOGO_PATH = Path(__file__).resolve().parent / "assets" / "placeholdarr_logo_yellow.png"
+_FONT_PATH = Path(__file__).resolve().parent / "assets" / "fonts" / "SpaceGrotesk-Bold.ttf"
 _VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo"})
+_TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v2"
+
+
+def _asset_digest(path: Path) -> str | None:
+    import hashlib
+
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return f"{hashlib.sha256(data).hexdigest()[:16]}:{len(data)}"
 
 
 def logo_asset_stamp() -> str:
-    """Change when the bundled logo file or badge layout changes so posters can be regenerated."""
-    try:
-        st = os.stat(_LOGO_PATH)
-        file_stamp = f"{int(st.st_mtime)}:{int(st.st_size)}"
-    except OSError:
-        file_stamp = ""
-    # Bump when corner badge placement changes (e.g. avoid Plex episode-count overlap).
-    layout_stamp = "corner-br-v1:prefer-local-nfo-v1"
-    return f"{layout_stamp}:{file_stamp}" if file_stamp else layout_stamp
+    """Change when the bundled logo file or badge layout changes so posters can be regenerated.
+
+    Uses file content hash (not mtime) so Docker restarts / image copies do not force a
+    full-library art rebuild when the logo bytes are unchanged.
+    """
+    layout_stamp = f"corner-br-v1:{_TOP_BANNER_LAYOUT}:prefer-local-nfo-v1"
+    logo_digest = _asset_digest(_LOGO_PATH)
+    font_digest = _asset_digest(_FONT_PATH)
+    parts = [layout_stamp]
+    if logo_digest:
+        parts.append(logo_digest)
+    if font_digest:
+        parts.append(f"font:{font_digest}")
+    return ":".join(parts)
 
 _pillow_modules: tuple | bool | None = None
 _pillow_missing_logged = False
@@ -64,7 +81,7 @@ def _log_pillow_missing_once() -> None:
     _pillow_missing_logged = True
     logger.warning(
         "Placeholder poster overlay mode is enabled but Pillow is not installed. "
-        "Skipping composited poster art; NFO refresh will still use remote poster URLs. "
+        "Falling back to raw poster downloads for local art files. "
         "Install with: pip install -r requirements.txt (or rebuild the Docker image).",
         extra={"emoji_type": "warning"},
     )
@@ -168,6 +185,14 @@ def _load_font(size: int):
     if mods is None:
         return None
     ImageFont = mods[3]
+    if _FONT_PATH.is_file():
+        try:
+            return ImageFont.truetype(str(_FONT_PATH), size=size)
+        except OSError as exc:
+            logger.warning(
+                f"Bundled overlay font failed to load ({_FONT_PATH}): {exc}",
+                extra={"emoji_type": "warning"},
+            )
     for name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "arial.ttf"):
         try:
             return ImageFont.truetype(name, size=size)
@@ -183,21 +208,23 @@ def _apply_top_banner(img):
     Image, ImageDraw, _, ImageFont, _ = mods
     out = img.convert("RGBA")
     w, h = out.size
-    bar_h = max(48, int(h * 0.09))
+    bar_h = max(56, int(h * 0.11))
     overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     draw.rectangle([0, 0, w, bar_h], fill=(0, 0, 0, int(255 * 0.65)))
     out = Image.alpha_composite(out, overlay)
     draw = ImageDraw.Draw(out)
     text = "PLACEHOLDER"
-    font_size = max(18, int(bar_h * 0.35))
+    font_size = max(26, int(bar_h * 0.50))
     font = _load_font(font_size)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    tx = (w - tw) // 2
-    ty = (bar_h - th) // 2
-    draw.text((tx, ty), text, fill=(255, 255, 255, 255), font=font)
+    # anchor="mm" centers on the point; naive bbox math ignores font ascender offset.
+    draw.text(
+        (w // 2, bar_h // 2),
+        text,
+        fill=(255, 255, 255, 255),
+        font=font,
+        anchor="mm",
+    )
     return out
 
 
@@ -264,6 +291,33 @@ def apply_overlay(img, mode: str, *, landscape: bool = False):
     return base
 
 
+def save_raw_poster_from_url(url: str | None, path: str, *, quality: int = 88) -> bool:
+    """Download remote art and save as JPEG without compositing."""
+    data = download_poster_bytes(url or "")
+    if not data:
+        return False
+    mods = _pillow()
+    if mods is None:
+        try:
+            from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            _apply_dir_chain_permissions(path)
+            with open(path, "wb") as f:
+                f.write(data)
+            _ensure_open_permissions(path)
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError as exc:
+            logger.warning(f"Failed to write raw poster {path!r}: {exc}", extra={"emoji_type": "warning"})
+            return False
+    img = load_image_from_bytes(data)
+    if img is None:
+        return False
+    return save_jpeg(img, path, quality=quality)
+
+
 def composite_poster_from_url(url: str | None, mode: str, *, landscape: bool = False):
     if _pillow() is None:
         _log_pillow_missing_once()
@@ -284,11 +338,15 @@ def save_jpeg(img, path: str, *, quality: int = 88) -> bool:
         return False
     Image = mods[0]
     try:
+        from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        _apply_dir_chain_permissions(path)
         rgb = img.convert("RGB")
         rgb.save(path, format="JPEG", quality=quality, optimize=True)
+        _ensure_open_permissions(path)
         return True
     except Exception as exc:
         logger.warning(f"Failed to write poster JPEG {path!r}: {exc}", extra={"emoji_type": "warning"})

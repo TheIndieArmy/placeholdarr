@@ -13,6 +13,7 @@ from services.placeholders import episode_placeholder_path, movie_placeholder_pa
 from services.postgres.models import ArrState, Episode, Movie, Placeholder, Season, Series
 from services.source_of_truth.arr_api import (
     fetch_radarr_movies,
+    fetch_sonarr_episodes,
     fetch_sonarr_series,
 )
 from services.source_of_truth.calendar_phase import run_calendar_phase
@@ -253,6 +254,69 @@ def _api_series_library_path(item: dict) -> str | None:
 
 def _api_series_monitored(item: dict) -> bool:
     return bool(item.get("monitored"))
+
+
+def _episode_monitored_signature(episode_rows: list[tuple[int, bool]]) -> int:
+    """Sum of Sonarr episode ids that are monitored — stable lite-sync drift signal."""
+    return sum(int(ep_id) for ep_id, monitored in episode_rows if monitored)
+
+
+def _db_episode_monitored_rows_by_series(session, instance_key: str) -> dict[int, list[tuple[int, bool]]]:
+    rows = (
+        session.query(Series.sonarrid, Episode.sonarrid, Episode.sonarr_monitored)
+        .join(Season, Season.series_id == Series.id)
+        .join(Episode, Episode.season_id == Season.id)
+        .filter(
+            Series.instance_key == instance_key,
+            Series.sonarrid.isnot(None),
+            Series.is_deleted == False,  # noqa: E712
+            Episode.is_deleted == False,  # noqa: E712
+            Episode.sonarrid.isnot(None),
+        )
+        .all()
+    )
+    out: dict[int, list[tuple[int, bool]]] = {}
+    for sid, eid, monitored in rows:
+        try:
+            sid_i = int(sid)
+            eid_i = int(eid)
+        except Exception:
+            continue
+        out.setdefault(sid_i, []).append((eid_i, bool(monitored)))
+    return out
+
+
+def _sonarr_episode_monitored_drift_series_ids(
+    session,
+    *,
+    instance_key: str,
+    base_url: str,
+    api_key: str,
+    candidate_series_ids: set[int],
+) -> set[int]:
+    """Series whose per-episode monitored flags differ between DB and Sonarr."""
+    if not candidate_series_ids:
+        return set()
+    db_by_series = _db_episode_monitored_rows_by_series(session, instance_key)
+    drift: set[int] = set()
+    for sid in candidate_series_ids:
+        db_rows = db_by_series.get(int(sid))
+        if not db_rows:
+            continue
+        db_sig = _episode_monitored_signature(db_rows)
+        api_eps = fetch_sonarr_episodes(int(sid), base_url, api_key) or []
+        api_rows: list[tuple[int, bool]] = []
+        for ep in api_eps:
+            if not isinstance(ep, dict):
+                continue
+            try:
+                eid = int(ep.get("id"))
+            except Exception:
+                continue
+            api_rows.append((eid, bool(ep.get("monitored"))))
+        if _episode_monitored_signature(api_rows) != db_sig:
+            drift.add(int(sid))
+    return drift
 
 
 def _api_series_total_episode_count(item: dict) -> int | None:
@@ -802,6 +866,18 @@ def _run_startup_lite_snapshot_for_instances(
                         ):
                             changed_ids.add(sid)
 
+                    if bool(getattr(settings, "SKIP_PLACEHOLDERS_WHEN_MONITORED", False)):
+                        episode_mon_candidates = set(db_by_id.keys()) - changed_ids
+                        ep_mon_drift = _sonarr_episode_monitored_drift_series_ids(
+                            session,
+                            instance_key=instance_key,
+                            base_url=instance["base_url"],
+                            api_key=instance["api_key"],
+                            candidate_series_ids=episode_mon_candidates,
+                        )
+                        if ep_mon_drift:
+                            changed_ids |= ep_mon_drift
+
                     if changed_ids:
                         n_path = n_mon = n_del = n_tot = n_file = 0
                         for sid in changed_ids:
@@ -970,6 +1046,14 @@ def run_startup_source_of_truth() -> dict:
         startup_sync_stats: dict = {}
         determination_stats: dict = {}
         materialization_stats: dict = {}
+        startup_task_run_id: int | None = None
+        if selected_mode in ("full", "lite"):
+            from services.task_run_history import begin_task_run
+
+            startup_task_run_id = begin_task_run(
+                task_key="full_sync" if selected_mode == "full" else "lite_sync",
+                trigger="startup",
+            )
 
         logger.info(
             f"Startup sync mode selected: {selected_mode} (configured_instances={len(instances)})",
@@ -977,14 +1061,25 @@ def run_startup_source_of_truth() -> dict:
         )
         started_at = datetime.now(timezone.utc)
 
+        def _emit_startup_progress(**kwargs) -> None:
+            if startup_task_run_id is not None:
+                from services.source_of_truth.scheduled_sync import record_task_sync_progress
+
+                record_task_sync_progress(
+                    task_run_id=startup_task_run_id,
+                    mode=selected_mode,
+                    started_at=started_at,
+                    **kwargs,
+                )
+            else:
+                record_startup_sync_progress(mode=selected_mode, started_at=started_at, **kwargs)
+
         if selected_mode == 'full':
             startup_sync_stats = _run_startup_full_for_instances(instances, run_ids)
         elif selected_mode == 'lite':
             # Activity UI + operators otherwise see nothing until this phase finishes (can be many minutes:
             # full /movie or /series catalogs per instance, then per-item targeted sync).
-            record_startup_sync_progress(
-                mode=selected_mode,
-                started_at=started_at,
+            _emit_startup_progress(
                 current_phase="discovery",
                 startup_sync_stats=None,
                 determination_stats=None,
@@ -1049,9 +1144,7 @@ def run_startup_source_of_truth() -> dict:
                 extra={'emoji_type': 'info'},
             )
         else:
-            record_startup_sync_progress(
-                mode=selected_mode,
-                started_at=started_at,
+            _emit_startup_progress(
                 # Not determination yet: next steps are full-tree FS scan + placeholder reconcile (+ calendar refresh).
                 current_phase="fs_scan",
                 startup_sync_stats=startup_sync_stats,
@@ -1080,9 +1173,7 @@ def run_startup_source_of_truth() -> dict:
             extra={'emoji_type': 'info'},
         )
         phase_started = time.monotonic()
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
+        _emit_startup_progress(
             current_phase='determination',
             startup_sync_stats=startup_sync_stats,
             determination_stats=None,
@@ -1121,9 +1212,7 @@ def run_startup_source_of_truth() -> dict:
             f"Startup phase complete: determination elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},
         )
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
+        _emit_startup_progress(
             current_phase='materialization',
             startup_sync_stats=startup_sync_stats,
             determination_stats=determination_stats,
@@ -1203,9 +1292,7 @@ def run_startup_source_of_truth() -> dict:
             )
             request_nfo_backfill_stats = {"ok": False, "error": str(exc)}
 
-        record_startup_sync_progress(
-            mode=selected_mode,
-            started_at=started_at,
+        _emit_startup_progress(
             current_phase='complete',
             startup_sync_stats=startup_sync_stats,
             determination_stats=determination_stats,
@@ -1262,24 +1349,56 @@ def run_startup_source_of_truth() -> dict:
                 extra={'emoji_type': 'debug'},
                 exc_info=True,
             )
+        if startup_task_run_id is not None:
+            from services.task_run_history import finish_task_run
+
+            finish_task_run(startup_task_run_id, status="done", summary=result)
         return result
     except Exception as exc:
         try:
             from services.startup_sync_activity import record_startup_sync_progress
 
-            record_startup_sync_progress(
-                mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
-                started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
-                current_phase='failed',
-                startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
-                determination_stats=determination_stats if 'determination_stats' in locals() else None,
-                materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
-                completed_at=datetime.now(timezone.utc),
-                failed=True,
-                error_message=str(exc),
-            )
+            if startup_task_run_id is not None:
+                from services.source_of_truth.scheduled_sync import record_task_sync_progress
+
+                record_task_sync_progress(
+                    task_run_id=startup_task_run_id,
+                    mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                    started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
+                    current_phase='failed',
+                    startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
+                    determination_stats=determination_stats if 'determination_stats' in locals() else None,
+                    materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
+                    completed_at=datetime.now(timezone.utc),
+                    failed=True,
+                    error_message=str(exc),
+                )
+            else:
+                record_startup_sync_progress(
+                    mode=str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto'),
+                    started_at=started_at if 'started_at' in locals() else datetime.now(timezone.utc),
+                    current_phase='failed',
+                    startup_sync_stats=startup_sync_stats if 'startup_sync_stats' in locals() else None,
+                    determination_stats=determination_stats if 'determination_stats' in locals() else None,
+                    materialization_stats=materialization_stats if 'materialization_stats' in locals() else None,
+                    completed_at=datetime.now(timezone.utc),
+                    failed=True,
+                    error_message=str(exc),
+                )
         except Exception:
             pass
+        if "startup_task_run_id" in locals() and startup_task_run_id is not None:
+            try:
+                from services.task_run_history import finish_task_run
+
+                finish_task_run(
+                    startup_task_run_id,
+                    status="failed",
+                    summary=result if "result" in locals() else None,
+                    error_message=str(exc),
+                )
+            except Exception:
+                pass
         raise
     finally:
         settings.REFRESH_TRIGGER_SUPPRESSED = False

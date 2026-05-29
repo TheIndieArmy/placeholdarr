@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, func, or_, text
@@ -16,6 +16,10 @@ from services.source_of_truth.arr_api import (
     set_sonarr_series_monitored,
     trigger_radarr_movie_search,
     trigger_sonarr_search,
+)
+from services.library_future_semantics import (
+    build_series_max_known_order_within_horizon,
+    episode_is_future_for_playback_search,
 )
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
 from services.source_of_truth.status_orchestrator import StatusOrchestrator
@@ -1099,6 +1103,9 @@ def _placeholder_intents_for_targets(session, targets: list[Episode], movie_row:
 
 
 def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
+    # Playback may enable Radarr monitoring and trigger search. Placeholder removal for
+    # monitored titles is deferred to sync/determination (SKIP_PLACEHOLDERS_WHEN_MONITORED);
+    # import still removes placeholders when a real file lands.
     if bool(getattr(movie_row, 'is_deleted', False)):
         return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
 
@@ -1138,7 +1145,141 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
     }
 
 
+def _episode_season_number(session, episode: Episode) -> int:
+    season = getattr(episode, "season", None)
+    if season is not None:
+        return int(getattr(season, "season_number", 0) or 0)
+    season_row = session.query(Season).filter(Season.id == episode.season_id).first()
+    return int(getattr(season_row, "season_number", 0) or 0) if season_row else 0
+
+
+def _suppress_search_for_monitored_episodes() -> bool:
+    return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED", False))
+
+
+def _suppress_search_for_future_episodes() -> bool:
+    return bool(getattr(settings, "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", False))
+
+
+def _playback_monitor_only_no_search() -> bool:
+    return bool(getattr(settings, "PLAYBACK_MONITOR_ONLY_NO_SEARCH", False))
+
+
+def _partition_playback_targets(
+    session,
+    series_row: Series,
+    targets: list[Episode],
+    *,
+    now_date: date | None = None,
+) -> dict[str, Any]:
+    """Split lookahead targets into monitor vs search buckets."""
+    eff = now_date or datetime.now(timezone.utc).date()
+    series_id = int(series_row.id)
+    max_known_order = build_series_max_known_order_within_horizon(session, series_id, now_date=eff)
+
+    to_monitor: list[Episode] = []
+    search_eligible: list[Episode] = []
+    future_episodes: list[Episode] = []
+    is_future_by_episode: list[bool] = []
+
+    for ep in targets:
+        season_number = _episode_season_number(session, ep)
+        is_future = episode_is_future_for_playback_search(
+            ep,
+            season_number=season_number,
+            series_max_known_order_within_horizon=max_known_order,
+            now_date=eff,
+        )
+        is_future_by_episode.append(is_future)
+        if is_future:
+            future_episodes.append(ep)
+
+        if not bool(getattr(ep, "sonarr_monitored", False)):
+            to_monitor.append(ep)
+
+        if is_future and _suppress_search_for_future_episodes():
+            continue
+        if bool(getattr(ep, "sonarr_monitored", False)) and _suppress_search_for_monitored_episodes():
+            continue
+        search_eligible.append(ep)
+
+    skipped_search_reason: str | None = None
+    if not search_eligible and targets:
+        if future_episodes and _suppress_search_for_future_episodes():
+            skipped_search_reason = "future_only"
+        elif not to_monitor:
+            skipped_search_reason = "no_unmonitored_search_targets"
+        elif _suppress_search_for_monitored_episodes():
+            skipped_search_reason = "suppressed_monitored"
+
+    monitor_ids = [int(ep.sonarrid) for ep in to_monitor if getattr(ep, "sonarrid", None)]
+    return {
+        "to_monitor": to_monitor,
+        "monitor_ids": monitor_ids,
+        "search_eligible": search_eligible,
+        "future_episodes": future_episodes,
+        "future_count": len(future_episodes),
+        "already_monitored_count": sum(1 for ep in targets if bool(getattr(ep, "sonarr_monitored", False))),
+        "search_count": len(search_eligible),
+        "skipped_search_reason": skipped_search_reason,
+    }
+
+
+def _search_eligible_ids(search_eligible: list[Episode]) -> list[int]:
+    return [int(ep.sonarrid) for ep in search_eligible if getattr(ep, "sonarrid", None)]
+
+
+def _trigger_playback_sonarr_search_for_row(
+    session,
+    *,
+    series_row: Series,
+    targets: list[Episode],
+    search_eligible: list[Episode],
+    mode: str,
+    target_meta: dict[str, Any],
+    base_url: str,
+    api_key: str,
+) -> bool:
+    if not search_eligible or not getattr(series_row, "sonarrid", None):
+        return False
+
+    series_id = int(series_row.sonarrid)
+    eligible_ids = _search_eligible_ids(search_eligible)
+    if not eligible_ids:
+        return False
+
+    eligible_set = {int(ep.id) for ep in search_eligible if getattr(ep, "id", None) is not None}
+    target_set = {int(ep.id) for ep in targets if getattr(ep, "id", None) is not None}
+    full_target_scope = eligible_set == target_set and len(target_set) > 0
+
+    if mode == "series" and full_target_scope:
+        return bool(trigger_sonarr_search(series_id=series_id, url=base_url, api_key=api_key))
+
+    if mode == "season" and full_target_scope:
+        season_numbers = {_episode_season_number(session, ep) for ep in search_eligible}
+        if len(season_numbers) == 1:
+            return bool(
+                trigger_sonarr_search(
+                    series_id=series_id,
+                    season_number=next(iter(season_numbers)),
+                    url=base_url,
+                    api_key=api_key,
+                )
+            )
+
+    return bool(
+        trigger_sonarr_search(
+            series_id=series_id,
+            episode_ids=eligible_ids,
+            url=base_url,
+            api_key=api_key,
+        )
+    )
+
+
 def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
+    # Same as movie playback: do not run determination/materialization here; monitored
+    # cleanup is handled on the next ARR sync when SKIP_PLACEHOLDERS_WHEN_MONITORED is on.
     if bool(getattr(series_row, 'is_deleted', False)):
         return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
 
@@ -1159,30 +1300,36 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
     if not base_url or not api_key:
         return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
 
-    target_episode_ids = [int(ep.sonarrid) for ep in targets if getattr(ep, 'sonarrid', None)]
-    monitor_result = set_sonarr_episode_monitored(target_episode_ids, True, url=base_url, api_key=api_key)
+    partition = _partition_playback_targets(session, series_row, targets)
+    to_monitor: list[Episode] = partition["to_monitor"]
+    search_eligible: list[Episode] = partition["search_eligible"]
+    monitor_ids: list[int] = partition["monitor_ids"]
+    skipped_search_reason = partition.get("skipped_search_reason")
 
-    for ep in targets:
-        ep.sonarr_monitored = True
-        session.add(ep)
+    if _playback_monitor_only_no_search():
+        search_eligible = []
+        skipped_search_reason = "monitor_only_no_search"
+
+    monitor_result = {"updated": 0, "failed": 0}
+    if monitor_ids:
+        monitor_result = set_sonarr_episode_monitored(monitor_ids, True, url=base_url, api_key=api_key)
+        for ep in to_monitor:
+            ep.sonarr_monitored = True
+            session.add(ep)
 
     mode = _play_mode()
     search_triggered = False
-    if mode == 'series':
-        if getattr(series_row, 'sonarrid', None):
-            search_triggered = trigger_sonarr_search(
-                series_id=int(series_row.sonarrid),
-                url=base_url,
-                api_key=api_key,
-            )
-    else:
-        if target_episode_ids and getattr(series_row, 'sonarrid', None):
-            search_triggered = trigger_sonarr_search(
-                series_id=int(series_row.sonarrid),
-                episode_ids=target_episode_ids,
-                url=base_url,
-                api_key=api_key,
-            )
+    if search_eligible:
+        search_triggered = _trigger_playback_sonarr_search_for_row(
+            session,
+            series_row=series_row,
+            targets=targets,
+            search_eligible=search_eligible,
+            mode=mode,
+            target_meta=target_meta,
+            base_url=base_url,
+            api_key=api_key,
+        )
 
     reached_end_marked = False
     if bool(target_meta.get('reached_end')) and getattr(series_row, 'sonarrid', None):
@@ -1197,7 +1344,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             series_row.sonarr_monitored = True
             session.add(series_row)
 
-    intents = _placeholder_intents_for_targets(session, targets)
+    intents = _placeholder_intents_for_targets(session, search_eligible)
     if intents:
         StatusOrchestrator(session=session).apply_and_project_statuses(intents)
 
@@ -1212,6 +1359,10 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'mode': mode,
         'targets': len(targets),
         'target_meta': target_meta,
+        'future_targets': int(partition.get('future_count') or 0),
+        'search_targets': len(search_eligible),
+        'monitor_only_targets': max(0, len(targets) - len(search_eligible)),
+        'skipped_search_reason': skipped_search_reason,
         'monitor_updated': int(monitor_result.get('updated', 0)),
         'monitor_failed': int(monitor_result.get('failed', 0)),
         'search_triggered': bool(search_triggered),
