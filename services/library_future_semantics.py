@@ -10,7 +10,7 @@ false) is excluded from Future counts — those rows are not "beyond lookahead".
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Date, and_, cast, func, literal, or_
@@ -174,3 +174,72 @@ def episode_row_is_future_outside_lookahead(episode: Episode, season_number: int
     if lk == 0:
         return days_until > 0
     return days_until > lk
+
+
+def build_series_max_known_order_within_horizon(
+    session,
+    series_id: int,
+    *,
+    now_date: date | None = None,
+) -> tuple[int, int] | None:
+    """Max (season, episode) with air_date inside the calendar horizon for a series.
+
+    Mirrors determination pass logic used for unknown-air-date middle-of-run episodes.
+    """
+    eff = now_date or datetime.now(timezone.utc).date()
+    lk = _lookahead_int()
+    if not _placeholders_enabled() or lk < 0:
+        return None
+
+    from services.postgres.models import Episode, Season
+
+    horizon = eff + timedelta(days=int(lk)) if lk >= 0 else None
+    known_rows = (
+        session.query(Season.season_number, Episode.episode_number)
+        .join(Season, Episode.season_id == Season.id)
+        .filter(
+            Season.series_id == int(series_id),
+            Episode.air_date.isnot(None),
+            Episode.is_deleted == False,  # noqa: E712
+        )
+        .filter(Episode.air_date <= horizon if horizon is not None else True)
+        .all()
+    )
+    max_order: tuple[int, int] | None = None
+    for season_number, episode_number in known_rows:
+        order = (int(season_number or 0), int(episode_number or 0))
+        if max_order is None or order > max_order:
+            max_order = order
+    return max_order
+
+
+def episode_is_future_for_playback_search(
+    episode: Episode,
+    *,
+    season_number: int,
+    series_max_known_order_within_horizon: tuple[int, int] | None,
+    now_date: date | None = None,
+) -> bool:
+    """True when a playback lookahead target should not be searched yet."""
+    eff = now_date or datetime.now(timezone.utc).date()
+    lk = _lookahead_int()
+    air_date = getattr(episode, "air_date", None)
+
+    if air_date is not None:
+        if lk < 0:
+            return air_date > eff
+        days_until = (air_date - eff).days
+        if lk == 0:
+            return days_until > 0
+        return days_until > lk
+
+    if not _placeholders_enabled() or lk < 0:
+        return False
+
+    order = (int(season_number or 0), int(episode.episode_number or 0))
+    if (
+        series_max_known_order_within_horizon is not None
+        and series_max_known_order_within_horizon > order
+    ):
+        return False
+    return True

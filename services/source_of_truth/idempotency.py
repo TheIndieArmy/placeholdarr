@@ -125,6 +125,10 @@ def nfo_refresh_idempotency_key(*, job_id: int) -> str:
     return f"nfo_refresh:job={int(job_id)}"
 
 
+def placeholder_art_refresh_idempotency_key(*, job_id: int) -> str:
+    return f"placeholder_art_refresh:job={int(job_id)}"
+
+
 def media_refresh_idempotency_key(*, job_id: int) -> str:
     return f"media_refresh:job={int(job_id)}"
 
@@ -138,6 +142,7 @@ __all__ = [
     "release_processed_key",
     "prune_old_processed_keys",
     "nfo_refresh_idempotency_key",
+    "placeholder_art_refresh_idempotency_key",
     "media_refresh_idempotency_key",
     "arr_search_idempotency_key",
 ]

@@ -1,6 +1,8 @@
 import {
   Fragment,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -14,19 +16,27 @@ import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getActivity,
+  getActivityOperations,
   getCalendar,
   getErrors,
   getLibrary,
   getLogs,
   getMovieDetail,
   getPlaceholderActivity,
+  getEntityReconcileStatus,
+  refreshEpisodePlaceholder,
+  refreshMoviePlaceholder,
+  refreshSeriesPlaceholder,
+  type EntityReconcileStartResponse,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
   getStats,
   saveSettings,
   testIntegrationConnection,
+  type NfoBackfillApplyScope,
 } from "./api/dashboard";
+import { getTasksHistory, getTasksScheduled, getTasksStatus, postTaskRun } from "./api/tasks";
 import { fetchJson, postJson } from "./api/client";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -40,7 +50,10 @@ import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticToke
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
+  ActivitySubPage,
   ArrInstanceOpenLink,
+  ScheduledTaskRow,
+  TaskRunRow,
   CalendarDay,
   CalendarResponse,
   DashboardTab,
@@ -55,11 +68,37 @@ import type {
   SettingsStatus,
   StatsResponse,
 } from "./types/api";
+import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
+import { LibraryCardControls } from "./library/LibraryCardControls";
+import { LibraryGridCard } from "./library/LibraryGridCard";
+import { LibraryListRow } from "./library/LibraryListRow";
+import {
+  LIBRARY_CARD_PREVIEW_PATH,
+  libraryListStyle,
+  libraryPosterGridItemClassName,
+  libraryPosterGridItemStyle,
+  libraryPosterGridStyle,
+  readLibraryCardSettings,
+  writeLibraryCardSettings,
+} from "./library/cardSettings";
 
 const REFRESH_MS_VISIBLE = 5000;
 const REFRESH_MS_HIDDEN = 30000;
+/** Post-save banner only — never shown while the form still has unsaved edits. */
+function formatSettingsSaveSuccessMessage(restartRequiredKeys?: string[] | null): string {
+  if (restartRequiredKeys && restartRequiredKeys.length > 0) {
+    return "Saved · restart recommended";
+  }
+  return "Saved";
+}
 const LIBRARY_MOVIES_PATH = "/library";
 const LIBRARY_TV_PATH = "/library/tv";
+const ACTIVITY_PLACEHOLDERS_PATH = "/activity/placeholders";
+const ACTIVITY_TASKS_PATH = "/activity/tasks";
+const ACTIVITY_OPERATIONS_PATH = "/activity/operations";
+const ACTIVITY_DEFAULT_PATH = ACTIVITY_PLACEHOLDERS_PATH;
+/** Default home after onboarding / root redirect. */
+const HOME_PATH = LIBRARY_MOVIES_PATH;
 const LIBRARY_MOVIES_FILTER_KEY = "placeholdarr:library-shelf-filter:movies";
 const LIBRARY_TV_FILTER_KEY = "placeholdarr:library-shelf-filter:tv";
 /** Legacy single key (pre split movies / TV pages). */
@@ -105,7 +144,10 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
 
 function digestLibraryItems(items: LibraryItem[]): string {
   return items
-    .map((i) => `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.overview ?? ""}`)
+    .map(
+      (i) =>
+        `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.overview ?? ""}`,
+    )
     .join("\n");
 }
 
@@ -161,6 +203,108 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   "Advanced": "advanced",
 };
 
+const LOOKAHEAD_FILTER_KEYS = [
+  "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+  "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
+] as const;
+
+function settingsFieldInteractionDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+  const disabledWhen = field.disabled_when;
+  if (disabledWhen) {
+    return Boolean(values[disabledWhen]);
+  }
+  const parentKey = field.depends_on;
+  if (!parentKey) return false;
+  return !Boolean(values[parentKey]);
+}
+
+function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+  return settingsFieldInteractionDisabled(field, values);
+}
+
+function isLookaheadFilterFieldKey(key: string): boolean {
+  return (LOOKAHEAD_FILTER_KEYS as readonly string[]).includes(key);
+}
+
+function snapshotLookaheadFilters(values: Record<string, unknown>): Record<string, boolean> {
+  return {
+    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: Boolean(
+      values.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
+    ),
+    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: Boolean(
+      values.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES,
+    ),
+  };
+}
+
+function settingsFieldDisplayValue(
+  field: SettingsField,
+  values: Record<string, unknown>,
+  lookaheadFilterSnapshot: Record<string, boolean> | null,
+): unknown {
+  if (
+    lookaheadFilterSnapshot &&
+    Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH) &&
+    isLookaheadFilterFieldKey(field.key)
+  ) {
+    return lookaheadFilterSnapshot[field.key as keyof typeof lookaheadFilterSnapshot];
+  }
+  return values[field.key];
+}
+
+function usePlaybackLookaheadFieldControls(
+  values: Record<string, unknown>,
+  onValueChange: (key: string, value: unknown) => void,
+) {
+  const [lookaheadFilterSnapshot, setLookaheadFilterSnapshot] = useState<Record<string, boolean> | null>(null);
+  const monitorOnlyEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
+
+  useEffect(() => {
+    if (!monitorOnlyEnabled) {
+      setLookaheadFilterSnapshot(null);
+      return;
+    }
+    setLookaheadFilterSnapshot((prev) => prev ?? snapshotLookaheadFilters(values));
+  }, [monitorOnlyEnabled]);
+
+  const handleValueChange = useCallback(
+    (key: string, value: unknown) => {
+      if (key === "PLAYBACK_MONITOR_ONLY_NO_SEARCH") {
+        const enabling = Boolean(value);
+        const wasEnabled = Boolean(values.PLAYBACK_MONITOR_ONLY_NO_SEARCH);
+        if (enabling && !wasEnabled) {
+          setLookaheadFilterSnapshot(snapshotLookaheadFilters(values));
+          onValueChange(key, value);
+          return;
+        }
+        if (!enabling && wasEnabled) {
+          const snap = lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values);
+          setLookaheadFilterSnapshot(null);
+          onValueChange(key, false);
+          onValueChange(
+            "PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED",
+            snap.PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED,
+          );
+          onValueChange("PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES", snap.PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES);
+          return;
+        }
+      }
+      onValueChange(key, value);
+    },
+    [values, onValueChange, lookaheadFilterSnapshot],
+  );
+
+  const effectiveSnapshot = monitorOnlyEnabled
+    ? (lookaheadFilterSnapshot ?? snapshotLookaheadFilters(values))
+    : null;
+
+  return { handleValueChange, effectiveSnapshot };
+}
+
+function settingsFieldIsNested(field: SettingsField): boolean {
+  return Boolean(field.nested);
+}
+
 /** Virtual settings sections backed by their own API endpoint, not `/api/settings/current`. */
 const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
 
@@ -174,7 +318,6 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Library sync",
   "Calendar",
   "Lookahead",
-  "Status Updates",
   "Advanced",
 ] as const;
 
@@ -204,6 +347,22 @@ const WIZARD_STEPS = [
   { key: "media", name: "Media Servers" },
   { key: "arr", name: "ARR Services" },
   { key: "behavior", name: "Behavior" },
+  { key: "look_and_feel", name: "Look and feel" },
+] as const;
+
+/** Onboarding Look and feel step — status messaging + poster overlay previews. */
+const LOOK_AND_FEEL_FIELD_KEYS = [
+  "PLACEHOLDER_STATUS_UPDATES",
+  "PLACEHOLDER_STATUS_PROJECTION_MODE",
+  "PLACEHOLDER_POSTER_OVERLAY_MODE",
+] as const;
+
+const POSTER_OVERLAY_PREVIEW_TMDB_ID = 1226863;
+const POSTER_OVERLAY_EXAMPLES_BASE = `${import.meta.env.BASE_URL}overlay-examples/`.replace(/(?<!:)\/{2,}/g, "/");
+const POSTER_OVERLAY_EXAMPLE_MODES = [
+  { mode: "grayscale", label: "Grayscale poster", image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg` },
+  { mode: "top_banner", label: "Top banner — PLACEHOLDER", image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg` },
+  { mode: "corner_logo", label: "Corner badge — Placeholdarr logo", image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg` },
 ] as const;
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
@@ -247,7 +406,11 @@ const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
 
 /** Shown in API/config but omitted from dashboard UI (onboarding + settings). */
-const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>(["WORKER_COUNT"]);
+const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
+  "WORKER_COUNT",
+  "RADARR_SHARED_PLACEHOLDER_CLEANUP",
+  "SONARR_SHARED_PLACEHOLDER_CLEANUP",
+]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
   "ARR_INSTANCES_JSON",
@@ -265,9 +428,15 @@ const ARR_REAL_FILE_PLAYBACK_KEYS = new Set<string>([
   "PLAYBACK_FALLBACK_TIMEOUT_MINUTES",
 ]);
 
+const ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS = new Set<string>([
+  "RADARR_SHARED_PLACEHOLDER_CLEANUP",
+  "SONARR_SHARED_PLACEHOLDER_CLEANUP",
+]);
+
 const ARR_BEHAVIOR_KEYS = new Set<string>([
   ...ARR_SEARCH_PLAYBACK_KEYS,
   ...ARR_REAL_FILE_PLAYBACK_KEYS,
+  ...ARR_SHARED_PLACEHOLDER_CLEANUP_KEYS,
 ]);
 
 function partitionLibraryPathFields(fields: SettingsField[]) {
@@ -345,6 +514,8 @@ function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
   if ("ARR_INSTANCES_JSON" in out && String(out.ARR_INSTANCES_JSON ?? "").trim() === "") {
     out.ARR_INSTANCES_JSON = "[]";
   }
+  out.PLACEHOLDER_STATUS_UPDATES = "ALL";
+  out.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
   return out;
 }
 
@@ -377,6 +548,7 @@ function SetupBootShell(props: {
   accentHex: string;
   appLabel: string;
   errorMessage?: string | null;
+  statusMessage?: string;
 }) {
   const err = props.errorMessage?.trim();
   return (
@@ -402,7 +574,7 @@ function SetupBootShell(props: {
             <span className="material-symbols-outlined animate-spin text-slate-500" style={{ fontSize: 16 }}>
               progress_activity
             </span>
-            <span className="animate-pulse">Preparing setup…</span>
+            <span className="animate-pulse">{props.statusMessage ?? "Preparing setup…"}</span>
           </div>
         )}
       </div>
@@ -510,9 +682,19 @@ export function App() {
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
   const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
-  const [activityTab, setActivityTab] = useState<"system" | "placeholders">("system");
-  const activityTabRef = useRef<"system" | "placeholders">(activityTab);
-  activityTabRef.current = activityTab;
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTaskRow[]>([]);
+  const [taskHistory, setTaskHistory] = useState<TaskRunRow[]>([]);
+  const refreshTaskHistory = useCallback(async () => {
+    try {
+      const hist = await getTasksHistory(50);
+      setTaskHistory(hist || []);
+    } catch {
+      /* Activity poll will retry. */
+    }
+  }, []);
+  const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
+  const [taskRunPending, setTaskRunPending] = useState(false);
+  const [taskRunError, setTaskRunError] = useState<string | null>(null);
 
   const [libraryShelfFilters, setLibraryShelfFilters] = useState<{ movies: LibraryShelfFilter; tv: LibraryShelfFilter }>(() => {
     const migrated = readLegacyLibraryFilterMigration();
@@ -549,13 +731,44 @@ export function App() {
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
-  const statusMessagesSaveRef = useRef<(() => Promise<void>) | null>(null);
+  const statusMessagesSaveRef = useRef<((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null>(null);
+  const [nfoBackfillScopeModal, setNfoBackfillScopeModal] = useState<null | {
+    placeholderCount: number;
+    pending: boolean;
+    title: string;
+    description: string;
+    resolve: (scope: NfoBackfillApplyScope) => void;
+    reject: (reason: unknown) => void;
+  }>(null);
 
   const [setupStatus, setSetupStatus] = useState<SettingsStatus | null>(null);
   const setupCompleteRef = useRef<boolean | undefined>(undefined);
   useEffect(() => {
     setupCompleteRef.current = setupStatus?.setup_complete;
   }, [setupStatus]);
+
+  /** Light status probe first — avoids routing to /setup and waiting on full settings before we know onboarding is done. */
+  useEffect(() => {
+    let cancelled = false;
+    void getSettingsStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setSetupStatus(status);
+        setOnboardingVisible(!status.setup_complete);
+        if (status.setup_complete) {
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setErrorMessage(err instanceof Error ? err.message : "Unable to reach the API");
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -574,6 +787,9 @@ export function App() {
   const libraryDigestRef = useRef<string>("");
 
   const currentTab = getTabFromPath(location.pathname);
+  const activitySubPage = getActivitySubPage(location.pathname);
+  const activitySubPageRef = useRef<ActivitySubPage>(activitySubPage);
+  activitySubPageRef.current = activitySubPage;
   const onboardingPreviewRoute = isActiveSetupPreviewRoute(location.pathname, location.search);
   const onboardingPreviewRouteRef = useRef(false);
   onboardingPreviewRouteRef.current = onboardingPreviewRoute;
@@ -593,9 +809,8 @@ export function App() {
   }, [settingsPayload]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
-  /** Until we know setup is complete, prefer `/setup` so `/` does not bounce through `/activity` (which runs heavy Activity fetches before we learn onboarding is incomplete). */
-  const defaultLandingPath =
-    setupStatus != null && setupStatus.setup_complete ? "/activity" : "/setup";
+  const homeRedirectPath =
+    setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
@@ -615,9 +830,53 @@ export function App() {
   );
   const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
   const hasUnsavedChangesRef = useRef(false);
-  const registerStatusMessagesSaveFlow = useCallback((fn: (() => Promise<void>) | null) => {
-    statusMessagesSaveRef.current = fn;
-  }, []);
+  useEffect(() => {
+    if (!combinedSettingsDirty) return;
+    if (settingsFeedbackKind !== "success") return;
+    setSettingsFeedback("");
+    setSettingsFeedbackKind("");
+  }, [combinedSettingsDirty, settingsFeedbackKind]);
+
+  useEffect(() => {
+    if (currentTab === "settings") return;
+    setSettingsFeedback("");
+    setSettingsFeedbackKind("");
+  }, [currentTab]);
+  const registerStatusMessagesSaveFlow = useCallback(
+    (fn: ((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null) => {
+      statusMessagesSaveRef.current = fn;
+    },
+    [],
+  );
+
+  const requestNfoBackfillApplyScopeChoice = useCallback(
+    (copy: { title: string; description: string }) =>
+      new Promise<NfoBackfillApplyScope | null>((resolve, reject) => {
+        void (async () => {
+          let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+          try {
+            data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+          } catch {
+            data = { placeholder_count: 0, pending_full_sync_backfill: false };
+          }
+          setNfoBackfillScopeModal({
+            placeholderCount: Number(data?.placeholder_count ?? 0),
+            pending: !!data?.pending_full_sync_backfill,
+            title: copy.title,
+            description: copy.description,
+            resolve: (scope) => {
+              setNfoBackfillScopeModal(null);
+              resolve(scope);
+            },
+            reject: (reason) => {
+              setNfoBackfillScopeModal(null);
+              reject(reason);
+            },
+          });
+        })();
+      }),
+    [],
+  );
   const handleStatusMessagesMetaChange = useCallback((meta: { dirty: boolean; hasValidationErrors: boolean }) => {
     setStatusMessagesMeta(meta);
   }, []);
@@ -718,6 +977,12 @@ export function App() {
                   setSetupStatus(status);
                 }
               }
+            } else if (setupCompleteRef.current === true) {
+              const status = await getSettingsStatus();
+              if (!stopped) {
+                setSetupStatus(status);
+                setOnboardingVisible(false);
+              }
             } else if (!settingsPayloadRef.current) {
               await loadSettings(stopped);
             } else {
@@ -758,17 +1023,27 @@ export function App() {
         if (!stopped) setDashboardRefreshing(true);
 
         if (currentTab === "activity") {
-          await loadStats(stopped, setStats);
-          if (activityTabRef.current === "system") {
-            const rows = await getActivity(100);
+          const sub = activitySubPageRef.current;
+          if (sub === "tasks") {
+            await loadStats(stopped, setStats);
+            const [sched, hist] = await Promise.all([getTasksScheduled(), getTasksHistory(50)]);
+            if (!stopped) {
+              setScheduledTasks(sched.tasks || []);
+              setTaskHistory(hist || []);
+            }
+          } else if (sub === "operations") {
+            const rows = await getActivityOperations(100);
             if (!stopped) setActivity(rows || []);
+          } else {
+            const placeholderRows = await getPlaceholderActivity(100);
+            if (!stopped) setPlaceholderActivity(placeholderRows || []);
           }
-          const placeholderRows = await getPlaceholderActivity(100);
-          if (!stopped) setPlaceholderActivity(placeholderRows || []);
         } else if (currentTab === "library") {
           const searchTrim = titleSearchRef.current.trim();
           const useSummary = searchTrim.length === 0;
-          const payload = await getLibrary(1000, { summary: useSummary });
+          const shelf = getLibraryListShelf(location.pathname);
+          const mediaType = shelf === "movies" ? "movie" : shelf === "tv" ? "series" : undefined;
+          const payload = await getLibrary(1000, { summary: useSummary, mediaType });
           const next = payload.items || [];
           const digest = digestLibraryItems(next);
           if (digest !== libraryDigestRef.current) {
@@ -844,23 +1119,6 @@ export function App() {
       window.clearTimeout(timeoutId);
     };
   }, [calendarMonth, currentTab, logLevel, location.pathname, location.search]);
-
-  /** When switching back to System Activity, refresh the feed (poll may have skipped it on Placeholder History). */
-  useEffect(() => {
-    if (currentTab !== "activity" || activityTab !== "system") return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const rows = await getActivity(100);
-        if (!cancelled) setActivity(rows || []);
-      } catch {
-        /* ignore — next poll will retry */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activityTab, currentTab]);
 
   /** When the user searches from the header, load full rows (overview) so overview matches work. */
   useEffect(() => {
@@ -1210,8 +1468,7 @@ export function App() {
     const payload = await getSettingsCurrent();
     setSettingsPayload(payload);
     setSetupStatus(payload.status);
-    const restartKeys = result.restart_required_keys || [];
-    setSettingsFeedback(restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved.");
+    setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
     setSettingsFeedbackKind("success");
   }
 
@@ -1343,9 +1600,74 @@ export function App() {
       }
     };
 
-    if (currentTab === "activity") return <ActivityPanel rows={activity} placeholderRows={placeholderActivity} activityTab={activityTab} onActivityTabChange={setActivityTab} stats={stats} brand={brand} themeMode={themeMode} onOpenLibraryFilter={openLibraryWithFilter} />;
+    if (currentTab === "activity") {
+      if (location.pathname === "/activity" || location.pathname === "/activity/") {
+        return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
+      }
+      if (activitySubPage === "tasks") {
+        return (
+          <TasksPanel
+            scheduled={scheduledTasks}
+            history={taskHistory}
+            stats={stats}
+            brand={brand}
+            themeMode={themeMode}
+            onOpenLibraryFilter={openLibraryWithFilter}
+            onRequestRun={(kind) => {
+              setTaskRunError(null);
+              setTaskRunModal(kind);
+            }}
+            onRequestRefresh={async (kind) => {
+              setTaskRunError(null);
+              setTaskRunPending(true);
+              try {
+                if (kind === "metadata") {
+                  await postTaskRun("placeholder_refresh", { metadata: true, art: false });
+                } else if (kind === "art") {
+                  await postTaskRun("placeholder_refresh", { metadata: false, art: true });
+                } else {
+                  await postTaskRun("placeholder_refresh", { metadata: true, art: true });
+                }
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start placeholder refresh");
+              } finally {
+                setTaskRunPending(false);
+              }
+            }}
+          />
+        );
+      }
+      if (activitySubPage === "operations") {
+        return (
+          <ActivityPanel
+            mode="operations"
+            rows={activity}
+            brand={brand}
+            themeMode={themeMode}
+          />
+        );
+      }
+      return (
+        <ActivityPanel
+          mode="placeholders"
+          placeholderRows={placeholderActivity}
+          brand={brand}
+          themeMode={themeMode}
+        />
+      );
+    }
 
     if (currentTab === "library") {
+      if (location.pathname === LIBRARY_CARD_PREVIEW_PATH) {
+        return (
+          <LibraryCardStylePreview
+            items={filteredLibrary}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+            onBack={() => navigate(LIBRARY_MOVIES_PATH)}
+          />
+        );
+      }
       const shelf = libraryListShelf;
       if (shelf === "movies" || shelf === "tv") {
         return (
@@ -1361,7 +1683,8 @@ export function App() {
               }
             }}
             onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-            brand={brand}
+            onOpenCardStylePreview={() => navigate(LIBRARY_CARD_PREVIEW_PATH)}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
             themeMode={themeMode}
           />
         );
@@ -1444,13 +1767,49 @@ export function App() {
               setSettingsFeedbackKind("error");
               return;
             }
-            let messageTemplatesSaved = false;
+            const statusKeysChanged =
+              hasUnsavedChanges && statusUpdateSettingsChanged(baselineValues, fieldValues);
+            const messagesDirty = statusMessagesMeta.dirty;
+            const needsBackfillPrompt = statusKeysChanged || messagesDirty;
+            let applyScope: NfoBackfillApplyScope | undefined;
             try {
-              /* Persist field-backed settings (incl. PLACEHOLDER_STATUS_PROJECTION_MODE) before saving templates +
-               * enqueueing nfo_refresh jobs. Otherwise workers can run with stale projection mode while message
-               * cache already has the new line.request — yielding summary-style titles and new plot brackets. */
+              if (needsBackfillPrompt) {
+                const modalCopy =
+                  statusKeysChanged && messagesDirty
+                    ? {
+                        title: "Apply changes to existing placeholders",
+                        description:
+                          "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
+                      }
+                    : statusKeysChanged
+                      ? {
+                          title: "Apply status & poster changes",
+                          description:
+                            "Choose when updates to placeholder status visibility, projection targets, or poster overlays should affect existing placeholders.",
+                        }
+                      : {
+                          title: "Apply template changes",
+                          description:
+                            "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.",
+                        };
+                const chosen = await requestNfoBackfillApplyScopeChoice(modalCopy);
+                if (chosen === null) {
+                  setSettingsFeedback("");
+                  setSettingsFeedbackKind("");
+                  return;
+                }
+                applyScope = chosen;
+              }
+
+              /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
-                const result = await saveSettings(buildPersistableSettingsValues(fieldValues, settingsPayload));
+                const settingsBackfillScope = statusKeysChanged ? applyScope : undefined;
+                const result = await saveSettings(
+                  buildPersistableSettingsValues(fieldValues, settingsPayload),
+                  false,
+                  undefined,
+                  settingsBackfillScope,
+                );
                 if (!result.ok) {
                   const first = Object.entries(result.errors || {})[0];
                   setSettingsFeedback(first ? `${first[0]}: ${first[1]}` : "Unable to save settings");
@@ -1458,58 +1817,44 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                const restartKeys = result.restart_required_keys || [];
-                const baseMsg =
-                  restartKeys.length ? `Saved. Restart recommended for: ${restartKeys.join(", ")}` : "Saved and applied.";
-                if (statusMessagesMeta.dirty && statusMessagesSaveRef.current) {
-                  try {
-                    await statusMessagesSaveRef.current();
-                    messageTemplatesSaved = true;
-                    setSettingsFeedback(`${baseMsg} Message templates saved.`);
-                  } catch (err: unknown) {
-                    const code =
-                      err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-                    if (code === "MESSAGES_SAVE_CANCELLED") {
-                      setSettingsFeedback("");
-                      setSettingsFeedbackKind("");
-                      return;
-                    }
-                    setSettingsFeedback(err instanceof Error ? err.message : "Message templates save failed");
-                    setSettingsFeedbackKind("error");
-                    return;
-                  }
+                const backfillQueuedNow =
+                  applyScope === "now" &&
+                  Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
+                const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
+                if (messagesDirty && statusMessagesSaveRef.current) {
+                  await statusMessagesSaveRef.current(applyScope);
+                  setSettingsFeedback(saveMsg);
                 } else {
-                  setSettingsFeedback(baseMsg);
+                  setSettingsFeedback(saveMsg);
                 }
                 setSettingsFeedbackKind("success");
+                if (backfillQueuedNow || applyScope === "now") {
+                  void refreshTaskHistory();
+                }
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
                 setOnboardingVisible(!payload.status.setup_complete);
-              } else if (statusMessagesMeta.dirty && statusMessagesSaveRef.current) {
-                try {
-                  await statusMessagesSaveRef.current();
-                  messageTemplatesSaved = true;
-                } catch (err: unknown) {
-                  const code =
-                    err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-                  if (code === "MESSAGES_SAVE_CANCELLED") {
-                    setSettingsFeedback("");
-                    setSettingsFeedbackKind("");
-                    return;
-                  }
-                  setSettingsFeedback(err instanceof Error ? err.message : "Message templates save failed");
-                  setSettingsFeedbackKind("error");
-                  return;
-                }
-                setSettingsFeedback("Message templates saved and applied.");
+              } else if (messagesDirty && statusMessagesSaveRef.current) {
+                await statusMessagesSaveRef.current(applyScope);
+                setSettingsFeedback("Saved");
                 setSettingsFeedbackKind("success");
+                if (applyScope === "now") {
+                  void refreshTaskHistory();
+                }
               } else {
                 setSettingsFeedback("");
                 setSettingsFeedbackKind("");
               }
-            } catch (e: unknown) {
-              setSettingsFeedback(e instanceof Error ? e.message : "Save failed");
+            } catch (err: unknown) {
+              const code =
+                err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
+              if (code === "MESSAGES_SAVE_CANCELLED") {
+                setSettingsFeedback("");
+                setSettingsFeedbackKind("");
+                return;
+              }
+              setSettingsFeedback(err instanceof Error ? err.message : "Save failed");
               setSettingsFeedbackKind("error");
             }
           }}
@@ -1542,9 +1887,10 @@ export function App() {
   if (setupRouteActive) {
     const setupShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
     if (setupStatus?.setup_complete && !onboardingPreviewRoute) {
-      return <Navigate to="/activity" replace />;
+      return <Navigate to={HOME_PATH} replace />;
     }
-    if (loading || !setupStatus || !settingsPayload) {
+    const needsSetupWizard = setupStatus != null && !setupStatus.setup_complete;
+    if (!setupStatus || (needsSetupWizard && (loading || !settingsPayload))) {
       return (
         <SetupBootShell
           setupShellClass={setupShellClass}
@@ -1553,6 +1899,7 @@ export function App() {
           accentHex={brandAccent.hex}
           appLabel={brandMeta.label}
           errorMessage={errorMessage}
+          statusMessage={setupStatus == null ? "Loading…" : "Preparing setup…"}
         />
       );
     }
@@ -1578,7 +1925,7 @@ export function App() {
                 return testIntegrationConnection({ service, url, credential });
               }
         }
-        onExitPreview={onboardingPreviewRoute ? () => navigate("/activity", { replace: true }) : undefined}
+        onExitPreview={onboardingPreviewRoute ? () => navigate(HOME_PATH, { replace: true }) : undefined}
         onSave={
           onboardingPreviewRoute
             ? undefined
@@ -1593,7 +1940,7 @@ export function App() {
                   return;
                 }
                 setBaselineValues(fieldValues);
-                setSettingsFeedback("Saved and applied.");
+                setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
                 setSettingsFeedbackKind("success");
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
@@ -1627,6 +1974,7 @@ export function App() {
     : `linear-gradient(to right, ${studioTopBarBlue} 0%, ${studioTopBarBlue} 52%, ${brandSemantic.topBarBand} 84%, ${brandSemantic.topBarBand} 100%)`;
 
   return (
+    <LibraryReconcileProvider>
       <div
         className={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} flex h-screen overflow-hidden font-brand-body ${isStudioGlass ? "text-slate-100" : "text-slate-900"}`}
         style={{
@@ -1638,7 +1986,7 @@ export function App() {
       >
         {/* Sidebar */}
         <aside
-          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-6 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
+          className={`hidden md:flex flex-col h-full w-64 z-20 flex-shrink-0 pb-0 pt-0 ${isStudioGlass ? "bg-white/8 backdrop-blur-2xl border-r" : "shadow-[12px_0_24px_rgba(40,42,48,0.10)]"}`}
           style={isStudioGlass ? { borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: brandSemantic.glassBorder } : { backgroundColor: studioLightChrome.sidebar, borderRightWidth: 1, borderRightStyle: "solid", borderRightColor: studioLightChrome.border }}
         >
           <div
@@ -1654,7 +2002,7 @@ export function App() {
           </div>
 
           {/* Nav */}
-          <nav className="flex-1 space-y-1 font-brand-label pt-4">
+          <nav className="flex-1 space-y-1 font-brand-label pt-4 pb-6">
             {(() => {
               const navActiveClass =
                 "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200 border-l-4";
@@ -1691,18 +2039,6 @@ export function App() {
 
               return (
                 <>
-                  {isActive("/activity") ? (
-                    <button type="button" onClick={() => tryNavigate("/activity")} className={navActiveClass} style={navActiveStyle}>
-                      <span className="material-symbols-outlined">analytics</span>
-                      <span>Activity</span>
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => tryNavigate("/activity")} className={navInactiveClass}>
-                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">analytics</span>
-                      <span>Activity</span>
-                    </button>
-                  )}
-
                   {librarySectionActive ? (
                     <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
                       <span className="material-symbols-outlined">movie_filter</span>
@@ -1736,6 +2072,44 @@ export function App() {
                         </span>
                         <span className="truncate">TV</span>
                       </button>
+                    </div>
+                  ) : null}
+
+                  {isActive("/activity") ? (
+                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass} style={navActiveStyle}>
+                      <span className="material-symbols-outlined">analytics</span>
+                      <span>Activity</span>
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navInactiveClass}>
+                      <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">analytics</span>
+                      <span>Activity</span>
+                    </button>
+                  )}
+                  {currentTab === "activity" ? (
+                    <div className="mt-1 space-y-0.5 pl-6 pr-3">
+                      {(
+                        [
+                          { label: "Placeholders", path: ACTIVITY_PLACEHOLDERS_PATH, icon: "history" },
+                          { label: "Tasks", path: ACTIVITY_TASKS_PATH, icon: "schedule" },
+                          { label: "Operations", path: ACTIVITY_OPERATIONS_PATH, icon: "bolt" },
+                        ] as const
+                      ).map(({ label, path, icon }) => {
+                        const isSubActive = location.pathname === path || location.pathname.startsWith(`${path}/`);
+                        return (
+                          <button
+                            key={path}
+                            type="button"
+                            onClick={() => tryNavigate(path)}
+                            className={subBase + (isSubActive ? subActiveClass : subInactiveClass)}
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                              {icon}
+                            </span>
+                            <span className="truncate">{label}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   ) : null}
 
@@ -1791,6 +2165,7 @@ export function App() {
             ) : null}
           </nav>
 
+          <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
         </aside>
 
         {/* Main area */}
@@ -2013,10 +2388,91 @@ export function App() {
         </div>
 
         <Routes>
-          <Route path="/" element={<Navigate to={defaultLandingPath} replace />} />
+          <Route
+            path="/"
+            element={
+              homeRedirectPath ? (
+                <Navigate to={homeRedirectPath} replace />
+              ) : (
+                <SetupBootShell
+                  setupShellClass={`brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`}
+                  surfaceStyle={setupLoadingShellStyle}
+                  brand={brand}
+                  accentHex={brandAccent.hex}
+                  appLabel={brandMeta.label}
+                  errorMessage={errorMessage}
+                  statusMessage="Loading…"
+                />
+              )
+            }
+          />
           <Route path="*" element={null} />
         </Routes>
+
+        <TaskRunConfirmModals
+          modal={taskRunModal}
+          pending={taskRunPending}
+          error={taskRunError}
+          brand={brand}
+          themeMode={themeMode}
+          onClose={() => {
+            if (!taskRunPending) setTaskRunModal(null);
+          }}
+          onConfirmFull={async () => {
+            setTaskRunPending(true);
+            setTaskRunError(null);
+            try {
+              await postTaskRun("full_sync");
+              setTaskRunModal(null);
+            } catch (e) {
+              setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
+            } finally {
+              setTaskRunPending(false);
+            }
+          }}
+          onConfirmLite={async () => {
+            setTaskRunPending(true);
+            setTaskRunError(null);
+            try {
+              await postTaskRun("lite_sync");
+              setTaskRunModal(null);
+            } catch (e) {
+              setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
+            } finally {
+              setTaskRunPending(false);
+            }
+          }}
+          onConfirmCalendarOnly={async () => {
+            setTaskRunPending(true);
+            setTaskRunError(null);
+            try {
+              await postTaskRun("calendar_only");
+              setTaskRunModal(null);
+            } catch (e) {
+              setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
+            } finally {
+              setTaskRunPending(false);
+            }
+          }}
+        />
+
+        {nfoBackfillScopeModal ? (
+          <NfoBackfillApplyScopeModal
+            placeholderCount={nfoBackfillScopeModal.placeholderCount}
+            alreadyPending={nfoBackfillScopeModal.pending}
+            saving={false}
+            title={nfoBackfillScopeModal.title}
+            description={nfoBackfillScopeModal.description}
+            onCancel={() => {
+              nfoBackfillScopeModal.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
+            }}
+            onConfirm={(scope) => nfoBackfillScopeModal.resolve(scope)}
+            brand={brand}
+            themeMode={themeMode}
+          />
+        ) : null}
       </div>
+    </LibraryReconcileProvider>
   );
 }
 
@@ -2077,20 +2533,17 @@ function StatCard(props: { title: string; value: number | undefined; sub: string
 }
 
 function ActivityPanel(props: {
-  rows: ActivityRow[];
+  mode: "operations" | "placeholders";
+  rows?: ActivityRow[];
   placeholderRows?: any[];
-  activityTab?: "system" | "placeholders";
-  onActivityTabChange?: (tab: "system" | "placeholders") => void;
-  stats: StatsResponse | null;
   brand: Brand;
   themeMode: ThemeMode;
-  onOpenLibraryFilter?: (f: LibraryFilter) => void;
 }) {
-  const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, accent);
   const isLight = props.themeMode === "light";
-  const tab = props.activityTab || "system";
+  const tab = props.mode === "placeholders" ? "placeholders" : "system";
+  const rows = props.rows || [];
   const panelShellStyle: React.CSSProperties | undefined = isLight
     ? {
         borderColor: semantic.glassBorder,
@@ -2104,9 +2557,10 @@ function ActivityPanel(props: {
   const rowKey = (row: ActivityRow, idx: number) => `${row.type}-${String((row as any).id ?? row.time ?? idx)}`;
 
   useEffect(() => {
+    if (props.mode !== "operations") return;
     setExpandedRows((prev) => {
       const next = { ...prev };
-      props.rows.forEach((row, idx) => {
+      rows.forEach((row, idx) => {
         const jt = String((row as any).job_type || "");
         if (jt !== "full_sync_progress" && jt !== "queue_monitor_batch") {
           return;
@@ -2121,32 +2575,34 @@ function ActivityPanel(props: {
       });
       return next;
     });
-  }, [props.rows]);
+  }, [props.mode, rows]);
 
-  // Check if there are any failures
-  const failedCount = props.rows.filter(r => r.status === "FAILED").length;
+  const failedCount = rows.filter(r => r.status === "FAILED").length;
   const hasFailures = failedCount > 0;
-
-  // For placeholder tab: count active vs deleted
   const createdCount = placeholderRows.filter(r => r.action === "Created").length;
   const deletedCount = placeholderRows.filter(r => r.action === "Deleted").length;
 
   return (
     <div>
-      {/* Status pill */}
+      {props.mode === "operations" ? (
       <div className="flex items-center gap-2 mb-4">
-        <div className={`w-2 h-2 rounded-full ${tab === "system" && hasFailures ? "bg-red-500" : "bg-green-500"}`} />
+        <div className={`w-2 h-2 rounded-full ${hasFailures ? "bg-red-500" : "bg-green-500"}`} />
         <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
-          {tab === "system"
-            ? hasFailures
-              ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
-              : "System Online"
-            : `${createdCount} Created • ${deletedCount} Deleted`}
+          {hasFailures
+            ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
+            : "System Online"}
         </span>
       </div>
+      ) : (
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-2 h-2 rounded-full bg-green-500" />
+        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
+          {`${createdCount} Created • ${deletedCount} Deleted`}
+        </span>
+      </div>
+      )}
 
-      {/* Alert banner if there are system failures */}
-      {tab === "system" && hasFailures && (
+      {props.mode === "operations" && hasFailures && (
         <div className="mb-6 p-4 rounded-lg border border-red-600/40 bg-red-900/20">
           <div className="flex items-start gap-3">
             <span className="material-symbols-outlined text-red-400 flex-shrink-0" style={{ fontSize: 20 }}>error</span>
@@ -2158,73 +2614,7 @@ function ActivityPanel(props: {
         </div>
       )}
 
-      {/* Top stat cards (shown on both system and placeholder tabs) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
-        <StatCard
-          accent={accent}
-          themeMode={props.themeMode}
-          title="Movies"
-          value={s?.movies.total}
-          sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
-          onClick={() => props.onOpenLibraryFilter?.("movie")}
-        />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
-      </div>
-
-      {/* Tab buttons */}
-      <div
-        className={`flex gap-2 mb-6 border-b pb-4 ${isLight ? "" : "border-[#424753]/30"}`}
-        style={isLight ? { borderBottomColor: semantic.borderSubtle } : undefined}
-      >
-        <button
-          type="button"
-          onClick={() => props.onActivityTabChange?.("system")}
-          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-[14px] font-headline uppercase tracking-wider transition-colors ${
-            tab === "system"
-              ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
-              : isLight
-                ? "text-slate-500 hover:text-slate-800"
-                : "text-slate-400 hover:text-slate-200"
-          }`}
-          style={
-            tab === "system"
-              ? {
-                  borderBottomColor: semantic.accent3,
-                  backgroundColor: alphaColor(semantic.accent2, isLight ? 0.12 : 0.16),
-                }
-              : undefined
-          }
-        >
-          System Activity
-        </button>
-        <button
-          type="button"
-          onClick={() => props.onActivityTabChange?.("placeholders")}
-          className={`px-4 py-2 rounded-tl-lg rounded-tr-lg text-[14px] font-headline uppercase tracking-wider transition-colors ${
-            tab === "placeholders"
-              ? `${isLight ? "text-slate-900" : "text-white"} font-bold border-b-2`
-              : isLight
-                ? "text-slate-500 hover:text-slate-800"
-                : "text-slate-400 hover:text-slate-200"
-          }`}
-          style={
-            tab === "placeholders"
-              ? {
-                  borderBottomColor: semantic.accent3,
-                  backgroundColor: alphaColor(semantic.accent2, isLight ? 0.12 : 0.16),
-                }
-              : undefined
-          }
-        >
-          Placeholder History
-        </button>
-      </div>
-
-      {/* System Activity table */}
-      {tab === "system" && (
+      {props.mode === "operations" && (
         <div
           className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
           style={panelShellStyle}
@@ -2232,10 +2622,10 @@ function ActivityPanel(props: {
           <div className="flex justify-between items-start px-4 py-3 border-b border-[#424753]/30">
             <div>
               <h2 className="text-[20px] font-bold text-white font-headline">Recent Operations</h2>
-              <p className="text-[13px] text-slate-400 mt-0.5">{props.rows.length} recent operations</p>
+              <p className="text-[13px] text-slate-400 mt-0.5">{rows.length} recent operations</p>
             </div>
           </div>
-          {!props.rows.length ? (
+          {!rows.length ? (
             <div className="p-10 text-center text-slate-500 text-[16px]">No recent activity.</div>
           ) : (
             <>
@@ -2259,7 +2649,7 @@ function ActivityPanel(props: {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#424753]/15">
-                  {props.rows.map((row, idx) => {
+                  {rows.map((row, idx) => {
                     const displayName = (row as any).display_name || row.event_type || row.job_type || "--";
                     const detailLine = (row as any).details || "";
                     const status = String(row.status || "").toLowerCase();
@@ -2452,15 +2842,14 @@ function ActivityPanel(props: {
               </table>
               </div>
               <div className="px-4 py-2 border-t border-[#424753]/20 text-[12px] text-slate-500 font-headline uppercase tracking-widest">
-                Showing {props.rows.length} items
+                Showing {rows.length} items
               </div>
             </>
           )}
         </div>
       )}
 
-      {/* Placeholder history table */}
-      {tab === "placeholders" && (
+      {props.mode === "placeholders" && (
         <div
           className={`rounded-xl overflow-hidden mb-6 border ${isLight ? "border-slate-200/90" : "border-[#424753]/40 bg-[#171c22]"}`}
           style={{
@@ -2681,32 +3070,408 @@ function ActivityPanel(props: {
         </div>
       )}
 
-      {/* Storage Progress (system tab only) */}
-      {tab === "system" && (
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
-          <div className="mb-4">
-            <span className="font-headline text-[14px] font-bold text-white uppercase tracking-widest">Storage Progress</span>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <div className="flex justify-between text-[12px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
-                <span>Movies on Disk</span><span>{s?.movies.downloaded ?? "--"} / {s?.movies.total ?? "--"}</span>
-              </div>
-              <div className="h-1.5 bg-[#252e3a] rounded-full">
-                <div className="h-full rounded-full" style={{ backgroundColor: accent.hex, width: s ? `${Math.min(100, (s.movies.downloaded / Math.max(s.movies.total, 1)) * 100).toFixed(0)}%` : "0%" }} />
-              </div>
+    </div>
+  );
+}
+
+function taskProgressStatusTokenClass(token: string): string {
+  const normalized = String(token || "").toLowerCase();
+  if (normalized === "done") return "text-green-300 bg-green-700/20 border-green-500/30";
+  if (normalized === "failed") return "text-red-300 bg-red-700/20 border-red-500/30";
+  if (normalized === "working") return "text-sky-300 bg-sky-700/20 border-sky-500/30";
+  if (normalized === "skipped") return "text-amber-300 bg-amber-700/20 border-amber-500/30";
+  return "text-slate-300 bg-slate-700/20 border-slate-500/30";
+}
+
+function taskRunProgressSections(progress: ActivityRow["progress"] | undefined): Array<any> {
+  if (!progress) return [];
+  const inner = (progress as any).progress;
+  if (inner && Array.isArray(inner.sections)) return inner.sections;
+  if (Array.isArray((progress as any).sections)) return (progress as any).sections;
+  return [];
+}
+
+function TaskSyncProgressSections(props: { progress: ActivityRow["progress"] }) {
+  const sections = taskRunProgressSections(props.progress);
+  if (!sections.length) return null;
+  return (
+    <div className="mt-2 mx-auto w-full max-w-[1100px] space-y-2">
+      {sections.map((section: any, sidx: number) => {
+        const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
+        const sectionStatus = String(section?.status || "pending").toLowerCase();
+        const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped" || sectionStatus === "working";
+        const phaseDur = section?.duration_seconds;
+        const timing =
+          section?.started_at || section?.ended_at || phaseDur != null
+            ? `${section?.started_at ? new Date(section.started_at).toLocaleTimeString() : "--"} → ${section?.ended_at ? new Date(section.ended_at).toLocaleTimeString() : sectionStatus === "working" ? "…" : "--"}${phaseDur != null ? ` (${formatTaskDuration(Number(phaseDur))})` : ""}`
+            : null;
+        return (
+          <div key={`task-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-3">
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[12px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
+              <span className={`rounded border px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider ${taskProgressStatusTokenClass(sectionStatus)}`}>
+                {String(section?.status || "pending")}
+              </span>
             </div>
-            <div>
-              <div className="flex justify-between text-[12px] text-slate-400 mb-1.5 font-headline uppercase tracking-widest">
-                <span>Episodes on Disk</span><span>{s?.episodes.downloaded ?? "--"} / {s?.episodes.total ?? "--"}</span>
-              </div>
-              <div className="h-1.5 bg-[#252e3a] rounded-full">
-                <div className="h-full rounded-full" style={{ backgroundColor: accent.hex, width: s ? `${Math.min(100, (s.episodes.downloaded / Math.max(s.episodes.total, 1)) * 100).toFixed(0)}%` : "0%" }} />
-              </div>
+            {timing ? <p className="text-[11px] text-slate-500 font-mono mb-2">{timing}</p> : null}
+            <div className="space-y-0.5 text-[13px] text-slate-400">
+              {showMetrics && metrics.length > 0 ? (
+                metrics.map((metric: any, midx: number) => (
+                  <div key={`task-metric-${sidx}-${midx}`} className="flex justify-between gap-2">
+                    <span>{String(metric?.label || "Metric")}</span>
+                    <span className="text-slate-200 text-right">{String(metric?.value ?? "--")}</span>
+                  </div>
+                ))
+              ) : sectionStatus === "working" ? (
+                <div className="text-sky-300/80">Running...</div>
+              ) : sectionStatus === "pending" ? (
+                <div className="text-slate-500">Waiting to start...</div>
+              ) : null}
             </div>
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatTaskDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "--";
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function formatTaskTrigger(trigger: string | null | undefined): string {
+  const normalized = String(trigger || "").trim().toLowerCase();
+  if (normalized === "settings_change") return "Settings Change";
+  if (!normalized) return "--";
+  return normalized.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function TasksPanel(props: {
+  scheduled: ScheduledTaskRow[];
+  history: TaskRunRow[];
+  stats: StatsResponse | null;
+  brand: Brand;
+  themeMode: ThemeMode;
+  onOpenLibraryFilter?: (f: LibraryFilter) => void;
+  onRequestRun: (kind: "full" | "lite") => void;
+  onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
+}) {
+  const s = props.stats;
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  const isLight = props.themeMode === "light";
+  const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setHistoryExpanded((prev) => {
+      const next = { ...prev };
+      for (const run of props.history) {
+        const key = `task-run-${run.id}`;
+        const hasProgress = taskRunProgressSections(run.progress).length > 0;
+        if (!hasProgress) continue;
+        if (String(run.status).toUpperCase() === "WORKING" && next[key] === undefined) {
+          next[key] = true;
+        }
+      }
+      return next;
+    });
+  }, [props.history]);
+
+  const statusClass = (status: string | null | undefined) => {
+    const t = String(status || "").toUpperCase();
+    if (t === "DONE") return "text-green-400";
+    if (t === "FAILED") return "text-red-400";
+    if (t === "SKIPPED") return "text-amber-400";
+    if (t === "WORKING") return "text-sky-400";
+    return "text-slate-400";
+  };
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+        <StatCard
+          accent={accent}
+          themeMode={props.themeMode}
+          title="Movies"
+          value={s?.movies.total}
+          sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
+          onClick={() => props.onOpenLibraryFilter?.("movie")}
+        />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
+        <StatCard accent={accent} themeMode={props.themeMode} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
+      </div>
+
+      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+        <div className="px-4 py-3 border-b border-[#424753]/30">
+          <h2 className="text-[20px] font-bold text-white font-headline">Scheduled</h2>
+          <p className="text-[13px] text-slate-400 mt-0.5">Recurring library maintenance</p>
         </div>
-      )}
+        <div className="px-4 py-3 border-b border-[#424753]/20 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("metadata")}
+            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh metadata
+          </button>
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("art")}
+            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
+          >
+            Refresh art
+          </button>
+          <button
+            type="button"
+            onClick={() => props.onRequestRefresh("both")}
+            className="px-3 py-1.5 rounded-lg text-[12px] uppercase tracking-wider text-white"
+            style={{ backgroundColor: accent.hex }}
+          >
+            Refresh all placeholders
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-[640px] w-full">
+            <thead>
+              <tr className="border-b border-[#424753]/20">
+                {["Name", "Interval", "Last execution", "Last duration", "Next execution", ""].map((h) => (
+                  <th key={h} className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#424753]/15">
+              {props.scheduled.map((task) => (
+                <tr key={task.task_key} className="hover:bg-[#1e2430]/40">
+                  <td className="px-3 py-3 text-[15px] text-slate-200 font-medium">
+                    {task.label}
+                    {task.task_key === "lite_sync" ? (
+                      <p className="text-[12px] text-slate-500 font-normal mt-0.5 max-w-md">
+                        Catalog diff plus calendar date refresh and Coming Soon status updates.
+                      </p>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400">{task.interval_label}</td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400 whitespace-nowrap">
+                    {task.last_run ? timeAgo(task.last_run) : "--"}
+                    {task.last_status ? (
+                      <span className={`ml-2 text-[11px] uppercase ${statusClass(task.last_status)}`}>{task.last_status}</span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400 font-mono">{formatTaskDuration(task.last_duration_seconds)}</td>
+                  <td className="px-3 py-3 text-[14px] text-slate-400 whitespace-nowrap">
+                    {task.running ? <span className="text-sky-400">Running now</span> : task.next_run ? timeUntil(task.next_run) : task.enabled ? "--" : "Disabled"}
+                  </td>
+                  <td className="px-3 py-3 text-right">
+                    <button
+                      type="button"
+                      disabled={!task.enabled || task.running}
+                      onClick={() => props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite")}
+                      className="inline-flex items-center justify-center w-9 h-9 rounded-lg border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Run now"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 18 }}>refresh</span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
+        <div className="px-4 py-3 border-b border-[#424753]/30">
+          <h2 className="text-[20px] font-bold text-white font-headline">Queue</h2>
+          <p className="text-[13px] text-slate-400 mt-0.5">
+            Recent task runs (scheduled, manual, and startup). Expand a row for phase details. Manual runs reset the next scheduled time.
+          </p>
+        </div>
+        {!props.history.length ? (
+          <div className="p-10 text-center text-slate-500">No task history yet.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-[640px] w-full">
+              <thead>
+                <tr className="border-b border-[#424753]/20">
+                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status"].map((h) => (
+                    <th key={h} className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#424753]/15">
+                {props.history.map((run) => {
+                  const rowKey = `task-run-${run.id}`;
+                  const hasProgress = taskRunProgressSections(run.progress).length > 0;
+                  const isExpanded = !!historyExpanded[rowKey];
+                  const wallDur = run.wall_clock_duration_seconds;
+                  const showWallDur = wallDur != null && wallDur > (run.duration_seconds ?? 0) + 30;
+                  return (
+                    <Fragment key={run.id}>
+                      <tr className="hover:bg-[#1e2430]/40">
+                        <td className="px-3 py-2 text-[14px] text-slate-200">
+                          <div className="flex items-start gap-2">
+                            {hasProgress ? (
+                              <button
+                                type="button"
+                                onClick={() => setHistoryExpanded((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))}
+                                className="mt-0.5 text-slate-400 hover:text-slate-200"
+                                aria-label={isExpanded ? "Collapse details" : "Expand details"}
+                              >
+                                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                                  {isExpanded ? "expand_less" : "expand_more"}
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="w-4" />
+                            )}
+                            <span>{run.task_label}</span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400">{formatTaskTrigger(run.trigger)}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{timeAgo(run.started_at)}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{run.ended_at ? timeAgo(run.ended_at) : "--"}</td>
+                        <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">
+                          {String(run.status).toUpperCase() === "WORKING" && run.started_at
+                            ? formatTaskDuration(
+                                Math.max(0, (Date.now() - new Date(run.started_at).getTime()) / 1000),
+                              )
+                            : formatTaskDuration(showWallDur ? wallDur : run.duration_seconds)}
+                          {showWallDur && String(run.status).toUpperCase() !== "WORKING" ? (
+                            <span className="block text-[11px] text-slate-500 font-sans" title="Older run: sync and art were tracked separately">
+                              (includes art)
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className={`text-[12px] font-headline uppercase tracking-wider ${statusClass(run.status)}`}>
+                            {run.status}
+                          </span>
+                          {run.details ? (
+                            <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">{run.details}</p>
+                          ) : null}
+                          {run.skip_reason ? (
+                            <p className="text-[11px] text-slate-500 mt-0.5">{run.skip_reason}</p>
+                          ) : null}
+                          {run.error_message ? (
+                            <p className="text-[11px] text-red-300/80 mt-0.5">{run.error_message}</p>
+                          ) : null}
+                        </td>
+                      </tr>
+                      {hasProgress && isExpanded ? (
+                        <tr className="bg-[#1a2028]/60">
+                          <td colSpan={6} className="px-4 py-3">
+                            <TaskSyncProgressSections progress={run.progress} />
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TaskRunConfirmModals(props: {
+  modal: null | "full" | "lite";
+  pending: boolean;
+  error: string | null;
+  brand: Brand;
+  themeMode: ThemeMode;
+  onClose: () => void;
+  onConfirmFull: () => void;
+  onConfirmLite: () => void;
+  onConfirmCalendarOnly: () => void;
+}) {
+  if (!props.modal) return null;
+  const accent = getBrandAccent(props.brand, props.themeMode);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !props.pending) props.onClose();
+      }}
+    >
+      <div className={`w-full max-w-xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] flex flex-col overflow-hidden`}>
+        <div className="px-5 py-4 border-b border-[#424753]/30">
+          <h3 className="text-[18px] font-bold text-white font-headline">
+            {props.modal === "full" ? "Run full ARR sync now?" : "Run maintenance sync"}
+          </h3>
+          {props.modal === "full" ? (
+            <p className="ui-field-description mt-2 leading-relaxed">
+              Full sync pulls complete Radarr and Sonarr catalogs into Placeholdarr, then runs filesystem scan,
+              placeholder reconciliation, determination, materialization, and calendar status updates. Large libraries
+              can take a long time and use significant CPU, disk I/O, and ARR API quota.
+            </p>
+          ) : (
+            <p className="ui-field-description mt-2 leading-relaxed">
+              <strong className="text-slate-200">Lite sync</strong> checks ARR for catalog changes (targeted sync only),
+              then runs calendar date refresh and Coming Soon status updates. Scheduled lite sync always includes both.
+              <br />
+              <br />
+              <strong className="text-slate-200">Calendar only</strong> refreshes release dates from ARR calendar APIs and
+              updates placeholder statuses—no full catalog pull.
+            </p>
+          )}
+          {props.error ? <p className="text-[13px] text-red-400 mt-2">{props.error}</p> : null}
+        </div>
+        <div className="px-5 py-4 flex flex-wrap justify-end gap-3 border-t border-[#424753]/30">
+          <button
+            type="button"
+            disabled={props.pending}
+            onClick={props.onClose}
+            className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          {props.modal === "full" ? (
+            <button
+              type="button"
+              disabled={props.pending}
+              onClick={props.onConfirmFull}
+              className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+              style={{ backgroundColor: accent.hex }}
+            >
+              {props.pending ? "Starting…" : "Run full sync"}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={props.pending}
+                onClick={props.onConfirmCalendarOnly}
+                className="px-4 py-2 rounded-lg border border-[#424753]/50 text-[14px] font-headline uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
+              >
+                Calendar only
+              </button>
+              <button
+                type="button"
+                disabled={props.pending}
+                onClick={props.onConfirmLite}
+                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+                style={{ backgroundColor: accent.hex }}
+              >
+                {props.pending ? "Starting…" : "Run lite sync"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2717,10 +3482,17 @@ function LibraryPanel(props: {
   activeFilter: LibraryShelfFilter;
   onFilterChange: (value: LibraryShelfFilter) => void;
   onOpenDetail: (item: LibraryItem) => void;
-  brand: Brand; themeMode: ThemeMode;
+  onOpenCardStylePreview: () => void;
+  accent: { hex: string; icon: string };
+  themeMode: ThemeMode;
 }) {
-  const accent = getBrandAccent(props.brand, props.themeMode);
+  const accent = props.accent;
   const isLight = props.themeMode === "light";
+  const [cardSettings, setCardSettings] = useState(readLibraryCardSettings);
+  const handleCardSettings = useCallback((next: ReturnType<typeof readLibraryCardSettings>) => {
+    setCardSettings(next);
+    writeLibraryCardSettings(next);
+  }, []);
   const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
     { id: "all", label: "All" },
     { id: "placeholders", label: "Placeholders" },
@@ -2744,58 +3516,10 @@ function LibraryPanel(props: {
     return { groups, letters };
   }, [props.items]);
 
-  function statusBadge(item: LibraryItem) {
-    if (item.has_missing) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-red-50 text-red-800 border-red-200" : "bg-red-600 text-white border-transparent"
-          }`}
-        >
-          Missing
-        </span>
-      );
-    }
-    if (item.has_placeholder) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-teal-50 text-teal-900 border-teal-200" : "bg-teal-700 text-white border-transparent"
-          }`}
-        >
-          Placeholder
-        </span>
-      );
-    }
-    if (item.is_future) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-600 text-white border-transparent"
-          }`}
-        >
-          Future
-        </span>
-      );
-    }
-    if (item.has_file) {
-      return (
-        <span
-          className={`px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider border ${
-            isLight ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-slate-500 text-white border-transparent"
-          }`}
-        >
-          1080p
-        </span>
-      );
-    }
-    return null;
-  }
-
   return (
     <div>
       {/* Header + filter tabs */}
-      <div className="flex flex-wrap justify-between items-end gap-4 mb-6">
+      <div className="flex flex-wrap justify-between items-end gap-4 mb-4">
         <div>
           <h2 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
           <p className={`text-[16px] mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
@@ -2821,20 +3545,28 @@ function LibraryPanel(props: {
           ))}
         </div>
       </div>
+      <div className="mb-6">
+        <LibraryCardControls
+          settings={cardSettings}
+          onChange={handleCardSettings}
+          accent={accent}
+          themeMode={props.themeMode}
+          onOpenPreview={props.onOpenCardStylePreview}
+        />
+      </div>
 
       {/* Poster grid with alphabet sections */}
       {props.items.length === 0 ? (
         <div className={`text-center py-16 ${isLight ? "text-slate-600" : "text-slate-500"}`}>No library items match the current filter.</div>
       ) : (
         <div className="flex items-start gap-4 mb-8">
-          <div className="flex-1 space-y-8">
+          <div className="flex-1 space-y-8 overflow-visible">
             {groupedItems.letters.map((letter) => (
               <div
                 key={letter}
                 ref={(el) => {
                   sectionRefs.current[letter] = el;
                 }}
-                style={{ contentVisibility: "auto", containIntrinsicSize: "1px 720px" }}
               >
                 <div
                   className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
@@ -2843,44 +3575,40 @@ function LibraryPanel(props: {
                 >
                   {letter}
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                  {(groupedItems.groups[letter] || []).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => props.onOpenDetail(item)}
-                      className={`relative isolate rounded-xl overflow-hidden group cursor-pointer text-left transition-transform hover:scale-[1.02] ${
-                        isLight ? "bg-white shadow-md shadow-slate-900/8" : "bg-[#1e2430]"
-                      }`}
-                      style={{
-                        aspectRatio: "2/3",
-                        border: `2px solid ${accent.hex}`,
-                      }}
-                    >
-                      {item.poster_url ? (
-                        <img
-                          src={item.poster_url}
-                          alt=""
-                          className="absolute inset-0 h-full w-full object-cover scale-[1.01]"
-                        />
-                      ) : null}
-                      <div
-                        className={`absolute pointer-events-none bottom-0 left-0 right-0 ${isLight ? "h-[48%]" : "h-[34%]"}`}
-                        style={{
-                          background: isLight
-                            ? "linear-gradient(180deg, rgba(238,243,248,0) 0%, rgba(238,243,248,0.42) 38%, rgba(238,243,248,0.88) 68%, rgba(238,243,248,1) 88%, rgba(238,243,248,1) 100%)"
-                            : "linear-gradient(180deg, rgba(15,20,25,0) 0%, rgba(15,20,25,0.62) 58%, rgba(15,20,25,0.95) 100%)",
-                        }}
+                <div className="overflow-visible">
+                {cardSettings.viewMode === "list" ? (
+                  <div style={libraryListStyle()}>
+                    {(groupedItems.groups[letter] || []).map((item) => (
+                      <LibraryListRow
+                        key={item.id}
+                        item={item}
+                        posterWidthPx={cardSettings.posterWidthPx}
+                        accent={accent}
+                        themeMode={props.themeMode}
+                        onClick={() => props.onOpenDetail(item)}
                       />
-                      <div className="absolute top-2 left-2">{statusBadge(item)}</div>
-                      <div className={`absolute bottom-0 left-0 right-0 flex flex-col gap-1 px-3 ${isLight ? "pb-3 pt-12" : "pb-3 pt-8"}`}>
-                        <div className="text-[14px] font-semibold tabular-nums truncate" style={{ color: accent.icon }}>
-                          {item.year || "—"}
-                        </div>
-                        <div className={`font-bold text-[16px] leading-snug line-clamp-2 ${isLight ? "text-slate-900" : "text-white"}`}>{item.title}</div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={libraryPosterGridStyle(cardSettings.posterWidthPx)}>
+                    {(groupedItems.groups[letter] || []).map((item) => (
+                      <div
+                        key={item.id}
+                        className={libraryPosterGridItemClassName}
+                        style={libraryPosterGridItemStyle()}
+                      >
+                        <LibraryGridCard
+                          item={item}
+                          variant={cardSettings.variant}
+                          posterWidthPx={cardSettings.posterWidthPx}
+                          accent={accent}
+                          themeMode={props.themeMode}
+                          onClick={() => props.onOpenDetail(item)}
+                        />
                       </div>
-                    </button>
-                  ))}
+                    ))}
+                  </div>
+                )}
                 </div>
               </div>
             ))}
@@ -2959,6 +3687,193 @@ function LibraryPanel(props: {
   );
 }
 
+type LibraryReconcileSidebarStatus = {
+  message: string | null;
+  kind: "info" | "success" | "error";
+  busy: boolean;
+};
+
+type LibraryReconcileContextValue = {
+  status: LibraryReconcileSidebarStatus;
+  runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
+};
+
+const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
+
+function useLibraryReconcile(): LibraryReconcileContextValue {
+  const ctx = useContext(LibraryReconcileContext);
+  if (!ctx) {
+    throw new Error("useLibraryReconcile must be used within LibraryReconcileProvider");
+  }
+  return ctx;
+}
+
+function LibraryReconcileProvider(props: { children: ReactNode }) {
+  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>({
+    message: null,
+    kind: "info",
+    busy: false,
+  });
+  const [pollingJobId, setPollingJobId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (status.kind !== "success" || !status.message) return;
+    const clearTimer = window.setTimeout(() => {
+      setStatus({ message: null, kind: "info", busy: false });
+    }, 3000);
+    return () => window.clearTimeout(clearTimer);
+  }, [status.kind, status.message]);
+
+  useEffect(() => {
+    if (pollingJobId == null) return;
+
+    let stopped = false;
+
+    const poll = async () => {
+      try {
+        const jobStatus = await getEntityReconcileStatus(pollingJobId);
+        if (stopped) return;
+
+        if (jobStatus.status === "failed") {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "error",
+            message: jobStatus.error_message || "Refresh failed",
+          });
+          return;
+        }
+
+        if (jobStatus.status === "done") {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "success",
+            message: "Refresh complete",
+          });
+          return;
+        }
+
+        setStatus({
+          busy: true,
+          kind: "info",
+          message: jobStatus.step_label || "Working…",
+        });
+      } catch (e) {
+        if (!stopped) {
+          setPollingJobId(null);
+          setStatus({
+            busy: false,
+            kind: "error",
+            message: e instanceof Error ? e.message : "Could not load refresh status",
+          });
+        }
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 1500);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, [pollingJobId]);
+
+  const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
+    setPollingJobId(null);
+    setStatus({ busy: true, kind: "info", message: "Refresh queued…" });
+    try {
+      const out = await startReconcile();
+      if (!out.ok || out.job_id == null) {
+        throw new Error(out.message || "Failed to start refresh");
+      }
+      setStatus({
+        busy: true,
+        kind: "info",
+        message: out.step_label || "Refresh queued…",
+      });
+      setPollingJobId(out.job_id);
+    } catch (e) {
+      setStatus({
+        busy: false,
+        kind: "error",
+        message: e instanceof Error ? e.message : "Failed to start refresh",
+      });
+    }
+  }, []);
+
+  const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
+
+  return (
+    <LibraryReconcileContext.Provider value={value}>
+      {props.children}
+    </LibraryReconcileContext.Provider>
+  );
+}
+
+function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
+  const ctx = useContext(LibraryReconcileContext);
+  const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
+  if (!message && !busy) return null;
+
+  const textClass =
+    kind === "error"
+      ? "text-red-400"
+      : kind === "success"
+        ? "text-emerald-400"
+        : props.isStudioGlass
+          ? "text-slate-400"
+          : "text-slate-600";
+
+  return (
+    <div
+      className={`mt-auto w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
+      aria-live="polite"
+    >
+      <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
+        {busy ? (
+          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
+            progress_activity
+          </span>
+        ) : kind === "success" ? (
+          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+            check_circle
+          </span>
+        ) : kind === "error" ? (
+          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
+            error
+          </span>
+        ) : null}
+        <span className="line-clamp-3">{message || "Working…"}</span>
+      </div>
+    </div>
+  );
+}
+
+function LibraryReconcileControl(props: {
+  label: string;
+  startReconcile: () => Promise<EntityReconcileStartResponse>;
+  buttonClassName?: string;
+}) {
+  const { status, runReconcile } = useLibraryReconcile();
+
+  return (
+    <button
+      type="button"
+      disabled={status.busy}
+      onClick={() => {
+        void runReconcile(props.startReconcile);
+      }}
+      className={
+        props.buttonClassName
+          ?? "px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
+      }
+    >
+      {props.label}
+    </button>
+  );
+}
+
 function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollContainerRef: React.RefObject<HTMLElement | null> }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -2968,7 +3883,6 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
   const [openSeasons, setOpenSeasons] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
   const pathParts = location.pathname.split("/");
   const entityType = pathParts[2] || "";
   const itemId = pathParts[3] || "";
@@ -3073,6 +3987,14 @@ function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollCont
           openSeasons={openSeasons}
           onToggleSeason={(seasonId) => setOpenSeasons((prev) => (prev.includes(seasonId) ? prev.filter((id) => id !== seasonId) : [...prev, seasonId]))}
         />
+      ) : null}
+      {!loading && !error && payload?.type === "movie" ? (
+        <div className="px-6 md:px-10 pb-6">
+          <LibraryReconcileControl
+            label="Refresh placeholder"
+            startReconcile={() => refreshMoviePlaceholder(payload.id)}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -3385,7 +4307,13 @@ function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeM
   );
 }
 
-function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; themeMode: ThemeMode; openSeasons: number[]; onToggleSeason: (seasonId: number) => void }) {
+function SeriesDetail(props: {
+  payload: SeriesDetailResponse;
+  brand: Brand;
+  themeMode: ThemeMode;
+  openSeasons: number[];
+  onToggleSeason: (seasonId: number) => void;
+}) {
   const payload = props.payload;
   const accent = getBrandAccent(props.brand, props.themeMode);
   const isLight = props.themeMode === "light";
@@ -3436,6 +4364,12 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
           accentHex={accent.hex}
           sonarrIconSrc={sonarrIcon}
         />
+        <div className="mb-6">
+          <LibraryReconcileControl
+            label="Refresh series placeholders"
+            startReconcile={() => refreshSeriesPlaceholder(payload.id)}
+          />
+        </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
           {[
@@ -3490,6 +4424,11 @@ function SeriesDetail(props: { payload: SeriesDetailResponse; brand: Brand; them
                               : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
                           }
                         </div>
+                        <LibraryReconcileControl
+                          label="Refresh"
+                          startReconcile={() => refreshEpisodePlaceholder(ep.id)}
+                          buttonClassName="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                        />
                       </div>
                     ))}
                   </div>
@@ -4549,6 +5488,110 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
 
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
 const PLAYBACK_MODE_VALUES = new Set(["match", "primary", "secondary", "both"]);
+const SHARED_PLACEHOLDER_CLEANUP_VALUES = new Set(["protect_siblings", "any_instance_has_file"]);
+
+const SHARED_PLACEHOLDER_CLEANUP_HELP_RADARR: Record<string, string> = {
+  protect_siblings:
+    "When two Radarr instances share the same movie folder, placeholder files stay until no configured instance still needs them—even if the other Radarr already imported a real file.",
+  any_instance_has_file:
+    "Once any Radarr instance has a real file for this movie, other instances will not recreate placeholders on sync, and stale placeholder files are removed from disk.",
+};
+
+const SHARED_PLACEHOLDER_CLEANUP_HELP_SONARR: Record<string, string> = {
+  protect_siblings:
+    "When two Sonarr instances share the same series folder, placeholder files stay until no configured instance still needs them—even if the other Sonarr already imported real episodes.",
+  any_instance_has_file:
+    "Once any Sonarr instance has a real file for this episode, other instances will not recreate placeholders on sync, and stale placeholder files are removed from disk.",
+};
+
+function sharedPlaceholderCleanupMode(values: FieldValueMap, key: string): string {
+  const raw = String(values[key] ?? "protect_siblings").trim().toLowerCase();
+  return SHARED_PLACEHOLDER_CLEANUP_VALUES.has(raw) ? raw : "protect_siblings";
+}
+
+function SharedPlaceholderCleanupColumn(props: {
+  label: string;
+  settingKey: string;
+  enabled: boolean;
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+  helpByMode: Record<string, string>;
+  disabledHint: string;
+}) {
+  const mode = sharedPlaceholderCleanupMode(props.values, props.settingKey);
+  const focus = getBrandFocusClass(props.brand, props.themeMode);
+  return (
+    <div className="min-w-0">
+      <label className="block text-[14px] font-semibold text-slate-300 mb-1.5">{props.label}</label>
+      <select
+        className={`w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${props.enabled ? "" : "opacity-60 cursor-not-allowed"}`}
+        value={props.enabled ? mode : "na"}
+        onChange={(e) => props.onChange(props.settingKey, e.target.value)}
+        disabled={!props.enabled}
+      >
+        {props.enabled ? (
+          <>
+            <option value="protect_siblings">Protect until no instance needs placeholder (recommended)</option>
+            <option value="any_instance_has_file">Remove when any instance has a real file</option>
+          </>
+        ) : (
+          <option value="na">Not applicable, no second instance set up.</option>
+        )}
+      </select>
+      <p className="ui-field-description-compact mt-1.5">
+        {props.enabled ? (props.helpByMode[mode] ?? props.helpByMode.protect_siblings) : props.disabledHint}
+      </p>
+    </div>
+  );
+}
+
+function SharedPlaceholderCleanupPanel(props: {
+  values: FieldValueMap;
+  onChange: (key: string, value: unknown) => void;
+  brand: Brand;
+  themeMode: ThemeMode;
+  canUseRadarrSecondaryBehavior: boolean;
+  canUseSonarrSecondaryBehavior: boolean;
+}) {
+  return (
+    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+      <div className="text-center">
+        <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">
+          Shared Placeholder Cleanup
+        </h3>
+        <p className="ui-field-description mx-auto max-w-2xl">
+          When two instances share the same on-disk folder, choose when placeholder files are removed from disk.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5">
+        <SharedPlaceholderCleanupColumn
+          label="Movies (Radarr)"
+          settingKey="RADARR_SHARED_PLACEHOLDER_CLEANUP"
+          enabled={props.canUseRadarrSecondaryBehavior}
+          values={props.values}
+          onChange={props.onChange}
+          brand={props.brand}
+          themeMode={props.themeMode}
+          helpByMode={SHARED_PLACEHOLDER_CLEANUP_HELP_RADARR}
+          disabledHint="Not applicable, no second Radarr instance set up."
+        />
+        <SharedPlaceholderCleanupColumn
+          label="TV Shows (Sonarr)"
+          settingKey="SONARR_SHARED_PLACEHOLDER_CLEANUP"
+          enabled={props.canUseSonarrSecondaryBehavior}
+          values={props.values}
+          onChange={props.onChange}
+          brand={props.brand}
+          themeMode={props.themeMode}
+          helpByMode={SHARED_PLACEHOLDER_CLEANUP_HELP_SONARR}
+          disabledHint="Not applicable, no second Sonarr instance set up."
+        />
+      </div>
+    </div>
+  );
+}
 
 function buildPersistableSettingsValues(values: FieldValueMap, payload: SettingsPayload | null) {
   const allowedKeys = new Set<string>(
@@ -4588,10 +5631,36 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
     cleaned.ENABLE_PLAYBACK_FALLBACK_SEARCH = false;
   }
 
+  const radarrSharedCleanupMode = String(cleaned.RADARR_SHARED_PLACEHOLDER_CLEANUP ?? "protect_siblings")
+    .trim()
+    .toLowerCase();
+  const sonarrSharedCleanupMode = String(cleaned.SONARR_SHARED_PLACEHOLDER_CLEANUP ?? "protect_siblings")
+    .trim()
+    .toLowerCase();
+  cleaned.RADARR_SHARED_PLACEHOLDER_CLEANUP = hasRadarrSecondary
+    ? SHARED_PLACEHOLDER_CLEANUP_VALUES.has(radarrSharedCleanupMode)
+      ? radarrSharedCleanupMode
+      : "protect_siblings"
+    : "protect_siblings";
+  cleaned.SONARR_SHARED_PLACEHOLDER_CLEANUP = hasSonarrSecondary
+    ? SHARED_PLACEHOLDER_CLEANUP_VALUES.has(sonarrSharedCleanupMode)
+      ? sonarrSharedCleanupMode
+      : "protect_siblings"
+    : "protect_siblings";
+
   if ("PLACEHOLDER_STATUS_PROJECTION_MODE" in cleaned) {
-    const pm = String(cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary").trim().toLowerCase();
+    const pm = String(cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "both").trim().toLowerCase();
     if (pm === "off" || !["summary", "title", "both"].includes(pm)) {
-      cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE = "summary";
+      cleaned.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
+    }
+  }
+
+  if ("PLACEHOLDER_POSTER_OVERLAY_MODE" in cleaned) {
+    const om = String(cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE ?? "off").trim().toLowerCase();
+    if (!["off", "grayscale", "top_banner", "corner_logo"].includes(om)) {
+      cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = "off";
+    } else {
+      cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = om;
     }
   }
 
@@ -5073,8 +6142,15 @@ function ArrInstancesEditor(props: {
             <p className="text-[16px] text-slate-300 leading-relaxed">
               This removes &quot;{disconnectDialog.label}&quot; from Placeholdarr. When you save settings, movies or
               shows that were tracked only on this instance will be marked removed and their placeholders cleaned up.
-              If another configured {disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists
-              the same title (same TMDB or TVDB id), shared on-disk placeholders are left in place.
+              {String(
+                props.values[
+                  disconnectDialog.arrType === "radarr"
+                    ? "RADARR_SHARED_PLACEHOLDER_CLEANUP"
+                    : "SONARR_SHARED_PLACEHOLDER_CLEANUP"
+                ] ?? "protect_siblings",
+              ).trim().toLowerCase() === "any_instance_has_file"
+                ? ` If another configured ${disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists the same title, shared on-disk placeholders may still be removed when that instance has a real file (see Shared placeholder cleanup).`
+                : ` If another configured ${disconnectDialog.arrType === "radarr" ? "Radarr" : "Sonarr"} instance still lists the same title (same TMDB or TVDB id), shared on-disk placeholders are left in place.`}
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <button
@@ -5846,6 +6922,96 @@ function PlaceholderStatusUpdatesDescription(props: { spacing: "settings" | "wiz
   );
 }
 
+function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
+  const wrapClass = props.embedded ? "space-y-3" : WIZARD_ONBOARDING_SECTION_SURFACE_CLASS;
+  return (
+    <div className={wrapClass}>
+      <p className="ui-field-description text-slate-300 leading-relaxed">
+        Choose how placeholders look in Plex, Jellyfin, and Emby: status text in the player and optional poster overlays on
+        library art. Changes to poster overlays apply on the next NFO refresh — use the previews below to compare styles
+        without refreshing your whole library.
+      </p>
+    </div>
+  );
+}
+
+function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  return (
+    <ul className={`list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed ${top}`}>
+      <li>
+        <span className="font-medium text-slate-200">Off</span>
+        {" — "}Use remote poster URLs only (no composited local art).
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Grayscale</span>
+        {" — "}Dimmed grayscale poster so placeholders stand out in the library grid.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Top banner</span>
+        {" — "}Original poster with a PLACEHOLDER banner across the top.
+      </li>
+      <li>
+        <span className="font-medium text-slate-200">Corner badge</span>
+        {" — "}Placeholdarr logo badge in the bottom-right corner.
+      </li>
+    </ul>
+  );
+}
+
+function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean }) {
+  const selected = String(props.selectedMode ?? "off").trim().toLowerCase();
+  const gridClass = props.compact
+    ? "grid grid-cols-1 sm:grid-cols-3 gap-3"
+    : "grid grid-cols-1 sm:grid-cols-3 gap-4";
+  return (
+    <details className="mt-3 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
+      <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
+        <span
+          className="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-90"
+          style={{ fontSize: 18 }}
+        >
+          chevron_right
+        </span>
+        Overlay style examples
+      </summary>
+      <div className="px-4 pb-4 border-t border-[#424753]/30 pt-4 space-y-3">
+        <p className="text-[13px] text-slate-500 leading-relaxed">
+          Sample poster from TMDB movie {POSTER_OVERLAY_PREVIEW_TMDB_ID}. Your placeholders use each title&apos;s own poster.
+        </p>
+        <div className={gridClass}>
+          {POSTER_OVERLAY_EXAMPLE_MODES.map((item) => {
+            const active = selected === item.mode;
+            return (
+              <figure
+                key={item.mode}
+                className={`rounded-lg overflow-hidden border bg-[#0f1419]/80 ${
+                  active ? "border-[var(--brand-accent)] ring-1 ring-[var(--brand-accent)]/40" : "border-[#424753]/40"
+                }`}
+              >
+                <img
+                  src={item.image}
+                  alt={`${item.label} overlay example`}
+                  className="w-full aspect-[2/3] object-cover bg-[#0b111b]"
+                  loading="lazy"
+                />
+                <figcaption className="px-2 py-2 text-[12px] text-slate-400 leading-snug">
+                  <span className={active ? "font-medium text-slate-200" : ""}>{item.label}</span>
+                  {active ? (
+                    <span className="ml-1.5 text-[11px] font-headline uppercase tracking-wide text-[var(--brand-accent)]">
+                      Selected
+                    </span>
+                  ) : null}
+                </figcaption>
+              </figure>
+            );
+          })}
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /** Calendar toggle: copy lives here; `ENABLE_COMING_SOON_COUNTDOWN.description` in app_config is intentionally empty. */
 function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
@@ -5913,7 +7079,7 @@ function SettingsPanel(props: {
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
-  registerStatusMessagesSaveFlow: (fn: (() => Promise<void>) | null) => void;
+  registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
@@ -5923,6 +7089,8 @@ function SettingsPanel(props: {
     serviceId: "tautulli" | "jellyfin" | "emby";
     instanceParam: string;
   } | null>(null);
+  const { handleValueChange: handleSettingsValueChange, effectiveSnapshot: lookaheadEffectiveSnapshot } =
+    usePlaybackLookaheadFieldControls(props.values, props.onValueChange);
   const accent = getBrandAccent(props.brand, props.themeMode);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
@@ -6004,17 +7172,23 @@ function SettingsPanel(props: {
 
   function renderStandardField(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
-    const value = props.values[field.key];
+    const value = settingsFieldDisplayValue(field, props.values, lookaheadEffectiveSnapshot);
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
+    const parentDisabled = settingsFieldParentDisabled(field, props.values);
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const isNested = settingsFieldIsNested(field);
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
 
     return (
-      <div key={field.key} className={`px-6 py-5 ${rowMuted ? "opacity-50" : ""}`}>
+      <div
+        key={field.key}
+        className={`${isNested ? "pl-10 pr-6 py-4 ml-6 border-l border-[#424753]/40" : "px-6 py-5"} ${rowMuted ? "opacity-50" : ""}`}
+      >
         <div className="flex items-start gap-3 mb-2">
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
@@ -6028,6 +7202,8 @@ function SettingsPanel(props: {
                 <StartupSyncModeDescription spacing="settings" />
               ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
                 <PlaceholderStatusUpdatesDescription spacing="settings" />
+              ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+                <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
               ) : field.description && !isPlexSectionIdField(field.key) ? (
@@ -6045,24 +7221,28 @@ function SettingsPanel(props: {
         </div>
 
         {field.type === "bool" ? (
-          <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-            <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
+          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <div
+              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
               style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => props.onValueChange(field.key, !Boolean(value))}>
+              onClick={() => {
+                if (!interactionLocked) handleSettingsValueChange(field.key, !Boolean(value));
+              }}
+            >
               <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className="text-[16px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(value) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
-            disabled={projectionFieldLocked}
+            className={`w-full max-w-xl bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
+            disabled={interactionLocked}
             value={(() => {
               const raw = String(value ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
               return raw;
             })()}
-            onChange={(e) => props.onValueChange(field.key, e.target.value)}
+            onChange={(e) => handleSettingsValueChange(field.key, e.target.value)}
           >
             {field.options.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -6071,12 +7251,12 @@ function SettingsPanel(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
+              className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-              disabled={lookaheadRangeLocked}
+              disabled={interactionLocked}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-              onChange={e => props.onValueChange(field.key, e.target.value)}
+              onChange={e => handleSettingsValueChange(field.key, e.target.value)}
             />
             {testTarget && (
               <button type="button" onClick={() => runTest(field)}
@@ -6087,6 +7267,10 @@ function SettingsPanel(props: {
             )}
           </div>
         )}
+
+        {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+          <PosterOverlayExamples selectedMode={String(value ?? "off")} />
+        ) : null}
 
         {testTarget ? (
           <div
@@ -6142,7 +7326,9 @@ function SettingsPanel(props: {
               Unsaved changes
             </span>
           )}
-          {props.feedback && !isVirtualActive && (
+          {props.feedback &&
+            !isVirtualActive &&
+            !(props.hasUnsavedChanges && props.feedbackKind === "success") && (
             <span className={`text-[14px] font-headline uppercase tracking-wider ${props.feedbackKind === "success" ? "text-green-400" : "text-red-400"}`}>
               {props.feedback}
             </span>
@@ -6340,8 +7526,15 @@ function SettingsPanel(props: {
                     />
                   </div>
 
-                  {/* Placeholder search mode dropdowns */}
-                  <div className="px-6 pb-5">
+                  <div className="px-6 pb-5 space-y-4">
+                    <SharedPlaceholderCleanupPanel
+                      values={props.values}
+                      onChange={props.onValueChange}
+                      brand={props.brand}
+                      themeMode={props.themeMode}
+                      canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                      canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+                    />
                     <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
                         <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
@@ -6398,7 +7591,7 @@ function SettingsPanel(props: {
                         </div>
                       </div>
                     </div>
-                    <div className={`mt-3 ${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
+                    <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                       <div className="text-center">
                         <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Real-File Search Behavior</h3>
                         <p className="ui-field-description mx-auto max-w-2xl">When an actual media file is played, choose how Placeholdarr routes the playback-triggered ARR search.</p>
@@ -6556,7 +7749,7 @@ function SettingsPanel(props: {
                     statusUpdatesScope={String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "ALL")}
                     projectionDraft={{
                       placeholder_status_updates: String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "ALL"),
-                      projection_mode: String(props.values.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "summary"),
+                      projection_mode: String(props.values.PLACEHOLDER_STATUS_PROJECTION_MODE ?? "both"),
                     }}
                     onMetaChange={props.onStatusMessagesMetaChange}
                     registerSaveFlow={props.registerStatusMessagesSaveFlow}
@@ -6628,7 +7821,17 @@ type StatusMessagePayload = {
   pending_full_sync_backfill?: boolean;
 };
 
-type ApplyScope = "now" | "next_full_sync" | "future";
+type ApplyScope = NfoBackfillApplyScope;
+
+const NFO_BACKFILL_SETTING_KEYS = [
+  "PLACEHOLDER_STATUS_UPDATES",
+  "PLACEHOLDER_STATUS_PROJECTION_MODE",
+  "PLACEHOLDER_POSTER_OVERLAY_MODE",
+] as const;
+
+function statusUpdateSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return NFO_BACKFILL_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
+}
 
 const STATUS_MESSAGE_GROUP_ORDER = [
   "Title Suffix",
@@ -6686,6 +7889,11 @@ function normalizeTitleSuffixTemplate(rowKey: string, value: string): string {
   const stripped = re ? text.replace(re, "") : text;
   const withPlaceholderLiteral = stripped.replace(/\{Bracket\}/g, "(Placeholder)");
   return withPlaceholderLiteral.replace(/^\+\s*/, "");
+}
+
+/** Normalize API default/override text to the suffix-only string shown in the UI input. */
+function titleSuffixUiValue(rowKey: string, raw: string): string {
+  return normalizeTitleSuffixTemplate(rowKey, raw);
 }
 
 function titleSuffixHardPrefix(rowKey: string): string {
@@ -6767,7 +7975,7 @@ function deriveProjectionSurfacesFromDraft(d: StatusProjectionDraft | undefined)
   project_title: boolean;
   project_summary: boolean;
 } {
-  const mode = String(d?.projection_mode ?? "summary").trim().toLowerCase();
+  const mode = String(d?.projection_mode ?? "both").trim().toLowerCase();
   if (mode === "both") return { project_title: true, project_summary: true };
   if (mode === "title") return { project_title: true, project_summary: false };
   return { project_title: false, project_summary: true };
@@ -6802,7 +8010,7 @@ function LineRequestLivePreview(props: {
       try {
         const base = {
           template_synopsis: syn,
-          projection_mode: String(props.projectionDraft?.projection_mode ?? "summary"),
+          projection_mode: String(props.projectionDraft?.projection_mode ?? "both"),
           placeholder_status_updates: scope,
         };
         const [m, e] = await Promise.all([
@@ -6883,7 +8091,7 @@ function StatusMessagesPanel(props: {
   projectionDraft?: StatusProjectionDraft;
   embedded?: boolean;
   onMetaChange?: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
-  registerSaveFlow?: (fn: (() => Promise<void>) | null) => void;
+  registerSaveFlow?: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
 }) {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const [payload, setPayload] = useState<StatusMessagePayload | null>(null);
@@ -6925,8 +8133,8 @@ function StatusMessagesPanel(props: {
       for (const row of data.registry) {
         const currentRaw = row.has_override ? row.value : row.default;
         const defaultRaw = row.default;
-        next[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, currentRaw) : currentRaw;
-        def[row.key] = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, defaultRaw) : defaultRaw;
+        next[row.key] = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, currentRaw) : currentRaw;
+        def[row.key] = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, defaultRaw) : defaultRaw;
       }
       setValues(next);
       setDefaults(def);
@@ -6974,7 +8182,8 @@ function StatusMessagesPanel(props: {
     if ((payload.wrapper_close ?? "") !== wrapperClose) return true;
     for (const row of payload.registry ?? []) {
       const current = values[row.key] ?? "";
-      const initial = row.has_override ? row.value : row.default;
+      const initialRaw = row.has_override ? row.value : row.default;
+      const initial = isTitleSuffixRowKey(row.key) ? titleSuffixUiValue(row.key, initialRaw) : initialRaw;
       if (current !== initial) return true;
     }
     return false;
@@ -7023,35 +8232,8 @@ function StatusMessagesPanel(props: {
     setValues((prev) => ({ ...prev, [key]: defaults[key] ?? "" }));
   }
 
-  const runMessagesSaveFlow = useCallback(async () => {
-    if (!payload) return;
-    if (!dirty) return;
-    if (hasValidationErrors) {
-      throw new Error("Fix status message template validation errors before saving.");
-    }
-    setFeedback(null);
-    let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
-    try {
-      data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
-    } catch {
-      data = { placeholder_count: 0, pending_full_sync_backfill: false };
-    }
-    await new Promise<void>((resolve, reject) => {
-      scopeFlowWaitersRef.current = { resolve, reject };
-      setScopeModal({
-        placeholderCount: Number(data?.placeholder_count ?? 0),
-        pending: !!data?.pending_full_sync_backfill,
-      });
-    });
-  }, [payload, dirty, hasValidationErrors]);
-
-  useEffect(() => {
-    if (!props.registerSaveFlow) return;
-    props.registerSaveFlow(runMessagesSaveFlow);
-    return () => props.registerSaveFlow?.(null);
-  }, [props.registerSaveFlow, runMessagesSaveFlow]);
-
-  async function handleSave(applyScope: ApplyScope) {
+  const handleSave = useCallback(
+    async (applyScope: ApplyScope) => {
     if (!payload) return;
     setSaving(true);
     setFeedback(null);
@@ -7060,7 +8242,10 @@ function StatusMessagesPanel(props: {
       for (const row of payload.registry ?? []) {
         const raw = values[row.key] ?? "";
         const v = isTitleSuffixRowKey(row.key) ? normalizeTitleSuffixTemplate(row.key, raw) : raw;
-        if (v.trim() && v !== row.default) overrides[row.key] = v;
+        const defaultNorm = isTitleSuffixRowKey(row.key)
+          ? titleSuffixUiValue(row.key, row.default)
+          : row.default;
+        if (v.trim() && v !== defaultNorm) overrides[row.key] = v;
       }
       const resp = await fetch("/api/messages/templates", {
         method: "POST",
@@ -7113,7 +8298,44 @@ function StatusMessagesPanel(props: {
     } finally {
       setSaving(false);
     }
-  }
+  },
+    [payload, values, separator, caseMode, wrapperPreset, wrapperOpen, wrapperClose],
+  );
+
+  const runMessagesSaveFlow = useCallback(
+    async (preselectedScope?: ApplyScope) => {
+      if (!payload) return;
+      if (!dirty) return;
+      if (hasValidationErrors) {
+        throw new Error("Fix status message template validation errors before saving.");
+      }
+      let scope = preselectedScope;
+      if (!scope) {
+        setFeedback(null);
+        let data: { placeholder_count?: number; pending_full_sync_backfill?: boolean };
+        try {
+          data = await fetchJson("/api/messages/templates/apply_estimate", { credentials: "same-origin" });
+        } catch {
+          data = { placeholder_count: 0, pending_full_sync_backfill: false };
+        }
+        scope = await new Promise<ApplyScope>((resolve, reject) => {
+          scopeFlowWaitersRef.current = { resolve, reject };
+          setScopeModal({
+            placeholderCount: Number(data?.placeholder_count ?? 0),
+            pending: !!data?.pending_full_sync_backfill,
+          });
+        });
+      }
+      await handleSave(scope);
+    },
+    [payload, dirty, hasValidationErrors, handleSave],
+  );
+
+  useEffect(() => {
+    if (!props.registerSaveFlow) return;
+    props.registerSaveFlow(runMessagesSaveFlow);
+    return () => props.registerSaveFlow?.(null);
+  }, [props.registerSaveFlow, runMessagesSaveFlow]);
 
   async function handleResetAll() {
     if (!payload) return;
@@ -7297,7 +8519,9 @@ function StatusMessagesPanel(props: {
                     {sub && <h4 className="text-[13px] font-headline uppercase tracking-wider text-slate-400">{sub}</h4>}
                     {rows.map((row) => {
                       const value = values[row.key] ?? "";
-                      const isOverride = value !== row.default;
+                      const isOverride = isTitleSuffixRowKey(row.key)
+                        ? value !== titleSuffixUiValue(row.key, row.default)
+                        : value !== row.default;
                       const sampleCtx: Record<string, string> = {};
                       for (const t of row.allowed_tokens ?? []) {
                         if (t in tokenSamplesByName) sampleCtx[t] = tokenSamplesByName[t];
@@ -7431,7 +8655,7 @@ function StatusMessagesPanel(props: {
       )}
 
       {scopeModal && (
-        <StatusMessagesApplyScopeModal
+        <NfoBackfillApplyScopeModal
           placeholderCount={scopeModal.placeholderCount}
           alreadyPending={scopeModal.pending}
           saving={saving}
@@ -7469,10 +8693,12 @@ function StatusMessagesPanel(props: {
   return panelInner;
 }
 
-function StatusMessagesApplyScopeModal(props: {
+function NfoBackfillApplyScopeModal(props: {
   placeholderCount: number;
   alreadyPending: boolean;
   saving: boolean;
+  title?: string;
+  description?: string;
   onCancel: () => void;
   onConfirm: (scope: ApplyScope) => void;
   brand: Brand;
@@ -7491,9 +8717,12 @@ function StatusMessagesApplyScopeModal(props: {
     >
       <div className={`w-full max-w-xl ${UI_SECTION_FRAME_CLASS} bg-[#171c22] flex flex-col overflow-hidden`}>
         <div className="px-5 py-4 border-b border-[#424753]/30">
-          <h3 className="text-[18px] font-bold text-white font-headline">Apply template changes</h3>
+          <h3 className="text-[18px] font-bold text-white font-headline">
+            {props.title ?? "Apply template changes"}
+          </h3>
           <p className="ui-field-description mt-1">
-            Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates.
+            {props.description ??
+              "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates."}
           </p>
         </div>
         <div className="px-5 py-4 space-y-3">
@@ -8338,6 +9567,8 @@ function OnboardingWizard(props: {
   } | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
+  const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
+    usePlaybackLookaheadFieldControls(props.values, props.onChange);
 
   const hasUnlockedSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "primary") : null,
@@ -8454,6 +9685,12 @@ function OnboardingWizard(props: {
         ? Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)
         : false;
       partial.PLAYBACK_FALLBACK_TIMEOUT_MINUTES = String(props.values.PLAYBACK_FALLBACK_TIMEOUT_MINUTES ?? "").trim() || 30;
+      partial.RADARR_SHARED_PLACEHOLDER_CLEANUP = canUseRadarrSecondaryBehavior
+        ? sharedPlaceholderCleanupMode(props.values, "RADARR_SHARED_PLACEHOLDER_CLEANUP")
+        : "protect_siblings";
+      partial.SONARR_SHARED_PLACEHOLDER_CLEANUP = canUseSonarrSecondaryBehavior
+        ? sharedPlaceholderCleanupMode(props.values, "SONARR_SHARED_PLACEHOLDER_CLEANUP")
+        : "protect_siblings";
     }
 
     return partial;
@@ -8461,6 +9698,7 @@ function OnboardingWizard(props: {
 
   function wizardFieldRow(field: SettingsField) {
     if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) || SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key)) return null;
+    const displayValue = settingsFieldDisplayValue(field, props.values, wizardLookaheadSnapshot);
     const test = testResults[field.key];
     const testTarget = URL_TEST_TARGET[field.key];
     const focus = getBrandFocusClass(props.brand, wizardUiTheme);
@@ -8468,15 +9706,23 @@ function OnboardingWizard(props: {
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked;
+    const parentDisabled = settingsFieldParentDisabled(field, props.values);
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const isNested = settingsFieldIsNested(field);
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
     return (
-      <div key={field.key} className={rowMuted ? "opacity-50" : undefined}>
+      <div
+        key={field.key}
+        className={`${isNested ? "pl-8 ml-4 border-l border-[#424753]/40" : ""} ${rowMuted ? "opacity-50" : ""}`}
+      >
         <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
           (field.key === "STARTUP_SYNC_MODE" ? (
             <StartupSyncModeDescription spacing="wizard" />
           ) : field.key === "PLACEHOLDER_STATUS_UPDATES" ? (
             <PlaceholderStatusUpdatesDescription spacing="wizard" />
+          ) : field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+            <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
           ) : field.description ? (
@@ -8488,24 +9734,28 @@ function OnboardingWizard(props: {
           </p>
         ) : null}
         {field.type === "bool" ? (
-          <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-            <div className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(props.values[field.key]) ? "" : "bg-[#252e3a]"}`}
-              style={Boolean(props.values[field.key]) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => props.onChange(field.key, !Boolean(props.values[field.key]))}>
-              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(props.values[field.key]) ? "translate-x-5" : "translate-x-0"}`} />
+          <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+            <div
+              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(displayValue) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
+              style={Boolean(displayValue) ? { backgroundColor: accent.hex } : undefined}
+              onClick={() => {
+                if (!interactionLocked) handleWizardValueChange(field.key, !Boolean(displayValue));
+              }}
+            >
+              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(displayValue) ? "translate-x-5" : "translate-x-0"}`} />
             </div>
-            <span className="text-[16px] text-slate-300">{Boolean(props.values[field.key]) ? "Enabled" : "Disabled"}</span>
+            <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(displayValue) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
           <select
-            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${projectionFieldLocked ? "cursor-not-allowed" : ""}`}
-            disabled={projectionFieldLocked}
+            className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
+            disabled={interactionLocked}
             value={(() => {
-              const raw = String(props.values[field.key] ?? field.options[0]?.value ?? "");
+              const raw = String(displayValue ?? field.options[0]?.value ?? "");
               if (field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && raw.toLowerCase() === "off") return "summary";
               return raw;
             })()}
-            onChange={(e) => props.onChange(field.key, e.target.value)}
+            onChange={(e) => handleWizardValueChange(field.key, e.target.value)}
           >
             {field.options.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -8514,12 +9764,12 @@ function OnboardingWizard(props: {
         ) : (
           <div className="flex gap-2">
             <input
-              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${lookaheadRangeLocked ? "cursor-not-allowed" : ""}`}
+              className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
               type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-              disabled={lookaheadRangeLocked}
-              value={String(props.values[field.key] ?? "")}
+              disabled={interactionLocked}
+              value={String(displayValue ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-              onChange={(e) => props.onChange(field.key, e.target.value)}
+              onChange={(e) => handleWizardValueChange(field.key, e.target.value)}
             />
             {testTarget && (
               <button type="button" onClick={() => runTest(field)}
@@ -8530,6 +9780,9 @@ function OnboardingWizard(props: {
             )}
           </div>
         )}
+        {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
+          <PosterOverlayExamples selectedMode={String(props.values[field.key] ?? "off")} compact />
+        ) : null}
         {testTarget ? (
           <div
             className={`mt-2 flex min-h-[2.25rem] items-start gap-1.5 text-[14px] ${
@@ -8778,6 +10031,14 @@ function OnboardingWizard(props: {
                   setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                 }}
               />
+              <SharedPlaceholderCleanupPanel
+                values={props.values}
+                onChange={props.onChange}
+                brand={props.brand}
+                themeMode={wizardUiTheme}
+                canUseRadarrSecondaryBehavior={canUseRadarrSecondaryBehavior}
+                canUseSonarrSecondaryBehavior={canUseSonarrSecondaryBehavior}
+              />
               <div className={`${UI_SECTION_FRAME_CLASS} p-4 space-y-4`}>
                 <div className="text-center">
                   <h3 className="text-[14px] font-semibold text-white font-headline uppercase tracking-wider mb-1">Placeholder Search Behavior</h3>
@@ -8958,6 +10219,15 @@ function OnboardingWizard(props: {
             </div>
           ) : !fields.length ? (
             <div className="text-center text-slate-500 text-[16px] py-8">No fields for this step.</div>
+          ) : step.key === "look_and_feel" ? (
+            <div className="space-y-6">
+              <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+                <LookAndFeelSectionIntro embedded />
+                <div className="mt-4 border-t border-[#424753]/25 pt-4 space-y-5">
+                  {fields.map((field) => wizardFieldRow(field))}
+                </div>
+              </div>
+            </div>
           ) : step.key === "behavior" ? (
             <div className="space-y-6">
               {BEHAVIOR_WIZARD_SECTIONS.map((sectionName) => {
@@ -9274,14 +10544,35 @@ function OnboardingWizard(props: {
     </>
   );
 }
+function getActivitySubPage(pathname: string): ActivitySubPage {
+  if (pathname === ACTIVITY_TASKS_PATH || pathname.startsWith(`${ACTIVITY_TASKS_PATH}/`)) return "tasks";
+  if (pathname === ACTIVITY_OPERATIONS_PATH || pathname.startsWith(`${ACTIVITY_OPERATIONS_PATH}/`)) return "operations";
+  return "placeholders";
+}
+
 function getTabFromPath(pathname: string): DashboardTab {
   if (pathname === "/setup" || pathname.startsWith("/setup/")) return "setup";
   if (pathname.startsWith("/library")) return "library";
+  if (pathname.startsWith("/activity")) return "activity";
   if (pathname.startsWith("/calendar")) return "calendar";
   if (pathname.startsWith("/errors")) return "errors";
   if (pathname.startsWith("/logs")) return "logs";
   if (pathname.startsWith("/settings")) return "settings";
-  return "activity";
+  return "library";
+}
+
+function timeUntil(iso: string | null): string {
+  if (!iso) return "--";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "--";
+  const diffMs = t - Date.now();
+  if (diffMs <= 0) return "now";
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `in ${mins} min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `in ${hours} hr`;
+  const days = Math.floor(hours / 24);
+  return `in ${days} day${days === 1 ? "" : "s"}`;
 }
 
 function getCurrentMonthToken() {
@@ -9474,11 +10765,13 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   if (stepKey === "media") {
     return [...mediaIntegrations];
   }
+  if (stepKey === "look_and_feel") {
+    return [...LOOK_AND_FEEL_FIELD_KEYS];
+  }
   return [
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
-    ...statusUpdates,
     ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
   ];
 }

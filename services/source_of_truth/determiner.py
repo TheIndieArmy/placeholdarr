@@ -11,7 +11,14 @@ from core.logger import logger
 from services.placeholders import episode_placeholder_path, movie_placeholder_path
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder, Season, Series
+from services.source_of_truth.arr_share_guard import (
+    expand_determination_entity_ids,
+    shared_placeholder_suppresses_creation,
+    sibling_episode_has_file,
+    sibling_movie_has_file,
+)
 from services.source_of_truth.filesystem import configured_roots
+from services.source_of_truth.status_intent import DisplayStatus
 
 
 DETERMINATION_OBSOLETE = 'obsolete_placeholder'
@@ -93,7 +100,137 @@ def _episode_placeholder_path_drifts(session, episode: Episode) -> bool:
     return bool(exp and cur and exp != cur)
 
 
+_ACQUIRING_DISPLAY_STATUSES = frozenset(
+    {
+        DisplayStatus.SEARCHING.value,
+        DisplayStatus.SEARCH_QUEUED.value,
+        DisplayStatus.DOWNLOADING.value,
+        DisplayStatus.IMPORT_IN_PROGRESS.value,
+    }
+)
+
+
+def _skip_placeholders_when_monitored_enabled() -> bool:
+    return bool(getattr(settings, "SKIP_PLACEHOLDERS_WHEN_MONITORED", False))
+
+
+def _skip_placeholders_when_series_monitored_enabled() -> bool:
+    return bool(
+        _skip_placeholders_when_monitored_enabled()
+        and getattr(settings, "SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED", False)
+    )
+
+
+def _series_monitored_for_episode(session, episode: Episode) -> bool:
+    """True when the parent series row is monitored in Sonarr."""
+    season_id = getattr(episode, "season_id", None)
+    if season_id is None:
+        return False
+    season = session.query(Season).filter(Season.id == int(season_id)).first()
+    if not season or getattr(season, "series_id", None) is None:
+        return False
+    series = session.query(Series).filter(Series.id == int(season.series_id)).first()
+    if not series:
+        return False
+    return bool(getattr(series, "sonarr_monitored", False))
+
+
+def _entity_is_arr_monitored(
+    entity,
+    *,
+    media_type: str,
+    series_monitored: bool = False,
+) -> bool:
+    if media_type == "movie":
+        return bool(getattr(entity, "radarr_monitored", False))
+    if series_monitored and _skip_placeholders_when_series_monitored_enabled():
+        return True
+    return bool(getattr(entity, "sonarr_monitored", False))
+
+
+def _placeholder_row_actively_acquiring(row: Placeholder) -> bool:
+    if bool(getattr(row, "queue_monitor_active", False)):
+        return True
+    for field in ("display_status_projected", "display_status"):
+        value = str(getattr(row, field, "") or "").strip().upper()
+        if value in _ACQUIRING_DISPLAY_STATUSES:
+            return True
+    return False
+
+
+def _placeholder_actively_acquiring(
+    session,
+    *,
+    movie_id: int | None = None,
+    episode_id: int | None = None,
+) -> bool:
+    query = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
+    if movie_id is not None:
+        query = query.filter(Placeholder.movie_id == int(movie_id))
+    elif episode_id is not None:
+        query = query.filter(Placeholder.episode_id == int(episode_id))
+    else:
+        return False
+    for row in query.all():
+        if _placeholder_row_actively_acquiring(row):
+            return True
+    return False
+
+
+def _apply_monitored_placeholder_suppression(
+    session,
+    *,
+    base: str,
+    entity,
+    media_type: str,
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+    movie_id: int | None = None,
+    episode_id: int | None = None,
+    series_monitored: bool = False,
+) -> str:
+    """When enabled, monitored titles without a real file do not need placeholders."""
+    if not _skip_placeholders_when_monitored_enabled():
+        return base
+    if has_file or is_deleted or not _entity_is_arr_monitored(
+        entity,
+        media_type=media_type,
+        series_monitored=series_monitored,
+    ):
+        return base
+    if has_placeholder and _placeholder_actively_acquiring(
+        session,
+        movie_id=movie_id,
+        episode_id=episode_id,
+    ):
+        return DETERMINATION_EXISTS
+    if has_placeholder:
+        return DETERMINATION_OBSOLETE
+    return DETERMINATION_NOT_NEEDED
+
+
+def _apply_sibling_placeholder_suppression(
+    *,
+    arr_type: str,
+    base: str,
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+    sibling_has_file: bool,
+) -> str:
+    """When aggressive shared mode is on, sibling has_file suppresses local placeholder need."""
+    if not shared_placeholder_suppresses_creation(arr_type):
+        return base
+    if has_file or is_deleted or not sibling_has_file:
+        return base
+    if has_placeholder:
+        return DETERMINATION_OBSOLETE
+    return DETERMINATION_NOT_NEEDED
+
+
 def _resolve_movie_determination(
+    session,
     movie: Movie,
     *,
     placeholders_enabled: bool,
@@ -101,10 +238,13 @@ def _resolve_movie_determination(
     now_date: date,
 ) -> tuple[str, bool]:
     """Return (determination_value, path_drift_detected)."""
+    has_placeholder = bool(getattr(movie, 'has_placeholder', False))
+    has_file = bool(getattr(movie, 'has_file', False))
+    is_deleted = bool(getattr(movie, 'is_deleted', False))
     base = _compute_determination(
-        bool(getattr(movie, 'has_placeholder', False)),
-        bool(getattr(movie, 'has_file', False)),
-        bool(getattr(movie, 'is_deleted', False)),
+        has_placeholder,
+        has_file,
+        is_deleted,
         target_date=_preferred_movie_release_date(movie),
         release_status=getattr(movie, 'radarr_release_status', None),
         lookahead_days=lookahead_days,
@@ -113,6 +253,24 @@ def _resolve_movie_determination(
     )
     if _movie_placeholder_path_drifts(movie):
         return DETERMINATION_OBSOLETE, True
+    base = _apply_monitored_placeholder_suppression(
+        session,
+        base=base,
+        entity=movie,
+        media_type="movie",
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        movie_id=int(movie.id) if getattr(movie, "id", None) is not None else None,
+    )
+    base = _apply_sibling_placeholder_suppression(
+        arr_type="radarr",
+        base=base,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_has_file=sibling_movie_has_file(session, movie),
+    )
     return base, False
 
 
@@ -141,10 +299,13 @@ def _resolve_episode_determination(
         if max_known_order is not None and max_known_order > (int(season_number), int(episode_number)):
             target_date = now_date
 
+    has_placeholder = bool(getattr(episode, 'has_placeholder', False))
+    has_file = bool(getattr(episode, 'has_file', False))
+    is_deleted = bool(getattr(episode, 'is_deleted', False))
     base = _compute_determination(
-        bool(getattr(episode, 'has_placeholder', False)),
-        bool(getattr(episode, 'has_file', False)),
-        bool(getattr(episode, 'is_deleted', False)),
+        has_placeholder,
+        has_file,
+        is_deleted,
         target_date=target_date,
         lookahead_days=lookahead_days,
         placeholders_enabled=placeholders_enabled,
@@ -152,6 +313,30 @@ def _resolve_episode_determination(
     )
     if _episode_placeholder_path_drifts(session, episode):
         return DETERMINATION_OBSOLETE, True
+    series_monitored = (
+        _series_monitored_for_episode(session, episode)
+        if _skip_placeholders_when_series_monitored_enabled()
+        else False
+    )
+    base = _apply_monitored_placeholder_suppression(
+        session,
+        base=base,
+        entity=episode,
+        media_type="episode",
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        episode_id=int(episode.id) if getattr(episode, "id", None) is not None else None,
+        series_monitored=series_monitored,
+    )
+    base = _apply_sibling_placeholder_suppression(
+        arr_type="sonarr",
+        base=base,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_has_file=sibling_episode_has_file(session, episode),
+    )
     return base, False
 
 
@@ -619,6 +804,7 @@ def run_determination_pass() -> dict:
         )
         for idx, movie in enumerate(movies, start=1):
             value, path_drift = _resolve_movie_determination(
+                session,
                 movie,
                 placeholders_enabled=placeholders_enabled,
                 lookahead_days=lookahead_days,
@@ -785,6 +971,56 @@ def run_determination_pass() -> dict:
         session.close()
 
 
+def run_determination_for_entities_with_siblings_in_session(
+    session,
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+) -> dict:
+    """Scoped determination including catalog siblings on other configured instances."""
+    expanded_movies, expanded_episodes = expand_determination_entity_ids(
+        session,
+        movie_ids=movie_ids,
+        episode_ids=episode_ids,
+    )
+    return run_determination_for_entities_in_session(
+        session,
+        movie_ids=expanded_movies,
+        episode_ids=expanded_episodes,
+    )
+
+
+def run_determination_for_entities_with_siblings(
+    movie_ids: list[int] | None = None,
+    episode_ids: list[int] | None = None,
+    log_subject: str | None = None,
+) -> dict:
+    """Committing wrapper for scoped determination with sibling expansion."""
+    subject = str(log_subject or "").strip()
+    subject_part = f" · {subject}" if subject else ""
+    session = get_session()
+    try:
+        stats = run_determination_for_entities_with_siblings_in_session(
+            session,
+            movie_ids=movie_ids,
+            episode_ids=episode_ids,
+        )
+        session.commit()
+        logger.info(
+            f"Determination · scoped_with_siblings{subject_part} · complete: {stats}",
+            extra={'emoji_type': 'success'},
+        )
+        return stats
+    except Exception as e:
+        session.rollback()
+        logger.error(
+            f"Determination · scoped_with_siblings{subject_part} · failed: {e}",
+            extra={'emoji_type': 'error'},
+        )
+        raise
+    finally:
+        session.close()
+
+
 def run_determination_for_entities(
     movie_ids: list[int] | None = None,
     episode_ids: list[int] | None = None,
@@ -861,6 +1097,7 @@ def run_determination_for_entities_in_session(
 
     for idx, movie in enumerate(movies, start=1):
         value, path_drift = _resolve_movie_determination(
+            session,
             movie,
             placeholders_enabled=placeholders_enabled,
             lookahead_days=lookahead_days,

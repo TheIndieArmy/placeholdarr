@@ -244,6 +244,29 @@ class PlaceholderActivityHistory(Base):
         return f"<PlaceholderActivityHistory(id={self.id}, action={self.action!r}, at={self.occurred_at!r})>"
 
 
+class ScheduledTaskRun(Base):
+    """Append-only history for scheduled/manual/startup maintenance tasks (Tasks UI)."""
+
+    __tablename__ = "scheduled_task_run"
+    __table_args__ = (
+        Index("ix_scheduled_task_run_started_at", "started_at"),
+        Index("ix_scheduled_task_run_task_key_started", "task_key", "started_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_key = Column(String(32), nullable=False)
+    trigger = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(String, nullable=True)
+    skip_reason = Column(String(256), nullable=True)
+    summary = Column(JSON, nullable=True)
+
+    def __repr__(self):
+        return f"<ScheduledTaskRun(id={self.id}, task_key={self.task_key!r}, status={self.status!r})>"
+
+
 class DashboardStatsSnapshot(Base):
     """Singleton materialized counters for `/api/stats` (id=1)."""
 
@@ -512,6 +535,8 @@ class Season(Base):
     sonarrpath = Column(String, nullable=True)
     # ARR-provided synopsis/overview for series-level metadata
     sonarr_season_overview = Column(String, nullable=True)
+    # Remote season poster URL from Sonarr (seasons[].images when includeSeasonImages is set)
+    remote_poster = Column(String, nullable=True)
     # Aggregate per-season file info
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)

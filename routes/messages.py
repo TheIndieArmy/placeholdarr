@@ -341,74 +341,40 @@ def post_templates(body: dict[str, Any]) -> JSONResponse:
 
 
 def _get_pending_backfill_flag() -> bool:
-    """Read the ``PLACEHOLDER_TEMPLATE_BACKFILL_PENDING`` flag from app_config."""
+    """Read unified pending placeholder-refresh intent."""
     try:
-        from services.postgres.db import get_session
-        from services.postgres.models import AppConfig
-        from services.source_of_truth.template_backfill import PENDING_FLAG_KEY
+        from services.source_of_truth.placeholder_refresh import has_pending_intent
     except Exception:
         return False
-
-    session = get_session()
-    try:
-        row = session.query(AppConfig).filter(AppConfig.key == PENDING_FLAG_KEY).first()
-        return bool(row and row.value)
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+    return bool(has_pending_intent())
 
 
 def _execute_apply_scope(apply_scope: str) -> dict[str, Any]:
-    """Materialize the user's chosen apply policy after a successful template save.
+    from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
-    - ``now``: enqueue an immediate template-backfill job covering all active placeholders.
-    - ``next_full_sync``: set the pending flag so the next scheduled or manual full sync runs the job.
-    - ``future``: clear any pending flag and do nothing retroactive.
-    """
-    try:
-        from services.source_of_truth.template_backfill import (
-            clear_pending_template_backfill,
-            enqueue_template_backfill,
-            mark_template_backfill_pending,
-        )
-    except Exception as exc:
-        logger.warning(
-            f"Template backfill module unavailable: {exc}",
-            extra={"emoji_type": "warning"},
-        )
-        return {"scope": apply_scope, "ok": False, "reason": "backfill_module_unavailable"}
-
-    if apply_scope == "now":
-        out = enqueue_template_backfill()
-        out.setdefault("scope", "now")
-        try:
-            clear_pending_template_backfill()
-        except Exception:
-            pass
-        return out
-
-    if apply_scope == "next_full_sync":
-        out = mark_template_backfill_pending()
-        out.setdefault("scope", "next_full_sync")
-        return out
-
-    out = clear_pending_template_backfill()
-    out.setdefault("scope", "future")
-    return out
+    out = execute_placeholder_refresh_apply_scope(
+        apply_scope=apply_scope,
+        metadata=True,
+        templates=True,
+        source="messages_save",
+        task_run_trigger="settings_change" if str(apply_scope) == "now" else None,
+    )
+    nfo = out.get("nfo_backfill") if isinstance(out.get("nfo_backfill"), dict) else {}
+    merged = dict(nfo) if nfo else {"ok": bool(out.get("ok", True))}
+    merged.setdefault("scope", out.get("scope"))
+    merged.setdefault("enqueued", bool(out.get("enqueued")))
+    return merged
 
 
 @router.get("/templates/apply_estimate")
 def get_apply_estimate() -> JSONResponse:
     """How many placeholders an immediate ``Apply now`` save would refresh."""
     try:
-        from services.source_of_truth.template_backfill import (
-            is_template_backfill_pending,
-            placeholder_count_for_apply_now,
-        )
+        from services.source_of_truth.template_backfill import placeholder_count_for_apply_now
+        from services.source_of_truth.placeholder_refresh import has_pending_intent
+
         count = placeholder_count_for_apply_now()
-        pending = is_template_backfill_pending()
+        pending = has_pending_intent()
     except Exception as exc:
         logger.warning(f"Apply estimate unavailable: {exc}", extra={"emoji_type": "warning"})
         return JSONResponse({"placeholder_count": 0, "pending_full_sync_backfill": False})

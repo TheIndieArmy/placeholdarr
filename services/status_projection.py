@@ -10,7 +10,7 @@ VALID_PROJECTION_MODES = {"summary", "title", "both"}
 
 
 def get_projection_mode() -> str:
-    raw = str(getattr(settings, "PLACEHOLDER_STATUS_PROJECTION_MODE", "summary") or "summary").strip().lower()
+    raw = str(getattr(settings, "PLACEHOLDER_STATUS_PROJECTION_MODE", "both") or "both").strip().lower()
     if raw == "off":
         return "summary"
     if raw in VALID_PROJECTION_MODES:

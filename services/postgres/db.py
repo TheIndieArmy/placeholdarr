@@ -310,7 +310,6 @@ def init_db(engine=None, convert_ts: bool | None = None):
     # Ensure critical partial unique indexes exist (add-only). These indexes
     # are required for atomic ON CONFLICT upserts used by the enqueue logic.
     try:
-        from sqlalchemy import text
         idx_sql = text(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_enrichment_groupid "
             "ON job(group_id) WHERE job_type='enrichment' AND status IN ('PENDING','CLAIMED','WORKING')"
@@ -324,7 +323,6 @@ def init_db(engine=None, convert_ts: bool | None = None):
     # Ensure unique partial index to prevent duplicate active observation trail
     # jobs for the same group_id when producers run concurrently.
     try:
-        from sqlalchemy import text
         idx_sql_obs_trail = text(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_obs_trail_groupid "
             "ON job(group_id) "
@@ -338,7 +336,6 @@ def init_db(engine=None, convert_ts: bool | None = None):
     
     # Ensure unique partial index for Plex busy-aware deferred observation trails
     try:
-        from sqlalchemy import text
         idx_sql_plex_busy = text(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_plex_busy_deferred_groupid "
             "ON job(group_id) "
@@ -352,7 +349,6 @@ def init_db(engine=None, convert_ts: bool | None = None):
 
     # Ensure unique partial index for hybrid observation slice coalescing.
     try:
-        from sqlalchemy import text
         idx_sql_hybrid_slice = text(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_job_obs_hybrid_slice_groupid "
             "ON job(group_id) "
@@ -366,7 +362,6 @@ def init_db(engine=None, convert_ts: bool | None = None):
 
     # Ensure unique partial index to prevent multiple active SubFlows for same (movie_id, action, branch)
     try:
-        from sqlalchemy import text
         idx_sql2 = text(
             "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ux_subflow_movie_action_branch_active "
             "ON subflow(movie_id, action, branch) WHERE movie_id IS NOT NULL AND status IN ('PENDING','IN_QUEUE','CLAIMED')"
@@ -379,7 +374,6 @@ def init_db(engine=None, convert_ts: bool | None = None):
 
     # Ensure indexes to speed Sonarr lookups (sonarrid) for series and episodes
     try:
-        from sqlalchemy import text
         idx_series_sonarr = text(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_series_sonarrid ON series(sonarrid)"
         )
@@ -547,7 +541,6 @@ def _migrate_instance_key_constraints(engine):
 
     Safe to call repeatedly — all operations are idempotent.
     """
-    from sqlalchemy import text
     
     # Derive default instance keys from configured instances using role/priority.
     def get_default_key(arr_type: str, role: str) -> str:
@@ -643,7 +636,6 @@ def _migrate_columns(engine, inspector):
       records the addition in the `auto_migrations` audit table.
     - Add-only: this function will not modify or drop existing columns or change types.
     """
-    from sqlalchemy import text
     from datetime import datetime
 
     # Ensure we have up-to-date lists
@@ -788,7 +780,6 @@ def _convert_timestamp_columns(engine, inspector, source_tz='UTC'):
     use source_tz='UTC' (the default). If they are local server time, set
     source_tz accordingly before running.
     """
-    from sqlalchemy import text
 
     logger.info("Scanning for timestamp columns to convert to TIMESTAMP WITH TIME ZONE", extra={'emoji_type': 'info'})
 

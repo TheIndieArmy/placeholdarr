@@ -24,7 +24,11 @@ from services.source_of_truth.arr_api import (
     fetch_sonarr_series_item,
     fetch_sonarr_episode_item,
 )
-from services.source_of_truth.determiner import run_determination_for_entities
+from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
+from services.source_of_truth.determiner import (
+    run_determination_for_entities,
+    run_determination_for_entities_with_siblings,
+)
 from services.source_of_truth.entity_materialization_job import (
     enqueue_entity_materialization_job,
 )
@@ -869,9 +873,19 @@ def process_movie_file_deleted_event(payload: dict[str, Any], instance: str | No
         )
         session.commit()
 
-        determination_stats = run_determination_for_entities(movie_ids=[movie_row_id])
+        expand_session = get_session()
+        try:
+            mat_movie_ids, mat_episode_ids = expand_determination_entity_ids(
+                expand_session,
+                movie_ids=[movie_row_id],
+            )
+        finally:
+            expand_session.close()
+
+        determination_stats = run_determination_for_entities_with_siblings(movie_ids=[movie_row_id])
         materialization_stats = run_materialization_for_entities(
-            movie_ids=[movie_row_id],
+            movie_ids=mat_movie_ids,
+            episode_ids=mat_episode_ids,
             observation_source="event_movie_file_deleted",
         )
 
@@ -1088,9 +1102,19 @@ def process_episode_file_deleted_event(payload: dict[str, Any], instance: str | 
             )
         session.commit()
 
-        determination_stats = run_determination_for_entities(episode_ids=episode_ids)
+        expand_session = get_session()
+        try:
+            mat_movie_ids, mat_episode_ids = expand_determination_entity_ids(
+                expand_session,
+                episode_ids=episode_ids,
+            )
+        finally:
+            expand_session.close()
+
+        determination_stats = run_determination_for_entities_with_siblings(episode_ids=episode_ids)
         materialization_stats = run_materialization_for_entities(
-            episode_ids=episode_ids,
+            movie_ids=mat_movie_ids,
+            episode_ids=mat_episode_ids,
             observation_source="event_episode_file_deleted",
         )
 

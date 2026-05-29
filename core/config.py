@@ -188,7 +188,9 @@ class Settings(BaseSettings):
     # - config: verify configured URL/API-key pairs only
     # - live: make live ARR API calls to verify reachability/auth
     STARTUP_ARR_CHECK_MODE: Literal["off", "config", "live"] = "live"
-    FULL_SYNC_INTERVAL_HOURS: int = 0
+    FULL_SYNC_INTERVAL_HOURS: int = 168
+    # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
+    LITE_SYNC_INTERVAL_HOURS: int = 12
 
     # Library Paths
     LIBRARY_ROOT: str = ""
@@ -228,7 +230,7 @@ class Settings(BaseSettings):
     PLACEHOLDER_STRATEGY: Literal["hardlink", "copy"] = "hardlink"
     PLACEHOLDER_CREATE_NFO: bool = True  # Always on; retained for env/back-compat only (see validator).
     PLACEHOLDER_STATUS_UPDATES: str = "ALL"
-    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both"] = "summary"
+    PLACEHOLDER_STATUS_PROJECTION_MODE: Literal["summary", "title", "both"] = "both"
     PLACEHOLDER_FILE_MODE: str = os.getenv("PLACEHOLDER_FILE_MODE", "666").split('#')[0].strip()
     PLACEHOLDER_DIR_MODE: str = os.getenv("PLACEHOLDER_DIR_MODE", "777").split('#')[0].strip()
     ENABLE_PRIMER: bool = False
@@ -237,10 +239,27 @@ class Settings(BaseSettings):
     TV_PLAY_MODE: Literal["episode", "season", "series"] = "episode"
     EPISODES_LOOKAHEAD: int = 5
     
-    # Playback-related settings
-    
+    # Playback-related settings (all default off: mark unmonitored + search full target set)
+    PLAYBACK_MONITOR_ONLY_NO_SEARCH: bool = False
+    PLAYBACK_SUPPRESS_SEARCH_WHEN_ALL_ELIGIBLE_MONITORED: bool = False
+    PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES: bool = False
     ENABLE_PLAYBACK_FALLBACK_SEARCH: bool = True
     PLAYBACK_FALLBACK_TIMEOUT_MINUTES: int = 30
+    # When multiple Radarr or Sonarr instances share on-disk paths for the same TMDB/TVDB title:
+    # - protect_siblings: keep placeholder files until no sibling instance still needs them (default)
+    # - any_instance_has_file: delete on obsolete cleanup when this instance has a real file
+    RADARR_SHARED_PLACEHOLDER_CLEANUP: Literal["protect_siblings", "any_instance_has_file"] = (
+        os.getenv("RADARR_SHARED_PLACEHOLDER_CLEANUP", "protect_siblings").split("#")[0].strip()
+        or "protect_siblings"
+    )
+    SONARR_SHARED_PLACEHOLDER_CLEANUP: Literal["protect_siblings", "any_instance_has_file"] = (
+        os.getenv("SONARR_SHARED_PLACEHOLDER_CLEANUP", "protect_siblings").split("#")[0].strip()
+        or "protect_siblings"
+    )
+    # Composited local poster art for placeholders in Plex/Jellyfin/Emby (off = remote URLs in NFO only).
+    PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
+        os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
+    )
 
     # Calendar-based status update settings
     # CALENDAR_LOOKAHEAD_DAYS: how many days into the future to create/show "Coming Soon" placeholders
@@ -251,7 +270,7 @@ class Settings(BaseSettings):
     CALENDAR_LOOKAHEAD_DAYS: int = 30
     # Calendar scheduler cadence (independent from full sync).
     # <= 0 disables independent calendar scheduler.
-    CALENDAR_SYNC_INTERVAL_HOURS: int = 12
+    CALENDAR_SYNC_INTERVAL_HOURS: int = 0
     PREFERRED_MOVIE_DATE_TYPE: str = "inCinemas"
     ENABLE_COMING_SOON_COUNTDOWN: bool = True
     # Deprecated: always treated as "coming_soon" (Coming Soon dummy when set, else standard dummy). Retained for env/back-compat only.
@@ -259,6 +278,11 @@ class Settings(BaseSettings):
 
     # Include specials (season 0) when creating episode subflows
     INCLUDE_SPECIALS: bool = False
+    # When True, skip creating placeholders for Radarr/Sonarr-monitored titles and remove
+    # stale placeholders when monitoring is learned during sync (import flow unchanged).
+    SKIP_PLACEHOLDERS_WHEN_MONITORED: bool = False
+    # TV only: when skip-for-monitored is on, treat the whole show as skip if Sonarr series is monitored.
+    SKIP_PLACEHOLDERS_WHEN_SERIES_MONITORED: bool = False
 
     # Postgres
     DB_HOST: str = os.getenv("DB_HOST", "localhost").split('#')[0].strip()
@@ -451,10 +475,10 @@ class Settings(BaseSettings):
 
     @validator("PLACEHOLDER_STATUS_PROJECTION_MODE", pre=True)
     def normalize_placeholder_status_projection_mode(cls, v):
-        # "off" was removed from the UI; use Placeholder status updates = Off instead. Legacy values map to summary.
-        raw = str(v or "summary").strip().lower()
+        # "off" was removed from the UI; use Placeholder status updates = Off instead. Legacy values map to both.
+        raw = str(v or "both").strip().lower()
         if raw == "off" or raw not in {"summary", "title", "both"}:
-            return "summary"
+            return "both"
         return raw
 
     @validator('COMING_SOON_DUMMY_FILE_PATH')

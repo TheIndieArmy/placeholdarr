@@ -182,12 +182,12 @@ def fetch_sonarr_series(url: Optional[str] = None, api_key: Optional[str] = None
         return []
 
     endpoint = _build_endpoint(url, 'series')
-    cache_key = f'sonarr_series:{endpoint}'
+    cache_key = f'sonarr_series:season_images:{endpoint}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    data = _get_json(endpoint, {'apikey': api_key}) or []
+    data = _get_json(endpoint, {'apikey': api_key, 'includeSeasonImages': 'true'}) or []
     _cache_set(cache_key, data)
     return data
 
@@ -200,12 +200,12 @@ def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key:
         return None
 
     endpoint = _build_endpoint(url, f'series/{int(series_id)}')
-    cache_key = f'sonarr_series_item:{endpoint}'
+    cache_key = f'sonarr_series_item:season_images:{endpoint}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    data = _get_json(endpoint, {'apikey': api_key})
+    data = _get_json(endpoint, {'apikey': api_key, 'includeSeasonImages': 'true'})
     if isinstance(data, dict):
         _cache_set(cache_key, data)
         return data

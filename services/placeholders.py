@@ -455,6 +455,130 @@ def _append_actors(lines: list[str], actors: Any) -> None:
         lines.append('  </actor>')
 
 
+def _valid_local_art_file(base_dir: str | None, rel_path: str | None) -> str | None:
+    """Return an absolute path when a non-empty local art file exists."""
+    if not base_dir or not rel_path:
+        return None
+    rel = str(rel_path).strip()
+    if not rel:
+        return None
+    abs_path = os.path.abspath(os.path.join(os.path.abspath(base_dir), rel))
+    try:
+        if os.path.isfile(abs_path) and os.path.getsize(abs_path) > 0:
+            return abs_path
+    except OSError:
+        return None
+    return None
+
+
+def _resolve_poster_art_refs(
+    local_rel: str | None,
+    remote_url: str,
+    *,
+    base_dir: str | None,
+) -> tuple[str, str]:
+    """Return (thumb_ref, art_ref) escaped for XML.
+
+    When composited local art exists, both tags use the absolute filesystem path
+    so Plex/Jellyfin/Emby display the overlay instead of the remote agent URL.
+    """
+    remote = str(remote_url or "").strip()
+    local_abs = _valid_local_art_file(base_dir, local_rel)
+    if local_abs:
+        local_esc = escape(local_abs)
+        return local_esc, local_esc
+    if remote:
+        remote_esc = escape(remote)
+        return remote_esc, remote_esc
+    return "", ""
+
+
+def _append_movie_art_tags(
+    lines: list[str],
+    *,
+    local_art: LocalArtPaths | None,
+    remote_poster: str,
+    remote_fanart: str,
+    art_base_dir: str | None = None,
+) -> None:
+    thumb_poster, art_poster = _resolve_poster_art_refs(
+        local_art.poster if local_art else None,
+        remote_poster,
+        base_dir=art_base_dir,
+    )
+    fanart_ref = escape(str(remote_fanart or ""))
+    if thumb_poster:
+        lines.append(f'  <thumb aspect="poster" preview="{thumb_poster}">{thumb_poster}</thumb>')
+    if fanart_ref:
+        lines.append("  <fanart>")
+        lines.append(f'    <thumb preview="{fanart_ref}">{fanart_ref}</thumb>')
+        lines.append("  </fanart>")
+    if art_poster or fanart_ref:
+        lines.append("  <art>")
+        if art_poster:
+            lines.append(f"    <poster>{art_poster}</poster>")
+            lines.append(f"    <thumb>{art_poster}</thumb>")
+        if fanart_ref:
+            lines.append(f"    <fanart>{fanart_ref}</fanart>")
+        lines.append("  </art>")
+
+
+def _append_episode_still_tags(
+    lines: list[str],
+    *,
+    local_art: LocalArtPaths | None,
+    remote_still: str,
+    art_base_dir: str | None = None,
+) -> None:
+    thumb_ref, art_still = _resolve_poster_art_refs(
+        local_art.thumb if local_art else None,
+        remote_still,
+        base_dir=art_base_dir,
+    )
+    if thumb_ref:
+        lines.append(f"  <thumb>{thumb_ref}</thumb>")
+    if art_still:
+        lines.append("  <art>")
+        lines.append(f"    <thumb>{art_still}</thumb>")
+        lines.append("  </art>")
+
+
+def _append_series_art_tags(
+    lines: list[str],
+    *,
+    local_art: LocalArtPaths | None,
+    remote_poster: str,
+    remote_fanart: str,
+    remote_banner: str,
+    art_base_dir: str | None = None,
+) -> None:
+    thumb_poster, art_poster = _resolve_poster_art_refs(
+        local_art.poster if local_art else None,
+        remote_poster,
+        base_dir=art_base_dir,
+    )
+    fanart_ref = escape(str(remote_fanart or ""))
+    banner_ref = escape(str(remote_banner or ""))
+    if thumb_poster:
+        lines.append(f'  <thumb aspect="poster" preview="{thumb_poster}">{thumb_poster}</thumb>')
+    if fanart_ref:
+        lines.append("  <fanart>")
+        lines.append(f'    <thumb preview="{fanart_ref}">{fanart_ref}</thumb>')
+        lines.append("  </fanart>")
+    if banner_ref:
+        lines.append(f"  <banner>{banner_ref}</banner>")
+    if art_poster or fanart_ref or banner_ref:
+        lines.append("  <art>")
+        if art_poster:
+            lines.append(f"    <poster>{art_poster}</poster>")
+            lines.append(f"    <thumb>{art_poster}</thumb>")
+        if fanart_ref:
+            lines.append(f"    <fanart>{fanart_ref}</fanart>")
+        if banner_ref:
+            lines.append(f"    <banner>{banner_ref}</banner>")
+        lines.append("  </art>")
+
+
 def _append_people_as_tag(lines: list[str], tag_name: str, values: Any) -> None:
     for value in _to_list(values):
         if isinstance(value, dict):
@@ -491,8 +615,6 @@ def _movie_nfo_xml(movie: Any) -> str:
     )
     tmdbid = getattr(movie, "tmdbid", None)
     imdbid = getattr(movie, "imdbid", None)
-    poster_url = escape(str(getattr(movie, "remote_poster", "") or ""))
-    fanart_url = escape(str(getattr(movie, "remote_fanart", "") or ""))
     certification = str(getattr(movie, "radarr_certification", "") or "").strip()
     genres = _to_list(getattr(movie, "radarr_genres", None))
     studio = str(getattr(movie, "radarr_studio", "") or "").strip()
@@ -543,20 +665,6 @@ def _movie_nfo_xml(movie: Any) -> str:
         lines.append(f"  <uniqueid type=\"imdb\">{escape(str(imdbid))}</uniqueid>")
     if runtime:
         lines.append(f"  <runtime>{runtime}</runtime>")
-    if poster_url:
-        lines.append(f"  <thumb aspect=\"poster\" preview=\"{poster_url}\">{poster_url}</thumb>")
-    if fanart_url:
-        lines.append("  <fanart>")
-        lines.append(f"    <thumb preview=\"{fanart_url}\">{fanart_url}</thumb>")
-        lines.append("  </fanart>")
-    if poster_url or fanart_url:
-        lines.append("  <art>")
-        if poster_url:
-            lines.append(f"    <poster>{poster_url}</poster>")
-            lines.append(f"    <thumb>{poster_url}</thumb>")
-        if fanart_url:
-            lines.append(f"    <fanart>{fanart_url}</fanart>")
-        lines.append("  </art>")
     if certification:
         lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
     for genre in genres:
@@ -629,9 +737,6 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
     tvdbid = getattr(episode, "sonarr_episode_tvdbid", None) or getattr(series, "tvdbid", None)
     imdbid = getattr(series, "imdbid", None)
     sonarrid = getattr(episode, "sonarrid", None)
-    still_url = escape(str(getattr(episode, "sonarr_episode_still", "") or ""))
-    if not still_url:
-        still_url = escape(str(getattr(series, "remote_fanart", "") or ""))
     certification = str(getattr(series, "sonarr_certification", "") or "").strip()
     network = str(getattr(series, "sonarr_network", "") or "").strip()
     directors = getattr(episode, "sonarr_episode_directors", None)
@@ -668,8 +773,6 @@ def _episode_nfo_xml(episode: Any, season: Any, series: Any) -> str:
         lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
     if network:
         lines.append(f"  <studio>{escape(network)}</studio>")
-    if still_url:
-        lines.append(f"  <thumb>{still_url}</thumb>")
     _append_people_as_tag(lines, 'credits', credits)
     _append_people_as_tag(lines, 'director', directors)
     lines.append("  <watched>false</watched>")
@@ -683,7 +786,10 @@ def ensure_movie_nfo(media_path: str, movie: Any) -> bool:
 
 
 def ensure_episode_nfo(media_path: str, episode: Any, season: Any, series: Any) -> bool:
-    return _atomic_write_text(nfo_sidecar_path(media_path), _episode_nfo_xml(episode, season, series))
+    return _atomic_write_text(
+        nfo_sidecar_path(media_path),
+        _episode_nfo_xml(episode, season, series),
+    )
 
 
 def _series_nfo_xml(series: Any) -> str:
@@ -713,9 +819,6 @@ def _series_nfo_xml(series: Any) -> str:
     ratings = _ratings_entries(getattr(series, "sonarr_ratings", None))
     genres = _to_list(getattr(series, "sonarr_genres", None))
     actors = getattr(series, "sonarr_actors", None)
-    poster_url = escape(str(getattr(series, "remote_poster", "") or ""))
-    fanart_url = escape(str(getattr(series, "remote_fanart", "") or ""))
-    banner_url = escape(str(getattr(series, "remote_banner", "") or ""))
 
     lines = [
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>",
@@ -747,24 +850,6 @@ def _series_nfo_xml(series: Any) -> str:
         lines.append(f"  <uniqueid type=\"tvmaze\">{escape(str(tvmazeid))}</uniqueid>")
     if runtime:
         lines.append(f"  <runtime>{runtime}</runtime>")
-    if poster_url:
-        lines.append(f"  <thumb aspect=\"poster\" preview=\"{poster_url}\">{poster_url}</thumb>")
-    if fanart_url:
-        lines.append("  <fanart>")
-        lines.append(f"    <thumb preview=\"{fanart_url}\">{fanart_url}</thumb>")
-        lines.append("  </fanart>")
-    if banner_url:
-        lines.append(f"  <banner>{banner_url}</banner>")
-    if poster_url or fanart_url or banner_url:
-        lines.append("  <art>")
-        if poster_url:
-            lines.append(f"    <poster>{poster_url}</poster>")
-            lines.append(f"    <thumb>{poster_url}</thumb>")
-        if fanart_url:
-            lines.append(f"    <fanart>{fanart_url}</fanart>")
-        if banner_url:
-            lines.append(f"    <banner>{banner_url}</banner>")
-        lines.append("  </art>")
     if certification:
         lines.append(f"  <mpaa>{escape(certification)}</mpaa>")
     for genre in genres:
@@ -823,7 +908,6 @@ def ensure_series_nfo(series: Any, folder: str | None = None) -> bool:
         os.makedirs(target_folder, exist_ok=True)
     except Exception:
         pass
-    # Build path for tvshow.nfo
     nfo_path = os.path.join(target_folder, "tvshow.nfo")
     return _atomic_write_text(nfo_path, _series_nfo_xml(series))
 

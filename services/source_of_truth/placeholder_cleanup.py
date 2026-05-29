@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.logger import logger
+from services.placeholder_poster_art import remove_placeholder_art_in_dir, remove_season_poster_art_in_series_folder
 from services.placeholders import remove_nfo_sidecar, remove_placeholder_file
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Placeholder, Season
@@ -15,6 +16,7 @@ from services.source_of_truth.arr_share_guard import (
 	active_sibling_series_exists,
 	configured_instance_keys,
 	filter_episode_disk_cleanup_paths,
+	protect_shared_placeholder_disk_paths,
 )
 from services.source_of_truth.filesystem import (
 	is_path_under_configured_roots,
@@ -116,6 +118,7 @@ def cleanup_movie_placeholder_files(*, candidate_paths: list[str]) -> dict[str, 
 	for path in paths:
 		deleted_any = remove_placeholder_file(path) or deleted_any
 		nfo_deleted_any = remove_nfo_sidecar(path) or nfo_deleted_any
+		remove_placeholder_art_in_dir(os.path.dirname(path))
 
 	for path in paths:
 		movie_folder = os.path.dirname(path)
@@ -152,6 +155,7 @@ def cleanup_episode_placeholder_files(
 	for path in paths:
 		deleted_any = remove_placeholder_file(path) or deleted_any
 		nfo_deleted_any = remove_nfo_sidecar(path) or nfo_deleted_any
+		remove_placeholder_art_in_dir(os.path.dirname(path), media_path=path)
 
 	season_folders = {os.path.dirname(path) for path in paths if path}
 	candidate_series_folders = {
@@ -165,7 +169,7 @@ def cleanup_episode_placeholder_files(
 	series_has_placeholders = _series_has_active_episode_placeholders(session, series_id=int(series.id))
 	allowed_son = configured_instance_keys("sonarr")
 	tvdbid = int(getattr(series, "tvdbid", 0) or 0)
-	if allowed_son and tvdbid:
+	if protect_shared_placeholder_disk_paths("sonarr") and allowed_son and tvdbid:
 		if active_sibling_series_exists(
 			session,
 			exclude_series_id=int(series.id),
@@ -177,6 +181,8 @@ def cleanup_episode_placeholder_files(
 	if not series_has_placeholders:
 		for folder in sorted(candidate_series_folders):
 			series_nfo_deleted = _remove_series_nfo(folder) or series_nfo_deleted
+			remove_placeholder_art_in_dir(folder, series_folder=folder)
+			remove_season_poster_art_in_series_folder(folder)
 			directories_deleted += _prune_empty_tree(folder)
 			refresh_path = _nearest_existing_dir(folder)
 			if refresh_path:

@@ -332,6 +332,16 @@ async def lifespan(app: FastAPI):
                     logger.debug(f"Failed to reset CLAIMED jobs on startup: {e}", extra={'emoji_type': 'debug'})
                 except Exception:
                     pass
+
+            try:
+                from services.task_run_history import abandon_orphaned_working_task_runs
+
+                abandon_orphaned_working_task_runs(reason="interrupted_by_restart")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to abandon orphaned working task runs on startup: {e}",
+                    extra={"emoji_type": "warning"},
+                )
         finally:
             session.close()
 
@@ -505,6 +515,9 @@ app = FastAPI(lifespan=lifespan)
 # Dashboard UI
 from routes.dashboard import router as dashboard_router
 app.include_router(dashboard_router)
+
+from routes.tasks import router as tasks_router
+app.include_router(tasks_router)
 
 # Customizable status message templates
 from routes.messages import router as messages_router
