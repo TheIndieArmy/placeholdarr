@@ -7,6 +7,7 @@ import type {
   ErrorRow,
   IntegrationTestResponse,
   LibraryResponse,
+  LibraryVersionResponse,
   LogsResponse,
   PlaceholderActivityRow,
   SaveSettingsResponse,
@@ -31,16 +32,63 @@ export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivity
   return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
 }
 
-export function getLibrary(
-  limit = 1000,
-  opts?: { summary?: boolean; mediaType?: "movie" | "series" },
-): Promise<LibraryResponse> {
+export type LibraryFetchResult =
+  | { notModified: true; version: number | null }
+  | { notModified: false; payload: LibraryResponse };
+
+export function getLibraryVersion(): Promise<LibraryVersionResponse> {
+  return fetchJson<LibraryVersionResponse>("/api/library/version");
+}
+
+export async function getLibrary(
+  opts?: {
+    summary?: boolean;
+    mediaType?: "movie" | "series";
+    ifNoneMatch?: number | string | null;
+  },
+): Promise<LibraryFetchResult> {
   const summary = opts?.summary === true;
-  const q = new URLSearchParams({ limit: String(limit) });
+  const q = new URLSearchParams();
   if (summary) q.set("summary", "true");
   if (opts?.mediaType === "movie") q.set("media_type", "movie");
   if (opts?.mediaType === "series") q.set("media_type", "series");
-  return fetchJson<LibraryResponse>(`/api/library?${q.toString()}`);
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (opts?.ifNoneMatch != null && opts.ifNoneMatch !== "") {
+    headers["If-None-Match"] = `"${opts.ifNoneMatch}"`;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`/api/library?${q.toString()}`, { headers });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error("Cannot reach the Placeholdarr API (network error). Trying to reconnect…");
+    }
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+
+  if (response.status === 304) {
+    const etag = response.headers.get("ETag")?.replace(/"/g, "") ?? null;
+    return {
+      notModified: true,
+      version: etag != null && /^\d+$/.test(etag) ? Number(etag) : etag,
+    };
+  }
+
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`;
+    try {
+      const payload = (await response.json()) as { message?: string; detail?: string };
+      message = payload.message || payload.detail || message;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
+
+  const payload = (await response.json()) as LibraryResponse;
+  return { notModified: false, payload };
 }
 
 export function getMovieDetail(movieId: number): Promise<DetailResponse> {

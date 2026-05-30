@@ -117,6 +117,16 @@ def get_engine():
         register_dashboard_stats_snapshot_hooks()
     except Exception as ex:
         logger.warning("Could not register dashboard_stats_snapshot hooks: %s", ex, extra={"emoji_type": "warning"})
+    try:
+        from services.series_episode_stats_hooks import (
+            ensure_series_stats_backfilled,
+            register_series_episode_stats_hooks,
+        )
+
+        register_series_episode_stats_hooks()
+        ensure_series_stats_backfilled()
+    except Exception as ex:
+        logger.warning("Could not register series_episode_stats hooks: %s", ex, extra={"emoji_type": "warning"})
     return _engine
 
 

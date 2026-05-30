@@ -180,6 +180,13 @@ export interface LibraryItem {
 export interface LibraryResponse {
   items: LibraryItem[];
   count: number;
+  total: number;
+  version: number | string;
+}
+
+export interface LibraryVersionResponse {
+  movies_version: number;
+  series_version: number;
 }
 
 /** Deep link to an ARR instance (Radarr / Sonarr) from detail views. */

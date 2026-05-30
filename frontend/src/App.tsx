@@ -20,6 +20,7 @@ import {
   getCalendar,
   getErrors,
   getLibrary,
+  getLibraryVersion,
   getLogs,
   getMovieDetail,
   getPlaceholderActivity,
@@ -69,18 +70,9 @@ import type {
   StatsResponse,
 } from "./types/api";
 import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
-import { LibraryCardControls } from "./library/LibraryCardControls";
-import { LibraryGridCard } from "./library/LibraryGridCard";
-import { LibraryListRow } from "./library/LibraryListRow";
-import {
-  LIBRARY_CARD_PREVIEW_PATH,
-  libraryListStyle,
-  libraryPosterGridItemClassName,
-  libraryPosterGridItemStyle,
-  libraryPosterGridStyle,
-  readLibraryCardSettings,
-  writeLibraryCardSettings,
-} from "./library/cardSettings";
+import { LibraryPanel } from "./library/LibraryPanel";
+import { LIBRARY_CARD_PREVIEW_PATH } from "./library/cardSettings";
+import { titleSortKey } from "./library/librarySort";
 
 const REFRESH_MS_VISIBLE = 5000;
 const REFRESH_MS_HIDDEN = 30000;
@@ -150,6 +142,16 @@ function digestLibraryItems(items: LibraryItem[]): string {
     )
     .join("\n");
 }
+
+type LibraryShelfKey = "movies" | "tv";
+
+type LibraryShelfCache = {
+  items: LibraryItem[];
+  total: number;
+  version: number | null;
+  digest: string;
+  loadedAt: number;
+};
 
 function formatDashboardDataAge(msAgo: number): string {
   const s = Math.floor(msAgo / 1000);
@@ -617,21 +619,6 @@ function alphaColor(hex: string, alpha: number) {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
-function titleSortKey(title: string | null | undefined): string {
-  const raw = String(title || "").trim().toLowerCase();
-  // Ignore leading punctuation/quotes and leading articles for alpha sorting.
-  return raw
-    .replace(/^[^a-z0-9]+/i, "")
-    .replace(/^(the|an|a)\s+/i, "")
-    .replace(/^[^a-z0-9]+/i, "");
-}
-
-function titleSortLetter(title: string | null | undefined): string {
-  const key = titleSortKey(title);
-  const first = key.charAt(0).toUpperCase();
-  return /[A-Z]/.test(first) ? first : "#";
-}
-
 function getBrandAccent(brand: Brand, theme: ThemeMode) {
   const key = `${brand}-${theme}` as const;
   return BRAND_ACCENTS[key];
@@ -673,7 +660,12 @@ export function App() {
 
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
-  const [library, setLibrary] = useState<LibraryItem[]>([]);
+  const [libraryCache, setLibraryCache] = useState<Partial<Record<LibraryShelfKey, LibraryShelfCache>>>({});
+  const libraryCacheRef = useRef<Partial<Record<LibraryShelfKey, LibraryShelfCache>>>({});
+  useEffect(() => {
+    libraryCacheRef.current = libraryCache;
+  }, [libraryCache]);
+  const libraryVersionsRef = useRef<{ movies_version: number; series_version: number } | null>(null);
   const [calendar, setCalendar] = useState<CalendarResponse | null>(null);
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
@@ -784,7 +776,7 @@ export function App() {
     titleSearchRef.current = titleSearch;
   }, [titleSearch]);
 
-  const libraryDigestRef = useRef<string>("");
+  const libraryDigestRef = useRef<Partial<Record<LibraryShelfKey, string>>>({});
 
   const currentTab = getTabFromPath(location.pathname);
   const activitySubPage = getActivitySubPage(location.pathname);
@@ -898,7 +890,12 @@ export function App() {
     const query = titleSearch.trim().toLowerCase();
     if (!query) return [];
 
-    return [...library]
+    const pool = [
+      ...(libraryCache.movies?.items ?? []),
+      ...(libraryCache.tv?.items ?? []),
+    ];
+
+    return [...pool]
       .filter((item) => {
         const title = item.title.toLowerCase();
         const overview = String(item.overview || "").toLowerCase();
@@ -913,7 +910,7 @@ export function App() {
         return leftTitle.localeCompare(rightTitle);
       })
       .slice(0, 8);
-  }, [library, titleSearch]);
+  }, [libraryCache, titleSearch]);
 
   useEffect(() => {
     hasUnsavedChangesRef.current = combinedSettingsDirty;
@@ -1042,13 +1039,52 @@ export function App() {
           const searchTrim = titleSearchRef.current.trim();
           const useSummary = searchTrim.length === 0;
           const shelf = getLibraryListShelf(location.pathname);
-          const mediaType = shelf === "movies" ? "movie" : shelf === "tv" ? "series" : undefined;
-          const payload = await getLibrary(1000, { summary: useSummary, mediaType });
-          const next = payload.items || [];
-          const digest = digestLibraryItems(next);
-          if (digest !== libraryDigestRef.current) {
-            libraryDigestRef.current = digest;
-            if (!stopped) setLibrary(next);
+          const versions = await getLibraryVersion();
+          if (!stopped) libraryVersionsRef.current = versions;
+
+          const refreshShelf = async (shelfKey: LibraryShelfKey, mediaType: "movie" | "series") => {
+            const targetVersion = shelfKey === "movies" ? versions.movies_version : versions.series_version;
+            const cached = libraryCacheRef.current[shelfKey];
+            if (cached?.version === targetVersion && cached.items.length > 0) {
+              return;
+            }
+            const result = await getLibrary({
+              summary: useSummary,
+              mediaType,
+              ifNoneMatch: cached?.version ?? undefined,
+            });
+            if (stopped) return;
+            if (result.notModified) return;
+            const next = result.payload.items || [];
+            const digest = digestLibraryItems(next);
+            if (digest === libraryDigestRef.current[shelfKey]) return;
+            libraryDigestRef.current[shelfKey] = digest;
+            if (!stopped) {
+              setLibraryCache((prev) => ({
+                ...prev,
+                [shelfKey]: {
+                  items: next,
+                  total: result.payload.total ?? next.length,
+                  version:
+                    typeof result.payload.version === "number"
+                      ? result.payload.version
+                      : targetVersion,
+                  digest,
+                  loadedAt: Date.now(),
+                },
+              }));
+            }
+          };
+
+          if (shelf === "movies") {
+            await refreshShelf("movies", "movie");
+            void refreshShelf("tv", "series");
+          } else if (shelf === "tv") {
+            await refreshShelf("tv", "series");
+            void refreshShelf("movies", "movie");
+          } else {
+            await refreshShelf("movies", "movie");
+            await refreshShelf("tv", "series");
           }
         } else if (currentTab === "calendar") {
           const payload = await getCalendar(calendarMonth);
@@ -1119,54 +1155,6 @@ export function App() {
       window.clearTimeout(timeoutId);
     };
   }, [calendarMonth, currentTab, logLevel, location.pathname, location.search]);
-
-  /** When the user searches from the header, load full rows (overview) so overview matches work. */
-  useEffect(() => {
-    const q = titleSearch.trim();
-    if (!q) return;
-
-    let stopped = false;
-    const handle = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const payload = await getLibrary(1000, { summary: false });
-          if (stopped) return;
-          const next = payload.items || [];
-          libraryDigestRef.current = digestLibraryItems(next);
-          setLibrary(next);
-        } catch {
-          /* ignore — periodic refresh will retry */
-        }
-      })();
-    }, 400);
-
-    return () => {
-      stopped = true;
-      window.clearTimeout(handle);
-    };
-  }, [titleSearch]);
-
-  useEffect(() => {
-    if (library.length > 0) return;
-    if (location.pathname === "/setup" || location.pathname.startsWith("/setup/")) return;
-
-    let stopped = false;
-    getLibrary(1000, { summary: true })
-      .then((payload) => {
-        if (!stopped) {
-          const next = payload.items || [];
-          libraryDigestRef.current = digestLibraryItems(next);
-          setLibrary(next);
-        }
-      })
-      .catch(() => {
-        // Ignore prefetch failures; the tab-specific loader will retry.
-      });
-
-    return () => {
-      stopped = true;
-    };
-  }, [library.length, location.pathname]);
 
   useEffect(() => {
     if (currentTab !== "calendar") return;
@@ -1347,10 +1335,14 @@ export function App() {
 
   const libraryListShelf = getLibraryListShelf(location.pathname);
 
+  const activeShelfCache =
+    libraryListShelf === "movies" ? libraryCache.movies : libraryListShelf === "tv" ? libraryCache.tv : undefined;
+
   const filteredLibrary = useMemo(() => {
     if (!libraryListShelf) return [];
+    const shelfItems = activeShelfCache?.items ?? [];
     const shelfFilter = libraryListShelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
-    return library
+    return shelfItems
       .filter((item) => {
         if (libraryListShelf === "movies" && item.type !== "movie") return false;
         if (libraryListShelf === "tv" && item.type !== "series") return false;
@@ -1360,7 +1352,7 @@ export function App() {
         return true;
       })
       .sort((left, right) => titleSortKey(left.title).localeCompare(titleSortKey(right.title)));
-  }, [library, libraryListShelf, libraryShelfFilters]);
+  }, [activeShelfCache?.items, libraryListShelf, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
     const filter = logFilter.trim().toLowerCase();
@@ -1547,7 +1539,7 @@ export function App() {
     });
 
     sessionStorage.removeItem("libraryScrollRestorePending");
-  }, [location.pathname, library.length]);
+  }, [location.pathname, filteredLibrary.length]);
 
   useEffect(() => {
     const isDetailRoute = location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
@@ -1674,6 +1666,7 @@ export function App() {
           <LibraryPanel
             shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
             items={filteredLibrary}
+            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
             activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
             onFilterChange={(value) => {
               if (shelf === "tv") {
@@ -3470,217 +3463,6 @@ function TaskRunConfirmModals(props: {
               </button>
             </>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LibraryPanel(props: {
-  shelfTitle: string;
-  items: LibraryItem[];
-  activeFilter: LibraryShelfFilter;
-  onFilterChange: (value: LibraryShelfFilter) => void;
-  onOpenDetail: (item: LibraryItem) => void;
-  onOpenCardStylePreview: () => void;
-  accent: { hex: string; icon: string };
-  themeMode: ThemeMode;
-}) {
-  const accent = props.accent;
-  const isLight = props.themeMode === "light";
-  const [cardSettings, setCardSettings] = useState(readLibraryCardSettings);
-  const handleCardSettings = useCallback((next: ReturnType<typeof readLibraryCardSettings>) => {
-    setCardSettings(next);
-    writeLibraryCardSettings(next);
-  }, []);
-  const filters: Array<{ id: LibraryShelfFilter; label: string }> = [
-    { id: "all", label: "All" },
-    { id: "placeholders", label: "Placeholders" },
-    { id: "future", label: "Future" },
-    { id: "missing", label: "Missing" },
-  ];
-  const totalMissing = props.items.filter(i => i.has_missing).length;
-  const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const groupedItems = useMemo(() => {
-    const groups: Record<string, LibraryItem[]> = {};
-    props.items.forEach((item) => {
-      const letter = titleSortLetter(item.title);
-      if (!groups[letter]) groups[letter] = [];
-      groups[letter].push(item);
-    });
-    const letters = Object.keys(groups).sort((a, b) => {
-      if (a === "#") return 1;
-      if (b === "#") return -1;
-      return a.localeCompare(b);
-    });
-    return { groups, letters };
-  }, [props.items]);
-
-  return (
-    <div>
-      {/* Header + filter tabs */}
-      <div className="flex flex-wrap justify-between items-end gap-4 mb-4">
-        <div>
-          <h2 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.shelfTitle}</h2>
-          <p className={`text-[16px] mt-1 ${isLight ? "text-slate-600" : "text-slate-400"}`}>Showing {props.items.length} items matching your criteria</p>
-        </div>
-        <div
-          className={`flex flex-wrap gap-1 p-1 rounded-lg border ${
-            isLight ? "bg-white border-slate-200/90 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
-          }`}
-        >
-          {filters.map(f => (
-            <button key={f.id} type="button" onClick={() => props.onFilterChange(f.id)}
-              className={`px-4 py-1.5 rounded-md text-[14px] font-headline uppercase tracking-wider transition-colors ${
-                f.id === props.activeFilter
-                  ? isLight
-                    ? "text-slate-900 font-semibold"
-                    : "text-white font-semibold"
-                  : isLight
-                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
-                    : "text-slate-400 hover:text-slate-200"
-                  }`} style={f.id === props.activeFilter ? { backgroundColor: accent.hex } : undefined}>
-              {f.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="mb-6">
-        <LibraryCardControls
-          settings={cardSettings}
-          onChange={handleCardSettings}
-          accent={accent}
-          themeMode={props.themeMode}
-          onOpenPreview={props.onOpenCardStylePreview}
-        />
-      </div>
-
-      {/* Poster grid with alphabet sections */}
-      {props.items.length === 0 ? (
-        <div className={`text-center py-16 ${isLight ? "text-slate-600" : "text-slate-500"}`}>No library items match the current filter.</div>
-      ) : (
-        <div className="flex items-start gap-4 mb-8">
-          <div className="flex-1 space-y-8 overflow-visible">
-            {groupedItems.letters.map((letter) => (
-              <div
-                key={letter}
-                ref={(el) => {
-                  sectionRefs.current[letter] = el;
-                }}
-              >
-                <div
-                  className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
-                    isLight ? "text-slate-700 border-slate-200" : "text-slate-500 border-[#424753]/25"
-                  }`}
-                >
-                  {letter}
-                </div>
-                <div className="overflow-visible">
-                {cardSettings.viewMode === "list" ? (
-                  <div style={libraryListStyle()}>
-                    {(groupedItems.groups[letter] || []).map((item) => (
-                      <LibraryListRow
-                        key={item.id}
-                        item={item}
-                        posterWidthPx={cardSettings.posterWidthPx}
-                        accent={accent}
-                        themeMode={props.themeMode}
-                        onClick={() => props.onOpenDetail(item)}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <div style={libraryPosterGridStyle(cardSettings.posterWidthPx)}>
-                    {(groupedItems.groups[letter] || []).map((item) => (
-                      <div
-                        key={item.id}
-                        className={libraryPosterGridItemClassName}
-                        style={libraryPosterGridItemStyle()}
-                      >
-                        <LibraryGridCard
-                          item={item}
-                          variant={cardSettings.variant}
-                          posterWidthPx={cardSettings.posterWidthPx}
-                          accent={accent}
-                          themeMode={props.themeMode}
-                          onClick={() => props.onOpenDetail(item)}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div
-            className={`hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border px-2 py-2 ${
-              isLight ? "border-slate-200 bg-white/95 shadow-sm backdrop-blur-sm" : "border-[#424753]/35 bg-[#111722]/90"
-            }`}
-          >
-            {groupedItems.letters.map((letter) => (
-              <button
-                key={`alpha-${letter}`}
-                type="button"
-                onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                className={`w-6 h-6 rounded text-[12px] font-headline font-bold transition-colors ${
-                  isLight
-                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
-                    : "text-slate-400 hover:text-white hover:bg-[#293346]"
-                }`}
-                title={`Jump to ${letter}`}
-              >
-                {letter}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Footer stat cards */}
-      <div className="grid grid-cols-3 gap-4">
-        <div
-          className={`rounded-xl border p-5 ${
-            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
-          }`}
-        >
-          <div className="flex justify-between items-start">
-            <div className={`text-[12px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Total Items</div>
-            <span className={`material-symbols-outlined ${isLight ? "text-slate-400" : "text-slate-600"}`} style={{ fontSize: 18 }}>storage</span>
-          </div>
-          <div className={`text-[32px] font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{props.items.length}</div>
-        </div>
-        <div
-          className={`rounded-xl border p-5 ${
-            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
-          }`}
-        >
-          <div className="flex justify-between items-start">
-            <div className={`text-[12px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Missing Assets</div>
-            <span className="material-symbols-outlined text-yellow-500" style={{ fontSize: 18 }}>warning</span>
-          </div>
-          <div className={`text-[32px] font-black font-headline ${isLight ? "text-slate-900" : "text-white"}`}>{totalMissing}</div>
-          {totalMissing > 0 && (
-            <button type="button" onClick={() => props.onFilterChange("missing")}
-              className="mt-3 text-[14px] font-headline uppercase tracking-wider flex items-center gap-1" style={{ color: accent.icon }}>
-              View Errors <span className="material-symbols-outlined" style={{ fontSize: 14 }}>arrow_forward</span>
-            </button>
-          )}
-        </div>
-        <div
-          className={`rounded-xl border p-5 ${
-            isLight ? "bg-white border-slate-200 shadow-sm" : "bg-[#171c22] border-[#424753]/40"
-          }`}
-        >
-          <div className="flex justify-between items-start">
-            <div className={`text-[12px] font-headline uppercase tracking-widest mb-3 ${isLight ? "text-slate-500" : "text-slate-400"}`}>Sync Status</div>
-            <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.hex }}>sync</span>
-          </div>
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className={`font-bold font-headline text-[16px] ${isLight ? "text-slate-900" : "text-white"}`}>Active</span>
-          </div>
-          <div className={`text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>Library indexed</div>
         </div>
       </div>
     </div>
