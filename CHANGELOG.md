@@ -10,11 +10,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 
 - **Library performance**: Materialized per-series episode stats (`episode_total`, files, placeholders, missing, future) refresh on sync and placeholder changes instead of aggregating all episodes on every `/api/library` request. Library catalog version counters power `GET /api/library/version` and conditional `If-None-Match` responses (304 when unchanged).
-- **Per-shelf library cache**: Movies and TV shelves cache independently in the dashboard so switching shelves shows the last loaded catalog immediately while polling refreshes only when the shelf version changes.
-- **Virtualized library grid**: Extracted `LibraryPanel` uses `@tanstack/react-virtual` to render large movie/TV catalogs without mounting every card at once. Removed the 1000-item API cap (full shelf load up to 50,000 rows).
+- **Per-shelf library cache**: Movies and TV shelves cache independently in the dashboard so switching shelves can show the last loaded catalog immediately when the shelf version has not changed.
+- **Library panel extraction**: `LibraryPanel` component for Movies/TV shelves with alphabet sections and card style controls. Removed the 1000-item API cap (full shelf load up to 50,000 rows).
 
 ### Changed
 
+- **Library load on navigation**: Movies and TV shelves fetch when you open that page (or on hard refresh), not on the global 5s dashboard poll. Returning to a shelf uses the in-memory cache when `movies_version` / `series_version` are unchanged. Tab focus and a 60s version check call `GET /api/library/version` and refetch the catalog body only when a version counter changes; on the Library tab the 5s loop is limited to `GET /api/settings/status`. The cache is invalidated after sync tasks and settings saves that affect the catalog.
 - **`GET /api/library`**: Returns `total` and `version` alongside `items`; TV loads read precomputed series stats instead of scanning every episode row.
 
 ## [0.9.12] - 2026-05-28

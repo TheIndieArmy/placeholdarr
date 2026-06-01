@@ -19,8 +19,6 @@ import {
   getActivityOperations,
   getCalendar,
   getErrors,
-  getLibrary,
-  getLibraryVersion,
   getLogs,
   getMovieDetail,
   getPlaceholderActivity,
@@ -73,6 +71,7 @@ import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
 import { LibraryPanel } from "./library/LibraryPanel";
 import { LIBRARY_CARD_PREVIEW_PATH } from "./library/cardSettings";
 import { titleSortKey } from "./library/librarySort";
+import { useLibraryShelves } from "./library/useLibraryShelves";
 
 const REFRESH_MS_VISIBLE = 5000;
 const REFRESH_MS_HIDDEN = 30000;
@@ -133,25 +132,6 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
   if (p === LIBRARY_MOVIES_PATH) return "movies";
   return null;
 }
-
-function digestLibraryItems(items: LibraryItem[]): string {
-  return items
-    .map(
-      (i) =>
-        `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.overview ?? ""}`,
-    )
-    .join("\n");
-}
-
-type LibraryShelfKey = "movies" | "tv";
-
-type LibraryShelfCache = {
-  items: LibraryItem[];
-  total: number;
-  version: number | null;
-  digest: string;
-  loadedAt: number;
-};
 
 function formatDashboardDataAge(msAgo: number): string {
   const s = Math.floor(msAgo / 1000);
@@ -660,12 +640,6 @@ export function App() {
 
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
-  const [libraryCache, setLibraryCache] = useState<Partial<Record<LibraryShelfKey, LibraryShelfCache>>>({});
-  const libraryCacheRef = useRef<Partial<Record<LibraryShelfKey, LibraryShelfCache>>>({});
-  useEffect(() => {
-    libraryCacheRef.current = libraryCache;
-  }, [libraryCache]);
-  const libraryVersionsRef = useRef<{ movies_version: number; series_version: number } | null>(null);
   const [calendar, setCalendar] = useState<CalendarResponse | null>(null);
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
@@ -776,9 +750,27 @@ export function App() {
     titleSearchRef.current = titleSearch;
   }, [titleSearch]);
 
-  const libraryDigestRef = useRef<Partial<Record<LibraryShelfKey, string>>>({});
-
   const currentTab = getTabFromPath(location.pathname);
+  const libraryListShelf = getLibraryListShelf(location.pathname);
+
+  const {
+    libraryCache,
+    libraryLoading,
+    invalidateLibraryShelves,
+    refreshLibraryShelves,
+  } = useLibraryShelves({
+    listShelf: libraryListShelf,
+    titleSearch,
+    enabled: currentTab === "library" && libraryListShelf !== null,
+    onSuccess: () => setLastDashboardSuccessAt(Date.now()),
+    onError: (message) => setErrorMessage(message),
+  });
+
+  const invalidateLibraryAfterCatalogChange = useCallback(() => {
+    invalidateLibraryShelves();
+    void refreshLibraryShelves({ force: true });
+  }, [invalidateLibraryShelves, refreshLibraryShelves]);
+
   const activitySubPage = getActivitySubPage(location.pathname);
   const activitySubPageRef = useRef<ActivitySubPage>(activitySubPage);
   activitySubPageRef.current = activitySubPage;
@@ -1016,6 +1008,25 @@ export function App() {
           return;
         }
 
+        if (currentTab === "library") {
+          try {
+            const status = await getSettingsStatus();
+            if (!stopped) {
+              setSetupStatus(status);
+              setOnboardingVisible(!status.setup_complete);
+              setErrorMessage(null);
+              setLoading(false);
+              setLastDashboardSuccessAt(Date.now());
+            }
+          } catch (err) {
+            if (!stopped) {
+              setErrorMessage(err instanceof Error ? err.message : "Dashboard refresh failed");
+              setLoading(false);
+            }
+          }
+          return;
+        }
+
         showRefreshChrome = true;
         if (!stopped) setDashboardRefreshing(true);
 
@@ -1034,57 +1045,6 @@ export function App() {
           } else {
             const placeholderRows = await getPlaceholderActivity(100);
             if (!stopped) setPlaceholderActivity(placeholderRows || []);
-          }
-        } else if (currentTab === "library") {
-          const searchTrim = titleSearchRef.current.trim();
-          const useSummary = searchTrim.length === 0;
-          const shelf = getLibraryListShelf(location.pathname);
-          const versions = await getLibraryVersion();
-          if (!stopped) libraryVersionsRef.current = versions;
-
-          const refreshShelf = async (shelfKey: LibraryShelfKey, mediaType: "movie" | "series") => {
-            const targetVersion = shelfKey === "movies" ? versions.movies_version : versions.series_version;
-            const cached = libraryCacheRef.current[shelfKey];
-            if (cached?.version === targetVersion && cached.items.length > 0) {
-              return;
-            }
-            const result = await getLibrary({
-              summary: useSummary,
-              mediaType,
-              ifNoneMatch: cached?.version ?? undefined,
-            });
-            if (stopped) return;
-            if (result.notModified) return;
-            const next = result.payload.items || [];
-            const digest = digestLibraryItems(next);
-            if (digest === libraryDigestRef.current[shelfKey]) return;
-            libraryDigestRef.current[shelfKey] = digest;
-            if (!stopped) {
-              setLibraryCache((prev) => ({
-                ...prev,
-                [shelfKey]: {
-                  items: next,
-                  total: result.payload.total ?? next.length,
-                  version:
-                    typeof result.payload.version === "number"
-                      ? result.payload.version
-                      : targetVersion,
-                  digest,
-                  loadedAt: Date.now(),
-                },
-              }));
-            }
-          };
-
-          if (shelf === "movies") {
-            await refreshShelf("movies", "movie");
-            void refreshShelf("tv", "series");
-          } else if (shelf === "tv") {
-            await refreshShelf("tv", "series");
-            void refreshShelf("movies", "movie");
-          } else {
-            await refreshShelf("movies", "movie");
-            await refreshShelf("tv", "series");
           }
         } else if (currentTab === "calendar") {
           const payload = await getCalendar(calendarMonth);
@@ -1333,8 +1293,6 @@ export function App() {
     if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
   }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
-  const libraryListShelf = getLibraryListShelf(location.pathname);
-
   const activeShelfCache =
     libraryListShelf === "movies" ? libraryCache.movies : libraryListShelf === "tv" ? libraryCache.tv : undefined;
 
@@ -1559,7 +1517,7 @@ export function App() {
   function renderTabBody() {
     // Settings has its own loading UI (`SettingsPanel` when payload is null). Do not gate it on the global
     // bootstrap flag — otherwise cold loads on `/settings/...` or slow first refresh can show an empty main area.
-    if (loading && currentTab !== "settings") {
+    if ((loading || (libraryLoading && currentTab === "library" && libraryListShelf)) && currentTab !== "settings") {
       return (
         <div
           className={`min-h-[40vh] flex items-center justify-center text-[16px] font-headline uppercase tracking-widest ${
@@ -1620,6 +1578,7 @@ export function App() {
                 } else {
                   await postTaskRun("placeholder_refresh", { metadata: true, art: true });
                 }
+                invalidateLibraryAfterCatalogChange();
               } catch (e) {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start placeholder refresh");
               } finally {
@@ -1824,6 +1783,7 @@ export function App() {
                 if (backfillQueuedNow || applyScope === "now") {
                   void refreshTaskHistory();
                 }
+                invalidateLibraryAfterCatalogChange();
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
@@ -1835,6 +1795,7 @@ export function App() {
                 if (applyScope === "now") {
                   void refreshTaskHistory();
                 }
+                invalidateLibraryAfterCatalogChange();
               } else {
                 setSettingsFeedback("");
                 setSettingsFeedbackKind("");
@@ -2417,6 +2378,7 @@ export function App() {
             try {
               await postTaskRun("full_sync");
               setTaskRunModal(null);
+              invalidateLibraryAfterCatalogChange();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -2429,6 +2391,7 @@ export function App() {
             try {
               await postTaskRun("lite_sync");
               setTaskRunModal(null);
+              invalidateLibraryAfterCatalogChange();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -2441,6 +2404,7 @@ export function App() {
             try {
               await postTaskRun("calendar_only");
               setTaskRunModal(null);
+              invalidateLibraryAfterCatalogChange();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
