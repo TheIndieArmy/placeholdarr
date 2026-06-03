@@ -37,6 +37,22 @@ def series_stats_dict_from_row(series: Series) -> dict[str, int]:
     }
 
 
+def _stats_row_from_query(
+    episode_total: Any,
+    episode_files: Any,
+    episode_placeholders: Any,
+    episode_future: Any,
+    episode_missing: Any,
+) -> dict[str, int]:
+    return {
+        "episode_total": int(episode_total or 0),
+        "episode_files": int(episode_files or 0),
+        "episode_placeholders": int(episode_placeholders or 0),
+        "episode_future": int(episode_future or 0),
+        "episode_missing": int(episode_missing or 0),
+    }
+
+
 def compute_series_episode_stats(session: Session, series_id: int) -> dict[str, int]:
     """Aggregate episode counts for one series (respects deleted season/episode rows)."""
     row = (
@@ -75,13 +91,70 @@ def compute_series_episode_stats(session: Session, series_id: int) -> dict[str, 
     )
     if not row:
         return series_counts_empty()
-    return {
-        "episode_total": int(row.episode_total or 0),
-        "episode_files": int(row.episode_files or 0),
-        "episode_placeholders": int(row.episode_placeholders or 0),
-        "episode_future": int(row.episode_future or 0),
-        "episode_missing": int(row.episode_missing or 0),
-    }
+    return _stats_row_from_query(
+        row.episode_total,
+        row.episode_files,
+        row.episode_placeholders,
+        row.episode_future,
+        row.episode_missing,
+    )
+
+
+def bulk_compute_series_episode_stats(session: Session, series_ids: Iterable[int]) -> dict[int, dict[str, int]]:
+    """Aggregate episode counts for many series in one query (library reads during backfill)."""
+    ids = sorted({int(x) for x in series_ids if x is not None})
+    if not ids:
+        return {}
+
+    rows = (
+        session.query(
+            Season.series_id.label("series_id"),
+            func.count(Episode.id).label("episode_total"),
+            func.sum(case((Episode.has_file == True, 1), else_=0)).label("episode_files"),
+            func.sum(case((Episode.has_placeholder == True, 1), else_=0)).label("episode_placeholders"),
+            func.sum(
+                case(
+                    (sql_episode_future_outside_lookahead(Episode, Season), 1),
+                    else_=0,
+                )
+            ).label("episode_future"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            func.coalesce(Episode.has_file, False) == False,
+                            func.coalesce(Episode.has_placeholder, False) == False,
+                            or_(Episode.determination.is_(None), Episode.determination != "not_needed"),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("episode_missing"),
+        )
+        .select_from(Episode)
+        .join(Season, Season.id == Episode.season_id)
+        .filter(
+            Season.series_id.in_(ids),
+            Episode.is_deleted == False,
+            Season.is_deleted == False,
+        )
+        .group_by(Season.series_id)
+        .all()
+    )
+
+    out: dict[int, dict[str, int]] = {sid: series_counts_empty() for sid in ids}
+    for row in rows:
+        if row.series_id is None:
+            continue
+        out[int(row.series_id)] = _stats_row_from_query(
+            row.episode_total,
+            row.episode_files,
+            row.episode_placeholders,
+            row.episode_future,
+            row.episode_missing,
+        )
+    return out
 
 
 def _apply_stats_to_series(series: Series, stats: dict[str, int], *, now: datetime) -> None:
@@ -99,18 +172,24 @@ def refresh_series_episode_stats(session: Session, series_ids: Iterable[int]) ->
     if not ids:
         return 0
     now = datetime.now(timezone.utc)
+    bulk = bulk_compute_series_episode_stats(session, ids)
     updated = 0
     for series_id in ids:
         series = session.get(Series, series_id)
         if series is None or bool(getattr(series, "is_deleted", False)):
             continue
-        stats = compute_series_episode_stats(session, series_id)
+        stats = bulk.get(series_id, series_counts_empty())
         _apply_stats_to_series(series, stats, now=now)
         updated += 1
     return updated
 
 
-def refresh_all_series_episode_stats(session: Session, *, chunk_size: int = 100) -> int:
+def refresh_all_series_episode_stats(
+    session: Session,
+    *,
+    chunk_size: int = 100,
+    commit_each_chunk: bool = False,
+) -> int:
     """Recompute stats for every non-deleted series row."""
     ids = [
         int(row[0])
@@ -120,7 +199,10 @@ def refresh_all_series_episode_stats(session: Session, *, chunk_size: int = 100)
         return 0
     total = 0
     for i in range(0, len(ids), chunk_size):
-        total += refresh_series_episode_stats(session, ids[i : i + chunk_size])
+        chunk = ids[i : i + chunk_size]
+        total += refresh_series_episode_stats(session, chunk)
+        if commit_each_chunk:
+            session.commit()
     return total
 
 
@@ -148,11 +230,21 @@ def should_full_refresh(dirty_series_count: int) -> bool:
 
 
 def series_episode_counts_map(session: Session, series_rows: list[Series]) -> dict[int, dict[str, int]]:
-    """Build series_id -> stats dict from materialized Series columns (compute inline if not yet backfilled)."""
-    out: dict[int, dict[str, int]] = {}
+    """Build series_id -> stats dict from materialized Series columns (bulk compute if not yet backfilled)."""
+    if not series_rows:
+        return {}
+
+    materialized: dict[int, dict[str, int]] = {}
+    need_compute: list[int] = []
     for series in series_rows:
+        sid = int(series.id)
         if getattr(series, "stats_computed_at", None) is None:
-            out[int(series.id)] = compute_series_episode_stats(session, int(series.id))
+            need_compute.append(sid)
         else:
-            out[int(series.id)] = series_stats_dict_from_row(series)
-    return out
+            materialized[sid] = series_stats_dict_from_row(series)
+
+    if need_compute:
+        computed = bulk_compute_series_episode_stats(session, need_compute)
+        materialized.update(computed)
+
+    return materialized

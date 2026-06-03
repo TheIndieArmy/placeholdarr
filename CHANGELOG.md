@@ -15,6 +15,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
+- **Series stats backfill no longer blocks HTTP startup**: Materialized episode stats backfill runs in a background thread after DB init so the dashboard can accept requests immediately. Library reads use a bulk SQL aggregation for series that are not backfilled yet, so the TV shelf can load from existing catalog data while backfill continues.
 - **Library load on navigation**: Movies and TV shelves fetch when you open that page (or on hard refresh), not on the global 5s dashboard poll. Returning to a shelf uses the in-memory cache when `movies_version` / `series_version` are unchanged. Tab focus and a 60s version check call `GET /api/library/version` and refetch the catalog body only when a version counter changes; on the Library tab the 5s loop is limited to `GET /api/settings/status`. The cache is invalidated after sync tasks and settings saves that affect the catalog.
 - **`GET /api/library`**: Returns `total` and `version` alongside `items`; TV loads read precomputed series stats instead of scanning every episode row.
 

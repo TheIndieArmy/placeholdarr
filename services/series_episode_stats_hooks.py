@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from sqlalchemy import event, text
@@ -19,6 +21,8 @@ from services.series_episode_stats import (
 )
 
 _hooks_registered = False
+_backfill_thread_started = False
+_backfill_thread_lock = threading.Lock()
 _DIRTY_SERIES_KEY = "series_episode_stats_dirty_ids"
 _DIRTY_SEASON_KEY = "series_episode_stats_dirty_season_ids"
 _BUMP_MOVIES_KEY = "library_catalog_bump_movies"
@@ -223,14 +227,24 @@ def ensure_series_stats_backfilled() -> None:
     try:
         if not series_ids_needing_backfill(sess):
             return
+        total_series = (
+            sess.query(Series.id).filter(Series.is_deleted == False, Series.stats_computed_at.is_(None)).count()
+        )
         logger.info(
-            "Backfilling materialized series episode stats…",
+            "Backfilling materialized series episode stats for %s series (background)…",
+            total_series,
             extra={"emoji_type": "refresh"},
         )
-        refresh_all_series_episode_stats(sess)
+        started = time.monotonic()
+        updated = refresh_all_series_episode_stats(sess, chunk_size=50, commit_each_chunk=True)
         bump_series_version(sess)
         sess.commit()
-        logger.info("Series episode stats backfill complete", extra={"emoji_type": "success"})
+        logger.info(
+            "Series episode stats backfill complete: updated=%s elapsed_s=%.1f",
+            updated,
+            time.monotonic() - started,
+            extra={"emoji_type": "success"},
+        )
     except Exception as exc:
         try:
             sess.rollback()
@@ -246,6 +260,24 @@ def ensure_series_stats_backfilled() -> None:
             sess.close()
         except Exception:
             pass
+
+
+def schedule_series_stats_backfill() -> None:
+    """Run one-time stats backfill in a daemon thread so HTTP startup is not blocked."""
+    global _backfill_thread_started
+    with _backfill_thread_lock:
+        if _backfill_thread_started:
+            return
+        _backfill_thread_started = True
+
+    def _run() -> None:
+        ensure_series_stats_backfilled()
+
+    threading.Thread(target=_run, name="series-stats-backfill", daemon=True).start()
+    logger.info(
+        "Series episode stats backfill scheduled in background (API will not wait for it)",
+        extra={"emoji_type": "info"},
+    )
 
 
 def schedule_full_series_stats_refresh() -> None:
