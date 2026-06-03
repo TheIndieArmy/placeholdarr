@@ -8,12 +8,16 @@ import {
   type LibraryCardVariant,
   type LibraryViewMode,
 } from "./cardSettings";
+import type { LibrarySortKey } from "./librarySort";
+import { LIBRARY_SORT_OPTIONS, isLibrarySortKey } from "./librarySortSettings";
 
 export function LibraryCardControls(props: {
   settings: LibraryCardSettings;
   onChange: (next: LibraryCardSettings) => void;
   accent: LibraryCardAccent;
   themeMode: ThemeMode;
+  sortKey?: LibrarySortKey;
+  onSortChange?: (key: LibrarySortKey) => void;
   onOpenPreview?: () => void;
   compact?: boolean;
 }) {
@@ -62,6 +66,44 @@ export function LibraryCardControls(props: {
       <span className={`tabular-nums text-[12px] font-mono min-w-[3rem] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
         {props.settings.posterWidthPx}px
       </span>
+
+      {props.sortKey != null && props.onSortChange ? (
+        <>
+          <div className={`hidden sm:block w-px h-6 ${isLight ? "bg-slate-200" : "bg-[#424753]/50"}`} aria-hidden />
+          <div className="flex items-center gap-2">
+            <span className={`material-symbols-outlined ${isLight ? "text-slate-500" : "text-slate-400"}`} style={{ fontSize: 18 }}>
+              sort
+            </span>
+            <label
+              htmlFor="library-sort-select"
+              className={`font-headline uppercase tracking-wider text-[12px] ${isLight ? "text-slate-600" : "text-slate-400"}`}
+            >
+              Sort
+            </label>
+            <select
+              id="library-sort-select"
+              value={props.sortKey}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (isLibrarySortKey(next)) props.onSortChange?.(next);
+              }}
+              className={`rounded-md border px-2 py-1 font-headline text-[12px] uppercase tracking-wider cursor-pointer focus:outline-none focus-visible:ring-2 ${
+                isLight
+                  ? "border-slate-200 bg-white text-slate-800"
+                  : "border-[#424753]/60 bg-[#141a24] text-slate-200"
+              }`}
+              style={{ ["--tw-ring-color" as string]: accent.hex }}
+              aria-label="Sort library"
+            >
+              {LIBRARY_SORT_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      ) : null}
 
       <div className={`hidden sm:block w-px h-6 ${isLight ? "bg-slate-200" : "bg-[#424753]/50"}`} aria-hidden />
 

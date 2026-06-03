@@ -174,6 +174,10 @@ export interface LibraryItem {
   is_future: boolean;
   has_missing: boolean;
   overview?: string | null;
+  /** When this title was first indexed in Placeholdarr (ISO 8601). */
+  created_at?: string | null;
+  /** Last catalog/metadata update for this row (ISO 8601). */
+  updated_at?: string | null;
   stats: LibraryItemStats;
 }
 

@@ -12,9 +12,56 @@ import {
   readLibraryCardSettings,
   writeLibraryCardSettings,
 } from "./cardSettings";
-import { titleSortLetter } from "./librarySort";
+import {
+  groupLibraryItemsByLetter,
+  sortLibraryItems,
+  sortUsesAlphaSections,
+  type LibrarySortKey,
+} from "./librarySort";
 
 export type LibraryShelfFilter = "all" | "placeholders" | "future" | "missing";
+
+function renderLibraryItems(
+  items: LibraryItem[],
+  cardSettings: ReturnType<typeof readLibraryCardSettings>,
+  accent: { hex: string; icon: string },
+  themeMode: ThemeMode,
+  onOpenDetail: (item: LibraryItem) => void,
+) {
+  if (cardSettings.viewMode === "list") {
+    return (
+      <div style={libraryListStyle()}>
+        {items.map((item) => (
+          <LibraryListRow
+            key={item.id}
+            item={item}
+            posterWidthPx={cardSettings.posterWidthPx}
+            accent={accent}
+            themeMode={themeMode}
+            onClick={() => onOpenDetail(item)}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={libraryPosterGridStyle(cardSettings.posterWidthPx)}>
+      {items.map((item) => (
+        <div key={item.id} className={libraryPosterGridItemClassName} style={libraryPosterGridItemStyle()}>
+          <LibraryGridCard
+            item={item}
+            variant={cardSettings.variant}
+            posterWidthPx={cardSettings.posterWidthPx}
+            accent={accent}
+            themeMode={themeMode}
+            onClick={() => onOpenDetail(item)}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function LibraryPanel(props: {
   shelfTitle: string;
@@ -22,6 +69,8 @@ export function LibraryPanel(props: {
   catalogTotal: number;
   activeFilter: LibraryShelfFilter;
   onFilterChange: (value: LibraryShelfFilter) => void;
+  sortKey: LibrarySortKey;
+  onSortChange: (value: LibrarySortKey) => void;
   onOpenDetail: (item: LibraryItem) => void;
   onOpenCardStylePreview: () => void;
   accent: { hex: string; icon: string };
@@ -45,20 +94,12 @@ export function LibraryPanel(props: {
   ];
   const totalMissing = props.items.filter((i) => i.has_missing).length;
 
-  const groupedItems = useMemo(() => {
-    const groups: Record<string, LibraryItem[]> = {};
-    props.items.forEach((item) => {
-      const letter = titleSortLetter(item.title);
-      if (!groups[letter]) groups[letter] = [];
-      groups[letter].push(item);
-    });
-    const letters = Object.keys(groups).sort((a, b) => {
-      if (a === "#") return 1;
-      if (b === "#") return -1;
-      return a.localeCompare(b);
-    });
-    return { groups, letters };
-  }, [props.items]);
+  const sortedItems = useMemo(() => sortLibraryItems(props.items, props.sortKey), [props.items, props.sortKey]);
+
+  const alphaLayout = useMemo(() => {
+    if (!sortUsesAlphaSections(props.sortKey)) return null;
+    return groupLibraryItemsByLetter(sortedItems);
+  }, [sortedItems, props.sortKey]);
 
   return (
     <div>
@@ -101,6 +142,8 @@ export function LibraryPanel(props: {
           onChange={handleCardSettings}
           accent={accent}
           themeMode={props.themeMode}
+          sortKey={props.sortKey}
+          onSortChange={props.onSortChange}
           onOpenPreview={props.onOpenCardStylePreview}
         />
       </div>
@@ -110,79 +153,55 @@ export function LibraryPanel(props: {
       ) : (
         <div className="flex items-start gap-4 mb-8">
           <div className="flex-1 space-y-8 overflow-visible">
-            {groupedItems.letters.map((letter) => (
-              <div
-                key={letter}
-                ref={(el) => {
-                  sectionRefs.current[letter] = el;
-                }}
-              >
+            {alphaLayout ? (
+              alphaLayout.letters.map((letter) => (
                 <div
-                  className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
-                    isLight ? "text-slate-700 border-slate-200" : "text-slate-500 border-[#424753]/25"
+                  key={letter}
+                  ref={(el) => {
+                    sectionRefs.current[letter] = el;
+                  }}
+                >
+                  <div
+                    className={`mb-3 text-[14px] font-headline uppercase tracking-widest border-b pb-2 ${
+                      isLight ? "text-slate-700 border-slate-200" : "text-slate-500 border-[#424753]/25"
+                    }`}
+                  >
+                    {letter}
+                  </div>
+                  <div className="overflow-visible">
+                    {renderLibraryItems(alphaLayout.groups[letter] || [], cardSettings, accent, props.themeMode, props.onOpenDetail)}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="overflow-visible">
+                {renderLibraryItems(sortedItems, cardSettings, accent, props.themeMode, props.onOpenDetail)}
+              </div>
+            )}
+          </div>
+          {alphaLayout ? (
+            <div
+              className={`hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border px-2 py-2 ${
+                isLight ? "border-slate-200 bg-white/95 shadow-sm backdrop-blur-sm" : "border-[#424753]/35 bg-[#111722]/90"
+              }`}
+            >
+              {alphaLayout.letters.map((letter) => (
+                <button
+                  key={`alpha-${letter}`}
+                  type="button"
+                  onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                  className={`w-6 h-6 rounded text-[12px] font-headline font-bold transition-colors ${
+                    isLight
+                      ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                      : "text-slate-400 hover:text-white hover:bg-[#293346]"
                   }`}
+                  title={`Jump to ${letter}`}
                 >
                   {letter}
-                </div>
-                <div className="overflow-visible">
-                  {cardSettings.viewMode === "list" ? (
-                    <div style={libraryListStyle()}>
-                      {(groupedItems.groups[letter] || []).map((item) => (
-                        <LibraryListRow
-                          key={item.id}
-                          item={item}
-                          posterWidthPx={cardSettings.posterWidthPx}
-                          accent={accent}
-                          themeMode={props.themeMode}
-                          onClick={() => props.onOpenDetail(item)}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={libraryPosterGridStyle(cardSettings.posterWidthPx)}>
-                      {(groupedItems.groups[letter] || []).map((item) => (
-                        <div
-                          key={item.id}
-                          className={libraryPosterGridItemClassName}
-                          style={libraryPosterGridItemStyle()}
-                        >
-                          <LibraryGridCard
-                            item={item}
-                            variant={cardSettings.variant}
-                            posterWidthPx={cardSettings.posterWidthPx}
-                            accent={accent}
-                            themeMode={props.themeMode}
-                            onClick={() => props.onOpenDetail(item)}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div
-            className={`hidden lg:flex sticky top-24 flex-col gap-1 rounded-lg border px-2 py-2 ${
-              isLight ? "border-slate-200 bg-white/95 shadow-sm backdrop-blur-sm" : "border-[#424753]/35 bg-[#111722]/90"
-            }`}
-          >
-            {groupedItems.letters.map((letter) => (
-              <button
-                key={`alpha-${letter}`}
-                type="button"
-                onClick={() => sectionRefs.current[letter]?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                className={`w-6 h-6 rounded text-[12px] font-headline font-bold transition-colors ${
-                  isLight
-                    ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
-                    : "text-slate-400 hover:text-white hover:bg-[#293346]"
-                }`}
-                title={`Jump to ${letter}`}
-              >
-                {letter}
-              </button>
-            ))}
-          </div>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
 

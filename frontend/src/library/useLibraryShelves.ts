@@ -26,7 +26,7 @@ export function digestLibraryItems(items: LibraryItem[]): string {
   return items
     .map(
       (i) =>
-        `${i.id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.overview ?? ""}`,
+        `${i.id}\t${i.item_id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.created_at ?? ""}\t${i.updated_at ?? ""}`,
     )
     .join("\n");
 }
@@ -34,7 +34,6 @@ export function digestLibraryItems(items: LibraryItem[]): string {
 export function useLibraryShelves(opts: {
   /** Active list shelf (`movies` / `tv`), or null on detail routes. */
   listShelf: LibraryShelfKey | null;
-  titleSearch: string;
   /** Library list route is mounted and should load/cache shelves. */
   enabled: boolean;
   onSuccess?: () => void;
@@ -57,8 +56,6 @@ export function useLibraryShelves(opts: {
     onSuccessRef.current = opts.onSuccess;
     onErrorRef.current = opts.onError;
   }, [opts.onSuccess, opts.onError]);
-
-  const useSummary = opts.titleSearch.trim().length === 0;
 
   const applyShelfCache = useCallback((shelfKey: LibraryShelfKey, entry: LibraryShelfCache) => {
     libraryDigestRef.current[shelfKey] = entry.digest;
@@ -164,7 +161,7 @@ export function useLibraryShelves(opts: {
       try {
         await syncShelvesFromVersions({
           shelves,
-          summary: useSummary,
+          summary: true,
           force: options?.force,
           stopped: false,
         });
@@ -172,7 +169,7 @@ export function useLibraryShelves(opts: {
         onErrorRef.current?.(err instanceof Error ? err.message : "Library refresh failed");
       }
     },
-    [syncShelvesFromVersions, useSummary],
+    [syncShelvesFromVersions],
   );
 
   /** Load active shelf on navigation; prefetch the other shelf once for title search. */
@@ -194,12 +191,12 @@ export function useLibraryShelves(opts: {
         if (stopped) return;
         versionsRef.current = versions;
 
-        await refreshShelf(activeShelf, versions, { summary: useSummary, stopped });
+        await refreshShelf(activeShelf, versions, { summary: true, stopped });
         if (stopped) return;
 
         const otherCached = libraryCacheRef.current[otherShelf];
         if (!otherCached?.items.length) {
-          void refreshShelf(otherShelf, versions, { summary: useSummary, stopped }).then(() => {
+          void refreshShelf(otherShelf, versions, { summary: true, stopped }).then(() => {
             if (!stopped) onSuccessRef.current?.();
           });
         }
@@ -217,7 +214,7 @@ export function useLibraryShelves(opts: {
     return () => {
       stopped = true;
     };
-  }, [opts.enabled, opts.listShelf, useSummary, refreshShelf]);
+  }, [opts.enabled, opts.listShelf, refreshShelf]);
 
   /** Tab focus + periodic version check — refetch catalog body only when version counters change. */
   useEffect(() => {
@@ -237,7 +234,7 @@ export function useLibraryShelves(opts: {
 
       void syncShelvesFromVersions({
         shelves,
-        summary: useSummary,
+        summary: true,
         stopped,
       }).catch((err) => {
         if (!stopped) {
@@ -260,7 +257,7 @@ export function useLibraryShelves(opts: {
       document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(pollId);
     };
-  }, [opts.enabled, opts.listShelf, useSummary, syncShelvesFromVersions]);
+  }, [opts.enabled, opts.listShelf, syncShelvesFromVersions]);
 
   return {
     libraryCache,

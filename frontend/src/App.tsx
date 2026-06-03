@@ -70,7 +70,12 @@ import type {
 import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
 import { LibraryPanel } from "./library/LibraryPanel";
 import { LIBRARY_CARD_PREVIEW_PATH } from "./library/cardSettings";
-import { titleSortKey } from "./library/librarySort";
+import { titleSortKey, type LibrarySortKey } from "./library/librarySort";
+import {
+  LIBRARY_MOVIES_SORT_KEY,
+  LIBRARY_TV_SORT_KEY,
+  readStoredLibrarySort,
+} from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
 
 const REFRESH_MS_VISIBLE = 5000;
@@ -670,6 +675,10 @@ export function App() {
       tv: readStoredShelfFilter(LIBRARY_TV_FILTER_KEY),
     };
   });
+  const [libraryShelfSort, setLibraryShelfSort] = useState<{ movies: LibrarySortKey; tv: LibrarySortKey }>(() => ({
+    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY),
+    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY),
+  }));
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
   const [calendarFilters, setCalendarFilters] = useState<CalendarFilters>({
     mediaTypes: { movie: true, episode: true },
@@ -760,7 +769,6 @@ export function App() {
     refreshLibraryShelves,
   } = useLibraryShelves({
     listShelf: libraryListShelf,
-    titleSearch,
     enabled: currentTab === "library" && libraryListShelf !== null,
     onSuccess: () => setLastDashboardSuccessAt(Date.now()),
     onError: (message) => setErrorMessage(message),
@@ -888,11 +896,7 @@ export function App() {
     ];
 
     return [...pool]
-      .filter((item) => {
-        const title = item.title.toLowerCase();
-        const overview = String(item.overview || "").toLowerCase();
-        return title.includes(query) || overview.includes(query);
-      })
+      .filter((item) => item.title.toLowerCase().includes(query))
       .sort((left, right) => {
         const leftTitle = titleSortKey(left.title);
         const rightTitle = titleSortKey(right.title);
@@ -916,6 +920,15 @@ export function App() {
       /* ignore */
     }
   }, [libraryShelfFilters]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(LIBRARY_MOVIES_SORT_KEY, libraryShelfSort.movies);
+      sessionStorage.setItem(LIBRARY_TV_SORT_KEY, libraryShelfSort.tv);
+    } catch {
+      /* ignore */
+    }
+  }, [libraryShelfSort]);
 
   useEffect(() => {
     if (lastDashboardSuccessAt == null) return;
@@ -1308,8 +1321,7 @@ export function App() {
         if (shelfFilter === "future") return item.is_future;
         if (shelfFilter === "missing") return item.has_missing;
         return true;
-      })
-      .sort((left, right) => titleSortKey(left.title).localeCompare(titleSortKey(right.title)));
+      });
   }, [activeShelfCache?.items, libraryListShelf, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
@@ -1632,6 +1644,14 @@ export function App() {
                 setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
               } else {
                 setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
+            onSortChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
               }
             }}
             onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}

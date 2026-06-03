@@ -2602,6 +2602,39 @@ def _movie_merge_priority(movie: Movie) -> tuple[int, int, int]:
     return (secondary, has_media, movie.id)
 
 
+def _library_earliest_added_from_rows(rows: list[dict]) -> tuple[str | None, int | None]:
+    """Earliest Placeholdarr insert (full timestamp) and matching row id for merged shelves."""
+    best_at: datetime | None = None
+    best_id: int | None = None
+    for row in rows:
+        dt = _parse_iso_datetime(row.get("created_at"))
+        try:
+            iid = int(row.get("item_id")) if row.get("item_id") is not None else None
+        except (TypeError, ValueError):
+            iid = None
+        if dt is None:
+            continue
+        if (
+            best_at is None
+            or dt < best_at
+            or (dt == best_at and iid is not None and (best_id is None or iid < best_id))
+        ):
+            best_at = dt
+            best_id = iid
+    if best_at is None:
+        return None, best_id
+    return _iso(best_at), best_id
+
+
+def _apply_earliest_added_to_merged_row(merged: dict[str, Any], instance_rows: list[dict], *, id_prefix: str) -> None:
+    created_at, item_id = _library_earliest_added_from_rows(instance_rows)
+    if created_at:
+        merged["created_at"] = created_at
+    if item_id is not None:
+        merged["item_id"] = item_id
+        merged["id"] = f"{id_prefix}-{item_id}"
+
+
 def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
     """One grid row per TMDB id; merge stats across Radarr instances."""
     if not entries:
@@ -2630,6 +2663,7 @@ def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
             "missing": 1 if merged["has_missing"] else 0,
         }
         merged["instance_label"] = None
+        _apply_earliest_added_to_merged_row(merged, [r for _, r in group], id_prefix="movie")
         out.append(merged)
     return out
 
@@ -2971,6 +3005,7 @@ def _merge_series_library_rows(
         merged["has_missing"] = series_has_missing
         merged["is_future"] = series_is_future
         merged["instance_label"] = None
+        _apply_earliest_added_to_merged_row(merged, [r for _, r in group], id_prefix="series")
         out.append(merged)
     return out
 
@@ -3249,6 +3284,8 @@ async def library(
                 "has_placeholder": bool(movie.has_placeholder),
                 "is_future": movie_is_future,
                 "has_missing": movie_has_missing,
+                "created_at": _iso(getattr(movie, "created_at", None)),
+                "updated_at": _iso(getattr(movie, "updated_at", None)),
                 "overview": movie.radarr_overview,
                 "stats": {
                     "downloaded": 1 if movie.has_file else 0,
@@ -3320,6 +3357,8 @@ async def library(
                 "has_placeholder": counts["episode_placeholders"] > 0,
                 "is_future": series_is_future,
                 "has_missing": series_has_missing,
+                "created_at": _iso(getattr(series, "created_at", None)),
+                "updated_at": _iso(getattr(series, "updated_at", None)),
                 "overview": series.sonarr_series_overview,
                 "stats": counts,
             }
