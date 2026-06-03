@@ -244,6 +244,15 @@ async def lifespan(app: FastAPI):
 
         engine = get_engine()
         init_db(engine)
+        try:
+            from services.series_episode_stats_hooks import schedule_series_stats_backfill
+
+            schedule_series_stats_backfill()
+        except Exception as e:
+            logger.warning(
+                f"Could not schedule series episode stats backfill: {e}",
+                extra={"emoji_type": "warning"},
+            )
         if not _ensure_core_tables(engine):
             startup_sync_complete.set()
             logger.error(

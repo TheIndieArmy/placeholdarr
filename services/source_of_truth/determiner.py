@@ -682,6 +682,9 @@ def run_placeholder_link_reconcile() -> dict:
                         extra={'emoji_type': 'info'},
                     )
 
+        from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+        refresh_series_stats_after_bulk(session, full=True)
         session.commit()
         elapsed = time.monotonic() - started_mono
         logger.info(

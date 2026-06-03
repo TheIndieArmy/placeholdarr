@@ -7,6 +7,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ## [0.9.13] - 2026-05-29
 
 ### Summary
@@ -15,6 +16,8 @@ This release makes **large Movies and TV libraries usable in the dashboard**: sh
 
 **Spotlight** cards get a cleaner caption (year above title, aligned posters). Changing **calendar lookahead** or specials policy now refreshes **both** movie and TV shelves so Future/Missing filters stay accurate.
 
+=======
+>>>>>>> 7bdbaad1d5331fa304e78b9eba1a25b600cb72c1
 ### Added
 
 - **Library performance**: Materialized per-series episode stats (`episode_total`, files, placeholders, missing, future) refresh on sync and placeholder changes instead of aggregating all episodes on every `/api/library` request. Library catalog version counters power `GET /api/library/version` and conditional `If-None-Match` responses (304 when unchanged).

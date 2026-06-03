@@ -105,6 +105,15 @@ def tombstone_unconfigured_arr_rows(arr_instances_json: str) -> dict[str, Any]:
                     .update({"is_deleted": True}, synchronize_session=False)
                 )
 
+        from services.series_episode_stats_hooks import (
+            bump_library_versions_after_bulk,
+            refresh_series_stats_after_bulk,
+        )
+
+        if any(int(stats.get(k) or 0) for k in ("movies_tombstoned", "series_tombstoned", "seasons_tombstoned", "episodes_tombstoned")):
+            refresh_series_stats_after_bulk(session, full=True)
+            if int(stats.get("movies_tombstoned") or 0):
+                bump_library_versions_after_bulk(session, movies=True, series=False)
         session.commit()
         if any(int(stats[k] or 0) for k in ("movies_tombstoned", "series_tombstoned", "seasons_tombstoned", "episodes_tombstoned")):
             logger.info(
