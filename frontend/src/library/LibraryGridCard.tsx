@@ -4,7 +4,7 @@ import type { ThemeMode } from "../brandTypes";
 import type { LibraryCardVariant } from "./cardSettings";
 import { LIBRARY_CARD_SIZE_DEFAULT } from "./cardSettings";
 import { LibraryCardStatusBar, libraryStatusCounts } from "./LibraryCardStatusBar";
-import { StackTwoLineTitle } from "./StackTwoLineTitle";
+import { StackTwoLineTitle, adaptiveTitleSlotHeightPx } from "./StackTwoLineTitle";
 
 export type LibraryCardAccent = { hex: string; icon: string };
 
@@ -491,7 +491,14 @@ export function LibraryGridCard(props: LibraryGridCardProps) {
   }
 
   if (props.variant === "spotlight") {
-    /* Dark stage: large poster hero, title strip below, year de-emphasized */
+    /* Dark stage: poster hero + fixed caption band (year, adaptive title) for row alignment */
+    const titleSlotPx = adaptiveTitleSlotHeightPx(scale);
+    const yearRowPx = Math.ceil(14 * scale);
+    const captionPadYPx = Math.ceil(8 * scale);
+    const captionBandPx = yearRowPx + titleSlotPx + captionPadYPx * 2;
+    const titleColor = isLight ? "#0f172a" : "#ffffff";
+    const yearColor = isLight ? META_GREY_LIGHT : META_GREY_DARK;
+
     return (
       <LibraryCardScaleButton
         onClick={props.onClick}
@@ -526,23 +533,31 @@ export function LibraryGridCard(props: LibraryGridCardProps) {
             </div>
           </div>
 
-          <div className="shrink-0 py-[calc(8px*var(--library-card-scale))] min-w-0">
+          <div
+            className="shrink-0 flex min-w-0 flex-col items-center justify-start px-[calc(2px*var(--library-card-scale))]"
+            style={{
+              height: captionBandPx,
+              paddingTop: captionPadYPx,
+              paddingBottom: captionPadYPx,
+            }}
+          >
             <div
-              className="font-black leading-tight tracking-tight line-clamp-2 text-center"
-              style={{ fontSize: `clamp(11px, calc(13px * var(--library-card-scale)), 16px)` }}
+              className="shrink-0 w-full text-center font-semibold tabular-nums"
+              style={{
+                height: yearRowPx,
+                lineHeight: `${yearRowPx}px`,
+                fontSize: `clamp(9px, calc(10px * var(--library-card-scale)), 12px)`,
+                color: yearColor,
+              }}
             >
-              {props.item.title}
+              {props.item.year || "—"}
             </div>
-            <div
-              className={`mt-1 flex items-center justify-center gap-2 font-headline uppercase tracking-wider ${
-                isLight ? "text-slate-600" : "opacity-55"
-              }`}
-              style={{ fontSize: `clamp(8px, calc(9px * var(--library-card-scale)), 10px)` }}
-            >
-              <span>{props.item.type === "series" ? "Series" : "Film"}</span>
-              <span aria-hidden>·</span>
-              <span className="tabular-nums font-mono normal-case">{props.item.year || "—"}</span>
-            </div>
+            <StackTwoLineTitle
+              title={props.item.title}
+              color={titleColor}
+              scale={scale}
+              uppercase={false}
+            />
           </div>
         </div>
       </LibraryCardScaleButton>
