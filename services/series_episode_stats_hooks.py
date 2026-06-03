@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import event, text
@@ -28,6 +29,160 @@ _DIRTY_SEASON_KEY = "series_episode_stats_dirty_season_ids"
 _BUMP_MOVIES_KEY = "library_catalog_bump_movies"
 _BUMP_SERIES_KEY = "library_catalog_bump_series"
 _ADVISORY_LOCK_KEY = 8_729_0002
+_PENDING_LOCK = threading.Lock()
+_RETRY_WORKER_LOCK = threading.Lock()
+_retry_worker: threading.Thread | None = None
+_pending_refresh: "_RefreshBatch | None" = None
+
+
+@dataclass
+class _RefreshBatch:
+    series_ids: set[int] = field(default_factory=set)
+    bump_movies: bool = False
+    bump_series: bool = False
+    full_series_refresh: bool = False
+
+    def is_empty(self) -> bool:
+        return not (
+            self.series_ids
+            or self.bump_movies
+            or self.bump_series
+            or self.full_series_refresh
+        )
+
+    def merge(self, other: "_RefreshBatch") -> None:
+        self.series_ids.update(other.series_ids)
+        self.bump_movies = self.bump_movies or other.bump_movies
+        self.bump_series = self.bump_series or other.bump_series
+        self.full_series_refresh = self.full_series_refresh or other.full_series_refresh
+
+
+def _enqueue_refresh_batch(batch: _RefreshBatch) -> None:
+    global _pending_refresh
+    if batch.is_empty():
+        return
+    with _PENDING_LOCK:
+        if _pending_refresh is None:
+            _pending_refresh = _RefreshBatch()
+        _pending_refresh.merge(batch)
+
+
+def _take_pending_refresh() -> _RefreshBatch | None:
+    global _pending_refresh
+    with _PENDING_LOCK:
+        batch = _pending_refresh
+        _pending_refresh = None
+        return batch
+
+
+def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
+    """Apply one refresh batch. Returns False when the advisory lock is already held."""
+    from services.postgres.db import get_session
+
+    if batch.is_empty():
+        return True
+
+    sess = get_session()
+    locked = False
+    try:
+        locked = bool(
+            sess.execute(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": _ADVISORY_LOCK_KEY},
+            ).scalar()
+        )
+        if not locked:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            return False
+        try:
+            sess.execute(text("SET LOCAL lock_timeout = '15s'"))
+        except Exception:
+            pass
+
+        if batch.full_series_refresh or (batch.series_ids and should_full_refresh(len(batch.series_ids))):
+            refresh_all_series_episode_stats(sess)
+        elif batch.series_ids:
+            refresh_series_episode_stats(sess, batch.series_ids)
+        if batch.bump_movies:
+            bump_movies_version(sess)
+        if batch.bump_series:
+            bump_series_version(sess)
+        sess.commit()
+        return True
+    except Exception as exc:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "series_episode_stats refresh failed (will retry): %s",
+            exc,
+            extra={"emoji_type": "warning"},
+        )
+        return False
+    finally:
+        if locked:
+            try:
+                sess.execute(
+                    text("SELECT pg_advisory_unlock(:k)"),
+                    {"k": _ADVISORY_LOCK_KEY},
+                )
+                sess.commit()
+            except Exception:
+                try:
+                    sess.rollback()
+                except Exception:
+                    pass
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+def _ensure_refresh_retry_worker() -> None:
+    global _retry_worker
+
+    def _run() -> None:
+        global _retry_worker
+        backoff_s = 0.25
+        while True:
+            batch = _take_pending_refresh()
+            if batch is None or batch.is_empty():
+                break
+            if _execute_refresh_batch(batch):
+                backoff_s = 0.25
+                continue
+            _enqueue_refresh_batch(batch)
+            time.sleep(backoff_s)
+            backoff_s = min(backoff_s * 1.5, 2.0)
+        with _RETRY_WORKER_LOCK:
+            _retry_worker = None
+
+    with _RETRY_WORKER_LOCK:
+        if _retry_worker is not None and _retry_worker.is_alive():
+            return
+        _retry_worker = threading.Thread(
+            target=_run,
+            name="series-stats-refresh-retry",
+            daemon=True,
+        )
+        _retry_worker.start()
+
+
+def _drain_pending_refresh() -> None:
+    """Run queued stats/version work; retry in the background when the advisory lock is busy."""
+    while True:
+        batch = _take_pending_refresh()
+        if batch is None or batch.is_empty():
+            return
+        if _execute_refresh_batch(batch):
+            continue
+        _enqueue_refresh_batch(batch)
+        _ensure_refresh_retry_worker()
+        return
 
 
 def _mark_series_id(session: Session, series_id: int | None) -> None:
@@ -98,64 +253,15 @@ def _refresh_in_new_session(
     bump_series: bool,
     full_series_refresh: bool = False,
 ) -> None:
-    from services.postgres.db import get_session
-
-    sess = get_session()
-    locked = False
-    try:
-        locked = bool(
-            sess.execute(
-                text("SELECT pg_try_advisory_lock(:k)"),
-                {"k": _ADVISORY_LOCK_KEY},
-            ).scalar()
+    _enqueue_refresh_batch(
+        _RefreshBatch(
+            series_ids=set(series_ids),
+            bump_movies=bump_movies,
+            bump_series=bump_series,
+            full_series_refresh=full_series_refresh,
         )
-        if not locked:
-            try:
-                sess.rollback()
-            except Exception:
-                pass
-            return
-        try:
-            sess.execute(text("SET LOCAL lock_timeout = '15s'"))
-        except Exception:
-            pass
-
-        if full_series_refresh or (series_ids and should_full_refresh(len(series_ids))):
-            refresh_all_series_episode_stats(sess)
-        elif series_ids:
-            refresh_series_episode_stats(sess, series_ids)
-        if bump_movies:
-            bump_movies_version(sess)
-        if bump_series:
-            bump_series_version(sess)
-        sess.commit()
-    except Exception as exc:
-        try:
-            sess.rollback()
-        except Exception:
-            pass
-        logger.warning(
-            "series_episode_stats refresh skipped: %s",
-            exc,
-            extra={"emoji_type": "warning"},
-        )
-    finally:
-        if locked:
-            try:
-                sess.execute(
-                    text("SELECT pg_advisory_unlock(:k)"),
-                    {"k": _ADVISORY_LOCK_KEY},
-                )
-                sess.commit()
-            except Exception:
-                try:
-                    sess.rollback()
-                except Exception:
-                    pass
-        try:
-            sess.close()
-        except Exception:
-            pass
+    )
+    _drain_pending_refresh()
 
 
 def _before_commit(session: Session) -> None:
@@ -281,10 +387,10 @@ def schedule_series_stats_backfill() -> None:
 
 
 def schedule_full_series_stats_refresh() -> None:
-    """Post-commit full stats refresh (settings / lookahead changes)."""
+    """Post-commit full stats refresh (settings / lookahead / specials policy changes)."""
     _refresh_in_new_session(
         series_ids=set(),
-        bump_movies=False,
+        bump_movies=True,
         bump_series=True,
         full_series_refresh=True,
     )

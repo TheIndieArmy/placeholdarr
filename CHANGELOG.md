@@ -27,6 +27,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Fixed
 
 - **Added sort on dual-instance titles**: Merged movie/series grid rows now sort by the earliest Placeholdarr insert time across Radarr/Sonarr instances, not only the canonical instance row.
+- **Library version after lookahead settings**: Changing calendar lookahead or include-specials policy now bumps both movie and series catalog versions so Movies filters (Future/Missing) refetch instead of serving a cached shelf with stale flags.
+- **Stats refresh under lock contention**: When series stats refresh cannot acquire the advisory lock, pending series updates and shelf version bumps are queued and retried instead of being dropped after commit.
 
 ## [0.9.12] - 2026-05-28
 
