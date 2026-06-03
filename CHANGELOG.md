@@ -7,6 +7,37 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-05-29
+
+### Summary
+
+This release makes **large Movies and TV libraries usable in the dashboard**: shelves load on demand, stay cached until the catalog version changes, and no longer block app startup while episode stats backfill runs. You can **sort** by title, year, when a title was added, or last update; header search matches **titles only** for a faster, clearer jump list.
+
+**Spotlight** cards get a cleaner caption (year above title, aligned posters). Changing **calendar lookahead** or specials policy now refreshes **both** movie and TV shelves so Future/Missing filters stay accurate.
+
+### Added
+
+- **Library performance**: Materialized per-series episode stats (`episode_total`, files, placeholders, missing, future) refresh on sync and placeholder changes instead of aggregating all episodes on every `/api/library` request. Library catalog version counters power `GET /api/library/version` and conditional `If-None-Match` responses (304 when unchanged).
+- **Per-shelf library cache**: Movies and TV shelves cache independently in the dashboard so switching shelves can show the last loaded catalog immediately when the shelf version has not changed.
+- **Library panel extraction**: `LibraryPanel` component for Movies/TV shelves with alphabet sections and card style controls. Removed the 1000-item API cap (full shelf load up to 50,000 rows).
+- **Library sort (Movies / TV)**: Toolbar sort control with title (A–Z / Z–A), year, **Added** (newest / oldest), and recently updated. Movies and TV remember their own sort in the browser session. Title sorts keep A–Z section headers and the letter jump rail; other sorts use a flat list.
+- **Library catalog timestamps**: `/api/library` rows include `created_at` and `updated_at` (ISO) so the dashboard can sort by when Placeholdarr first indexed a title and when it last changed.
+
+### Changed
+
+- **Series stats backfill no longer blocks HTTP startup**: Materialized episode stats backfill runs in a background thread after DB init so the dashboard can accept requests immediately. Library reads use a bulk SQL aggregation for series that are not backfilled yet, so the TV shelf can load from existing catalog data while backfill continues.
+- **Library load on navigation**: Movies and TV shelves fetch when you open that page (or on hard refresh), not on the global 5s dashboard poll. Returning to a shelf uses the in-memory cache when `movies_version` / `series_version` are unchanged. Tab focus and a 60s version check call `GET /api/library/version` and refetch the catalog body only when a version counter changes; on the Library tab the 5s loop is limited to `GET /api/settings/status`. The cache is invalidated after sync tasks and settings saves that affect the catalog.
+- **`GET /api/library`**: Returns `total` and `version` alongside `items`; TV loads read precomputed series stats instead of scanning every episode row.
+- **Header library search**: Matches **titles only** (movies and series names). Shelves always load the summary catalog (no full overview payload while typing in search).
+- **Spotlight library cards**: Year is centered above the title; the Film/Series line under the title is removed. Titles use the same shrink-to-fit band as Stack cards so caption height is fixed and posters align across a row.
+- **Added sort semantics**: **Added** uses Placeholdarr `created_at` at full timestamp resolution, with database `item_id` as a tiebreaker when two titles share the same second. Merged standard/4K rows use the earliest `created_at` across instances.
+
+### Fixed
+
+- **Added sort on dual-instance titles**: Merged movie/series grid rows now sort by the earliest Placeholdarr insert time across Radarr/Sonarr instances, not only the canonical instance row.
+- **Library version after lookahead settings**: Changing calendar lookahead or include-specials policy now bumps both movie and series catalog versions so Movies filters (Future/Missing) refetch instead of serving a cached shelf with stale flags.
+- **Stats refresh under lock contention**: When series stats refresh cannot acquire the advisory lock, pending series updates and shelf version bumps are queued and retried instead of being dropped after commit.
+
 ## [0.9.12] - 2026-05-28
 
 ### Summary
