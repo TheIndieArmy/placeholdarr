@@ -12,7 +12,7 @@ import unicodedata
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import and_, case, func, or_, text
 from sqlalchemy.orm import joinedload
@@ -38,7 +38,9 @@ from services.postgres.models import (
     Job,
     EventLog,
 )
-from services.library_future_semantics import movie_row_is_future_outside_lookahead, sql_episode_future_outside_lookahead
+from services.library_catalog_version import get_library_versions, library_etag_for_shelf
+from services.library_future_semantics import movie_row_is_future_outside_lookahead
+from services.series_episode_stats import series_episode_counts_map, series_stats_dict_from_row
 from services.source_of_truth.status_intent import StatusSource
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
@@ -2600,6 +2602,39 @@ def _movie_merge_priority(movie: Movie) -> tuple[int, int, int]:
     return (secondary, has_media, movie.id)
 
 
+def _library_earliest_added_from_rows(rows: list[dict]) -> tuple[str | None, int | None]:
+    """Earliest Placeholdarr insert (full timestamp) and matching row id for merged shelves."""
+    best_at: datetime | None = None
+    best_id: int | None = None
+    for row in rows:
+        dt = _parse_iso_datetime(row.get("created_at"))
+        try:
+            iid = int(row.get("item_id")) if row.get("item_id") is not None else None
+        except (TypeError, ValueError):
+            iid = None
+        if dt is None:
+            continue
+        if (
+            best_at is None
+            or dt < best_at
+            or (dt == best_at and iid is not None and (best_id is None or iid < best_id))
+        ):
+            best_at = dt
+            best_id = iid
+    if best_at is None:
+        return None, best_id
+    return _iso(best_at), best_id
+
+
+def _apply_earliest_added_to_merged_row(merged: dict[str, Any], instance_rows: list[dict], *, id_prefix: str) -> None:
+    created_at, item_id = _library_earliest_added_from_rows(instance_rows)
+    if created_at:
+        merged["created_at"] = created_at
+    if item_id is not None:
+        merged["item_id"] = item_id
+        merged["id"] = f"{id_prefix}-{item_id}"
+
+
 def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
     """One grid row per TMDB id; merge stats across Radarr instances."""
     if not entries:
@@ -2628,6 +2663,7 @@ def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
             "missing": 1 if merged["has_missing"] else 0,
         }
         merged["instance_label"] = None
+        _apply_earliest_added_to_merged_row(merged, [r for _, r in group], id_prefix="movie")
         out.append(merged)
     return out
 
@@ -2837,53 +2873,18 @@ def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
 
 
 def _episode_stats_for_series(session, series_id: int) -> dict[str, int]:
-    """Aggregate episode counts for one series (matches /api/library series_episode_counts semantics)."""
-    row = (
-        session.query(
-            func.count(Episode.id).label("episode_total"),
-            func.sum(case((Episode.has_file == True, 1), else_=0)).label("episode_files"),
-            func.sum(case((Episode.has_placeholder == True, 1), else_=0)).label("episode_placeholders"),
-            func.sum(
-                case(
-                    (
-                        sql_episode_future_outside_lookahead(Episode, Season),
-                        1,
-                    ),
-                    else_=0,
-                )
-            ).label("episode_future"),
-            func.sum(
-                case(
-                    (
-                        and_(
-                            func.coalesce(Episode.has_file, False) == False,
-                            func.coalesce(Episode.has_placeholder, False) == False,
-                            or_(Episode.determination.is_(None), Episode.determination != "not_needed"),
-                        ),
-                        1,
-                    ),
-                    else_=0,
-                )
-            ).label("episode_missing"),
-        )
-        .select_from(Episode)
-        .join(Season, Season.id == Episode.season_id)
-        .filter(
-            Season.series_id == series_id,
-            Episode.is_deleted == False,
-            Season.is_deleted == False,
-        )
-        .first()
-    )
-    if not row:
-        return _series_counts_empty()
-    return {
-        "episode_total": int(row.episode_total or 0),
-        "episode_files": int(row.episode_files or 0),
-        "episode_placeholders": int(row.episode_placeholders or 0),
-        "episode_future": int(row.episode_future or 0),
-        "episode_missing": int(row.episode_missing or 0),
-    }
+    """Episode counts for one series (reads materialized columns when available)."""
+    series = session.get(Series, int(series_id))
+    if series is None or bool(getattr(series, "is_deleted", False)):
+        from services.series_episode_stats import series_counts_empty
+
+        return series_counts_empty()
+    if getattr(series, "stats_computed_at", None) is None:
+        from services.series_episode_stats import compute_series_episode_stats, refresh_series_episode_stats
+
+        refresh_series_episode_stats(session, {int(series_id)})
+        session.flush()
+    return series_stats_dict_from_row(series)
 
 
 def _series_arr_instance_links_from_db(session, anchor: Series) -> list[dict[str, Any]]:
@@ -3004,6 +3005,7 @@ def _merge_series_library_rows(
         merged["has_missing"] = series_has_missing
         merged["is_future"] = series_is_future
         merged["instance_label"] = None
+        _apply_earliest_added_to_merged_row(merged, [r for _, r in group], id_prefix="series")
         out.append(merged)
     return out
 
@@ -3198,9 +3200,21 @@ async def library_poster(item_type: str, item_id: int):
         session.close()
 
 
+@router.get("/api/library/version")
+async def library_version():
+    """Lightweight shelf version counters for conditional library polling."""
+    session = get_session()
+    try:
+        return get_library_versions(session)
+    finally:
+        session.close()
+
+
 @router.get("/api/library")
 async def library(
-    limit: int = Query(300, ge=1, le=1000),
+    request: Request,
+    response: Response,
+    limit: int = Query(50000, ge=1, le=50000),
     summary: bool = Query(False),
     media_type: str | None = Query(None, description="Optional filter: movie or series"),
 ):
@@ -3208,6 +3222,7 @@ async def library(
 
     When ``summary`` is true, omit large text fields (``overview``, ``backdrop_url``) to shrink JSON for grid polling.
     When ``media_type`` is set, only query that shelf (faster load for Movies vs TV pages).
+    Supports ``If-None-Match`` with the shelf version for 304 responses.
     """
     want_movies = True
     want_series = True
@@ -3219,46 +3234,12 @@ async def library(
 
     session = get_session()
     try:
-        series_episode_counts = {
-            row.series_id: {
-                "episode_total": int(row.episode_total or 0),
-                "episode_files": int(row.episode_files or 0),
-                "episode_placeholders": int(row.episode_placeholders or 0),
-                "episode_future": int(row.episode_future or 0),
-                "episode_missing": int(row.episode_missing or 0),
-            }
-            for row in session.query(
-                Season.series_id.label("series_id"),
-                func.count(Episode.id).label("episode_total"),
-                func.sum(case((Episode.has_file == True, 1), else_=0)).label("episode_files"),
-                func.sum(case((Episode.has_placeholder == True, 1), else_=0)).label("episode_placeholders"),
-                func.sum(
-                    case(
-                        (
-                            sql_episode_future_outside_lookahead(Episode, Season),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ).label("episode_future"),
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                func.coalesce(Episode.has_file, False) == False,
-                                func.coalesce(Episode.has_placeholder, False) == False,
-                                or_(Episode.determination.is_(None), Episode.determination != "not_needed"),
-                            ),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ).label("episode_missing"),
-            )
-            .join(Episode, Episode.season_id == Season.id)
-            .group_by(Season.series_id)
-            .all()
-        } if want_series else {}
+        etag = library_etag_for_shelf(session, mt if mt else "all")
+        client_etag = str(request.headers.get("if-none-match") or "").strip().strip('"')
+        if client_etag and client_etag == etag:
+            return Response(status_code=304)
+
+        series_episode_counts: dict[int, dict[str, int]] = {}
 
         movie_entries: list[tuple[Movie, dict]] = []
 
@@ -3303,6 +3284,8 @@ async def library(
                 "has_placeholder": bool(movie.has_placeholder),
                 "is_future": movie_is_future,
                 "has_missing": movie_has_missing,
+                "created_at": _iso(getattr(movie, "created_at", None)),
+                "updated_at": _iso(getattr(movie, "updated_at", None)),
                 "overview": movie.radarr_overview,
                 "stats": {
                     "downloaded": 1 if movie.has_file else 0,
@@ -3326,6 +3309,7 @@ async def library(
                 .limit(limit)
                 .all()
             )
+            series_episode_counts = series_episode_counts_map(session, series_rows)
         else:
             series_rows = []
         for series in series_rows:
@@ -3373,6 +3357,8 @@ async def library(
                 "has_placeholder": counts["episode_placeholders"] > 0,
                 "is_future": series_is_future,
                 "has_missing": series_has_missing,
+                "created_at": _iso(getattr(series, "created_at", None)),
+                "updated_at": _iso(getattr(series, "updated_at", None)),
                 "overview": series.sonarr_series_overview,
                 "stats": counts,
             }
@@ -3392,7 +3378,14 @@ async def library(
             )
         )
 
-        return {"items": items[:limit], "count": min(len(items), limit)}
+        total = len(items)
+        response.headers["ETag"] = f'"{etag}"'
+        return {
+            "items": items[:limit],
+            "count": min(total, limit),
+            "total": total,
+            "version": int(etag) if etag.isdigit() else etag,
+        }
     finally:
         session.close()
 
@@ -3920,6 +3913,8 @@ async def settings_save(request: Request):
     )
     before_arr_fingerprint = _arr_endpoint_fingerprint()
     was_setup_complete = bool(get_onboarding_status().get("setup_complete"))
+    lookahead_before = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+    include_specials_before = bool(getattr(settings, "INCLUDE_SPECIALS", False))
     apply_scope_raw = payload.get("apply_scope") if isinstance(payload, dict) else None
     apply_scope = (
         str(apply_scope_raw).strip().lower()
@@ -3940,6 +3935,20 @@ async def settings_save(request: Request):
         _launch_post_onboarding_startup_sync()
     elif result.get("ok") and not partial and arr_endpoints_changed:
         _launch_arr_change_full_sync(reason="arr_endpoint_changed")
+    if result.get("ok"):
+        lookahead_after = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        include_specials_after = bool(getattr(settings, "INCLUDE_SPECIALS", False))
+        if lookahead_before != lookahead_after or include_specials_before != include_specials_after:
+            try:
+                from services.series_episode_stats_hooks import schedule_full_series_stats_refresh
+
+                schedule_full_series_stats_refresh()
+            except Exception as exc:
+                logger.warning(
+                    "Could not schedule full series stats refresh after settings change: %s",
+                    exc,
+                    extra={"emoji_type": "warning"},
+                )
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

@@ -1316,6 +1316,9 @@ def _run_materialization_for_ids(
             },
             synchronize_session=False,
         )
+        from services.series_episode_stats_hooks import refresh_series_stats_after_bulk
+
+        refresh_series_stats_after_bulk(session, series_ids={int(series_id)})
         stats["deleted"] += len(ids)
         files_deleted_count = int(cleanup_result.get("files_deleted", 0) or 0)
         stats["files_deleted"] += files_deleted_count

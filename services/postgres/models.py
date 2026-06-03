@@ -267,6 +267,23 @@ class ScheduledTaskRun(Base):
         return f"<ScheduledTaskRun(id={self.id}, task_key={self.task_key!r}, status={self.status!r})>"
 
 
+class LibraryCatalogVersion(Base):
+    """Singleton version counters for library shelf ETag polling (id=1)."""
+
+    __tablename__ = "library_catalog_version"
+
+    id = Column(Integer, primary_key=True, autoincrement=False, default=1)
+    movies_version = Column(Integer, nullable=False, default=0)
+    series_version = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, server_default=text("now()"))
+
+    def __repr__(self):
+        return (
+            f"<LibraryCatalogVersion(id={self.id}, movies_version={self.movies_version}, "
+            f"series_version={self.series_version})>"
+        )
+
+
 class DashboardStatsSnapshot(Base):
     """Singleton materialized counters for `/api/stats` (id=1)."""
 
@@ -465,6 +482,13 @@ class Series(Base):
     # Aggregate flags for files under this series
     has_files = Column(Boolean, default=False)
     seriesfile_count = Column(BigInteger, nullable=True)
+    # Materialized episode counters for fast library reads (refreshed on episode/season changes).
+    episode_total = Column(Integer, nullable=False, default=0)
+    episode_files = Column(Integer, nullable=False, default=0)
+    episode_placeholders = Column(Integer, nullable=False, default=0)
+    episode_future = Column(Integer, nullable=False, default=0)
+    episode_missing = Column(Integer, nullable=False, default=0)
+    stats_computed_at = Column(DateTime(timezone=True), nullable=True)
     # human-friendly quality label aggregated or representative for the series
     sonarr_quality = Column(String, nullable=True)
     sonarr_status = Column(String, nullable=True)
