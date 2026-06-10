@@ -8,8 +8,11 @@ import type {
   IntegrationTestResponse,
   LibraryResponse,
   LibraryVersionResponse,
+  DashboardEvent,
+  HealthResponse,
   LogsResponse,
   PlaceholderActivityRow,
+  ReadyResponse,
   SaveSettingsResponse,
   SettingsPayload,
   SettingsStatus,
@@ -150,8 +153,90 @@ export function getErrors(limit = 100): Promise<ErrorRow[]> {
   return fetchJson<ErrorRow[]>(`/api/errors?limit=${limit}`);
 }
 
-export function getLogs(level: "all" | "debug" | "info" | "warn" | "error" | "critical", tail = 500): Promise<LogsResponse> {
-  return fetchJson<LogsResponse>(`/api/logs?tail=${tail}&level=${level}`);
+export function getLogs(
+  level: "all" | "debug" | "info" | "warn" | "error" | "critical",
+  tail = 500,
+  sinceId?: number,
+): Promise<LogsResponse> {
+  const params = new URLSearchParams({
+    tail: String(tail),
+    level,
+  });
+  if (sinceId != null) {
+    params.set("since_id", String(sinceId));
+  }
+  return fetchJson<LogsResponse>(`/api/logs?${params.toString()}`);
+}
+
+export function openLogsEventSource(
+  level: "all" | "debug" | "info" | "warn" | "error" | "critical",
+  sinceId: number,
+  handlers: {
+    onLine: (id: number, line: string) => void;
+    onError?: () => void;
+  },
+): () => void {
+  const params = new URLSearchParams({
+    since_id: String(Math.max(0, sinceId)),
+    level,
+  });
+  const source = new EventSource(`/api/logs/stream?${params.toString()}`);
+
+  source.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data) as { id?: number; line?: string };
+      if (typeof payload.id === "number" && typeof payload.line === "string") {
+        handlers.onLine(payload.id, payload.line);
+      }
+    } catch {
+      /* ignore malformed frames */
+    }
+  };
+
+  source.onerror = () => {
+    handlers.onError?.();
+    source.close();
+  };
+
+  return () => source.close();
+}
+
+export function getHealth(): Promise<HealthResponse> {
+  return fetchJson<HealthResponse>("/api/health");
+}
+
+export function getReady(): Promise<ReadyResponse> {
+  return fetchJson<ReadyResponse>("/api/ready");
+}
+
+export function openDashboardEventSource(handlers: {
+  onOpen?: () => void;
+  onEvent: (event: DashboardEvent) => void;
+  onError?: () => void;
+}): () => void {
+  const source = new EventSource("/api/events");
+
+  source.onopen = () => {
+    handlers.onOpen?.();
+  };
+
+  source.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data) as DashboardEvent;
+      if (payload && typeof payload.type === "string") {
+        handlers.onEvent(payload);
+      }
+    } catch {
+      /* ignore malformed frames */
+    }
+  };
+
+  source.onerror = () => {
+    handlers.onError?.();
+    source.close();
+  };
+
+  return () => source.close();
 }
 
 export function getSettingsCurrent(): Promise<SettingsPayload> {

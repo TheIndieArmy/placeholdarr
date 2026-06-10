@@ -328,6 +328,10 @@ export interface LogsResponse {
   file?: string | null;
   /** Log files capture full verbosity (VERBOSE/DEBUG and above); console stays INFO-only. */
   capture_level?: string | null;
+  /** Monotonic line id for incremental live streaming; 0 when tail came from the log file. */
+  latest_id?: number;
+  /** `live` when served from the in-process buffer; `file` on cold start fallback. */
+  source?: "live" | "file" | string | null;
 }
 
 export interface CalendarLegendItem {
@@ -436,6 +440,20 @@ export interface SettingsSection {
   name: string;
   fields: SettingsField[];
 }
+
+export interface HealthResponse {
+  ok: boolean;
+}
+
+export interface ReadyResponse {
+  ok: boolean;
+  startup_sync_complete: boolean;
+}
+
+export type DashboardEvent =
+  | { type: "ping"; ts: number }
+  | { type: "startup_sync_complete"; value: boolean }
+  | { type: "library_version"; movies_version: number; series_version: number };
 
 export interface SettingsStatus {
   setup_complete: boolean;

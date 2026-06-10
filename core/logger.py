@@ -217,6 +217,14 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 if workspace_file_handler is not None:
     logger.addHandler(workspace_file_handler)
+_log_formatter = EnhancedEmojiLogFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+try:
+    from services.live_log_buffer import install_live_log_capture
+
+    install_live_log_capture(_log_formatter)
+except Exception as ex:
+    print(f"Live log buffer unavailable: {ex}", file=sys.stderr)
+
 logger.debug(f"File logging initialized at {log_file_path} (keeping {max_run_files} run files)", extra={'emoji_type': 'debug'})
 if workspace_file_handler is not None:
     logger.debug(f"Workspace logging mirrored at {workspace_log_path}", extra={'emoji_type': 'debug'})

@@ -36,6 +36,8 @@ export function useLibraryShelves(opts: {
   listShelf: LibraryShelfKey | null;
   /** Library list route is mounted and should load/cache shelves. */
   enabled: boolean;
+  /** When true, skip the 60s version poll (dashboard SSE pushes library_version). */
+  liveVersionSync?: boolean;
   onSuccess?: () => void;
   onError?: (message: string) => void;
 }) {
@@ -250,14 +252,18 @@ export function useLibraryShelves(opts: {
     };
 
     document.addEventListener("visibilitychange", onVisibility);
-    const pollId = window.setInterval(runVersionCheck, LIBRARY_VERSION_POLL_MS);
+    const pollId = opts.liveVersionSync
+      ? 0
+      : window.setInterval(runVersionCheck, LIBRARY_VERSION_POLL_MS);
 
     return () => {
       stopped = true;
       document.removeEventListener("visibilitychange", onVisibility);
-      window.clearInterval(pollId);
+      if (pollId) {
+        window.clearInterval(pollId);
+      }
     };
-  }, [opts.enabled, opts.listShelf, syncShelvesFromVersions]);
+  }, [opts.enabled, opts.liveVersionSync, opts.listShelf, syncShelvesFromVersions]);
 
   return {
     libraryCache,

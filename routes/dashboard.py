@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import and_, case, func, or_, text
 from sqlalchemy.orm import joinedload
 
@@ -40,6 +40,7 @@ from services.postgres.models import (
     EventLog,
 )
 from services.library_catalog_version import get_library_versions, library_etag_for_shelf
+from services.library_poster_paths import library_poster_cache_token, load_library_poster_path
 from services.library_future_semantics import movie_row_is_future_outside_lookahead
 from services.series_episode_stats import series_episode_counts_map, series_stats_dict_from_row
 from services.source_of_truth.status_intent import StatusSource
@@ -3488,39 +3489,36 @@ def _build_library_payload(
         session.close()
 
 
+def _library_poster_file_response(path: str) -> FileResponse:
+    cache_token = library_poster_cache_token(path)
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": _LIBRARY_POSTER_CACHE,
+            "ETag": f'"{cache_token}"',
+        },
+    )
+
+
+def _resolve_library_poster_response(kind: str, item_id: int):
+    """Read-only poster serve: cached path lookup, no catalog downloads on request."""
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"movie", "series"}:
+        return JSONResponse({"ok": False, "message": "invalid item type"}, status_code=400)
+
+    local_path, remote = load_library_poster_path(normalized, int(item_id))
+    if local_path:
+        return _library_poster_file_response(local_path)
+    if remote:
+        return RedirectResponse(remote, status_code=302)
+    return JSONResponse({"ok": False, "message": "poster not found"}, status_code=404)
+
+
 @router.get("/api/library/poster/{item_type}/{item_id}")
 async def library_poster(item_type: str, item_id: int):
-    """Serve on-disk library poster (poster-grid.jpg or raw poster.jpg; browser-cacheable)."""
-    kind = str(item_type or "").strip().lower()
-    session = get_session()
-    try:
-        if kind == "movie":
-            movie = session.query(Movie).filter(Movie.id == int(item_id), Movie.is_deleted == False).first()  # noqa: E712
-            if not movie:
-                return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-            path = _local_poster_file_for_movie(movie, try_catalog_download=True)
-        elif kind == "series":
-            series = session.query(Series).filter(Series.id == int(item_id), Series.is_deleted == False).first()  # noqa: E712
-            if not series:
-                return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
-            path = _local_poster_file_for_series(series, try_catalog_download=True)
-        else:
-            return JSONResponse({"ok": False, "message": "invalid item type"}, status_code=400)
-
-        if not path or not os.path.isfile(path):
-            return JSONResponse({"ok": False, "message": "poster not found"}, status_code=404)
-
-        cache_token = _library_poster_cache_token(path)
-        return FileResponse(
-            path,
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": _LIBRARY_POSTER_CACHE,
-                "ETag": f'"{cache_token}"',
-            },
-        )
-    finally:
-        session.close()
+    """Serve pre-materialized poster-grid.jpg (or poster.jpg). Never downloads art on this hot path."""
+    return await asyncio.to_thread(_resolve_library_poster_response, item_type, item_id)
 
 
 @router.get("/api/library/version")
@@ -4157,19 +4155,94 @@ async def integrations_test(request: Request):
 async def logs(
     tail: int = Query(200, ge=1, le=2000),
     level: str = Query("all"),
+    since_id: int | None = Query(None, ge=0),
 ):
-    """Tail the current log file. Optionally filter by level threshold (all/debug/info/warn/error/critical)."""
+    """Tail logs from the in-process live buffer, or fall back to the log file on cold start."""
+    from services.live_log_buffer import LIVE_LOG_BUFFER, live_log_payload
+
     log_file = _latest_runtime_log_file()
+    file_name = os.path.basename(log_file) if log_file else None
+
+    if since_id is not None:
+        payload = live_log_payload(tail=tail, level=level, since_id=since_id)
+        payload["file"] = file_name
+        return payload
+
+    if LIVE_LOG_BUFFER.latest_id() > 0:
+        payload = live_log_payload(tail=tail, level=level, since_id=None)
+        payload["file"] = file_name
+        return payload
+
     if not log_file:
-        return {"lines": [], "file": None}
+        return {"lines": [], "file": None, "latest_id": 0, "source": "file"}
 
     try:
-        lines = _read_runtime_log_tail(log_file, tail=tail, level=level)
+        lines = await asyncio.to_thread(_read_runtime_log_tail, log_file, tail=tail, level=level)
     except FileNotFoundError:
-        return {"lines": [], "file": None}
+        return {"lines": [], "file": None, "latest_id": 0, "source": "file"}
 
     return {
         "lines": lines,
-        "file": os.path.basename(log_file),
+        "file": file_name,
         "capture_level": "FULL",
+        "latest_id": 0,
+        "source": "file",
     }
+
+
+@router.get("/api/logs/stream")
+async def logs_stream(
+    request: Request,
+    since_id: int = Query(0, ge=0),
+    level: str = Query("all"),
+):
+    """Server-sent events stream of new log lines from the live buffer."""
+    from services.live_log_buffer import LIVE_LOG_BUFFER
+
+    async def generate():
+        last_id = max(0, int(since_id))
+        while True:
+            if await request.is_disconnected():
+                break
+            entries = await asyncio.to_thread(
+                lambda cursor=last_id, filter_level=level: LIVE_LOG_BUFFER.get_since(
+                    cursor,
+                    level=filter_level,
+                )
+            )
+            for entry in entries:
+                last_id = entry.id
+                yield f"data: {json.dumps({'id': entry.id, 'line': entry.line})}\n\n"
+            await asyncio.sleep(0.35)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/api/events")
+async def dashboard_events_stream(request: Request):
+    """Server-sent events for dashboard liveness and cheap state deltas."""
+    from services.dashboard_events import iter_dashboard_events
+
+    async def generate():
+        async for event in iter_dashboard_events():
+            if await request.is_disconnected():
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

@@ -16,6 +16,7 @@ from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
 from services.activity_snapshot import clear_queue_download_snapshot, set_queue_download_snapshot
 from services.source_of_truth.arr_api import (
+    ARR_HTTP_TIMEOUT_SECONDS,
     trigger_radarr_refresh_monitored_downloads,
     trigger_sonarr_refresh_monitored_downloads,
 )
@@ -464,7 +465,7 @@ class QueueMonitorProducer:
         """One full poll cycle: scan -> ARR HTTP (no DB held) -> apply intents.
 
         Phase 1 connection-lifecycle: this method previously held one DB
-        session across all four ARR HTTP calls (each up to 30s timeout).
+        session across all four ARR HTTP calls (each up to ARR_HTTP_TIMEOUT_SECONDS).
         Now we run in three short phases:
 
         1. Read-only scan session: figure out which ARR endpoints we need
@@ -581,7 +582,7 @@ class QueueMonitorProducer:
             return {}
 
         try:
-            response = requests.get(endpoint, headers={"X-Api-Key": api_key}, timeout=30)
+            response = requests.get(endpoint, headers={"X-Api-Key": api_key}, timeout=ARR_HTTP_TIMEOUT_SECONDS)
             response.raise_for_status()
             payload = response.json() if response.text else {}
             records = payload.get("records", []) if isinstance(payload, dict) else []

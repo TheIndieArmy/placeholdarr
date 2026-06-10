@@ -14,7 +14,7 @@ import time
 from typing import Any, Callable
 
 from core.logger import logger
-from services.source_of_truth.arr_api import _build_endpoint, _request_json
+from services.source_of_truth.arr_api import ARR_HTTP_TIMEOUT_SECONDS, _build_endpoint, _request_json
 
 TERMINAL_COMMAND_STATUSES = frozenset({"completed", "failed", "aborted", "cancelled"})
 
@@ -35,7 +35,7 @@ def post_arr_command(
     api_key: str,
     name: str,
     body: dict[str, Any],
-    timeout: int = 30,
+    timeout: int = ARR_HTTP_TIMEOUT_SECONDS,
 ) -> int:
     """POST /api/v3/command and return the command id."""
     endpoint = _build_endpoint(base_url, "command")
@@ -61,7 +61,7 @@ def get_arr_command(
     base_url: str,
     api_key: str,
     command_id: int,
-    timeout: int = 20,
+    timeout: int = ARR_HTTP_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     endpoint = _build_endpoint(base_url, f"command/{int(command_id)}")
     result = _request_json("GET", endpoint, api_key=api_key, timeout=timeout)
