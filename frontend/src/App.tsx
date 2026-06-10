@@ -50,7 +50,6 @@ import type {
   CalendarResponse,
   DashboardTab,
   ErrorRow,
-  LibraryItem,
   MovieDetailResponse,
   SeriesDetailResponse,
   SeriesSeasonDetail,
@@ -309,6 +308,7 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Library sync",
   "Calendar",
   "Lookahead",
+  "Status Updates",
   "Advanced",
 ] as const;
 
@@ -1860,7 +1860,7 @@ export function App() {
       return <Navigate to={HOME_PATH} replace />;
     }
     const needsSetupWizard = setupStatus != null && !setupStatus.setup_complete;
-    if (!setupStatus || (needsSetupWizard && (loading || !settingsPayload))) {
+    if (!setupStatus || !settingsPayload || (needsSetupWizard && loading)) {
       return (
         <SetupBootShell
           setupShellClass={setupShellClass}
@@ -2518,7 +2518,6 @@ function ActivityPanel(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, accent);
   const isLight = props.themeMode === "light";
-  const tab = props.mode === "placeholders" ? "placeholders" : "system";
   const rows = props.rows || [];
   const panelShellStyle: React.CSSProperties | undefined = isLight
     ? {
@@ -3140,7 +3139,6 @@ function TasksPanel(props: {
 }) {
   const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
   const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -7877,7 +7875,7 @@ function StatusMessagesPanel(props: {
     placeholderCount: number;
     pending: boolean;
   }>(null);
-  const scopeFlowWaitersRef = useRef<{ resolve: () => void; reject: (e: unknown) => void } | null>(null);
+  const scopeFlowWaitersRef = useRef<{ resolve: (scope: ApplyScope) => void; reject: (e: unknown) => void } | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -8052,9 +8050,6 @@ function StatusMessagesPanel(props: {
       setFeedback({ kind: "success", message: savedMsg });
       setScopeModal(null);
       await reload();
-      const w = scopeFlowWaitersRef.current;
-      scopeFlowWaitersRef.current = null;
-      w?.resolve();
     } catch (e: unknown) {
       setFeedback({ kind: "error", message: e instanceof Error ? e.message : "Save failed" });
       const w = scopeFlowWaitersRef.current;
@@ -8430,7 +8425,12 @@ function StatusMessagesPanel(props: {
             scopeFlowWaitersRef.current = null;
             w?.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
           }}
-          onConfirm={(scope) => handleSave(scope)}
+          onConfirm={(scope) => {
+            setScopeModal(null);
+            const w = scopeFlowWaitersRef.current;
+            scopeFlowWaitersRef.current = null;
+            w?.resolve(scope);
+          }}
           brand={props.brand}
           themeMode={props.themeMode}
         />
@@ -10532,6 +10532,7 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
+    ...statusUpdates,
     ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
   ];
 }

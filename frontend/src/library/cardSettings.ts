@@ -77,10 +77,11 @@ export function readLibraryCardSettings(): LibraryCardSettings {
       return { variant: "stacked", posterWidthPx: LIBRARY_CARD_SIZE_DEFAULT, viewMode: "grid" };
     }
     const parsed = JSON.parse(raw) as Partial<LibraryCardSettings>;
+    const viewMode = parsed.viewMode ?? null;
     return {
       variant: normalizeVariant(parsed.variant ?? null),
       posterWidthPx: clampSize(Number(parsed.posterWidthPx) || LIBRARY_CARD_SIZE_DEFAULT),
-      viewMode: isViewMode(parsed.viewMode ?? null) ? parsed.viewMode : "grid",
+      viewMode: isViewMode(viewMode) ? viewMode : "grid",
     };
   } catch {
     return { variant: "stacked", posterWidthPx: LIBRARY_CARD_SIZE_DEFAULT, viewMode: "grid" };

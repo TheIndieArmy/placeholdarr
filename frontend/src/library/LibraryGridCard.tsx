@@ -77,15 +77,6 @@ function posterShell(
   );
 }
 
-/** Poster art only—no overlays (status/title live outside this block). */
-function posterArtBlock(item: LibraryItem, className?: string) {
-  return (
-    <div className={`relative min-h-0 min-w-0 overflow-hidden bg-neutral-900 ${className ?? ""}`}>
-      {posterImage(item)}
-    </div>
-  );
-}
-
 function metaBlock(
   item: LibraryItem,
   opts: {

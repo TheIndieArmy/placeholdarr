@@ -75,7 +75,7 @@ export async function getLibrary(
     const etag = response.headers.get("ETag")?.replace(/"/g, "") ?? null;
     return {
       notModified: true,
-      version: etag != null && /^\d+$/.test(etag) ? Number(etag) : etag,
+      version: etag != null && /^\d+$/.test(etag) ? Number(etag) : null,
     };
   }
 

@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 import type { LibraryItem } from "../types/api";
 import type { ThemeMode } from "../brandTypes";
-import { LIBRARY_CARD_SIZE_DEFAULT, LIBRARY_CARD_SIZE_MIN } from "./cardSettings";
+import { LIBRARY_CARD_SIZE_DEFAULT } from "./cardSettings";
 import type { LibraryCardAccent } from "./LibraryGridCard";
 import { LibraryCardStatusBar } from "./LibraryCardStatusBar";
 
