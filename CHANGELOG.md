@@ -7,7 +7,33 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-<<<<<<< HEAD
+## [0.9.14] - 2026-06-09
+
+### Summary
+
+This release makes the dashboard **feel live** without hammering the API: **server-sent events** push library version changes and startup-sync status, the **Logs** tab streams new lines in real time, and background polling backs off when SSE is connected. **Library poster requests** stay read-only on the hot path — `poster-grid.jpg` is materialized in a background thread instead of during browser loads.
+
+Large *arr libraries also get more headroom: bulk Radarr/Sonarr HTTP reads now use a **120s timeout** (was 30s) so full sync and catalog fetches are less likely to fail on slow user-share I/O.
+
+### Added
+
+- **Live log streaming**: In-process ring buffer captures formatted log lines; `GET /api/logs` supports `since_id` for incremental tailing and level filtering; `GET /api/logs/stream` pushes new lines over SSE. Cold start falls back to the on-disk log file until the buffer has entries.
+- **Dashboard SSE (`GET /api/events`)**: Pushes `startup_sync_complete`, `library_version` (movies/series counters), and periodic pings so the UI can react without polling every tab on a fixed interval.
+- **Health and readiness probes**: `GET /api/health` (liveness, no DB) and `GET /api/ready` (includes startup sync gate) for browser reconnect logic and startup UI.
+- **Frontend data hooks**: Extracted `useLogsStream`, `useDashboardEvents`, `useApiHealthCheck`, `useActivityFeed`, `useActivityTasks`, `useCalendarData`, `useErrorsFeed`, `useSetupStatusPoll`, and `useStartupReadyPoll` so `App.tsx` owns routing/layout and each tab manages its own fetch/stream lifecycle.
+- **Library poster grid backfill**: Background thread creates missing `poster-grid.jpg` beside existing `poster.jpg` for placeholder rows; `GET /api/library/poster` serves pre-materialized files only (no art download on request).
+
+### Changed
+
+- **Dashboard polling strategy**: When SSE is connected, library version checks skip the 60s poll loop (events drive refetch); health and startup-ready probes use exponential backoff and idle when the event stream is up. Tab visibility still triggers catch-up refreshes.
+- **Library poster resolution**: Poster path lookup and cache-busting tokens live in `services/library_poster_paths.py`; list/grid `poster_url` values point at the dedicated poster API with stable cache tokens.
+- **ARR HTTP timeout**: Shared `ARR_HTTP_TIMEOUT_SECONDS` raised to **120** for bulk movie/series catalog reads, queue-monitor ARR calls, and command polling — reduces read timeouts on large libraries over mergerfs/user shares.
+
+### Fixed
+
+- **CI / Docker frontend build**: `.gitignore` `logs/` no longer ignores `frontend/src/logs/`; `useLogsStream.ts` is tracked so Vite can resolve the import in release builds.
+- **TypeScript build**: Setup wizard null-guard for settings payload, Status Updates behavior-wizard section typing, status-messages save-flow scope promise resolution, and minor unused-import / narrowing fixes in library card modules.
+
 ## [0.9.13] - 2026-05-29
 
 ### Summary
@@ -16,8 +42,6 @@ This release makes **large Movies and TV libraries usable in the dashboard**: sh
 
 **Spotlight** cards get a cleaner caption (year above title, aligned posters). Changing **calendar lookahead** or specials policy now refreshes **both** movie and TV shelves so Future/Missing filters stay accurate.
 
-=======
->>>>>>> 7bdbaad1d5331fa304e78b9eba1a25b600cb72c1
 ### Added
 
 - **Library performance**: Materialized per-series episode stats (`episode_total`, files, placeholders, missing, future) refresh on sync and placeholder changes instead of aggregating all episodes on every `/api/library` request. Library catalog version counters power `GET /api/library/version` and conditional `If-None-Match` responses (304 when unchanged).
