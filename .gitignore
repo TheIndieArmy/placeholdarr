@@ -65,9 +65,9 @@ wheels/
 .installed.cfg
 *.egg
 
-# Logs
+# Logs (repo-root runtime logs only — not frontend/src/logs/)
 *.log
-logs/
+/logs/
 media_handler.log
 
 # Local diagnostics / probe artifacts

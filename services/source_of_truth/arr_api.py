@@ -16,6 +16,8 @@ _session = requests.Session()
 _cache_lock = threading.Lock()
 _cache = {}
 _DEFAULT_TTL_SECONDS = 120
+# Bulk *arr reads (e.g. GET /api/v3/movie) can exceed 30s on large libraries over user-share I/O.
+ARR_HTTP_TIMEOUT_SECONDS = 120
 
 
 def _cache_get(key: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS):
@@ -48,7 +50,7 @@ def _default_sonarr_endpoint() -> tuple[str, str]:
     return settings.resolve_arr_endpoint("sonarr", role="primary")
 
 
-def _get_json(url: str, params: dict, timeout: int = 30):
+def _get_json(url: str, params: dict, timeout: int = ARR_HTTP_TIMEOUT_SECONDS):
     safe_url = url
     try:
         parts = urlsplit(url)
@@ -77,7 +79,7 @@ def _request_json(
     params: Optional[dict] = None,
     payload: Optional[dict] = None,
     api_key: Optional[str] = None,
-    timeout: int = 30,
+    timeout: int = ARR_HTTP_TIMEOUT_SECONDS,
 ):
     safe_url = url
     try:
@@ -401,7 +403,7 @@ def trigger_radarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
         endpoint,
         payload={"name": "RefreshMonitoredDownloads"},
         api_key=api_key,
-        timeout=20,
+        timeout=ARR_HTTP_TIMEOUT_SECONDS,
     )
     return result is not None
 
@@ -417,7 +419,7 @@ def trigger_sonarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
         endpoint,
         payload={"name": "RefreshMonitoredDownloads"},
         api_key=api_key,
-        timeout=20,
+        timeout=ARR_HTTP_TIMEOUT_SECONDS,
     )
     return result is not None
 

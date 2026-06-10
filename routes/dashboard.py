@@ -1,6 +1,7 @@
 """Dashboard routes: lightweight UI showing stats, activity, errors, and live logs."""
 
 import ast
+import asyncio
 import calendar as _calendar
 from collections import defaultdict
 import json
@@ -13,7 +14,7 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import and_, case, func, or_, text
 from sqlalchemy.orm import joinedload
 
@@ -39,6 +40,7 @@ from services.postgres.models import (
     EventLog,
 )
 from services.library_catalog_version import get_library_versions, library_etag_for_shelf
+from services.library_poster_paths import library_poster_cache_token, load_library_poster_path
 from services.library_future_semantics import movie_row_is_future_outside_lookahead
 from services.series_episode_stats import series_episode_counts_map, series_stats_dict_from_row
 from services.source_of_truth.status_intent import StatusSource
@@ -1476,6 +1478,101 @@ def _latest_runtime_log_file() -> str | None:
         except OSError:
             continue
     return by_mtime[0]
+
+
+_LOG_LEVEL_THRESHOLDS = {
+    "debug": 10,
+    "info": 20,
+    "warn": 30,
+    "error": 40,
+    "critical": 50,
+}
+
+
+def _log_line_level_value(line: str) -> int | None:
+    upper = line.upper()
+    if "CRITICAL" in upper:
+        return 50
+    if "ERROR" in upper:
+        return 40
+    if "WARNING" in upper or " WARN " in upper:
+        return 30
+    if "INFO" in upper:
+        return 20
+    if "DEBUG" in upper:
+        return 10
+    return None
+
+
+def _tail_file_lines(path: str, *, max_lines: int) -> list[str]:
+    """Return the last ``max_lines`` lines without reading the whole file."""
+    block = 65536
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            end = fh.tell()
+            if end == 0:
+                return []
+            data = b""
+            pos = end
+            while pos > 0 and data.count(b"\n") <= max_lines:
+                read_len = min(block, pos)
+                pos -= read_len
+                fh.seek(pos)
+                data = fh.read(read_len) + data
+    except OSError:
+        return []
+
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    return lines[-max_lines:] if len(lines) > max_lines else lines
+
+
+def _tail_log_lines_filtered(path: str, *, tail: int, threshold: int) -> list[str]:
+    """Last ``tail`` lines at or above ``threshold``, scanning backward from EOF."""
+    block = 65536
+    collected: list[str] = []
+    carry = b""
+    try:
+        pos = os.path.getsize(path)
+    except OSError:
+        return []
+    if pos == 0:
+        return []
+
+    try:
+        with open(path, "rb") as fh:
+            while pos > 0 and len(collected) < tail:
+                read_len = min(block, pos)
+                pos -= read_len
+                fh.seek(pos)
+                chunk = fh.read(read_len) + carry
+                parts = chunk.split(b"\n")
+                carry = parts[0]
+                for line_bytes in reversed(parts[1:]):
+                    if len(collected) >= tail:
+                        break
+                    line = line_bytes.decode("utf-8", errors="replace")
+                    if (_log_line_level_value(line) or -1) >= threshold:
+                        collected.append(line)
+            if len(collected) < tail and carry:
+                line = carry.decode("utf-8", errors="replace")
+                if (_log_line_level_value(line) or -1) >= threshold:
+                    collected.append(line)
+    except OSError:
+        return []
+
+    collected.reverse()
+    return collected[-tail:]
+
+
+def _read_runtime_log_tail(path: str, *, tail: int, level: str) -> list[str]:
+    normalized_level = str(level or "all").strip().lower()
+    threshold = _LOG_LEVEL_THRESHOLDS.get(normalized_level)
+    if threshold is None:
+        lines = _tail_file_lines(path, max_lines=tail)
+    else:
+        lines = _tail_log_lines_filtered(path, tail=tail, threshold=threshold)
+    return [line.rstrip("\n") for line in lines]
 
 
 def _parse_metrics_dict(fragment: str) -> dict[str, Any]:
@@ -3165,65 +3262,54 @@ def _effective_library_poster_url(item_type: str, item_id: int, entity: Movie | 
     return remote
 
 
-@router.get("/api/library/poster/{item_type}/{item_id}")
-async def library_poster(item_type: str, item_id: int):
-    """Serve on-disk library poster (poster-grid.jpg or raw poster.jpg; browser-cacheable)."""
-    kind = str(item_type or "").strip().lower()
-    session = get_session()
-    try:
-        if kind == "movie":
-            movie = session.query(Movie).filter(Movie.id == int(item_id), Movie.is_deleted == False).first()  # noqa: E712
-            if not movie:
-                return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-            path = _local_poster_file_for_movie(movie, try_catalog_download=True)
-        elif kind == "series":
-            series = session.query(Series).filter(Series.id == int(item_id), Series.is_deleted == False).first()  # noqa: E712
-            if not series:
-                return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
-            path = _local_poster_file_for_series(series, try_catalog_download=True)
-        else:
-            return JSONResponse({"ok": False, "message": "invalid item type"}, status_code=400)
+def _library_poster_url_for_list(
+    item_type: str,
+    item_id: int,
+    *,
+    use_local_poster_api: bool,
+    remote: str | None,
+    cache_bust: datetime | None = None,
+) -> str | None:
+    """Fast list-view poster URL — no filesystem probes or HTTP downloads during list builds."""
+    if use_local_poster_api:
+        token = 0
+        if isinstance(cache_bust, datetime):
+            try:
+                token = int(cache_bust.timestamp())
+            except (ValueError, OSError):
+                token = 0
+        return f"/api/library/poster/{item_type}/{int(item_id)}?v={token}"
+    remote_text = str(remote or "").strip()
+    return remote_text or None
 
-        if not path or not os.path.isfile(path):
-            return JSONResponse({"ok": False, "message": "poster not found"}, status_code=404)
 
-        cache_token = _library_poster_cache_token(path)
-        return FileResponse(
-            path,
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": _LIBRARY_POSTER_CACHE,
-                "ETag": f'"{cache_token}"',
-            },
+def _resolve_library_poster_url(
+    item_type: str,
+    item_id: int,
+    entity: Movie | Series,
+    remote: str | None,
+    *,
+    summary: bool,
+    use_local_poster_api: bool,
+) -> str | None:
+    if summary:
+        return _library_poster_url_for_list(
+            item_type,
+            item_id,
+            use_local_poster_api=use_local_poster_api,
+            remote=remote,
+            cache_bust=getattr(entity, "updated_at", None),
         )
-    finally:
-        session.close()
+    return _effective_library_poster_url(item_type, item_id, entity, remote)
 
 
-@router.get("/api/library/version")
-async def library_version():
-    """Lightweight shelf version counters for conditional library polling."""
-    session = get_session()
-    try:
-        return get_library_versions(session)
-    finally:
-        session.close()
-
-
-@router.get("/api/library")
-async def library(
-    request: Request,
-    response: Response,
-    limit: int = Query(50000, ge=1, le=50000),
-    summary: bool = Query(False),
-    media_type: str | None = Query(None, description="Optional filter: movie or series"),
-):
-    """Return mixed movie/series library rows with poster and placeholder stats.
-
-    When ``summary`` is true, omit large text fields (``overview``, ``backdrop_url``) to shrink JSON for grid polling.
-    When ``media_type`` is set, only query that shelf (faster load for Movies vs TV pages).
-    Supports ``If-None-Match`` with the shelf version for 304 responses.
-    """
+def _build_library_payload(
+    client_etag: str,
+    limit: int,
+    summary: bool,
+    media_type: str | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Build library JSON off the event loop. Returns ``(etag, None)`` for 304."""
     want_movies = True
     want_series = True
     mt = str(media_type or "").strip().lower()
@@ -3235,9 +3321,8 @@ async def library(
     session = get_session()
     try:
         etag = library_etag_for_shelf(session, mt if mt else "all")
-        client_etag = str(request.headers.get("if-none-match") or "").strip().strip('"')
         if client_etag and client_etag == etag:
-            return Response(status_code=304)
+            return etag, None
 
         series_episode_counts: dict[int, dict[str, int]] = {}
 
@@ -3271,7 +3356,14 @@ async def library(
                 "type": "movie",
                 "title": movie.title,
                 "year": movie.year,
-                "poster_url": _effective_library_poster_url("movie", int(movie.id), movie, movie.remote_poster),
+                "poster_url": _resolve_library_poster_url(
+                    "movie",
+                    int(movie.id),
+                    movie,
+                    movie.remote_poster,
+                    summary=summary,
+                    use_local_poster_api=bool(movie.has_placeholder),
+                ),
                 "backdrop_url": movie.remote_fanart,
                 "is_4k": _legacy_is_4k(instance_meta),
                 "instance_key": movie.instance_key,
@@ -3337,6 +3429,7 @@ async def library(
                 title=series.title,
                 payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
             )
+            series_folder = str(getattr(series, "placeholder_folder", "") or "").strip()
             row = {
                 "id": f"series-{series.id}",
                 "item_id": series.id,
@@ -3344,7 +3437,14 @@ async def library(
                 "title": series.title,
                 "year": series.year,
                 "network": getattr(series, "sonarr_network", None),
-                "poster_url": _effective_library_poster_url("series", int(series.id), series, series.remote_poster),
+                "poster_url": _resolve_library_poster_url(
+                    "series",
+                    int(series.id),
+                    series,
+                    series.remote_poster,
+                    summary=summary,
+                    use_local_poster_api=bool(series_folder),
+                ),
                 "backdrop_url": series.remote_fanart or series.remote_banner,
                 "is_4k": _legacy_is_4k(instance_meta),
                 "instance_key": series.instance_key,
@@ -3379,8 +3479,7 @@ async def library(
         )
 
         total = len(items)
-        response.headers["ETag"] = f'"{etag}"'
-        return {
+        return etag, {
             "items": items[:limit],
             "count": min(total, limit),
             "total": total,
@@ -3388,6 +3487,76 @@ async def library(
         }
     finally:
         session.close()
+
+
+def _library_poster_file_response(path: str) -> FileResponse:
+    cache_token = library_poster_cache_token(path)
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": _LIBRARY_POSTER_CACHE,
+            "ETag": f'"{cache_token}"',
+        },
+    )
+
+
+def _resolve_library_poster_response(kind: str, item_id: int):
+    """Read-only poster serve: cached path lookup, no catalog downloads on request."""
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"movie", "series"}:
+        return JSONResponse({"ok": False, "message": "invalid item type"}, status_code=400)
+
+    local_path, remote = load_library_poster_path(normalized, int(item_id))
+    if local_path:
+        return _library_poster_file_response(local_path)
+    if remote:
+        return RedirectResponse(remote, status_code=302)
+    return JSONResponse({"ok": False, "message": "poster not found"}, status_code=404)
+
+
+@router.get("/api/library/poster/{item_type}/{item_id}")
+async def library_poster(item_type: str, item_id: int):
+    """Serve pre-materialized poster-grid.jpg (or poster.jpg). Never downloads art on this hot path."""
+    return await asyncio.to_thread(_resolve_library_poster_response, item_type, item_id)
+
+
+@router.get("/api/library/version")
+async def library_version():
+    """Lightweight shelf version counters for conditional library polling."""
+    session = get_session()
+    try:
+        return get_library_versions(session)
+    finally:
+        session.close()
+
+
+@router.get("/api/library")
+async def library(
+    request: Request,
+    response: Response,
+    limit: int = Query(50000, ge=1, le=50000),
+    summary: bool = Query(False),
+    media_type: str | None = Query(None, description="Optional filter: movie or series"),
+):
+    """Return mixed movie/series library rows with poster and placeholder stats.
+
+    When ``summary`` is true, omit large text fields (``overview``, ``backdrop_url``) to shrink JSON for grid polling.
+    When ``media_type`` is set, only query that shelf (faster load for Movies vs TV pages).
+    Supports ``If-None-Match`` with the shelf version for 304 responses.
+    """
+    client_etag = str(request.headers.get("if-none-match") or "").strip().strip('"')
+    etag, payload = await asyncio.to_thread(
+        _build_library_payload,
+        client_etag,
+        limit,
+        summary,
+        media_type,
+    )
+    if payload is None:
+        return Response(status_code=304)
+    response.headers["ETag"] = f'"{etag}"'
+    return payload
 
 
 @router.get("/api/detail/movie/{movie_id}")
@@ -3986,55 +4155,94 @@ async def integrations_test(request: Request):
 async def logs(
     tail: int = Query(200, ge=1, le=2000),
     level: str = Query("all"),
+    since_id: int | None = Query(None, ge=0),
 ):
-    """Tail the current log file. Optionally filter by level threshold (all/debug/info/warn/error/critical)."""
+    """Tail logs from the in-process live buffer, or fall back to the log file on cold start."""
+    from services.live_log_buffer import LIVE_LOG_BUFFER, live_log_payload
+
     log_file = _latest_runtime_log_file()
+    file_name = os.path.basename(log_file) if log_file else None
+
+    if since_id is not None:
+        payload = live_log_payload(tail=tail, level=level, since_id=since_id)
+        payload["file"] = file_name
+        return payload
+
+    if LIVE_LOG_BUFFER.latest_id() > 0:
+        payload = live_log_payload(tail=tail, level=level, since_id=None)
+        payload["file"] = file_name
+        return payload
+
     if not log_file:
-        return {"lines": [], "file": None}
+        return {"lines": [], "file": None, "latest_id": 0, "source": "file"}
 
-    # Read last N lines efficiently
     try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+        lines = await asyncio.to_thread(_read_runtime_log_tail, log_file, tail=tail, level=level)
     except FileNotFoundError:
-        return {"lines": [], "file": None}
-
-    # Optional level filter (threshold semantics) — applied to ALL lines before
-    # tailing so that changing the level shows the last N *matching* lines from
-    # the full history, not the last N raw lines filtered down to almost nothing.
-    normalized_level = str(level or "all").strip().lower()
-    thresholds = {
-        "debug": 10,
-        "info": 20,
-        "warn": 30,
-        "error": 40,
-        "critical": 50,
-    }
-
-    def _line_level_value(line: str):
-        upper = line.upper()
-        if "CRITICAL" in upper:
-            return 50
-        if "ERROR" in upper:
-            return 40
-        if "WARNING" in upper or " WARN " in upper:
-            return 30
-        if "INFO" in upper:
-            return 20
-        if "DEBUG" in upper:
-            return 10
-        return None
-
-    threshold = thresholds.get(normalized_level)
-    if threshold is not None:
-        lines = [l for l in all_lines if (_line_level_value(l) or -1) >= threshold]
-    else:
-        lines = all_lines
-
-    lines = lines[-tail:]
+        return {"lines": [], "file": None, "latest_id": 0, "source": "file"}
 
     return {
-        "lines": [l.rstrip("\n") for l in lines],
-        "file": os.path.basename(log_file),
+        "lines": lines,
+        "file": file_name,
         "capture_level": "FULL",
+        "latest_id": 0,
+        "source": "file",
     }
+
+
+@router.get("/api/logs/stream")
+async def logs_stream(
+    request: Request,
+    since_id: int = Query(0, ge=0),
+    level: str = Query("all"),
+):
+    """Server-sent events stream of new log lines from the live buffer."""
+    from services.live_log_buffer import LIVE_LOG_BUFFER
+
+    async def generate():
+        last_id = max(0, int(since_id))
+        while True:
+            if await request.is_disconnected():
+                break
+            entries = await asyncio.to_thread(
+                lambda cursor=last_id, filter_level=level: LIVE_LOG_BUFFER.get_since(
+                    cursor,
+                    level=filter_level,
+                )
+            )
+            for entry in entries:
+                last_id = entry.id
+                yield f"data: {json.dumps({'id': entry.id, 'line': entry.line})}\n\n"
+            await asyncio.sleep(0.35)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/api/events")
+async def dashboard_events_stream(request: Request):
+    """Server-sent events for dashboard liveness and cheap state deltas."""
+    from services.dashboard_events import iter_dashboard_events
+
+    async def generate():
+        async for event in iter_dashboard_events():
+            if await request.is_disconnected():
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

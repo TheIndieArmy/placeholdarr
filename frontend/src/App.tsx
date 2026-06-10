@@ -15,13 +15,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
-  getActivity,
-  getActivityOperations,
-  getCalendar,
-  getErrors,
-  getLogs,
   getMovieDetail,
-  getPlaceholderActivity,
   getEntityReconcileStatus,
   refreshEpisodePlaceholder,
   refreshMoviePlaceholder,
@@ -30,12 +24,11 @@ import {
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
-  getStats,
   saveSettings,
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
-import { getTasksHistory, getTasksScheduled, getTasksStatus, postTaskRun } from "./api/tasks";
+import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson } from "./api/client";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -57,7 +50,6 @@ import type {
   CalendarResponse,
   DashboardTab,
   ErrorRow,
-  LibraryItem,
   MovieDetailResponse,
   SeriesDetailResponse,
   SeriesSeasonDetail,
@@ -77,9 +69,20 @@ import {
   readStoredLibrarySort,
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
+import { useActivityTasks } from "./activity/useActivityTasks";
+import { useActivityFeed } from "./activity/useActivityFeed";
+import { useCalendarData } from "./calendar/useCalendarData";
+import { useErrorsFeed } from "./errors/useErrorsFeed";
+import { useLogsStream } from "./logs/useLogsStream";
+import { useApiHealthCheck } from "./dashboard/useApiHealthCheck";
+import { useDashboardEvents } from "./dashboard/useDashboardEvents";
+import { useSetupStatusPoll } from "./dashboard/useSetupStatusPoll";
+import { useStartupReadyPoll } from "./dashboard/useStartupReadyPoll";
+import {
+  clearSetupCompleteInSession,
+  markSetupCompleteInSession,
+} from "./dashboard/setupSession";
 
-const REFRESH_MS_VISIBLE = 5000;
-const REFRESH_MS_HIDDEN = 30000;
 /** Post-save banner only — never shown while the form still has unsaved edits. */
 function formatSettingsSaveSuccessMessage(restartRequiredKeys?: string[] | null): string {
   if (restartRequiredKeys && restartRequiredKeys.length > 0) {
@@ -305,6 +308,7 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Library sync",
   "Calendar",
   "Lookahead",
+  "Status Updates",
   "Advanced",
 ] as const;
 
@@ -643,26 +647,8 @@ export function App() {
   const brand = BRAND;
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
 
-  const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [activity, setActivity] = useState<ActivityRow[]>([]);
-  const [calendar, setCalendar] = useState<CalendarResponse | null>(null);
-  const [errors, setErrors] = useState<ErrorRow[]>([]);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [logFile, setLogFile] = useState<string>("");
-  const [logCaptureLevel, setLogCaptureLevel] = useState<string>("");
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
-  const [placeholderActivity, setPlaceholderActivity] = useState<any[]>([]);
-  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTaskRow[]>([]);
-  const [taskHistory, setTaskHistory] = useState<TaskRunRow[]>([]);
-  const refreshTaskHistory = useCallback(async () => {
-    try {
-      const hist = await getTasksHistory(50);
-      setTaskHistory(hist || []);
-    } catch {
-      /* Activity poll will retry. */
-    }
-  }, []);
   const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
   const [taskRunPending, setTaskRunPending] = useState(false);
   const [taskRunError, setTaskRunError] = useState<string | null>(null);
@@ -722,28 +708,6 @@ export function App() {
     setupCompleteRef.current = setupStatus?.setup_complete;
   }, [setupStatus]);
 
-  /** Light status probe first — avoids routing to /setup and waiting on full settings before we know onboarding is done. */
-  useEffect(() => {
-    let cancelled = false;
-    void getSettingsStatus()
-      .then((status) => {
-        if (cancelled) return;
-        setSetupStatus(status);
-        setOnboardingVisible(!status.setup_complete);
-        if (status.setup_complete) {
-          setLoading(false);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setErrorMessage(err instanceof Error ? err.message : "Unable to reach the API");
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -761,6 +725,54 @@ export function App() {
 
   const currentTab = getTabFromPath(location.pathname);
   const libraryListShelf = getLibraryListShelf(location.pathname);
+  const currentTabRef = useRef(currentTab);
+  currentTabRef.current = currentTab;
+
+  const markTabDataFresh = useCallback(() => {
+    setErrorMessage(null);
+    setLoading(false);
+    setLastDashboardSuccessAt(Date.now());
+  }, []);
+
+  const markTabDataError = useCallback((message: string) => {
+    setErrorMessage(message);
+    setLoading(false);
+  }, []);
+
+  const clearReconnectError = useCallback(() => {
+    setErrorMessage((prev) =>
+      prev && /Cannot reach the Placeholdarr API/i.test(prev) ? null : prev,
+    );
+  }, []);
+
+  const markApiUnhealthy = useCallback((message: string) => {
+    setErrorMessage(message);
+    setLoading(false);
+  }, []);
+
+  const refreshLibraryShelvesRef = useRef<(options?: { force?: boolean }) => Promise<void>>(async () => {});
+
+  const { eventsConnected } = useDashboardEvents({
+    enabled: true,
+    onConnected: clearReconnectError,
+    onDisconnected: () => {
+      /* health fallback hook takes over */
+    },
+    onStartupSyncComplete: (value) => {
+      setSetupStatus((prev) => (prev ? { ...prev, startup_sync_complete: value } : prev));
+    },
+    onLibraryVersion: () => {
+      if (currentTabRef.current === "library") {
+        void refreshLibraryShelvesRef.current();
+      }
+    },
+  });
+
+  useApiHealthCheck({
+    enabled: !eventsConnected,
+    onHealthy: clearReconnectError,
+    onUnhealthy: markApiUnhealthy,
+  });
 
   const {
     libraryCache,
@@ -770,9 +782,14 @@ export function App() {
   } = useLibraryShelves({
     listShelf: libraryListShelf,
     enabled: currentTab === "library" && libraryListShelf !== null,
+    liveVersionSync: eventsConnected,
     onSuccess: () => setLastDashboardSuccessAt(Date.now()),
     onError: (message) => setErrorMessage(message),
   });
+
+  useEffect(() => {
+    refreshLibraryShelvesRef.current = refreshLibraryShelves;
+  }, [refreshLibraryShelves]);
 
   const invalidateLibraryAfterCatalogChange = useCallback(() => {
     invalidateLibraryShelves();
@@ -780,8 +797,69 @@ export function App() {
   }, [invalidateLibraryShelves, refreshLibraryShelves]);
 
   const activitySubPage = getActivitySubPage(location.pathname);
-  const activitySubPageRef = useRef<ActivitySubPage>(activitySubPage);
-  activitySubPageRef.current = activitySubPage;
+
+  const {
+    stats,
+    scheduledTasks,
+    taskHistory,
+    refreshTasks,
+  } = useActivityTasks({
+    enabled: currentTab === "activity" && activitySubPage === "tasks",
+    onSuccess: markTabDataFresh,
+    onError: markTabDataError,
+    onRefreshing: setDashboardRefreshing,
+  });
+
+  const { activity, placeholderActivity } = useActivityFeed({
+    subPage: activitySubPage,
+    enabled: currentTab === "activity" && activitySubPage !== "tasks",
+    onSuccess: markTabDataFresh,
+    onError: markTabDataError,
+  });
+
+  const { calendar } = useCalendarData({
+    enabled: currentTab === "calendar",
+    month: calendarMonth,
+    onMonthResolved: setCalendarMonth,
+    onSuccess: markTabDataFresh,
+    onError: markTabDataError,
+  });
+
+  const { errors } = useErrorsFeed({
+    enabled: currentTab === "errors",
+    onSuccess: markTabDataFresh,
+    onError: markTabDataError,
+  });
+
+  const { logs, logFile, logCaptureLevel } = useLogsStream({
+    enabled: currentTab === "logs",
+    level: logLevel,
+    tailLines: LOG_TAIL_LINES,
+    onSuccess: markTabDataFresh,
+    onError: markTabDataError,
+  });
+
+  useSetupStatusPoll({
+    enabled: currentTab !== "setup" || setupStatus?.setup_complete === true,
+    onStatus: (status) => {
+      setSetupStatus(status);
+      setOnboardingVisible(!status.setup_complete);
+      if (status.setup_complete) {
+        setLoading(false);
+      }
+    },
+  });
+
+  useStartupReadyPoll({
+    enabled:
+      setupStatus?.setup_complete === true &&
+      setupStatus.startup_sync_complete === false &&
+      !eventsConnected,
+    onStartupSyncComplete: (value) => {
+      setSetupStatus((prev) => (prev ? { ...prev, startup_sync_complete: value } : prev));
+    },
+  });
+
   const onboardingPreviewRoute = isActiveSetupPreviewRoute(location.pathname, location.search);
   const onboardingPreviewRouteRef = useRef(false);
   onboardingPreviewRouteRef.current = onboardingPreviewRoute;
@@ -946,178 +1024,56 @@ export function App() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [combinedSettingsDirty]);
 
+  /** Setup wizard — load on tab enter and tab focus only (no periodic 5s poll). */
   useEffect(() => {
+    if (currentTab !== "setup") return;
+
     let stopped = false;
-    let timeoutId = 0;
-    let showRefreshChrome = false;
 
-    const scheduleNext = () => {
-      window.clearTimeout(timeoutId);
-      const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
-      const delay = hidden ? REFRESH_MS_HIDDEN : REFRESH_MS_VISIBLE;
-      timeoutId = window.setTimeout(() => {
-        void runRefresh().then(() => {
-          if (!stopped) scheduleNext();
-        });
-      }, delay);
-    };
-
-    async function runRefresh() {
-      showRefreshChrome = false;
+    async function runSetupRefresh() {
+      const setupPreviewPath = isActiveSetupPreviewRoute(location.pathname, location.search);
       try {
-        if (currentTab === "setup") {
-          // First visit: one full `getSettingsCurrent` (via loadSettings) so we do not block on status
-          // and then again in a separate effect — that doubled network latency before the wizard appeared.
-          // Later polls: light `getSettingsStatus` only so we never clobber in-progress wizard edits.
-          // `/setup/preview` uses dummy values and its own bootstrap effect — never call loadSettings here.
-          const setupPreviewPath = isActiveSetupPreviewRoute(location.pathname, location.search);
-          try {
-            if (setupPreviewPath) {
-              if (settingsPayloadRef.current) {
-                const status = await getSettingsStatus();
-                if (!stopped) {
-                  setSetupStatus(status);
-                }
-              }
-            } else if (setupCompleteRef.current === true) {
-              const status = await getSettingsStatus();
-              if (!stopped) {
-                setSetupStatus(status);
-                setOnboardingVisible(false);
-              }
-            } else if (!settingsPayloadRef.current) {
-              await loadSettings(stopped);
-            } else {
-              const status = await getSettingsStatus();
-              if (!stopped) {
-                setSetupStatus(status);
-                setOnboardingVisible(!status.setup_complete);
-              }
-            }
+        if (setupPreviewPath) {
+          if (settingsPayloadRef.current) {
+            const status = await getSettingsStatus();
             if (!stopped) {
-              setErrorMessage(null);
-            }
-          } catch (err) {
-            if (!stopped) {
-              setErrorMessage(err instanceof Error ? err.message : "Unable to load setup. Check the API and try again.");
+              setSetupStatus(status);
             }
           }
-          if (!stopped && !setupPreviewPath) {
-            setLoading(false);
+        } else if (setupCompleteRef.current === true) {
+          const status = await getSettingsStatus();
+          if (!stopped) {
+            setSetupStatus(status);
+            setOnboardingVisible(false);
           }
-          return;
-        }
-
-        if (currentTab === "activity" && setupCompleteRef.current === false) {
+        } else if (!settingsPayloadRef.current) {
+          await loadSettings(stopped);
+        } else {
           const status = await getSettingsStatus();
           if (!stopped) {
             setSetupStatus(status);
             setOnboardingVisible(!status.setup_complete);
           }
-          if (!stopped) {
-            setErrorMessage(null);
-            setLoading(false);
-          }
-          return;
         }
-
-        if (currentTab === "library") {
-          try {
-            const status = await getSettingsStatus();
-            if (!stopped) {
-              setSetupStatus(status);
-              setOnboardingVisible(!status.setup_complete);
-              setErrorMessage(null);
-              setLoading(false);
-              setLastDashboardSuccessAt(Date.now());
-            }
-          } catch (err) {
-            if (!stopped) {
-              setErrorMessage(err instanceof Error ? err.message : "Dashboard refresh failed");
-              setLoading(false);
-            }
-          }
-          return;
-        }
-
-        showRefreshChrome = true;
-        if (!stopped) setDashboardRefreshing(true);
-
-        if (currentTab === "activity") {
-          const sub = activitySubPageRef.current;
-          if (sub === "tasks") {
-            await loadStats(stopped, setStats);
-            const [sched, hist] = await Promise.all([getTasksScheduled(), getTasksHistory(50)]);
-            if (!stopped) {
-              setScheduledTasks(sched.tasks || []);
-              setTaskHistory(hist || []);
-            }
-          } else if (sub === "operations") {
-            const rows = await getActivityOperations(100);
-            if (!stopped) setActivity(rows || []);
-          } else {
-            const placeholderRows = await getPlaceholderActivity(100);
-            if (!stopped) setPlaceholderActivity(placeholderRows || []);
-          }
-        } else if (currentTab === "calendar") {
-          const payload = await getCalendar(calendarMonth);
-          if (!stopped && payload.ok) {
-            setCalendar(payload);
-            setCalendarMonth(payload.month || calendarMonth);
-          }
-        } else if (currentTab === "errors") {
-          const rows = await getErrors(100);
-          if (!stopped) setErrors(rows || []);
-        } else if (currentTab === "logs") {
-          const payload = await getLogs(logLevel, LOG_TAIL_LINES);
-          if (!stopped) {
-            setLogs(payload.lines || []);
-            setLogFile(payload.file || "");
-            setLogCaptureLevel(payload.capture_level ?? "");
-          }
-        } else if (currentTab === "settings") {
-          // Avoid clobbering in-progress edits from the periodic refresh loop.
-          if (!hasUnsavedChangesRef.current) {
-            await loadSettings(stopped);
-          }
-        }
-
-        const status = await getSettingsStatus();
-        if (!stopped) {
-          setSetupStatus(status);
-          setOnboardingVisible(!status.setup_complete);
-        }
-
         if (!stopped) {
           setErrorMessage(null);
-          setLoading(false);
-          setLastDashboardSuccessAt(Date.now());
         }
       } catch (err) {
         if (!stopped) {
-          setErrorMessage(err instanceof Error ? err.message : "Dashboard refresh failed");
-          setLoading(false);
+          setErrorMessage(err instanceof Error ? err.message : "Unable to load setup. Check the API and try again.");
         }
-      } finally {
-        if (showRefreshChrome && !stopped) {
-          setDashboardRefreshing(false);
-        }
+      }
+      if (!stopped && !setupPreviewPath) {
+        setLoading(false);
       }
     }
 
-    void runRefresh().then(() => {
-      if (!stopped) scheduleNext();
-    });
+    void runSetupRefresh();
 
     const onVisibility = () => {
-      window.clearTimeout(timeoutId);
       if (stopped) return;
       if (typeof document !== "undefined" && document.visibilityState === "visible") {
-        void runRefresh().then(() => {
-          if (!stopped) scheduleNext();
-        });
-      } else {
-        scheduleNext();
+        void runSetupRefresh();
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
@@ -1125,9 +1081,43 @@ export function App() {
     return () => {
       stopped = true;
       document.removeEventListener("visibilitychange", onVisibility);
-      window.clearTimeout(timeoutId);
     };
-  }, [calendarMonth, currentTab, logLevel, location.pathname, location.search]);
+  }, [currentTab, location.pathname, location.search]);
+
+  /** Settings: reload on tab focus when there are no unsaved edits (no periodic 5s poll). */
+  useEffect(() => {
+    if (currentTab !== "settings") return;
+
+    let stopped = false;
+
+    const reload = () => {
+      if (stopped || hasUnsavedChangesRef.current) return;
+      void loadSettings(stopped)
+        .then(() => {
+          if (!stopped) {
+            markTabDataFresh();
+          }
+        })
+        .catch((err) => {
+          if (!stopped) {
+            markTabDataError(err instanceof Error ? err.message : "Settings refresh failed");
+          }
+        });
+    };
+
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        reload();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      stopped = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [currentTab, markTabDataError, markTabDataFresh]);
 
   useEffect(() => {
     if (currentTab !== "calendar") return;
@@ -1359,6 +1349,11 @@ export function App() {
     setSettingsPayload(payload);
     setSetupStatus(payload.status);
     setOnboardingVisible(!payload.status.setup_complete);
+    if (payload.status.setup_complete) {
+      markSetupCompleteInSession();
+    } else {
+      clearSetupCompleteInSession();
+    }
 
     const nextValues: FieldValueMap = {};
     payload.sections.forEach((section) => {
@@ -1591,6 +1586,7 @@ export function App() {
                   await postTaskRun("placeholder_refresh", { metadata: true, art: true });
                 }
                 invalidateLibraryAfterCatalogChange();
+                void refreshTasks();
               } catch (e) {
                 setTaskRunError(e instanceof Error ? e.message : "Failed to start placeholder refresh");
               } finally {
@@ -1801,7 +1797,7 @@ export function App() {
                 }
                 setSettingsFeedbackKind("success");
                 if (backfillQueuedNow || applyScope === "now") {
-                  void refreshTaskHistory();
+                  void refreshTasks();
                 }
                 invalidateLibraryAfterCatalogChange();
                 const payload = await getSettingsCurrent();
@@ -1813,7 +1809,7 @@ export function App() {
                 setSettingsFeedback("Saved");
                 setSettingsFeedbackKind("success");
                 if (applyScope === "now") {
-                  void refreshTaskHistory();
+                  void refreshTasks();
                 }
                 invalidateLibraryAfterCatalogChange();
               } else {
@@ -1864,7 +1860,7 @@ export function App() {
       return <Navigate to={HOME_PATH} replace />;
     }
     const needsSetupWizard = setupStatus != null && !setupStatus.setup_complete;
-    if (!setupStatus || (needsSetupWizard && (loading || !settingsPayload))) {
+    if (!setupStatus || !settingsPayload || (needsSetupWizard && loading)) {
       return (
         <SetupBootShell
           setupShellClass={setupShellClass}
@@ -2399,6 +2395,7 @@ export function App() {
               await postTaskRun("full_sync");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
+              void refreshTasks();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -2412,6 +2409,7 @@ export function App() {
               await postTaskRun("lite_sync");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
+              void refreshTasks();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -2425,6 +2423,7 @@ export function App() {
               await postTaskRun("calendar_only");
               setTaskRunModal(null);
               invalidateLibraryAfterCatalogChange();
+              void refreshTasks();
             } catch (e) {
               setTaskRunError(e instanceof Error ? e.message : "Failed to start task");
             } finally {
@@ -2519,7 +2518,6 @@ function ActivityPanel(props: {
   const accent = getBrandAccent(props.brand, props.themeMode);
   const semantic = getBrandSemanticTokens(props.brand, props.themeMode, accent);
   const isLight = props.themeMode === "light";
-  const tab = props.mode === "placeholders" ? "placeholders" : "system";
   const rows = props.rows || [];
   const panelShellStyle: React.CSSProperties | undefined = isLight
     ? {
@@ -3141,7 +3139,6 @@ function TasksPanel(props: {
 }) {
   const s = props.stats;
   const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
   const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -7878,7 +7875,7 @@ function StatusMessagesPanel(props: {
     placeholderCount: number;
     pending: boolean;
   }>(null);
-  const scopeFlowWaitersRef = useRef<{ resolve: () => void; reject: (e: unknown) => void } | null>(null);
+  const scopeFlowWaitersRef = useRef<{ resolve: (scope: ApplyScope) => void; reject: (e: unknown) => void } | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -8053,9 +8050,6 @@ function StatusMessagesPanel(props: {
       setFeedback({ kind: "success", message: savedMsg });
       setScopeModal(null);
       await reload();
-      const w = scopeFlowWaitersRef.current;
-      scopeFlowWaitersRef.current = null;
-      w?.resolve();
     } catch (e: unknown) {
       setFeedback({ kind: "error", message: e instanceof Error ? e.message : "Save failed" });
       const w = scopeFlowWaitersRef.current;
@@ -8431,7 +8425,12 @@ function StatusMessagesPanel(props: {
             scopeFlowWaitersRef.current = null;
             w?.reject(Object.assign(new Error("cancelled"), { code: "MESSAGES_SAVE_CANCELLED" }));
           }}
-          onConfirm={(scope) => handleSave(scope)}
+          onConfirm={(scope) => {
+            setScopeModal(null);
+            const w = scopeFlowWaitersRef.current;
+            scopeFlowWaitersRef.current = null;
+            w?.resolve(scope);
+          }}
           brand={props.brand}
           themeMode={props.themeMode}
         />
@@ -10489,11 +10488,6 @@ function formatCalendarItemMeta(item: CalendarDay["items"][number]) {
   return bits;
 }
 
-async function loadStats(stopped: boolean, setStats: (s: StatsResponse) => void) {
-  const payload = await getStats();
-  if (!stopped) setStats(payload);
-}
-
 function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sections: { name: string; fields: SettingsField[] }[]) {
   const map: Record<string, string[]> = {};
   sections.forEach((section) => {
@@ -10538,6 +10532,7 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
+    ...statusUpdates,
     ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
   ];
 }

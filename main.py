@@ -253,6 +253,15 @@ async def lifespan(app: FastAPI):
                 f"Could not schedule series episode stats backfill: {e}",
                 extra={"emoji_type": "warning"},
             )
+        try:
+            from services.library_poster_backfill import schedule_library_poster_grid_backfill
+
+            schedule_library_poster_grid_backfill()
+        except Exception as e:
+            logger.warning(
+                f"Could not schedule library poster grid backfill: {e}",
+                extra={"emoji_type": "warning"},
+            )
         if not _ensure_core_tables(engine):
             startup_sync_complete.set()
             logger.error(
