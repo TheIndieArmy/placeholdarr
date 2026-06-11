@@ -12,6 +12,7 @@ import {
 } from "../api/collections";
 import type { CollectionRecipe, LibraryItem, PlexSectionOption } from "../types/api";
 import { CollectionEditor } from "./CollectionEditor";
+import { getCollectionTheme } from "./collectionTheme";
 
 function formatLastRun(recipe: CollectionRecipe): string {
   if (!recipe.last_run_at) return "Never run";
@@ -31,6 +32,8 @@ export function CollectionsPanel(props: {
   onEnsureLibrary: () => void;
 }) {
   const accentHex = props.accent.hex;
+  const isLight = props.themeMode === "light";
+  const theme = getCollectionTheme(isLight);
 
   const [recipes, setRecipes] = useState<CollectionRecipe[]>([]);
   const [tmdbConfigured, setTmdbConfigured] = useState(true);
@@ -152,13 +155,13 @@ export function CollectionsPanel(props: {
               setEditing(null);
               setSaveError(null);
             }}
-            className="material-symbols-outlined text-slate-400 hover:text-white transition-colors"
+            className={`material-symbols-outlined transition-colors ${theme.iconMuted} ${isLight ? "hover:text-slate-900" : "hover:text-white"}`}
             style={{ fontSize: 22 }}
             title="Back to collections"
           >
             arrow_back
           </button>
-          <h1 className="text-[32px] font-black text-white tracking-tight font-headline">
+          <h1 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
             {editing === "new" ? "New Collection" : `Edit: ${editing.name}`}
           </h1>
         </div>
@@ -193,12 +196,14 @@ export function CollectionsPanel(props: {
     <div>
       <div className="flex items-center gap-2 mb-1">
         <div className="w-2 h-2 rounded-full bg-green-500" />
-        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
+        <span className={`text-[12px] font-headline uppercase tracking-widest ${theme.iconMuted}`}>
           Rule-Based Plex Collections
         </span>
       </div>
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-[32px] font-black text-white tracking-tight font-headline">Collections</h1>
+        <h1 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+          Collections
+        </h1>
         <button
           type="button"
           onClick={() => {
@@ -232,16 +237,16 @@ export function CollectionsPanel(props: {
         </div>
       ) : null}
 
-      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden">
+      <div className={`${theme.blockCard} overflow-hidden`}>
         {loading ? (
-          <div className="p-10 text-center text-slate-500 text-[16px]">Loading collections…</div>
+          <div className={`p-10 text-center text-[16px] ${theme.muted}`}>Loading collections…</div>
         ) : !recipes.length ? (
           <div className="p-12 text-center">
-            <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 44 }}>
+            <span className={`material-symbols-outlined ${theme.iconMuted}`} style={{ fontSize: 44 }}>
               video_library
             </span>
-            <p className="mt-3 text-[16px] text-slate-400">No collections yet.</p>
-            <p className="mt-1 text-[14px] text-slate-500 max-w-md mx-auto">
+            <p className={`mt-3 text-[16px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>No collections yet.</p>
+            <p className={`mt-1 text-[14px] max-w-md mx-auto ${theme.muted}`}>
               Build rule-based Plex collections from TMDB trending, streaming services, or your own catalog metadata —
               they stay in sync automatically.
             </p>
@@ -249,24 +254,27 @@ export function CollectionsPanel(props: {
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-[#424753]/30">
+              <tr className={`border-b ${theme.divider}`}>
                 {["Collection", "Target Library", "Items", "Last Run", "Enabled", "Actions"].map((h) => (
                   <th
                     key={h}
-                    className="px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal"
+                    className={`px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${theme.muted}`}
                   >
                     {h}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#424753]/15">
+            <tbody className={isLight ? "divide-y divide-slate-200/80" : "divide-y divide-[#424753]/15"}>
               {recipes.map((recipe) => {
                 const summary = recipe.last_run_summary;
                 const section = sections.find((s) => s.id === recipe.plex_section_id);
                 const running = runningIds.has(recipe.id);
                 return (
-                  <tr key={recipe.id} className="hover:bg-[#1e2430]/40 transition-colors">
+                  <tr
+                    key={recipe.id}
+                    className={isLight ? "hover:bg-[#f2f7ff] transition-colors" : "hover:bg-[#1e2430]/40 transition-colors"}
+                  >
                     <td className="px-5 py-4">
                       <button
                         type="button"
@@ -276,23 +284,27 @@ export function CollectionsPanel(props: {
                         }}
                         className="text-left"
                       >
-                        <span className="block text-[16px] text-slate-200 hover:text-white transition-colors">
+                        <span
+                          className={`block text-[16px] transition-colors ${isLight ? "text-slate-900 hover:text-sky-800" : "text-slate-200 hover:text-white"}`}
+                        >
                           {recipe.name}
                         </span>
-                        <span className="block text-[13px] text-slate-500">→ "{recipe.collection_title}"</span>
+                        <span className={`block text-[13px] ${theme.muted}`}>→ "{recipe.collection_title}"</span>
                       </button>
                     </td>
-                    <td className="px-5 py-4 text-[15px] text-slate-400">
+                    <td className={`px-5 py-4 text-[15px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
                       {section ? section.title : `Section ${recipe.plex_section_id}`}
-                      <span className="ml-1.5 text-[12px] uppercase text-slate-600">
+                      <span className={`ml-1.5 text-[12px] uppercase ${isLight ? "text-slate-400" : "text-slate-600"}`}>
                         {recipe.plex_section_type === "movie" ? "Movies" : "TV"}
                       </span>
                     </td>
-                    <td className="px-5 py-4 text-[15px] font-mono text-slate-300">
+                    <td className={`px-5 py-4 text-[15px] font-mono ${isLight ? "text-slate-800" : "text-slate-300"}`}>
                       {summary?.synced ? summary.synced.total : "—"}
                     </td>
                     <td className="px-5 py-4">
-                      <span className="block text-[14px] text-slate-400">{running ? "Running…" : formatLastRun(recipe)}</span>
+                      <span className={`block text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                        {running ? "Running…" : formatLastRun(recipe)}
+                      </span>
                       {summary ? (
                         summary.status === "ok" ? (
                           <span className="text-[12px] text-green-400/90">
@@ -310,7 +322,7 @@ export function CollectionsPanel(props: {
                         type="button"
                         onClick={() => void handleToggle(recipe)}
                         className={`relative h-5 w-9 rounded-full transition-colors ${
-                          recipe.enabled ? "" : "bg-[#424753]/60"
+                          recipe.enabled ? "" : isLight ? "bg-slate-300" : "bg-[#424753]/60"
                         }`}
                         style={recipe.enabled ? { backgroundColor: accentHex } : undefined}
                         title={recipe.enabled ? "Disable scheduled runs" : "Enable scheduled runs"}
@@ -328,7 +340,7 @@ export function CollectionsPanel(props: {
                           type="button"
                           disabled={running}
                           onClick={() => void handleRun(recipe)}
-                          className="material-symbols-outlined rounded-md p-1.5 text-slate-400 hover:text-white hover:bg-[#1e2430] transition-colors disabled:opacity-40"
+                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors disabled:opacity-40 ${theme.iconMuted} ${isLight ? "hover:text-slate-900 hover:bg-slate-100" : "hover:text-white hover:bg-[#1e2430]"}`}
                           style={{ fontSize: 18 }}
                           title="Run now"
                         >
@@ -340,7 +352,7 @@ export function CollectionsPanel(props: {
                             setSaveError(null);
                             setEditing(recipe);
                           }}
-                          className="material-symbols-outlined rounded-md p-1.5 text-slate-400 hover:text-white hover:bg-[#1e2430] transition-colors"
+                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors ${theme.iconMuted} ${isLight ? "hover:text-slate-900 hover:bg-slate-100" : "hover:text-white hover:bg-[#1e2430]"}`}
                           style={{ fontSize: 18 }}
                           title="Edit"
                         >
@@ -349,7 +361,7 @@ export function CollectionsPanel(props: {
                         <button
                           type="button"
                           onClick={() => void handleDelete(recipe)}
-                          className="material-symbols-outlined rounded-md p-1.5 text-slate-400 hover:text-red-400 hover:bg-[#1e2430] transition-colors"
+                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors ${theme.iconMuted} ${isLight ? "hover:text-red-600 hover:bg-red-50" : "hover:text-red-400 hover:bg-[#1e2430]"}`}
                           style={{ fontSize: 18 }}
                           title="Delete"
                         >
@@ -365,7 +377,7 @@ export function CollectionsPanel(props: {
         )}
       </div>
 
-      <p className="mt-4 text-[13px] text-slate-500">
+      <p className={`mt-4 text-[13px] ${theme.muted}`}>
         Enabled collections run automatically on the collections sync schedule (Settings → Library sync). Collections
         only include titles already present in the target Plex library — for a placeholder library that means anything
         Placeholdarr materialized; rules refine by metadata, not placeholder state.

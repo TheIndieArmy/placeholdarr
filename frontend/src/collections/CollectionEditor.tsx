@@ -7,6 +7,11 @@ import {
   previewCollectionDefinition,
   type RecipeWritePayload,
 } from "../api/collections";
+import {
+  CollectionThemeProvider,
+  getCollectionTheme,
+  useCollectionTheme,
+} from "./collectionTheme";
 import type {
   CollectionBuilderMeta,
   CollectionDefinition,
@@ -99,8 +104,6 @@ function defaultFilterBlock(field: CollectionFilterField): CollectionFilterBlock
   }
 }
 
-const fieldBase =
-  "bg-[#11161d] border border-[#424753]/50 rounded-md px-2.5 py-1.5 text-[14px] text-slate-200 outline-none focus:border-slate-400/60";
 const chipBase =
   "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[12px] font-headline uppercase tracking-wider cursor-pointer transition-colors border";
 
@@ -112,10 +115,11 @@ function NumberInput(props: {
   max?: number;
   width?: number;
 }) {
+  const theme = useCollectionTheme();
   return (
     <input
       type="number"
-      className={fieldBase}
+      className={theme.field}
       style={{ width: props.width ?? 90 }}
       value={props.value ?? ""}
       min={props.min}
@@ -141,10 +145,11 @@ function MultiChipPicker(props: {
   onToggle: (key: string) => void;
   emptyHint: string;
 }) {
+  const theme = useCollectionTheme();
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? props.options : props.options.slice(0, 14);
   if (!props.options.length) {
-    return <span className="text-[13px] text-slate-500">{props.emptyHint}</span>;
+    return <span className={theme.muted}>{props.emptyHint}</span>;
   }
   return (
     <div className="flex flex-wrap gap-1.5">
@@ -156,9 +161,7 @@ function MultiChipPicker(props: {
             type="button"
             onClick={() => props.onToggle(opt.key)}
             className={`${chipBase} ${
-              active
-                ? "text-[#0a0e14] border-transparent"
-                : "text-slate-300 border-[#424753]/60 hover:border-slate-400/70"
+              active ? "text-[#0a0e14] border-transparent" : theme.chipInactive
             }`}
             style={active ? { backgroundColor: props.accentHex } : undefined}
           >
@@ -170,7 +173,7 @@ function MultiChipPicker(props: {
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className={`${chipBase} text-slate-400 border-dashed border-[#424753]/60 hover:text-slate-200`}
+          className={`${chipBase} ${theme.chipShowMore}`}
         >
           {expanded ? "Show less" : `+${props.options.length - 14} more`}
         </button>
@@ -189,17 +192,10 @@ function BlockCard(props: {
   /** Set when the card body contains dropdowns that must escape the card bounds. */
   overflowVisible?: boolean;
 }) {
+  const theme = useCollectionTheme();
   return (
-    <div
-      className={`rounded-xl border border-[#424753]/50 bg-[#1a212b] ${
-        props.overflowVisible ? "" : "overflow-hidden"
-      }`}
-    >
-      <div
-        className={`flex items-center gap-2.5 px-4 py-2.5 border-b border-[#424753]/30 bg-[#1e2430] ${
-          props.overflowVisible ? "rounded-t-[11px]" : ""
-        }`}
-      >
+    <div className={`${theme.blockCard} ${props.overflowVisible ? "" : "overflow-hidden"}`}>
+      <div className={`${theme.blockHeader} ${props.overflowVisible ? "rounded-t-[11px]" : ""}`}>
         <span
           className="material-symbols-outlined rounded-md p-1"
           style={{ fontSize: 18, color: props.accentHex, backgroundColor: `${props.accentHex}1f` }}
@@ -207,14 +203,14 @@ function BlockCard(props: {
           {props.icon}
         </span>
         <div className="flex-1 min-w-0">
-          <div className="text-[14px] font-headline uppercase tracking-wider text-slate-200">{props.title}</div>
-          {props.subtitle ? <div className="text-[12px] text-slate-500 truncate">{props.subtitle}</div> : null}
+          <div className={theme.blockTitle}>{props.title}</div>
+          {props.subtitle ? <div className={theme.blockSubtitle}>{props.subtitle}</div> : null}
         </div>
         {props.onRemove ? (
           <button
             type="button"
             onClick={props.onRemove}
-            className="material-symbols-outlined text-slate-500 hover:text-red-400 transition-colors"
+            className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
             style={{ fontSize: 18 }}
             title="Remove block"
           >
@@ -228,16 +224,14 @@ function BlockCard(props: {
 }
 
 function PipelineConnector(props: { label: string; accentHex: string }) {
+  const theme = useCollectionTheme();
   return (
     <div className="flex flex-col items-center py-1">
-      <div className="w-px h-3 bg-[#424753]/60" />
-      <span
-        className="rounded-full border border-[#424753]/50 bg-[#11161d] px-3 py-0.5 text-[11px] font-headline uppercase tracking-widest"
-        style={{ color: props.accentHex }}
-      >
+      <div className={`w-px h-3 ${theme.connectorLine}`} />
+      <span className={theme.connectorPill} style={{ color: props.accentHex }}>
         {props.label}
       </span>
-      <div className="w-px h-3 bg-[#424753]/60" />
+      <div className={`w-px h-3 ${theme.connectorLine}`} />
     </div>
   );
 }
@@ -247,6 +241,7 @@ function AddBlockMenu(props: {
   options: { key: string; label: string; icon: string; description?: string; disabled?: boolean }[];
   onAdd: (key: string) => void;
 }) {
+  const theme = useCollectionTheme();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -259,18 +254,14 @@ function AddBlockMenu(props: {
   }, [open]);
   return (
     <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-[#424753]/60 px-4 py-2.5 text-[13px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200 hover:border-slate-400/60 transition-colors"
-      >
+      <button type="button" onClick={() => setOpen((v) => !v)} className={theme.dashedButton}>
         <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
           add
         </span>
         {props.label}
       </button>
       {open ? (
-        <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-[#424753]/60 bg-[#11161d] shadow-2xl">
+        <div className={theme.dropdown}>
           {props.options.map((opt) => (
             <button
               key={opt.key}
@@ -280,14 +271,14 @@ function AddBlockMenu(props: {
                 props.onAdd(opt.key);
                 setOpen(false);
               }}
-              className="flex w-full items-start gap-2.5 px-3.5 py-2.5 text-left hover:bg-[#1e2430] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className={`${theme.dropdownItem} items-start gap-2.5 px-3.5 py-2.5`}
             >
-              <span className="material-symbols-outlined text-slate-400 mt-0.5" style={{ fontSize: 17 }}>
+              <span className={`material-symbols-outlined mt-0.5 ${theme.iconMuted}`} style={{ fontSize: 17 }}>
                 {opt.icon}
               </span>
               <span>
-                <span className="block text-[14px] text-slate-200">{opt.label}</span>
-                {opt.description ? <span className="block text-[12px] text-slate-500">{opt.description}</span> : null}
+                <span className={theme.dropdownItemTitle}>{opt.label}</span>
+                {opt.description ? <span className={theme.dropdownItemDescription}>{opt.description}</span> : null}
               </span>
             </button>
           ))}
@@ -373,6 +364,7 @@ function PinPicker(props: {
   onAdd: (item: CollectionPinnedItem) => void;
   onRemove: (index: number) => void;
 }) {
+  const theme = useCollectionTheme();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -406,11 +398,11 @@ function PinPicker(props: {
     <div className="flex flex-col gap-2.5">
       <div className="relative" ref={ref}>
         <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-slate-500" style={{ fontSize: 17 }}>
+          <span className={`material-symbols-outlined ${theme.iconMuted}`} style={{ fontSize: 17 }}>
             search
           </span>
           <input
-            className={`${fieldBase} flex-1`}
+            className={`${theme.field} flex-1`}
             value={query}
             placeholder={props.placeholder}
             onChange={(e) => {
@@ -424,12 +416,10 @@ function PinPicker(props: {
           ) : null}
         </div>
         {open && query.trim() && !results.length && !props.catalogLoading ? (
-          <div className="absolute z-20 mt-1 w-full rounded-xl border border-[#424753]/60 bg-[#11161d] px-3 py-2 text-[13px] text-slate-500 shadow-2xl">
-            No catalog titles match.
-          </div>
+          <div className={theme.dropdownEmpty}>No catalog titles match.</div>
         ) : null}
         {open && results.length ? (
-          <div className="absolute z-20 mt-1 w-full max-h-72 overflow-y-auto rounded-xl border border-[#424753]/60 bg-[#11161d] shadow-2xl">
+          <div className={`${theme.dropdown} max-h-72 overflow-y-auto`}>
             {results.map((item) => {
               const candidate: CollectionPinnedItem = {
                 tmdb_id: item.tmdb_id ?? null,
@@ -450,20 +440,23 @@ function PinPicker(props: {
                     setQuery("");
                     setOpen(false);
                   }}
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-[#1e2430] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  className={`${theme.dropdownItem} items-center gap-2.5 px-3 py-2`}
                 >
                   {item.poster_url ? (
-                    <img src={item.poster_url} alt="" className="h-10 w-7 rounded object-cover border border-[#424753]/40" />
+                    <img src={item.poster_url} alt="" className={`h-10 w-7 rounded object-cover ${theme.posterFallback}`} />
                   ) : (
-                    <span className="flex h-10 w-7 items-center justify-center rounded border border-[#424753]/40 bg-[#1e2430] material-symbols-outlined text-slate-600" style={{ fontSize: 14 }}>
+                    <span
+                      className={`flex h-10 w-7 items-center justify-center rounded material-symbols-outlined ${theme.posterFallback}`}
+                      style={{ fontSize: 14 }}
+                    >
                       movie
                     </span>
                   )}
                   <span className="flex-1 min-w-0">
-                    <span className="block truncate text-[14px] text-slate-200">{item.title}</span>
-                    <span className="block text-[12px] text-slate-500">{item.year ?? "—"}</span>
+                    <span className={theme.dropdownItemTitle}>{item.title}</span>
+                    <span className={theme.dropdownItemDescription}>{item.year ?? "—"}</span>
                   </span>
-                  {already ? <span className="text-[11px] text-slate-500 uppercase">pinned</span> : null}
+                  {already ? <span className={`text-[11px] uppercase ${theme.muted}`}>pinned</span> : null}
                 </button>
               );
             })}
@@ -473,21 +466,18 @@ function PinPicker(props: {
       {props.items.length ? (
         <div className="flex flex-wrap gap-2">
           {props.items.map((item, index) => (
-            <span
-              key={pinKey(item)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#424753]/50 bg-[#11161d] pl-1 pr-1.5 py-1"
-            >
+            <span key={pinKey(item)} className={theme.pinTag}>
               {item.poster ? (
                 <img src={item.poster} alt="" className="h-8 w-[1.35rem] rounded-sm object-cover" />
               ) : null}
-              <span className="text-[13px] text-slate-300">
+              <span className={theme.pinTitle}>
                 {item.title}
-                {item.year ? <span className="text-slate-500"> ({item.year})</span> : null}
+                {item.year ? <span className={theme.pinYear}> ({item.year})</span> : null}
               </span>
               <button
                 type="button"
                 onClick={() => props.onRemove(index)}
-                className="material-symbols-outlined text-slate-500 hover:text-red-400 transition-colors"
+                className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
                 style={{ fontSize: 15 }}
                 title="Remove pin"
               >
@@ -519,6 +509,7 @@ export function CollectionEditor(props: {
   onCancel: () => void;
 }) {
   const accentHex = props.accent.hex;
+  const theme = getCollectionTheme(props.themeMode === "light");
 
   const [name, setName] = useState(props.recipe?.name ?? "");
   const [enabled, setEnabled] = useState(props.recipe?.enabled ?? true);
@@ -741,10 +732,10 @@ export function CollectionEditor(props: {
     return (
       <div className="flex flex-col gap-3">
         {block.type === "tmdb_trending" ? (
-          <label className="flex items-center gap-2 text-[13px] text-slate-400">
+          <label className={`flex items-center gap-2 ${theme.label}`}>
             Window
             <select
-              className={fieldBase}
+              className={theme.selectField}
               value={block.window ?? "week"}
               onChange={(e) => updateSource(index, { window: e.target.value as "day" | "week" })}
             >
@@ -755,10 +746,10 @@ export function CollectionEditor(props: {
         ) : null}
 
         {block.type === "tmdb_list" ? (
-          <label className="flex items-center gap-2 text-[13px] text-slate-400">
+          <label className={`flex items-center gap-2 ${theme.label}`}>
             List ID
             <input
-              className={fieldBase}
+              className={theme.field}
               style={{ width: 160 }}
               value={block.list_id ?? ""}
               placeholder="e.g. 8136"
@@ -768,10 +759,10 @@ export function CollectionEditor(props: {
         ) : null}
 
         {block.type === "mdblist" || block.type === "trakt_list" ? (
-          <label className="flex items-center gap-2 text-[13px] text-slate-400">
+          <label className={`flex items-center gap-2 ${theme.label}`}>
             List
             <input
-              className={`${fieldBase} flex-1`}
+              className={`${theme.field} flex-1`}
               style={{ minWidth: 260 }}
               value={block.list_ref ?? ""}
               placeholder={
@@ -803,7 +794,7 @@ export function CollectionEditor(props: {
               />
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-2 text-[13px] text-slate-400">
+              <label className={`flex items-center gap-2 ${theme.label}`}>
                 Years
                 <NumberInput
                   value={block.year_from}
@@ -821,7 +812,7 @@ export function CollectionEditor(props: {
                   onChange={(v) => updateSource(index, { year_to: v })}
                 />
               </label>
-              <label className="flex items-center gap-2 text-[13px] text-slate-400">
+              <label className={`flex items-center gap-2 ${theme.label}`}>
                 Min rating
                 <NumberInput
                   value={block.min_vote_average}
@@ -839,7 +830,7 @@ export function CollectionEditor(props: {
                   Streaming services
                 </span>
                 <select
-                  className={fieldBase}
+                  className={theme.selectField}
                   value={region}
                   onChange={(e) => {
                     updateSource(index, { watch_region: e.target.value });
@@ -872,7 +863,7 @@ export function CollectionEditor(props: {
           </>
         ) : null}
 
-        <label className="flex items-center gap-2 text-[13px] text-slate-400">
+        <label className={`flex items-center gap-2 ${theme.label}`}>
           Max candidates
           <NumberInput
             value={block.limit}
@@ -889,7 +880,7 @@ export function CollectionEditor(props: {
   function renderFilterConfig(block: CollectionFilterBlock, index: number) {
     const opSelect = (options: { value: string; label: string }[]) => (
       <select
-        className={fieldBase}
+        className={theme.selectOp}
         value={block.op ?? options[0].value}
         onChange={(e) => updateFilter(index, { op: e.target.value })}
       >
@@ -958,7 +949,7 @@ export function CollectionEditor(props: {
               { value: "not_in", label: "is none of" },
             ])}
             <input
-              className={fieldBase}
+              className={theme.field}
               style={{ width: 220 }}
               placeholder="e.g. PG-13, R (comma separated)"
               value={(block.values ?? []).join(", ")}
@@ -981,7 +972,7 @@ export function CollectionEditor(props: {
               { value: "not_contains", label: "does not contain" },
             ])}
             <input
-              className={fieldBase}
+              className={theme.field}
               style={{ width: 200 }}
               placeholder="e.g. HBO"
               value={typeof block.value === "string" ? block.value : ""}
@@ -992,7 +983,7 @@ export function CollectionEditor(props: {
       case "monitored":
         return (
           <select
-            className={fieldBase}
+            className={theme.selectField}
             value={block.value === false ? "no" : "yes"}
             onChange={(e) => updateFilter(index, { value: e.target.value === "yes" })}
           >
@@ -1048,7 +1039,7 @@ export function CollectionEditor(props: {
       case "instance":
         return (
           <select
-            className={fieldBase}
+            className={theme.selectField}
             style={{ width: 260 }}
             value={typeof block.value === "string" ? block.value : ""}
             onChange={(e) => updateFilter(index, { value: e.target.value })}
@@ -1108,15 +1099,16 @@ export function CollectionEditor(props: {
   ];
 
   return (
+    <CollectionThemeProvider value={theme}>
     <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
       {/* Pipeline column — capped so leftover width goes to the preview rail instead of stretching cards */}
       <div className="flex-1 min-w-0 lg:max-w-3xl flex flex-col">
         {/* Recipe identity + target — picking the library first drives media type, genres, pins, and preview */}
-        <div className="rounded-xl border border-[#424753]/50 bg-[#171c22] px-4 py-3.5 mb-4 flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-[13px] text-slate-400">
+        <div className={`${theme.identityCard} flex flex-wrap items-center gap-4`}>
+          <label className={`flex items-center gap-2 ${theme.label}`}>
             Plex library
             <select
-              className={fieldBase}
+              className={`${theme.selectField} min-w-[14rem]`}
               value={sectionId ?? ""}
               onChange={(e) => setSectionId(e.target.value === "" ? null : Number(e.target.value))}
             >
@@ -1128,27 +1120,27 @@ export function CollectionEditor(props: {
               ))}
             </select>
           </label>
-          <label className="flex items-center gap-2 text-[13px] text-slate-400">
+          <label className={`flex items-center gap-2 ${theme.label}`}>
             Collection title
             <input
-              className={fieldBase}
+              className={theme.field}
               style={{ width: 220 }}
               value={collectionTitle}
               placeholder="e.g. Trending Now"
               onChange={(e) => setCollectionTitle(e.target.value)}
             />
           </label>
-          <label className="flex items-center gap-2 text-[13px] text-slate-400">
+          <label className={`flex items-center gap-2 ${theme.label}`}>
             Recipe name
             <input
-              className={fieldBase}
+              className={theme.field}
               style={{ width: 220 }}
               value={name}
               placeholder="e.g. Trending This Week"
               onChange={(e) => setName(e.target.value)}
             />
           </label>
-          <label className="flex items-center gap-2 text-[13px] text-slate-400 cursor-pointer">
+          <label className={`flex items-center gap-2 ${theme.label} cursor-pointer`}>
             <input
               type="checkbox"
               checked={enabled}
@@ -1162,7 +1154,7 @@ export function CollectionEditor(props: {
 
         {/* Sources */}
         <div className="flex flex-col gap-2.5">
-          <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Sources</div>
+          <div className={theme.sectionLabel}>Sources</div>
           {definition.sources.map((block, index) => (
             <BlockCard
               key={`${block.type}-${index}`}
@@ -1205,11 +1197,11 @@ export function CollectionEditor(props: {
 
         {/* Filters */}
         <div className="flex flex-col gap-2.5">
-          <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
-            Filters <span className="normal-case tracking-normal text-slate-600">(all must match)</span>
+          <div className={theme.sectionLabel}>
+            Filters <span className="normal-case tracking-normal opacity-80">(all must match)</span>
           </div>
           {definition.filters.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-[#424753]/40 px-4 py-3 text-[13px] text-slate-500">
+            <div className={theme.dashedPanel}>
               No filters — every matched title passes through.
             </div>
           ) : null}
@@ -1244,15 +1236,11 @@ export function CollectionEditor(props: {
 
         {/* Pins */}
         <div className="flex flex-col gap-2.5">
-          <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">
-            Pins <span className="normal-case tracking-normal text-slate-600">(manual overrides)</span>
+          <div className={theme.sectionLabel}>
+            Pins <span className="normal-case tracking-normal opacity-80">(manual overrides)</span>
           </div>
           {!pinsExpanded ? (
-            <button
-              type="button"
-              onClick={() => setPinsExpanded(true)}
-              className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-[#424753]/40 px-4 py-3 text-[13px] text-slate-500 hover:text-slate-300 hover:border-slate-400/60 transition-colors"
-            >
+            <button type="button" onClick={() => setPinsExpanded(true)} className={`${theme.dashedButton} py-3`}>
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
                 push_pin
               </span>
@@ -1303,10 +1291,10 @@ export function CollectionEditor(props: {
         {/* Output */}
         <BlockCard icon="sort" title="Arrange" subtitle="Order and cap the final selection" accentHex={accentHex}>
           <div className="flex flex-wrap items-center gap-4">
-            <label className="flex items-center gap-2 text-[13px] text-slate-400">
+            <label className={`flex items-center gap-2 ${theme.label}`}>
               Sort by
               <select
-                className={fieldBase}
+                className={theme.selectField}
                 value={definition.sort ?? "popularity"}
                 onChange={(e) =>
                   setDefinition((prev) => ({ ...prev, sort: e.target.value as CollectionDefinition["sort"] }))
@@ -1317,7 +1305,7 @@ export function CollectionEditor(props: {
                 <option value="title">Title (A–Z)</option>
               </select>
             </label>
-            <label className="flex items-center gap-2 text-[13px] text-slate-400">
+            <label className={`flex items-center gap-2 ${theme.label}`}>
               Max items
               <NumberInput
                 value={definition.limit ?? null}
@@ -1356,11 +1344,7 @@ export function CollectionEditor(props: {
           >
             {props.saving ? "Saving…" : props.recipe ? "Save changes" : "Create collection"}
           </button>
-          <button
-            type="button"
-            onClick={props.onCancel}
-            className="rounded-lg border border-[#424753]/60 px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-slate-300 hover:text-white transition-colors"
-          >
+          <button type="button" onClick={props.onCancel} className={theme.cancelButton}>
             Cancel
           </button>
         </div>
@@ -1368,19 +1352,19 @@ export function CollectionEditor(props: {
 
       {/* Preview rail — grows with available width */}
       <aside className="w-full min-w-0 lg:flex-1 lg:min-w-[20rem]">
-        <div className="rounded-xl border border-[#424753]/50 bg-[#171c22] overflow-hidden lg:sticky lg:top-4 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
-          <div className="flex items-center gap-2 px-4 py-3 border-b border-[#424753]/30 bg-[#1e2430]">
+        <div className={theme.previewRail}>
+          <div className={theme.previewHeader}>
             <span className="material-symbols-outlined" style={{ fontSize: 18, color: accentHex }}>
               preview
             </span>
-            <span className="text-[14px] font-headline uppercase tracking-wider text-slate-200">Live preview</span>
+            <span className={theme.heading}>Live preview</span>
             {previewLoading ? (
               <span className="ml-auto h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: accentHex }} />
             ) : null}
           </div>
           <div className="px-4 py-3">
             {!sectionId ? (
-              <p className="text-[13px] text-slate-500">Pick a target Plex library to see live counts.</p>
+              <p className={theme.muted}>Pick a target Plex library to see live counts.</p>
             ) : previewError ? (
               <p className="text-[13px] text-red-300">{previewError}</p>
             ) : (
@@ -1390,13 +1374,13 @@ export function CollectionEditor(props: {
                     <div key={stage.label} className="flex items-center gap-3 py-1.5">
                       <div className="flex flex-col items-center self-stretch">
                         <span
-                          className="h-2 w-2 rounded-full"
-                          style={{ backgroundColor: stage.value != null ? accentHex : "#424753" }}
+                          className={`h-2 w-2 rounded-full ${stage.value == null ? theme.stageLineInactive : ""}`}
+                          style={stage.value != null ? { backgroundColor: accentHex } : undefined}
                         />
-                        {idx < previewStages.length - 1 ? <span className="w-px flex-1 bg-[#424753]/50" /> : null}
+                        {idx < previewStages.length - 1 ? <span className={`w-px flex-1 ${theme.stageLine}`} /> : null}
                       </div>
-                      <span className="flex-1 text-[13px] text-slate-400">{stage.label}</span>
-                      <span className="text-[15px] font-mono text-slate-200">
+                      <span className={theme.previewStage}>{stage.label}</span>
+                      <span className={theme.previewValue}>
                         {stage.value == null ? "—" : stage.value}
                       </span>
                     </div>
@@ -1413,13 +1397,11 @@ export function CollectionEditor(props: {
                 ) : null}
 
                 {/* Check a title — trace one catalog title through the pipeline */}
-                <div className="mt-3 border-t border-[#424753]/30 pt-3">
-                  <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-2">
-                    Check a title
-                  </div>
+                <div className={`mt-3 border-t ${theme.divider} pt-3`}>
+                  <div className={`${theme.sectionLabel} mb-2`}>Check a title</div>
                   <div className="relative" ref={explainBoxRef}>
                     <input
-                      className={`${fieldBase} w-full`}
+                      className={`${theme.field} w-full`}
                       value={explainQuery}
                       placeholder="Search your catalog to see why a title is in or out…"
                       onChange={(e) => {
@@ -1429,7 +1411,7 @@ export function CollectionEditor(props: {
                       onFocus={() => setExplainOpen(true)}
                     />
                     {explainOpen && explainResults.length ? (
-                      <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto rounded-xl border border-[#424753]/60 bg-[#11161d] shadow-2xl">
+                      <div className={`${theme.dropdown} max-h-60 overflow-y-auto`}>
                         {explainResults.map((item) => (
                           <button
                             key={item.id}
@@ -1446,10 +1428,10 @@ export function CollectionEditor(props: {
                               setExplainQuery("");
                               setExplainOpen(false);
                             }}
-                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[#1e2430] transition-colors"
+                            className={`${theme.dropdownItem} items-center gap-2 px-3 py-1.5`}
                           >
-                            <span className="flex-1 min-w-0 truncate text-[13px] text-slate-200">{item.title}</span>
-                            <span className="text-[12px] text-slate-500">{item.year ?? ""}</span>
+                            <span className={`flex-1 min-w-0 truncate text-[13px] ${theme.pinTitle}`}>{item.title}</span>
+                            <span className={`text-[12px] ${theme.pinYear}`}>{item.year ?? ""}</span>
                           </button>
                         ))}
                       </div>
@@ -1461,9 +1443,9 @@ export function CollectionEditor(props: {
                         {explainItem.poster ? (
                           <img src={explainItem.poster} alt="" className="h-9 w-6 rounded-sm object-cover" />
                         ) : null}
-                        <span className="flex-1 min-w-0 truncate text-[13px] text-slate-200">
+                        <span className={`flex-1 min-w-0 truncate text-[13px] ${theme.pinTitle}`}>
                           {explainItem.title}
-                          {explainItem.year ? <span className="text-slate-500"> ({explainItem.year})</span> : null}
+                          {explainItem.year ? <span className={theme.pinYear}> ({explainItem.year})</span> : null}
                         </span>
                         {explainLoading ? (
                           <span className="h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: accentHex }} />
@@ -1485,7 +1467,7 @@ export function CollectionEditor(props: {
                             setExplainResult(null);
                             setExplainError(null);
                           }}
-                          className="material-symbols-outlined text-slate-500 hover:text-red-400 transition-colors"
+                          className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
                           style={{ fontSize: 16 }}
                           title="Clear"
                         >
@@ -1501,7 +1483,7 @@ export function CollectionEditor(props: {
                                 <ExplainStatusIcon status={stage.status} />
                                 <span
                                   className={`flex-1 text-[13px] ${
-                                    stage.status === "skip" ? "text-slate-600" : "text-slate-300"
+                                    stage.status === "skip" ? theme.explainSkip : theme.explainStage
                                   }`}
                                 >
                                   {EXPLAIN_STAGE_LABELS[stage.key] ?? stage.key}
@@ -1516,7 +1498,7 @@ export function CollectionEditor(props: {
                                   {stage.checks.map((check, i) => (
                                     <div key={i} className="flex items-center gap-1.5">
                                       <ExplainStatusIcon status={check.status} />
-                                      <span className="flex-1 min-w-0 truncate text-[12px] text-slate-400">
+                                      <span className={`flex-1 min-w-0 truncate text-[12px] ${theme.explainCheck}`}>
                                         {stage.key === "sources"
                                           ? explainSourceCheckLabel(check)
                                           : explainRuleCheckLabel(check)}
@@ -1539,10 +1521,8 @@ export function CollectionEditor(props: {
                 </div>
 
                 {preview?.sample?.length ? (
-                  <div className="mt-3 border-t border-[#424753]/30 pt-3">
-                    <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-2">
-                      Sample
-                    </div>
+                  <div className={`mt-3 border-t ${theme.divider} pt-3`}>
+                    <div className={`${theme.sectionLabel} mb-2`}>Sample</div>
                     <div className="grid grid-cols-4 sm:grid-cols-5 xl:grid-cols-6 gap-2">
                       {preview.sample.map((item) =>
                         item.poster ? (
@@ -1551,14 +1531,14 @@ export function CollectionEditor(props: {
                             src={item.poster}
                             alt={item.title}
                             title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                            className="aspect-[2/3] w-full rounded-md object-cover border border-[#424753]/40"
+                            className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
                             loading="lazy"
                           />
                         ) : (
                           <div
                             key={item.id}
                             title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                            className="aspect-[2/3] w-full rounded-md border border-[#424753]/40 bg-[#1e2430] p-1 text-[9px] leading-tight text-slate-500 overflow-hidden"
+                            className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
                           >
                             {item.title}
                           </div>
@@ -1573,5 +1553,6 @@ export function CollectionEditor(props: {
         </div>
       </aside>
     </div>
+    </CollectionThemeProvider>
   );
 }

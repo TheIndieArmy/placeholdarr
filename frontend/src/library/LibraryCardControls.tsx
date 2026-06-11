@@ -87,7 +87,7 @@ export function LibraryCardControls(props: {
                 const next = e.target.value;
                 if (isLibrarySortKey(next)) props.onSortChange?.(next);
               }}
-              className={`rounded-md border px-2 py-1 font-headline text-[12px] uppercase tracking-wider cursor-pointer focus:outline-none focus-visible:ring-2 ${
+              className={`rounded-md border pl-2 pr-8 py-1 font-headline text-[12px] uppercase tracking-wider cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 ${
                 isLight
                   ? "border-slate-200 bg-white text-slate-800"
                   : "border-[#424753]/60 bg-[#141a24] text-slate-200"
