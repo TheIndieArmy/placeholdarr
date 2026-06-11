@@ -600,6 +600,44 @@ _OVERLAY_EXAMPLE_MEDIA_TYPES = {
     ".json": "application/json",
 }
 
+_FAVICON_FILES = {
+    "favicon.ico": "image/x-icon",
+    "favicon-16x16.png": "image/png",
+    "favicon-32x32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+}
+
+
+def _dashboard_dist_root_file(filename: str, media_types: dict[str, str]) -> FileResponse | JSONResponse:
+    """Serve a single file from frontend/dist (Vite public/ copies)."""
+    if filename not in media_types:
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
+    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    file_path = os.path.join(dist_dir, filename)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
+    return FileResponse(file_path, media_type=media_types[filename])
+
+
+@router.get("/favicon.ico")
+async def dashboard_favicon_ico():
+    return _dashboard_dist_root_file("favicon.ico", _FAVICON_FILES)
+
+
+@router.get("/favicon-16x16.png")
+async def dashboard_favicon_16():
+    return _dashboard_dist_root_file("favicon-16x16.png", _FAVICON_FILES)
+
+
+@router.get("/favicon-32x32.png")
+async def dashboard_favicon_32():
+    return _dashboard_dist_root_file("favicon-32x32.png", _FAVICON_FILES)
+
+
+@router.get("/apple-touch-icon.png")
+async def dashboard_apple_touch_icon():
+    return _dashboard_dist_root_file("apple-touch-icon.png", _FAVICON_FILES)
+
 
 @router.get("/overlay-examples/{asset_path:path}")
 async def dashboard_overlay_examples(asset_path: str):
