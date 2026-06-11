@@ -176,6 +176,37 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "TMDB_API_KEY",
+            {
+                "section": "Media Integrations",
+                "label": "TMDB API Key",
+                "description": (
+                    "TMDB API key (v3 auth) used by the Collections builder to source trending, popular, upcoming, "
+                    "and discover lists. Get a free key at themoviedb.org. Optional; only needed for TMDB-based collection sources."
+                ),
+                "type": "string",
+                "required": False,
+                "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "TRAKT_CLIENT_ID",
+            {
+                "section": "Media Integrations",
+                "label": "Trakt Client ID",
+                "description": (
+                    "Trakt API application Client ID used by the Collections builder to read public Trakt lists. "
+                    "Create a free app at trakt.tv/oauth/applications — only the Client ID is needed (no account linking). "
+                    "Optional; only needed for Trakt list collection sources."
+                ),
+                "type": "string",
+                "required": False,
+                "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
             "ARR_INSTANCES_JSON",
             {
                 "section": "ARR Integrations",
@@ -246,6 +277,20 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     "How often to run lite sync: ARR catalog diff, targeted sync for changes, calendar date refresh, "
                     "Coming Soon status updates, and scoped placeholder work. Default 12 hours. Set to 0 to disable. "
                     "Includes calendar maintenance; a separate calendar interval is only used when lite sync is off."
+                ),
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "COLLECTIONS_SYNC_INTERVAL_HOURS",
+            {
+                "section": "Library sync",
+                "label": "Scheduled collections sync interval (hours)",
+                "description": (
+                    "How often to run enabled collection recipes and sync their results into Plex collections. "
+                    "Default 24 hours. Set to 0 to disable the scheduled job (recipes can still be run manually)."
                 ),
                 "type": "int",
                 "min": 0,

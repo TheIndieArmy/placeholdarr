@@ -537,6 +537,10 @@ app.include_router(dashboard_router)
 from routes.tasks import router as tasks_router
 app.include_router(tasks_router)
 
+# Rule-based Plex collection builder
+from routes.collections import router as collections_router
+app.include_router(collections_router)
+
 # Customizable status message templates
 from routes.messages import router as messages_router
 app.include_router(messages_router)

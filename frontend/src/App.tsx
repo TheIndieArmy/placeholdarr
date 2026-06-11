@@ -69,6 +69,7 @@ import {
   readStoredLibrarySort,
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
+import { CollectionsPanel } from "./collections/CollectionsPanel";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { useCalendarData } from "./calendar/useCalendarData";
@@ -751,6 +752,7 @@ export function App() {
   }, []);
 
   const refreshLibraryShelvesRef = useRef<(options?: { force?: boolean }) => Promise<void>>(async () => {});
+  const refreshTasksRef = useRef<() => Promise<void>>(async () => {});
 
   const { eventsConnected } = useDashboardEvents({
     enabled: true,
@@ -764,6 +766,11 @@ export function App() {
     onLibraryVersion: () => {
       if (currentTabRef.current === "library") {
         void refreshLibraryShelvesRef.current();
+      }
+    },
+    onTaskRunsVersion: () => {
+      if (currentTabRef.current === "activity") {
+        void refreshTasksRef.current();
       }
     },
   });
@@ -796,6 +803,15 @@ export function App() {
     void refreshLibraryShelves({ force: true });
   }, [invalidateLibraryShelves, refreshLibraryShelves]);
 
+  /** Lazily warm the shelf cache when something other than the Library tab needs it (title search, pins picker). */
+  const libraryCacheEmptyRef = useRef(true);
+  libraryCacheEmptyRef.current = !(libraryCache.movies?.items.length || libraryCache.tv?.items.length);
+  const ensureLibraryLoaded = useCallback(() => {
+    if (libraryCacheEmptyRef.current) {
+      void refreshLibraryShelvesRef.current();
+    }
+  }, []);
+
   const activitySubPage = getActivitySubPage(location.pathname);
 
   const {
@@ -809,6 +825,12 @@ export function App() {
     onError: markTabDataError,
     onRefreshing: setDashboardRefreshing,
   });
+
+  useEffect(() => {
+    refreshTasksRef.current = async () => {
+      await refreshTasks();
+    };
+  }, [refreshTasks]);
 
   const { activity, placeholderActivity } = useActivityFeed({
     subPage: activitySubPage,
@@ -964,16 +986,15 @@ export function App() {
     }
     return `episode:${selectedCalendarItem.item_id}`;
   }, [selectedCalendarItem]);
+  const allLibraryItems = useMemo(
+    () => [...(libraryCache.movies?.items ?? []), ...(libraryCache.tv?.items ?? [])],
+    [libraryCache],
+  );
   const titleSearchResults = useMemo(() => {
     const query = titleSearch.trim().toLowerCase();
     if (!query) return [];
 
-    const pool = [
-      ...(libraryCache.movies?.items ?? []),
-      ...(libraryCache.tv?.items ?? []),
-    ];
-
-    return [...pool]
+    return [...allLibraryItems]
       .filter((item) => item.title.toLowerCase().includes(query))
       .sort((left, right) => {
         const leftTitle = titleSortKey(left.title);
@@ -984,7 +1005,7 @@ export function App() {
         return leftTitle.localeCompare(rightTitle);
       })
       .slice(0, 8);
-  }, [libraryCache, titleSearch]);
+  }, [allLibraryItems, titleSearch]);
 
   useEffect(() => {
     hasUnsavedChangesRef.current = combinedSettingsDirty;
@@ -1574,6 +1595,14 @@ export function App() {
               setTaskRunError(null);
               setTaskRunModal(kind);
             }}
+            onRunCollections={async () => {
+              setTaskRunError(null);
+              try {
+                await postTaskRun("collections_sync");
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start collections sync");
+              }
+            }}
             onRequestRefresh={async (kind) => {
               setTaskRunError(null);
               setTaskRunPending(true);
@@ -1658,6 +1687,18 @@ export function App() {
         );
       }
       return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
+    }
+
+    if (currentTab === "collections") {
+      return (
+        <CollectionsPanel
+          accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+          themeMode={themeMode}
+          libraryItems={allLibraryItems}
+          libraryLoading={libraryLoading}
+          onEnsureLibrary={ensureLibraryLoaded}
+        />
+      );
     }
 
     if (currentTab === "calendar") {
@@ -2084,6 +2125,7 @@ export function App() {
                   ) : null}
 
                   {[
+                    { icon: "video_library", label: "Collections", path: "/collections" },
                     { icon: "calendar_month", label: "Calendar", path: "/calendar" },
                     { icon: "error", label: "Errors", path: "/errors" },
                     { icon: "terminal", label: "Logs", path: "/logs" },
@@ -2160,7 +2202,10 @@ export function App() {
                     setTitleSearchIndex(0);
                     setTitleSearchOpen(true);
                   }}
-                  onFocus={() => setTitleSearchOpen(true)}
+                  onFocus={() => {
+                    setTitleSearchOpen(true);
+                    ensureLibraryLoaded();
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
@@ -3135,6 +3180,7 @@ function TasksPanel(props: {
   themeMode: ThemeMode;
   onOpenLibraryFilter?: (f: LibraryFilter) => void;
   onRequestRun: (kind: "full" | "lite") => void;
+  onRunCollections: () => Promise<void> | void;
   onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
 }) {
   const s = props.stats;
@@ -3248,7 +3294,13 @@ function TasksPanel(props: {
                     <button
                       type="button"
                       disabled={!task.enabled || task.running}
-                      onClick={() => props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite")}
+                      onClick={() => {
+                        if (task.task_key === "collections_sync") {
+                          void props.onRunCollections();
+                          return;
+                        }
+                        props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite");
+                      }}
                       className="inline-flex items-center justify-center w-9 h-9 rounded-lg border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] disabled:opacity-40 disabled:cursor-not-allowed"
                       title="Run now"
                     >
@@ -10319,6 +10371,7 @@ function getTabFromPath(pathname: string): DashboardTab {
   if (pathname === "/setup" || pathname.startsWith("/setup/")) return "setup";
   if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/activity")) return "activity";
+  if (pathname.startsWith("/collections")) return "collections";
   if (pathname.startsWith("/calendar")) return "calendar";
   if (pathname.startsWith("/errors")) return "errors";
   if (pathname.startsWith("/logs")) return "logs";

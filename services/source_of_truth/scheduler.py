@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 from core.config import settings
 from services.source_of_truth.scheduled_sync import run_lite_sync, run_scheduled_full_sync
@@ -20,6 +21,7 @@ _scheduler: BackgroundScheduler | None = None
 JOB_ID_FULL = "source_of_truth:all_arrs"
 JOB_ID_LITE = "source_of_truth:lite_sync"
 JOB_ID_CALENDAR = "source_of_truth:calendar_date_refresh"
+JOB_ID_COLLECTIONS = "collections:sync"
 
 
 def _interval_hours_for(task_key: str) -> int:
@@ -27,6 +29,8 @@ def _interval_hours_for(task_key: str) -> int:
         return max(0, int(getattr(settings, "FULL_SYNC_INTERVAL_HOURS", 0) or 0))
     if task_key == "lite_sync":
         return max(0, int(getattr(settings, "LITE_SYNC_INTERVAL_HOURS", 0) or 0))
+    if task_key == "collections_sync":
+        return max(0, int(getattr(settings, "COLLECTIONS_SYNC_INTERVAL_HOURS", 0) or 0))
     return 0
 
 
@@ -81,13 +85,30 @@ def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | 
     nxt = bump_next_run_after_run(task_key, hours, completed_at=completed_at)
     if _scheduler is None:
         return
-    job_id = JOB_ID_FULL if task_key == "full_sync" else JOB_ID_LITE if task_key == "lite_sync" else None
+    job_id = (
+        JOB_ID_FULL
+        if task_key == "full_sync"
+        else JOB_ID_LITE
+        if task_key == "lite_sync"
+        else JOB_ID_COLLECTIONS
+        if task_key == "collections_sync"
+        else None
+    )
     if not job_id:
         return
     try:
         job = _scheduler.get_job(job_id)
         if job:
-            job.reschedule(trigger="interval", hours=max(1, hours), next_run_time=nxt)
+            safe_hours = max(1, hours)
+            if nxt.tzinfo is None:
+                nxt = nxt.replace(tzinfo=timezone.utc)
+            # APScheduler reschedule_job passes **trigger_args to IntervalTrigger only;
+            # next_run_time must be set via modify_job instead.
+            _scheduler.modify_job(
+                job_id,
+                trigger=IntervalTrigger(hours=safe_hours),
+                next_run_time=nxt,
+            )
             logger.info(
                 "Rescheduled %s after completion: next_run=%s",
                 task_key,
@@ -104,6 +125,12 @@ def _run_all_syncs_scheduled():
 
 def _run_lite_sync_scheduled():
     run_lite_sync(trigger="scheduled")
+
+
+def _run_collections_sync_scheduled():
+    from services.collections.scheduled import run_collections_sync
+
+    run_collections_sync(trigger="scheduled")
 
 
 def schedule_all_syncs():
@@ -128,6 +155,16 @@ def schedule_all_syncs():
         "Lite sync",
         job_id=JOB_ID_LITE,
         disable_hint="LITE_SYNC_INTERVAL_HOURS",
+    )
+
+    collections_hours = int(getattr(settings, "COLLECTIONS_SYNC_INTERVAL_HOURS", 0) or 0)
+    _start_interval(
+        "collections_sync",
+        collections_hours,
+        _run_collections_sync_scheduled,
+        "Collections sync",
+        job_id=JOB_ID_COLLECTIONS,
+        disable_hint="COLLECTIONS_SYNC_INTERVAL_HOURS",
     )
 
     calendar_hours = int(getattr(settings, "CALENDAR_SYNC_INTERVAL_HOURS", 0) or 0)
@@ -170,8 +207,9 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
     out: dict[str, Any] = {
         "full_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
         "lite_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
+        "collections_sync": {"enabled": False, "interval_hours": 0, "next_run": None},
     }
-    for task_key in ("full_sync", "lite_sync"):
+    for task_key in ("full_sync", "lite_sync", "collections_sync"):
         hours = _interval_hours_for(task_key)
         out[task_key]["interval_hours"] = hours
         out[task_key]["enabled"] = hours > 0
@@ -184,7 +222,13 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
             out[task_key]["next_run"] = nrt.astimezone(timezone.utc).isoformat()
 
         if _scheduler is not None:
-            job_id = JOB_ID_FULL if task_key == "full_sync" else JOB_ID_LITE
+            job_id = (
+                JOB_ID_FULL
+                if task_key == "full_sync"
+                else JOB_ID_LITE
+                if task_key == "lite_sync"
+                else JOB_ID_COLLECTIONS
+            )
             try:
                 job = _scheduler.get_job(job_id)
                 if job and job.next_run_time:

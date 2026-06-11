@@ -1,0 +1,83 @@
+import { fetchJson, postJson } from "./client";
+import type {
+  CollectionBuilderMeta,
+  CollectionDefinition,
+  CollectionExplainResponse,
+  CollectionPinnedItem,
+  CollectionPreviewResponse,
+  CollectionRecipe,
+  CollectionRecipesResponse,
+  CollectionTmdbMeta,
+  PlexSectionOption,
+} from "../types/api";
+
+export interface RecipeWritePayload {
+  name: string;
+  enabled: boolean;
+  plex_section_id: number;
+  plex_section_type: "movie" | "show";
+  collection_title: string;
+  definition: CollectionDefinition;
+}
+
+export function getCollectionRecipes(): Promise<CollectionRecipesResponse> {
+  return fetchJson<CollectionRecipesResponse>("/api/collections");
+}
+
+export function createCollectionRecipe(payload: RecipeWritePayload): Promise<{ ok: boolean; recipe: CollectionRecipe }> {
+  return postJson("/api/collections", payload);
+}
+
+export async function updateCollectionRecipe(
+  id: number,
+  payload: RecipeWritePayload,
+): Promise<{ ok: boolean; recipe: CollectionRecipe }> {
+  return fetchJson(`/api/collections/${id}`, {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function toggleCollectionRecipe(id: number, enabled: boolean): Promise<{ ok: boolean; recipe: CollectionRecipe }> {
+  return postJson(`/api/collections/${id}/toggle`, { enabled });
+}
+
+export async function deleteCollectionRecipe(id: number): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/collections/${id}`, { method: "DELETE" });
+}
+
+export function runCollectionRecipe(id: number): Promise<{ ok: boolean; recipe_id: number; message: string }> {
+  return postJson(`/api/collections/${id}/run`);
+}
+
+export function previewCollectionDefinition(payload: {
+  plex_section_id: number;
+  plex_section_type: "movie" | "show";
+  definition: CollectionDefinition;
+}): Promise<CollectionPreviewResponse> {
+  return postJson("/api/collections/preview", payload);
+}
+
+export function getCollectionPlexSections(): Promise<{ sections: PlexSectionOption[] }> {
+  return fetchJson("/api/collections/plex-sections");
+}
+
+export function getCollectionTmdbMeta(mediaType: "movie" | "tv", region: string): Promise<CollectionTmdbMeta> {
+  const params = new URLSearchParams({ media_type: mediaType, region });
+  return fetchJson(`/api/collections/tmdb-meta?${params.toString()}`);
+}
+
+export function getCollectionBuilderMeta(mediaType: "movie" | "show"): Promise<CollectionBuilderMeta> {
+  const params = new URLSearchParams({ media_type: mediaType });
+  return fetchJson(`/api/collections/builder-meta?${params.toString()}`);
+}
+
+export function explainCollectionItem(payload: {
+  plex_section_id: number;
+  plex_section_type: "movie" | "show";
+  definition: CollectionDefinition;
+  item: CollectionPinnedItem;
+}): Promise<CollectionExplainResponse> {
+  return postJson("/api/collections/explain", payload);
+}

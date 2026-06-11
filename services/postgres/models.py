@@ -284,6 +284,40 @@ class LibraryCatalogVersion(Base):
         )
 
 
+class CollectionRecipe(Base):
+    """A saved rule-based collection definition synced into a Plex library collection."""
+
+    __tablename__ = "collection_recipe"
+    __table_args__ = (
+        Index("ix_collection_recipe_enabled", "enabled"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    # Target Plex library section (any section, picked live from the Plex API).
+    plex_section_id = Column(Integer, nullable=False)
+    # "movie" or "show" — mirrors the Plex section type so the engine knows which catalog to query.
+    plex_section_type = Column(String(16), nullable=False)
+    collection_title = Column(String(200), nullable=False)
+    # Block-based rule definition: {"sources": [...], "filters": [...], "limit": int|None, "sort": str|None}
+    definition = Column(JSON, nullable=False, default=dict)
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    # Counts/status from the most recent run: {"status", "candidates", "matched", "resolved", "synced", "error"}
+    last_run_summary = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, server_default=text("now()"))
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+        onupdate=func.now(),
+    )
+
+    def __repr__(self):
+        return f"<CollectionRecipe(id={self.id}, name={self.name!r}, section={self.plex_section_id})>"
+
+
 class DashboardStatsSnapshot(Base):
     """Singleton materialized counters for `/api/stats` (id=1)."""
 

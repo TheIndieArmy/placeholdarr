@@ -522,6 +522,16 @@ async def dashboard_calendar_page():
     return _serve_dashboard_index()
 
 
+@router.get("/collections", response_class=HTMLResponse)
+async def dashboard_collections_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/collections/{path:path}", response_class=HTMLResponse)
+async def dashboard_collections_nested(path: str):
+    return _serve_dashboard_index()
+
+
 @router.get("/errors", response_class=HTMLResponse)
 async def dashboard_errors_page():
     return _serve_dashboard_index()
@@ -3356,6 +3366,9 @@ def _build_library_payload(
                 "type": "movie",
                 "title": movie.title,
                 "year": movie.year,
+                "tmdb_id": int(movie.tmdbid or 0) or None,
+                "tvdb_id": None,
+                "imdb_id": movie.imdbid,
                 "poster_url": _resolve_library_poster_url(
                     "movie",
                     int(movie.id),
@@ -3436,6 +3449,9 @@ def _build_library_payload(
                 "type": "series",
                 "title": series.title,
                 "year": series.year,
+                "tmdb_id": int(getattr(series, "sonarr_tmdbid", 0) or 0) or None,
+                "tvdb_id": int(series.tvdbid or 0) or None,
+                "imdb_id": series.imdbid,
                 "network": getattr(series, "sonarr_network", None),
                 "poster_url": _resolve_library_poster_url(
                     "series",
