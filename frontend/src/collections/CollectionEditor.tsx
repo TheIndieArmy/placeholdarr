@@ -12,13 +12,18 @@ import {
   getCollectionTheme,
   useCollectionTheme,
 } from "./collectionTheme";
+import { AndOrToggle, ToggleSwitch } from "./ToggleSwitch";
 import type {
+  CollectionActiveWindow,
   CollectionBuilderMeta,
   CollectionDefinition,
   CollectionExplainCheck,
+  CollectionExplainNode,
   CollectionExplainResponse,
   CollectionFilterBlock,
   CollectionFilterField,
+  CollectionFilterGroup,
+  CollectionFilterNode,
   CollectionPinnedItem,
   CollectionPreviewResponse,
   CollectionRecipe,
@@ -79,7 +84,7 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
   }
 }
 
-function defaultFilterBlock(field: CollectionFilterField): CollectionFilterBlock {
+function defaultFilterBlock(field: CollectionFilterField, sectionType: "movie" | "show"): CollectionFilterBlock {
   switch (field) {
     case "genre":
       return { field, op: "includes_any", values: [] };
@@ -98,7 +103,12 @@ function defaultFilterBlock(field: CollectionFilterField): CollectionFilterBlock
     case "instance":
       return { field, op: "is", value: "" };
     case "release_window":
-      return { field, op: "within_past", value: 365 };
+      return {
+        field,
+        op: "within_past",
+        value: 365,
+        basis: sectionType === "movie" ? "theater" : "premiered",
+      };
     case "rating":
       return { field, op: "gte", value: 7 };
   }
@@ -292,6 +302,153 @@ function pinKey(item: { tmdb_id?: number | null; tvdb_id?: number | null; imdb_i
   return `${item.tmdb_id ?? ""}:${item.tvdb_id ?? ""}:${item.imdb_id ?? ""}`;
 }
 
+function isRuleNode(node: CollectionFilterNode): node is CollectionFilterBlock {
+  return (node as CollectionFilterBlock).field !== undefined;
+}
+
+function isEmptyFilters(filters: CollectionDefinition["filters"] | undefined): boolean {
+  if (!filters) return true;
+  if (Array.isArray(filters)) return filters.length === 0;
+  return (filters.children ?? []).length === 0;
+}
+
+/** True when the tree can be shown in simple mode without losing meaning. */
+function isLinearFilters(filters: CollectionDefinition["filters"] | undefined): boolean {
+  if (isEmptyFilters(filters)) return true;
+  if (!filters || Array.isArray(filters)) return true;
+  if (filters.op === "and" && (filters.children ?? []).every(isRuleNode)) return true;
+  if (filters.op === "or") {
+    return (filters.children ?? []).every(
+      (child) => !isRuleNode(child) && child.op === "and" && (child.children ?? []).every(isRuleNode),
+    );
+  }
+  return false;
+}
+
+/** Normalize an advanced tree back to the shape simple mode expects. */
+function toSimpleFilters(filters: CollectionDefinition["filters"] | undefined): CollectionDefinition["filters"] {
+  if (isEmptyFilters(filters)) return [];
+  if (!filters || Array.isArray(filters)) return filters ?? [];
+  if (filters.op === "and" && (filters.children ?? []).every(isRuleNode)) {
+    return [...filters.children] as CollectionFilterBlock[];
+  }
+  return filters;
+}
+
+function filtersToGroups(filters: CollectionDefinition["filters"] | undefined): CollectionFilterBlock[][] {
+  if (!filters) return [];
+  if (Array.isArray(filters)) return filters.length ? [filters] : [];
+  if (filters.op === "and" && (filters.children ?? []).every(isRuleNode)) {
+    return [filters.children as CollectionFilterBlock[]];
+  }
+  return (filters.children ?? []).map((group) => (isRuleNode(group) ? [group] : (group.children ?? []).filter(isRuleNode)));
+}
+
+function groupsToFilters(groups: CollectionFilterBlock[][]): CollectionDefinition["filters"] {
+  if (!groups.length) return [];
+  if (groups.length === 1) return groups[0];
+  return { op: "or", children: groups.map((group) => ({ op: "and" as const, children: group })) };
+}
+
+/** Hoist a sole AND sub-group of rules so advanced mode doesn't show a fake level-2 wrapper. */
+function flattenRedundantFilterGroup(group: CollectionFilterGroup): CollectionFilterGroup {
+  const children = (group.children ?? []).map((child) =>
+    isRuleNode(child) ? child : flattenRedundantFilterGroup(child),
+  );
+  if (
+    children.length === 1 &&
+    !isRuleNode(children[0]) &&
+    children[0].op === "and" &&
+    (children[0].children ?? []).every(isRuleNode)
+  ) {
+    const op = group.op === "or" ? "and" : group.op;
+    return { op, children: [...children[0].children!] };
+  }
+  return { ...group, children };
+}
+
+/** Coerce any filters value to an editable tree root for the Advanced builder. */
+function filtersToTree(filters: CollectionDefinition["filters"] | undefined): CollectionFilterGroup {
+  if (!filters) return { op: "and", children: [] };
+  if (Array.isArray(filters)) return { op: "and", children: [...filters] };
+  return flattenRedundantFilterGroup(filters);
+}
+
+function toAdvancedFilters(filters: CollectionDefinition["filters"] | undefined): CollectionFilterGroup {
+  return filtersToTree(filters);
+}
+
+/** Immutably replace the node at `path` (child indices from the root); null deletes it. */
+function updateTreeAt(
+  root: CollectionFilterGroup,
+  path: number[],
+  fn: (node: CollectionFilterNode) => CollectionFilterNode | null,
+): CollectionFilterGroup {
+  if (!path.length) {
+    const next = fn(root);
+    return next && !isRuleNode(next) ? next : root;
+  }
+  const [head, ...rest] = path;
+  const children = [...(root.children ?? [])];
+  const target = children[head];
+  if (target === undefined) return root;
+  if (!rest.length) {
+    const next = fn(target);
+    if (next === null) children.splice(head, 1);
+    else children[head] = next;
+  } else {
+    if (isRuleNode(target)) return root;
+    children[head] = updateTreeAt(target, rest, fn);
+  }
+  return { ...root, children };
+}
+
+const MAX_FILTER_DEPTH = 3;
+
+const SCHEDULE_PRESETS: { value: string; label: string }[] = [
+  { value: "", label: "App default" },
+  { value: "1", label: "Every hour" },
+  { value: "6", label: "Every 6 hours" },
+  { value: "12", label: "Every 12 hours" },
+  { value: "24", label: "Daily" },
+  { value: "168", label: "Weekly" },
+];
+
+const MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+function splitMonthDay(raw: string): { month: number; day: number } {
+  const [m, d] = raw.split("-").map((p) => Number(p));
+  return { month: Math.min(Math.max(m || 1, 1), 12), day: Math.min(Math.max(d || 1, 1), 31) };
+}
+
+function joinMonthDay(month: number, day: number): string {
+  return `${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function MonthDayPicker(props: { value: string; onChange: (value: string) => void }) {
+  const theme = useCollectionTheme();
+  const { month, day } = splitMonthDay(props.value);
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <select
+        className={`${theme.selectField} !min-w-[4.5rem]`}
+        value={month}
+        onChange={(e) => props.onChange(joinMonthDay(Number(e.target.value), day))}
+      >
+        {MONTH_NAMES.map((name, i) => (
+          <option key={name} value={i + 1}>
+            {name}
+          </option>
+        ))}
+      </select>
+      <NumberInput value={day} min={1} max={31} width={58} onChange={(v) => props.onChange(joinMonthDay(month, v ?? 1))} />
+    </span>
+  );
+}
+
 const EXPLAIN_STAGE_LABELS: Record<string, string> = {
   sources: "Produced by a source",
   catalog: "Matched in catalog",
@@ -314,6 +471,8 @@ const FILTER_OP_LABELS: Record<string, string> = {
   is: "is",
   within_past: "released in the past (days)",
   within_next: "releasing in the next (days)",
+  has_released: "has been released",
+  not_yet_released: "not yet released",
 };
 
 function explainSourceCheckLabel(check: CollectionExplainCheck): string {
@@ -322,6 +481,15 @@ function explainSourceCheckLabel(check: CollectionExplainCheck): string {
   return check.list_ref ? `${base} — ${check.list_ref}` : base;
 }
 
+const RELEASE_BASIS_LABELS: Record<string, string> = {
+  premiered: "series premiere",
+  latest_episode: "latest aired episode",
+  latest_season: "latest season premiere",
+  theater: "theatrical release",
+  digital: "digital release",
+  physical: "physical release",
+};
+
 function explainRuleCheckLabel(check: CollectionExplainCheck): string {
   const base = filterMeta(String(check.field ?? "")).label;
   const op = FILTER_OP_LABELS[String(check.op ?? "")] ?? String(check.op ?? "");
@@ -329,7 +497,50 @@ function explainRuleCheckLabel(check: CollectionExplainCheck): string {
   if (check.values?.length) value = check.values.join(", ");
   else if (check.value != null && check.value !== "") value = String(check.value);
   if (check.value_to != null) value = `${value}–${check.value_to}`;
-  return [base, op, value].filter(Boolean).join(" ");
+  const basis =
+    check.field === "release_window" && check.basis
+      ? `(by ${RELEASE_BASIS_LABELS[check.basis] ?? check.basis})`
+      : "";
+  return [base, op, value, basis].filter(Boolean).join(" ");
+}
+
+/** Skip redundant single-child group wrappers so simple recipes read flat. */
+function collapseTrivialExplainNode(node: CollectionExplainNode): CollectionExplainNode {
+  let current = node;
+  while (current.kind === "group" && current.children.length === 1 && current.children[0].kind === "group") {
+    current = current.children[0];
+  }
+  return current;
+}
+
+function ExplainTreeNodeView(props: { node: CollectionExplainNode }) {
+  const theme = useCollectionTheme();
+  if (props.node.kind === "rule") {
+    return (
+      <div className="flex items-center gap-1.5">
+        <ExplainStatusIcon status={props.node.status} />
+        <span className={`flex-1 min-w-0 truncate text-[12px] ${theme.explainCheck}`}>
+          {explainRuleCheckLabel(props.node)}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="flex items-center gap-1.5">
+        <ExplainStatusIcon status={props.node.status} />
+        <span className={`text-[12px] ${props.node.status === "skip" ? theme.explainSkip : theme.explainCheck}`}>
+          {props.node.op === "and" ? "All of:" : "Any of:"}
+          {props.node.status === "skip" ? " — not needed" : ""}
+        </span>
+      </div>
+      <div className="ml-5 flex flex-col gap-0.5">
+        {props.node.children.map((child, i) => (
+          <ExplainTreeNodeView key={i} node={child} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function ExplainStatusIcon(props: { status: "pass" | "fail" | "skip" }) {
@@ -515,6 +726,8 @@ export function CollectionEditor(props: {
   const [enabled, setEnabled] = useState(props.recipe?.enabled ?? true);
   const [sectionId, setSectionId] = useState<number | null>(props.recipe?.plex_section_id ?? null);
   const [collectionTitle, setCollectionTitle] = useState(props.recipe?.collection_title ?? "");
+  const [runIntervalHours, setRunIntervalHours] = useState<number | null>(props.recipe?.run_interval_hours ?? null);
+  const [activeWindow, setActiveWindow] = useState<CollectionActiveWindow | null>(props.recipe?.active_window ?? null);
   const [definition, setDefinition] = useState<CollectionDefinition>(
     props.recipe?.definition && Array.isArray(props.recipe.definition.sources)
       ? props.recipe.definition
@@ -573,14 +786,84 @@ export function CollectionEditor(props: {
   const removeSource = (index: number) => {
     setDefinition((prev) => ({ ...prev, sources: prev.sources.filter((_, i) => i !== index) }));
   };
-  const updateFilter = (index: number, patch: Partial<CollectionFilterBlock>) => {
+  // Filters: simple mode is OR-ed groups of AND-ed rules; Advanced mode edits the
+  // full and/or tree (depth-capped). Recipes that already nest open in Advanced.
+  const [advancedFilters, setAdvancedFilters] = useState<boolean>(
+    () => !isLinearFilters(props.recipe?.definition?.filters),
+  );
+  const filterGroups = useMemo(() => filtersToGroups(definition.filters), [definition.filters]);
+  const filterTree = useMemo(() => filtersToTree(definition.filters), [definition.filters]);
+  const canUseSimpleFilters = useMemo(() => isLinearFilters(definition.filters), [definition.filters]);
+  const handleAdvancedFiltersToggle = (on: boolean) => {
+    if (!on && !canUseSimpleFilters) return;
+    setAdvancedFilters(on);
     setDefinition((prev) => ({
       ...prev,
-      filters: prev.filters.map((f, i) => (i === index ? { ...f, ...patch } : f)),
+      filters: on ? toAdvancedFilters(prev.filters) : toSimpleFilters(prev.filters),
     }));
   };
-  const removeFilter = (index: number) => {
-    setDefinition((prev) => ({ ...prev, filters: prev.filters.filter((_, i) => i !== index) }));
+  const mutateGroups = (mutate: (groups: CollectionFilterBlock[][]) => CollectionFilterBlock[][]) => {
+    setDefinition((prev) => ({ ...prev, filters: groupsToFilters(mutate(filtersToGroups(prev.filters))) }));
+  };
+  const mutateTree = (mutate: (root: CollectionFilterGroup) => CollectionFilterGroup) => {
+    setDefinition((prev) => ({ ...prev, filters: mutate(filtersToTree(prev.filters)) }));
+  };
+  const setGroupOp = (path: number[], op: "and" | "or") => {
+    mutateTree((root) =>
+      updateTreeAt(root, path, (node) => (isRuleNode(node) ? node : { ...node, op })),
+    );
+  };
+  const addTreeRule = (path: number[], field: CollectionFilterField) => {
+    mutateTree((root) =>
+      updateTreeAt(root, path, (node) =>
+        isRuleNode(node)
+          ? node
+          : { ...node, children: [...(node.children ?? []), defaultFilterBlock(field, sectionType)] },
+      ),
+    );
+  };
+  const addTreeGroup = (path: number[]) => {
+    mutateTree((root) =>
+      updateTreeAt(root, path, (node) =>
+        isRuleNode(node) ? node : { ...node, children: [...(node.children ?? []), { op: "and" as const, children: [] }] },
+      ),
+    );
+  };
+  const removeTreeNode = (path: number[]) => {
+    mutateTree((root) => updateTreeAt(root, path, () => null));
+  };
+  const updateTreeRule = (path: number[], patch: Partial<CollectionFilterBlock>) => {
+    mutateTree((root) =>
+      updateTreeAt(root, path, (node) => (isRuleNode(node) ? { ...node, ...patch } : node)),
+    );
+  };
+  const updateFilter = (groupIndex: number, ruleIndex: number, patch: Partial<CollectionFilterBlock>) => {
+    mutateGroups((groups) =>
+      groups.map((group, gi) =>
+        gi === groupIndex ? group.map((f, ri) => (ri === ruleIndex ? { ...f, ...patch } : f)) : group,
+      ),
+    );
+  };
+  const removeFilter = (groupIndex: number, ruleIndex: number) => {
+    mutateGroups((groups) =>
+      groups
+        .map((group, gi) => (gi === groupIndex ? group.filter((_, ri) => ri !== ruleIndex) : group))
+        .filter((group) => group.length > 0),
+    );
+  };
+  const addFilter = (groupIndex: number, field: CollectionFilterField) => {
+    mutateGroups((groups) => {
+      if (!groups.length) return [[defaultFilterBlock(field, sectionType)]];
+      return groups.map((group, gi) =>
+        gi === groupIndex ? [...group, defaultFilterBlock(field, sectionType)] : group,
+      );
+    });
+  };
+  const addGroup = (field: CollectionFilterField) => {
+    mutateGroups((groups) => [...groups, [defaultFilterBlock(field, sectionType)]]);
+  };
+  const removeGroup = (groupIndex: number) => {
+    mutateGroups((groups) => groups.filter((_, gi) => gi !== groupIndex));
   };
   const addPin = (bucket: "include" | "exclude", item: CollectionPinnedItem) => {
     setDefinition((prev) => {
@@ -877,12 +1160,12 @@ export function CollectionEditor(props: {
     );
   }
 
-  function renderFilterConfig(block: CollectionFilterBlock, index: number) {
+  function renderFilterConfig(block: CollectionFilterBlock, update: (patch: Partial<CollectionFilterBlock>) => void) {
     const opSelect = (options: { value: string; label: string }[]) => (
       <select
         className={theme.selectOp}
         value={block.op ?? options[0].value}
-        onChange={(e) => updateFilter(index, { op: e.target.value })}
+        onChange={(e) => update({ op: e.target.value })}
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -907,7 +1190,7 @@ export function CollectionEditor(props: {
               emptyHint="Genre list loads from TMDB; type names via ARR metadata otherwise"
               onToggle={(key) => {
                 const current = block.values ?? [];
-                updateFilter(index, {
+                update({
                   values: current.includes(key) ? current.filter((v) => v !== key) : [...current, key],
                 });
               }}
@@ -926,7 +1209,7 @@ export function CollectionEditor(props: {
               value={typeof block.value === "number" ? block.value : null}
               min={1900}
               max={2100}
-              onChange={(v) => updateFilter(index, { value: v })}
+              onChange={(v) => update({ value: v })}
             />
             {block.op === "between" ? (
               <>
@@ -935,7 +1218,7 @@ export function CollectionEditor(props: {
                   value={block.value_to ?? null}
                   min={1900}
                   max={2100}
-                  onChange={(v) => updateFilter(index, { value_to: v })}
+                  onChange={(v) => update({ value_to: v })}
                 />
               </>
             ) : null}
@@ -954,7 +1237,7 @@ export function CollectionEditor(props: {
               placeholder="e.g. PG-13, R (comma separated)"
               value={(block.values ?? []).join(", ")}
               onChange={(e) =>
-                updateFilter(index, {
+                update({
                   values: e.target.value
                     .split(",")
                     .map((v) => v.trim())
@@ -976,7 +1259,7 @@ export function CollectionEditor(props: {
               style={{ width: 200 }}
               placeholder="e.g. HBO"
               value={typeof block.value === "string" ? block.value : ""}
-              onChange={(e) => updateFilter(index, { value: e.target.value })}
+              onChange={(e) => update({ value: e.target.value })}
             />
           </div>
         );
@@ -985,7 +1268,7 @@ export function CollectionEditor(props: {
           <select
             className={theme.selectField}
             value={block.value === false ? "no" : "yes"}
-            onChange={(e) => updateFilter(index, { value: e.target.value === "yes" })}
+            onChange={(e) => update({ value: e.target.value === "yes" })}
           >
             <option value="yes">is monitored</option>
             <option value="no">is not monitored</option>
@@ -1008,7 +1291,7 @@ export function CollectionEditor(props: {
               emptyHint={builderMeta ? "No quality profiles found — check ARR connections" : "Loading profiles…"}
               onToggle={(key) => {
                 const current = block.values ?? [];
-                updateFilter(index, {
+                update({
                   values: current.includes(key) ? current.filter((v) => v !== key) : [...current, key],
                 });
               }}
@@ -1029,7 +1312,7 @@ export function CollectionEditor(props: {
               emptyHint={builderMeta ? "No languages found in your catalog yet" : "Loading languages…"}
               onToggle={(key) => {
                 const current = block.values ?? [];
-                updateFilter(index, {
+                update({
                   values: current.includes(key) ? current.filter((v) => v !== key) : [...current, key],
                 });
               }}
@@ -1042,7 +1325,7 @@ export function CollectionEditor(props: {
             className={theme.selectField}
             style={{ width: 260 }}
             value={typeof block.value === "string" ? block.value : ""}
-            onChange={(e) => updateFilter(index, { value: e.target.value })}
+            onChange={(e) => update({ value: e.target.value })}
           >
             <option value="">{builderMeta ? "Select an instance…" : "Loading instances…"}</option>
             {(builderMeta?.instances ?? []).map((inst) => (
@@ -1052,22 +1335,54 @@ export function CollectionEditor(props: {
             ))}
           </select>
         );
-      case "release_window":
+      case "release_window": {
+        const statusOp = block.op === "has_released" || block.op === "not_yet_released";
         return (
           <div className="flex flex-wrap items-center gap-2">
             {opSelect([
+              { value: "has_released", label: "has been released" },
+              { value: "not_yet_released", label: "not yet released" },
               { value: "within_past", label: "released in the past" },
               { value: "within_next", label: "releasing in the next" },
             ])}
-            <NumberInput
-              value={typeof block.value === "number" ? block.value : null}
-              min={1}
-              max={3650}
-              onChange={(v) => updateFilter(index, { value: v })}
-            />
-            <span className="text-[13px] text-slate-500">days</span>
+            {!statusOp ? (
+              <>
+                <NumberInput
+                  value={typeof block.value === "number" ? block.value : null}
+                  min={1}
+                  max={3650}
+                  onChange={(v) => update({ value: v })}
+                />
+                <span className="text-[13px] text-slate-500">days</span>
+              </>
+            ) : null}
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              based on
+              <select
+                className={theme.selectField}
+                value={block.basis ?? (sectionType === "movie" ? "theater" : "premiered")}
+                onChange={(e) =>
+                  update({ basis: e.target.value as CollectionFilterBlock["basis"] })
+                }
+              >
+                {sectionType === "movie" ? (
+                  <>
+                    <option value="theater">Theatrical release</option>
+                    <option value="digital">Digital release</option>
+                    <option value="physical">Physical release</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="premiered">Series premiere</option>
+                    <option value="latest_episode">Latest aired episode</option>
+                    <option value="latest_season">Latest season premiere</option>
+                  </>
+                )}
+              </select>
+            </label>
           </div>
         );
+      }
       case "rating":
         return (
           <div className="flex flex-wrap items-center gap-2">
@@ -1080,12 +1395,87 @@ export function CollectionEditor(props: {
               min={0}
               max={10}
               width={70}
-              onChange={(v) => updateFilter(index, { value: v })}
+              onChange={(v) => update({ value: v })}
             />
             <span className="text-[13px] text-slate-500">/ 10</span>
           </div>
         );
     }
+  }
+
+  // Advanced (nested) filter builder — recursive group cards with AND/OR toggles.
+  function renderTreeGroup(group: CollectionFilterGroup, path: number[], depth: number): ReactNode {
+    const children = group.children ?? [];
+    const isRoot = path.length === 0;
+    const accentAlpha = depth === 1 ? "66" : depth === 2 ? "44" : "2e";
+    return (
+      <div
+        className={`rounded-xl border p-3 ${theme.divider}`}
+        style={{ borderLeft: `3px solid ${accentHex}${accentAlpha}` }}
+      >
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <AndOrToggle
+            op={group.op}
+            onChange={(op) => setGroupOp(path, op)}
+            accentHex={accentHex}
+            mutedClass={theme.muted}
+          />
+          <span className={theme.muted}>{isRoot ? "Top level" : `Nested group (level ${depth})`}</span>
+          {!isRoot ? (
+            <button
+              type="button"
+              onClick={() => removeTreeNode(path)}
+              className={`ml-auto material-symbols-outlined transition-colors ${theme.iconAction}`}
+              style={{ fontSize: 17 }}
+              title="Remove group (and everything inside it)"
+            >
+              close
+            </button>
+          ) : null}
+        </div>
+        <div className="flex flex-col">
+          {children.map((child, index) => (
+            <div key={index}>
+              {index > 0 ? <PipelineConnector label={group.op.toUpperCase()} accentHex={accentHex} /> : null}
+              {isRuleNode(child) ? (
+                <BlockCard
+                  icon={filterMeta(child.field).icon}
+                  title={filterMeta(child.field).label}
+                  accentHex={accentHex}
+                  onRemove={() => removeTreeNode([...path, index])}
+                >
+                  {renderFilterConfig(child, (patch) => updateTreeRule([...path, index], patch))}
+                </BlockCard>
+              ) : (
+                renderTreeGroup(child, [...path, index], depth + 1)
+              )}
+            </div>
+          ))}
+          {!children.length ? (
+            <div className={theme.dashedPanel}>Empty group — add a rule or sub-group below.</div>
+          ) : null}
+        </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <AddBlockMenu
+            label="Add rule"
+            options={(Object.keys(FILTER_META) as CollectionFilterField[]).map((field) => ({
+              key: field,
+              label: FILTER_META[field].label,
+              icon: FILTER_META[field].icon,
+            }))}
+            onAdd={(key) => addTreeRule(path, key as CollectionFilterField)}
+          />
+          {depth < MAX_FILTER_DEPTH ? (
+            <button type="button" onClick={() => addTreeGroup(path)} className={theme.dashedButton}>
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                account_tree
+              </span>
+              Add sub-group
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
   const previewStages: { label: string; value: number | null | undefined }[] = [
@@ -1104,52 +1494,113 @@ export function CollectionEditor(props: {
       {/* Pipeline column — capped so leftover width goes to the preview rail instead of stretching cards */}
       <div className="flex-1 min-w-0 lg:max-w-3xl flex flex-col">
         {/* Recipe identity + target — picking the library first drives media type, genres, pins, and preview */}
-        <div className={`${theme.identityCard} flex flex-wrap items-center gap-4`}>
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            Plex library
-            <select
-              className={`${theme.selectField} min-w-[14rem]`}
-              value={sectionId ?? ""}
-              onChange={(e) => setSectionId(e.target.value === "" ? null : Number(e.target.value))}
-            >
-              <option value="">Select a library…</option>
-              {props.sections.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.title} ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            Collection title
-            <input
-              className={theme.field}
-              style={{ width: 220 }}
-              value={collectionTitle}
-              placeholder="e.g. Trending Now"
-              onChange={(e) => setCollectionTitle(e.target.value)}
-            />
-          </label>
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            Recipe name
-            <input
-              className={theme.field}
-              style={{ width: 220 }}
-              value={name}
-              placeholder="e.g. Trending This Week"
-              onChange={(e) => setName(e.target.value)}
-            />
-          </label>
-          <label className={`flex items-center gap-2 ${theme.label} cursor-pointer`}>
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              className="accent-current"
-              style={{ accentColor: accentHex }}
-            />
-            Enabled (runs on schedule)
-          </label>
+        <div className={`${theme.identityCard} flex flex-col gap-3`}>
+          <div className="flex flex-wrap items-center gap-4">
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Plex library
+              <select
+                className={`${theme.selectField} min-w-[14rem]`}
+                value={sectionId ?? ""}
+                onChange={(e) => setSectionId(e.target.value === "" ? null : Number(e.target.value))}
+              >
+                <option value="">Select a library…</option>
+                {props.sections.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title} ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Collection title
+              <input
+                className={theme.field}
+                style={{ width: 220 }}
+                value={collectionTitle}
+                placeholder="e.g. Trending Now"
+                onChange={(e) => setCollectionTitle(e.target.value)}
+              />
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Recipe name
+              <input
+                className={theme.field}
+                style={{ width: 220 }}
+                value={name}
+                placeholder="e.g. Trending This Week"
+                onChange={(e) => setName(e.target.value)}
+              />
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label} cursor-pointer select-none`}>
+              <span>Enabled (runs on schedule)</span>
+              <ToggleSwitch
+                checked={enabled}
+                onChange={setEnabled}
+                accentHex={accentHex}
+                ariaLabel="Enable scheduled runs"
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Schedule
+              <select
+                className={theme.selectField}
+                value={runIntervalHours == null ? "" : String(runIntervalHours)}
+                onChange={(e) => setRunIntervalHours(e.target.value === "" ? null : Number(e.target.value))}
+              >
+                {SCHEDULE_PRESETS.map((preset) => (
+                  <option key={preset.value} value={preset.value}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label} cursor-pointer select-none`}>
+              <span>Seasonal window</span>
+              <ToggleSwitch
+                checked={activeWindow !== null}
+                onChange={(checked) =>
+                  setActiveWindow(checked ? { start: "12-01", end: "01-06", when_inactive: "keep" } : null)
+                }
+                accentHex={accentHex}
+                ariaLabel="Seasonal window"
+              />
+            </label>
+            {activeWindow ? (
+              <>
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  Active from
+                  <MonthDayPicker
+                    value={activeWindow.start}
+                    onChange={(value) => setActiveWindow((prev) => (prev ? { ...prev, start: value } : prev))}
+                  />
+                </label>
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  to
+                  <MonthDayPicker
+                    value={activeWindow.end}
+                    onChange={(value) => setActiveWindow((prev) => (prev ? { ...prev, end: value } : prev))}
+                  />
+                </label>
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  When dormant
+                  <select
+                    className={theme.selectField}
+                    value={activeWindow.when_inactive}
+                    onChange={(e) =>
+                      setActiveWindow((prev) =>
+                        prev ? { ...prev, when_inactive: e.target.value as "keep" | "clear" } : prev,
+                      )
+                    }
+                  >
+                    <option value="keep">Keep collection as-is</option>
+                    <option value="clear">Empty the collection</option>
+                  </select>
+                </label>
+              </>
+            ) : null}
+          </div>
         </div>
 
         {/* Sources */}
@@ -1195,41 +1646,121 @@ export function CollectionEditor(props: {
 
         <PipelineConnector label="then filter" accentHex={accentHex} />
 
-        {/* Filters */}
+        {/* Filters — simple mode: AND within a group, OR between groups; Advanced: full nesting */}
         <div className="flex flex-col gap-2.5">
-          <div className={theme.sectionLabel}>
-            Filters <span className="normal-case tracking-normal opacity-80">(all must match)</span>
+          <div className="flex items-center gap-3">
+            <div className={theme.sectionLabel}>
+              Filters{" "}
+              <span className="normal-case tracking-normal opacity-80">
+                {advancedFilters
+                  ? "(advanced filtering — nest AND/OR groups up to 3 levels)"
+                  : filterGroups.length > 1
+                    ? "(a title passes if any group matches; all rules within a group must match)"
+                    : "(all must match)"}
+              </span>
+            </div>
+            <label
+              className={`ml-auto flex items-center gap-2 ${theme.label} select-none ${
+                advancedFilters && !canUseSimpleFilters ? "cursor-not-allowed" : "cursor-pointer"
+              }`}
+              title={
+                advancedFilters && !canUseSimpleFilters
+                  ? "This recipe uses logic the simple layout can't represent — simplify groups to switch back"
+                  : "Switch between simple OR groups and advanced filtering"
+              }
+            >
+              <span className={advancedFilters && !canUseSimpleFilters ? "opacity-60" : undefined}>
+                Advanced filtering
+              </span>
+              <ToggleSwitch
+                checked={advancedFilters}
+                disabled={advancedFilters && !canUseSimpleFilters}
+                onChange={handleAdvancedFiltersToggle}
+                accentHex={accentHex}
+                ariaLabel="Advanced filtering"
+              />
+            </label>
           </div>
-          {definition.filters.length === 0 ? (
+          {advancedFilters ? (
+            renderTreeGroup(filterTree, [], 1)
+          ) : (
+            <>
+          {filterGroups.length === 0 ? (
             <div className={theme.dashedPanel}>
               No filters — every matched title passes through.
             </div>
           ) : null}
-          {definition.filters.map((block, index) => (
-            <BlockCard
-              key={`${block.field}-${index}`}
-              icon={filterMeta(block.field).icon}
-              title={filterMeta(block.field).label}
-              accentHex={accentHex}
-              onRemove={() => removeFilter(index)}
-            >
-              {renderFilterConfig(block, index)}
-            </BlockCard>
-          ))}
+          {filterGroups.map((group, groupIndex) => {
+            const groupBody = (
+              <>
+                <div className="flex flex-col gap-2.5">
+                  {group.map((block, ruleIndex) => (
+                    <BlockCard
+                      key={`${block.field}-${ruleIndex}`}
+                      icon={filterMeta(block.field).icon}
+                      title={filterMeta(block.field).label}
+                      accentHex={accentHex}
+                      onRemove={() => removeFilter(groupIndex, ruleIndex)}
+                    >
+                      {renderFilterConfig(block, (patch) => updateFilter(groupIndex, ruleIndex, patch))}
+                    </BlockCard>
+                  ))}
+                </div>
+                <div className="mt-2.5">
+                  <AddBlockMenu
+                    label="Add filter"
+                    options={(Object.keys(FILTER_META) as CollectionFilterField[]).map((field) => ({
+                      key: field,
+                      label: FILTER_META[field].label,
+                      icon: FILTER_META[field].icon,
+                    }))}
+                    onAdd={(key) => addFilter(groupIndex, key as CollectionFilterField)}
+                  />
+                </div>
+              </>
+            );
+            // A single group renders without group chrome — exactly like the flat layout.
+            if (filterGroups.length === 1) {
+              return <div key={groupIndex}>{groupBody}</div>;
+            }
+            return (
+              <div key={groupIndex}>
+                {groupIndex > 0 ? <PipelineConnector label="OR" accentHex={accentHex} /> : null}
+                <div className={`rounded-xl border p-3 ${theme.divider}`}>
+                  <div className="mb-2 flex items-center gap-2">
+                    <span
+                      className="rounded-md px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider"
+                      style={{ color: accentHex, backgroundColor: `${accentHex}1f` }}
+                    >
+                      Group {groupIndex + 1}
+                    </span>
+                    <span className={theme.muted}>all rules must match</span>
+                    <button
+                      type="button"
+                      onClick={() => removeGroup(groupIndex)}
+                      className={`ml-auto material-symbols-outlined transition-colors ${theme.iconAction}`}
+                      style={{ fontSize: 17 }}
+                      title="Remove group"
+                    >
+                      close
+                    </button>
+                  </div>
+                  {groupBody}
+                </div>
+              </div>
+            );
+          })}
           <AddBlockMenu
-            label="Add filter"
+            label={filterGroups.length ? "Add OR group" : "Add filter"}
             options={(Object.keys(FILTER_META) as CollectionFilterField[]).map((field) => ({
               key: field,
               label: FILTER_META[field].label,
               icon: FILTER_META[field].icon,
             }))}
-            onAdd={(key) =>
-              setDefinition((prev) => ({
-                ...prev,
-                filters: [...prev.filters, defaultFilterBlock(key as CollectionFilterField)],
-              }))
-            }
+            onAdd={(key) => addGroup(key as CollectionFilterField)}
           />
+            </>
+          )}
         </div>
 
         <PipelineConnector label="then pin" accentHex={accentHex} />
@@ -1302,6 +1833,7 @@ export function CollectionEditor(props: {
               >
                 <option value="popularity">Popularity / list rank</option>
                 <option value="release_date">Release date (newest)</option>
+                <option value="latest_aired">Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}</option>
                 <option value="title">Title (A–Z)</option>
               </select>
             </label>
@@ -1337,6 +1869,8 @@ export function CollectionEditor(props: {
                 plex_section_type: sectionType,
                 collection_title: collectionTitle.trim(),
                 definition,
+                run_interval_hours: runIntervalHours,
+                active_window: activeWindow,
               });
             }}
             className="rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] transition-opacity disabled:opacity-40"
@@ -1362,6 +1896,7 @@ export function CollectionEditor(props: {
               <span className="ml-auto h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: accentHex }} />
             ) : null}
           </div>
+
           <div className="px-4 py-3">
             {!sectionId ? (
               <p className={theme.muted}>Pick a target Plex library to see live counts.</p>
@@ -1380,9 +1915,7 @@ export function CollectionEditor(props: {
                         {idx < previewStages.length - 1 ? <span className={`w-px flex-1 ${theme.stageLine}`} /> : null}
                       </div>
                       <span className={theme.previewStage}>{stage.label}</span>
-                      <span className={theme.previewValue}>
-                        {stage.value == null ? "—" : stage.value}
-                      </span>
+                      <span className={theme.previewValue}>{stage.value == null ? "—" : stage.value}</span>
                     </div>
                   ))}
                 </div>
@@ -1396,134 +1929,141 @@ export function CollectionEditor(props: {
                   </p>
                 ) : null}
 
-                {/* Check a title — trace one catalog title through the pipeline */}
-                <div className={`mt-3 border-t ${theme.divider} pt-3`}>
+                <div className={`mt-3 border-t pt-3 ${theme.divider}`}>
                   <div className={`${theme.sectionLabel} mb-2`}>Check a title</div>
-                  <div className="relative" ref={explainBoxRef}>
-                    <input
-                      className={`${theme.field} w-full`}
-                      value={explainQuery}
-                      placeholder="Search your catalog to see why a title is in or out…"
-                      onChange={(e) => {
-                        setExplainQuery(e.target.value);
-                        setExplainOpen(true);
-                      }}
-                      onFocus={() => setExplainOpen(true)}
-                    />
-                    {explainOpen && explainResults.length ? (
-                      <div className={`${theme.dropdown} max-h-60 overflow-y-auto`}>
-                        {explainResults.map((item) => (
-                          <button
-                            key={item.id}
-                            type="button"
-                            onClick={() => {
-                              setExplainItem({
-                                tmdb_id: item.tmdb_id ?? null,
-                                tvdb_id: item.tvdb_id ?? null,
-                                imdb_id: item.imdb_id ?? null,
-                                title: item.title,
-                                year: item.year ?? null,
-                                poster: item.poster_url ?? null,
-                              });
-                              setExplainQuery("");
-                              setExplainOpen(false);
-                            }}
-                            className={`${theme.dropdownItem} items-center gap-2 px-3 py-1.5`}
-                          >
-                            <span className={`flex-1 min-w-0 truncate text-[13px] ${theme.pinTitle}`}>{item.title}</span>
-                            <span className={`text-[12px] ${theme.pinYear}`}>{item.year ?? ""}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
+              <div className="relative" ref={explainBoxRef}>
+                <input
+                  className={`${theme.field} w-full`}
+                  value={explainQuery}
+                  placeholder="Search your catalog…"
+                  disabled={!sectionId}
+                  onChange={(e) => {
+                    setExplainQuery(e.target.value);
+                    setExplainOpen(true);
+                  }}
+                  onFocus={() => setExplainOpen(true)}
+                />
+                {explainOpen && explainResults.length ? (
+                  <div className={`${theme.dropdown} max-h-48 overflow-y-auto`}>
+                    {explainResults.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setExplainItem({
+                            tmdb_id: item.tmdb_id ?? null,
+                            tvdb_id: item.tvdb_id ?? null,
+                            imdb_id: item.imdb_id ?? null,
+                            title: item.title,
+                            year: item.year ?? null,
+                            poster: item.poster_url ?? null,
+                          });
+                          setExplainQuery("");
+                          setExplainOpen(false);
+                        }}
+                        className={`${theme.dropdownItem} items-center gap-2 px-3 py-1.5`}
+                      >
+                        <span className={`flex-1 min-w-0 truncate text-[13px] ${theme.pinTitle}`}>{item.title}</span>
+                        <span className={`text-[12px] ${theme.pinYear}`}>{item.year ?? ""}</span>
+                      </button>
+                    ))}
                   </div>
-                  {explainItem ? (
-                    <div className="mt-2">
-                      <div className="flex items-center gap-2">
-                        {explainItem.poster ? (
-                          <img src={explainItem.poster} alt="" className="h-9 w-6 rounded-sm object-cover" />
-                        ) : null}
-                        <span className={`flex-1 min-w-0 truncate text-[13px] ${theme.pinTitle}`}>
-                          {explainItem.title}
-                          {explainItem.year ? <span className={theme.pinYear}> ({explainItem.year})</span> : null}
-                        </span>
-                        {explainLoading ? (
-                          <span className="h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: accentHex }} />
-                        ) : explainResult ? (
-                          <span
-                            className={`rounded-full border px-2 py-0.5 text-[11px] font-headline uppercase tracking-wider ${
-                              explainResult.in_collection
-                                ? "border-emerald-500/40 text-emerald-400"
-                                : "border-red-500/40 text-red-400"
-                            }`}
-                          >
-                            {explainResult.in_collection ? "In collection" : "Not included"}
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setExplainItem(null);
-                            setExplainResult(null);
-                            setExplainError(null);
-                          }}
-                          className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
-                          style={{ fontSize: 16 }}
-                          title="Clear"
-                        >
-                          close
-                        </button>
-                      </div>
-                      {explainError ? <p className="mt-1.5 text-[12px] text-red-300">{explainError}</p> : null}
-                      {explainResult ? (
-                        <div className="mt-1.5 flex flex-col gap-1">
-                          {explainResult.stages.map((stage) => (
-                            <div key={stage.key}>
-                              <div className="flex items-center gap-2 py-0.5">
-                                <ExplainStatusIcon status={stage.status} />
-                                <span
-                                  className={`flex-1 text-[13px] ${
-                                    stage.status === "skip" ? theme.explainSkip : theme.explainStage
-                                  }`}
-                                >
-                                  {EXPLAIN_STAGE_LABELS[stage.key] ?? stage.key}
-                                  {stage.status === "skip" ? " — not reached" : ""}
-                                </span>
-                              </div>
-                              {stage.detail ? (
-                                <p className="ml-6 text-[12px] text-slate-500">{stage.detail}</p>
-                              ) : null}
-                              {stage.checks.length ? (
-                                <div className="ml-6 flex flex-col gap-0.5">
-                                  {stage.checks.map((check, i) => (
-                                    <div key={i} className="flex items-center gap-1.5">
-                                      <ExplainStatusIcon status={check.status} />
-                                      <span className={`flex-1 min-w-0 truncate text-[12px] ${theme.explainCheck}`}>
-                                        {stage.key === "sources"
-                                          ? explainSourceCheckLabel(check)
-                                          : explainRuleCheckLabel(check)}
-                                      </span>
-                                    </div>
-                                  ))}
-                                  {stage.checks.some((c) => c.detail) ? (
-                                    <p className="text-[11px] text-slate-600">
-                                      {stage.checks.find((c) => c.detail)?.detail}
-                                    </p>
-                                  ) : null}
+                ) : null}
+              </div>
+              {explainItem ? (
+                <div className="mt-3">
+                  <div className="flex items-center gap-2">
+                    {explainItem.poster ? (
+                      <img src={explainItem.poster} alt="" className="h-9 w-6 rounded-sm object-cover" />
+                    ) : null}
+                    <span className={`flex-1 min-w-0 truncate text-[13px] ${theme.pinTitle}`}>
+                      {explainItem.title}
+                      {explainItem.year ? <span className={theme.pinYear}> ({explainItem.year})</span> : null}
+                    </span>
+                    {explainLoading ? (
+                      <span className="h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: accentHex }} />
+                    ) : explainResult ? (
+                      <span
+                        className={`rounded-full border px-2 py-0.5 text-[11px] font-headline uppercase tracking-wider ${
+                          explainResult.in_collection
+                            ? "border-emerald-500/40 text-emerald-400"
+                            : "border-red-500/40 text-red-400"
+                        }`}
+                      >
+                        {explainResult.in_collection ? "In collection" : "Not included"}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExplainItem(null);
+                        setExplainResult(null);
+                        setExplainError(null);
+                      }}
+                      className={`material-symbols-outlined transition-colors ${theme.iconAction}`}
+                      style={{ fontSize: 16 }}
+                      title="Clear"
+                    >
+                      close
+                    </button>
+                  </div>
+                  {explainError ? <p className="mt-1.5 text-[12px] text-red-300">{explainError}</p> : null}
+                  {explainResult ? (
+                    <div className="mt-2 flex flex-col gap-1">
+                      {explainResult.stages.map((stage) => (
+                        <div key={stage.key}>
+                          <div className="flex items-center gap-2 py-0.5">
+                            <ExplainStatusIcon status={stage.status} />
+                            <span
+                              className={`flex-1 text-[13px] ${
+                                stage.status === "skip" ? theme.explainSkip : theme.explainStage
+                              }`}
+                            >
+                              {EXPLAIN_STAGE_LABELS[stage.key] ?? stage.key}
+                              {stage.status === "skip" ? " — not reached" : ""}
+                            </span>
+                          </div>
+                          {stage.detail ? <p className="ml-6 text-[12px] text-slate-500">{stage.detail}</p> : null}
+                          {stage.key === "filters" && stage.tree ? (
+                            <div className="ml-6 flex flex-col gap-0.5">
+                              <ExplainTreeNodeView node={collapseTrivialExplainNode(stage.tree)} />
+                            </div>
+                          ) : null}
+                          {stage.checks.length ? (
+                            <div className="ml-6 flex flex-col gap-0.5">
+                              {stage.checks.map((check, i) => (
+                                <div key={i} className="flex items-center gap-1.5">
+                                  <ExplainStatusIcon status={check.status} />
+                                  <span className={`flex-1 min-w-0 truncate text-[12px] ${theme.explainCheck}`}>
+                                    {stage.key === "sources"
+                                      ? explainSourceCheckLabel(check)
+                                      : explainRuleCheckLabel(check)}
+                                  </span>
                                 </div>
+                              ))}
+                              {stage.checks.some((c) => c.detail) ? (
+                                <p className="text-[11px] text-slate-600">
+                                  {stage.checks.find((c) => c.detail)?.detail}
+                                </p>
                               ) : null}
                             </div>
-                          ))}
+                          ) : null}
                         </div>
-                      ) : null}
+                      ))}
                     </div>
                   ) : null}
                 </div>
+              ) : (
+                <p className={`mt-2 ${theme.muted}`}>
+                  Trace a catalog title through sources, filters, pins, and the final cut.
+                </p>
+              )}
+                </div>
 
                 {preview?.sample?.length ? (
-                  <div className={`mt-3 border-t ${theme.divider} pt-3`}>
+                  <div className={`mt-3 border-t pt-3 ${theme.divider}`}>
                     <div className={`${theme.sectionLabel} mb-2`}>Sample</div>
-                    <div className="grid grid-cols-4 sm:grid-cols-5 xl:grid-cols-6 gap-2">
+                    <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
                       {preview.sample.map((item) =>
                         item.poster ? (
                           <img
@@ -1549,6 +2089,7 @@ export function CollectionEditor(props: {
                 ) : null}
               </>
             )}
+
           </div>
         </div>
       </aside>

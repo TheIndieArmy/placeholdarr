@@ -20,7 +20,9 @@ from services.collections.engine import (
     explain_definition_item,
     preview_definition,
     run_recipe,
+    validate_active_window,
     validate_definition,
+    window_is_active,
 )
 from services.media_servers import plex_collections
 from services.postgres.db import session_scope
@@ -38,6 +40,7 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
+    window = row.active_window if isinstance(row.active_window, dict) else None
     return {
         "id": row.id,
         "name": row.name,
@@ -46,11 +49,27 @@ def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
         "plex_section_type": row.plex_section_type,
         "collection_title": row.collection_title,
         "definition": row.definition or {},
+        "run_interval_hours": row.run_interval_hours,
+        "active_window": window,
+        "window_active": window_is_active(window),
         "last_run_at": _iso(row.last_run_at),
         "last_run_summary": row.last_run_summary,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
+
+
+def _refresh_collections_schedule() -> None:
+    """Re-apply the collections job tick after schedule overrides change."""
+    try:
+        from services.source_of_truth.scheduler import refresh_collections_schedule
+
+        refresh_collections_schedule()
+    except Exception as exc:
+        logger.warning(
+            f"Collections: failed to refresh schedule after recipe change: {exc}",
+            extra={"emoji_type": "warning"},
+        )
 
 
 class RecipePayload(BaseModel):
@@ -60,6 +79,8 @@ class RecipePayload(BaseModel):
     plex_section_type: str = Field(..., pattern="^(movie|show)$")
     collection_title: str = Field(..., min_length=1, max_length=200)
     definition: dict[str, Any]
+    run_interval_hours: int | None = Field(None, ge=1, le=24 * 14)
+    active_window: dict[str, Any] | None = None
 
 
 class PreviewPayload(BaseModel):
@@ -84,6 +105,7 @@ async def list_recipes():
 async def create_recipe(body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
+        window = validate_active_window(body.active_window)
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
@@ -94,11 +116,14 @@ async def create_recipe(body: RecipePayload):
             plex_section_type=body.plex_section_type,
             collection_title=body.collection_title.strip(),
             definition=normalized,
+            run_interval_hours=body.run_interval_hours,
+            active_window=window,
         )
         session.add(row)
         session.commit()
         session.refresh(row)
         payload = _serialize_recipe(row)
+    _refresh_collections_schedule()
     return {"ok": True, "recipe": payload}
 
 
@@ -271,6 +296,7 @@ async def get_recipe(recipe_id: int):
 async def update_recipe(recipe_id: int, body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
+        window = validate_active_window(body.active_window)
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
@@ -283,9 +309,12 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
         row.plex_section_type = body.plex_section_type
         row.collection_title = body.collection_title.strip()
         row.definition = normalized
+        row.run_interval_hours = body.run_interval_hours
+        row.active_window = window
         session.commit()
         session.refresh(row)
         payload = _serialize_recipe(row)
+    _refresh_collections_schedule()
     return {"ok": True, "recipe": payload}
 
 
@@ -303,6 +332,7 @@ async def toggle_recipe(recipe_id: int, body: RecipeToggleRequest):
         session.commit()
         session.refresh(row)
         payload = _serialize_recipe(row)
+    _refresh_collections_schedule()
     return {"ok": True, "recipe": payload}
 
 

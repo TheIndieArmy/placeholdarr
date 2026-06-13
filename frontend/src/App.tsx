@@ -38,6 +38,8 @@ import sonarrIcon from "./assets/services/sonarr.svg";
 import placeholdarrLogoBlue from "./assets/Placeholdarr_blue.svg";
 import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
+import { ToggleSwitch } from "./ToggleSwitch";
+import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
@@ -5847,16 +5849,14 @@ function ArrInstancesEditor(props: {
             {opts?.showToggle ? (
               <label className={`flex items-center gap-2 select-none shrink-0 ${opts.toggleDisabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
                 <span className="text-[13px] text-slate-300">Enabled</span>
-                <div
-                  className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${isEnabled ? "" : "bg-[#252e3a]"}`}
-                  style={isEnabled ? { backgroundColor: props.accent.hex } : undefined}
-                  onClick={() => {
-                    if (opts.toggleDisabled) return;
-                    opts.onToggle?.(!isEnabled);
-                  }}
-                >
-                  <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${isEnabled ? "translate-x-4" : "translate-x-0"}`} />
-                </div>
+                <ToggleSwitch
+                  checked={isEnabled}
+                  onChange={(v) => opts.onToggle?.(v)}
+                  accentHex={props.accent.hex}
+                  disabled={opts.toggleDisabled}
+                  ariaLabel="Enabled"
+                  size="sm"
+                />
               </label>
             ) : null}
           </div>
@@ -6423,13 +6423,12 @@ function LibraryPathsForm(props: {
     const v = Boolean(props.values[field.key]);
     return (
       <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-        <div
-          className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${v ? "" : "bg-[#252e3a]"}`}
-          style={v ? { backgroundColor: props.accent.hex } : undefined}
-          onClick={() => props.onValueChange(field.key, !v)}
-        >
-          <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${v ? "translate-x-5" : "translate-x-0"}`} />
-        </div>
+        <ToggleSwitch
+          checked={v}
+          onChange={() => props.onValueChange(field.key, !v)}
+          accentHex={props.accent.hex}
+          ariaLabel={field.label}
+        />
         <span className={compact ? "text-[14px] text-slate-400" : "text-[16px] text-slate-300"}>{v ? "Enabled" : "Disabled"}</span>
       </label>
     );
@@ -7037,15 +7036,13 @@ function SettingsPanel(props: {
 
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-            <div
-              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
-              style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => {
-                if (!interactionLocked) handleSettingsValueChange(field.key, !Boolean(value));
-              }}
-            >
-              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
-            </div>
+            <ToggleSwitch
+              checked={Boolean(value)}
+              onChange={(v) => handleSettingsValueChange(field.key, v)}
+              accentHex={accent.hex}
+              disabled={interactionLocked}
+              ariaLabel={field.label}
+            />
             <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(value) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
@@ -7085,6 +7082,10 @@ function SettingsPanel(props: {
 
         {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
           <PosterOverlayExamples selectedMode={String(value ?? "off")} />
+        ) : null}
+
+        {field.key === "TMDB_API_KEY" ? (
+          <TmdbAttribution api posters mutedClass="text-slate-500" className="mt-4 max-w-xl" />
         ) : null}
 
         {testTarget ? (
@@ -7486,13 +7487,13 @@ function SettingsPanel(props: {
                             </div>
                           </div>
                           <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                            <div
-                              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
-                              style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
-                              onClick={() => canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
-                            >
-                              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
-                            </div>
+                            <ToggleSwitch
+                              checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
+                              onChange={(v) => props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
+                              accentHex={accent.hex}
+                              disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
+                              ariaLabel="Playback fallback search"
+                            />
                             <span className="text-[16px] text-slate-300">
                               {fallbackUnnecessaryBecauseAllBoth
                                 ? "Not needed"
@@ -9552,15 +9553,13 @@ function OnboardingWizard(props: {
         ) : null}
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-            <div
-              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(displayValue) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
-              style={Boolean(displayValue) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => {
-                if (!interactionLocked) handleWizardValueChange(field.key, !Boolean(displayValue));
-              }}
-            >
-              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(displayValue) ? "translate-x-5" : "translate-x-0"}`} />
-            </div>
+            <ToggleSwitch
+              checked={Boolean(displayValue)}
+              onChange={(v) => handleWizardValueChange(field.key, v)}
+              accentHex={accent.hex}
+              disabled={interactionLocked}
+              ariaLabel={field.label}
+            />
             <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(displayValue) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
@@ -9972,13 +9971,13 @@ function OnboardingWizard(props: {
                       </div>
                     </div>
                     <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                      <div
-                        className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
-                        style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
-                        onClick={() => canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
-                      >
-                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
-                      </div>
+                      <ToggleSwitch
+                        checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
+                        onChange={(v) => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
+                        accentHex={accent.hex}
+                        disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
+                        ariaLabel="Playback fallback search"
+                      />
                       <span className="text-[16px] text-slate-300">
                         {fallbackUnnecessaryBecauseAllBoth
                           ? "Not needed"
@@ -10233,13 +10232,12 @@ function OnboardingWizard(props: {
                       {getPlexLibraryIdNote(field.key) ? <p className="text-[13px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
                       {field.type === "bool" ? (
                         <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-                          <div
-                            className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
-                            style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-                            onClick={() => handleMediaPanelFieldChange(field.key, !Boolean(value))}
-                          >
-                            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
-                          </div>
+                          <ToggleSwitch
+                            checked={Boolean(value)}
+                            onChange={(v) => handleMediaPanelFieldChange(field.key, v)}
+                            accentHex={accent.hex}
+                            ariaLabel={field.label}
+                          />
                           <span className="text-[14px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
                         </label>
                       ) : (

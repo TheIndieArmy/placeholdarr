@@ -30,7 +30,21 @@ def _interval_hours_for(task_key: str) -> int:
     if task_key == "lite_sync":
         return max(0, int(getattr(settings, "LITE_SYNC_INTERVAL_HOURS", 0) or 0))
     if task_key == "collections_sync":
-        return max(0, int(getattr(settings, "COLLECTIONS_SYNC_INTERVAL_HOURS", 0) or 0))
+        global_hours = max(0, int(getattr(settings, "COLLECTIONS_SYNC_INTERVAL_HOURS", 0) or 0))
+        if global_hours <= 0:
+            return 0
+        # The job ticks at the smallest per-recipe override so 1h recipes actually
+        # run hourly; recipes without overrides stay on the global cadence via the
+        # due check in run_all_enabled_recipes.
+        try:
+            from services.collections.engine import smallest_enabled_recipe_interval_hours
+
+            smallest = smallest_enabled_recipe_interval_hours()
+        except Exception:
+            smallest = None
+        if smallest and smallest > 0:
+            return min(global_hours, smallest)
+        return global_hours
     return 0
 
 
@@ -133,6 +147,18 @@ def _run_collections_sync_scheduled():
     run_collections_sync(trigger="scheduled")
 
 
+def refresh_collections_schedule() -> None:
+    """Re-apply the collections job interval after recipe schedule overrides change."""
+    _start_interval(
+        "collections_sync",
+        _interval_hours_for("collections_sync"),
+        _run_collections_sync_scheduled,
+        "Collections sync",
+        job_id=JOB_ID_COLLECTIONS,
+        disable_hint="COLLECTIONS_SYNC_INTERVAL_HOURS",
+    )
+
+
 def schedule_all_syncs():
     """Schedule interval-based full and lite sync jobs using persisted next-run times."""
     global _scheduler
@@ -157,7 +183,7 @@ def schedule_all_syncs():
         disable_hint="LITE_SYNC_INTERVAL_HOURS",
     )
 
-    collections_hours = int(getattr(settings, "COLLECTIONS_SYNC_INTERVAL_HOURS", 0) or 0)
+    collections_hours = _interval_hours_for("collections_sync")
     _start_interval(
         "collections_sync",
         collections_hours,

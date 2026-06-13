@@ -18,7 +18,12 @@ def run_collections_sync(*, trigger: str = "scheduled") -> dict:
 
     run_id = begin_task_run(task_key="collections_sync", trigger=trigger)
     try:
-        results = run_all_enabled_recipes()
+        from core.config import settings
+
+        default_hours = max(1, int(getattr(settings, "COLLECTIONS_SYNC_INTERVAL_HOURS", 24) or 24))
+        # Manual trigger forces all active recipes; scheduled ticks only run due ones
+        # (the job ticks at the smallest per-recipe interval, so most ticks skip most recipes).
+        results = run_all_enabled_recipes(force=(trigger == "manual"), default_interval_hours=default_hours)
         status = "done" if results.get("failed", 0) == 0 else "failed"
         error_message = None
         if status == "failed":

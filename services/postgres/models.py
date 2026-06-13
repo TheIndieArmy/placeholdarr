@@ -302,6 +302,11 @@ class CollectionRecipe(Base):
     collection_title = Column(String(200), nullable=False)
     # Block-based rule definition: {"sources": [...], "filters": [...], "limit": int|None, "sort": str|None}
     definition = Column(JSON, nullable=False, default=dict)
+    # Per-recipe schedule override in hours; null = follow COLLECTIONS_SYNC_INTERVAL_HOURS.
+    run_interval_hours = Column(Integer, nullable=True)
+    # Annually recurring active window: {"start": "MM-DD", "end": "MM-DD", "when_inactive": "keep"|"clear"}.
+    # Wrap-around windows (start > end, e.g. Dec 15 -> Jan 6) are supported. Null = always active.
+    active_window = Column(JSON, nullable=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     # Counts/status from the most recent run: {"status", "candidates", "matched", "resolved", "synced", "error"}
     last_run_summary = Column(JSON, nullable=True)

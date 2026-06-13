@@ -1,5 +1,6 @@
 import { fetchJson, postJson } from "./client";
 import type {
+  CollectionActiveWindow,
   CollectionBuilderMeta,
   CollectionDefinition,
   CollectionExplainResponse,
@@ -18,6 +19,8 @@ export interface RecipeWritePayload {
   plex_section_type: "movie" | "show";
   collection_title: string;
   definition: CollectionDefinition;
+  run_interval_hours: number | null;
+  active_window: CollectionActiveWindow | null;
 }
 
 export function getCollectionRecipes(): Promise<CollectionRecipesResponse> {

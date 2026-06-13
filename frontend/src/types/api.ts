@@ -535,15 +535,36 @@ export type CollectionFilterField =
   | "release_window"
   | "rating";
 
+export type CollectionReleaseWindowBasis =
+  | "premiered"
+  | "latest_episode"
+  | "latest_season"
+  | "theater"
+  | "digital"
+  | "physical";
+
 export interface CollectionFilterBlock {
   field: CollectionFilterField;
   op?: string;
   value?: string | number | boolean | null;
   value_to?: number | null;
   values?: string[];
+  /** release_window only: TV air-date mode or movie release type. */
+  basis?: CollectionReleaseWindowBasis | null;
 }
 
-export type CollectionSortOption = "popularity" | "release_date" | "title";
+export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title";
+
+/** Boolean filter tree: groups carry and/or and may nest rules or sub-groups (depth ≤ 3). */
+export interface CollectionFilterGroup {
+  op: "and" | "or";
+  children: CollectionFilterNode[];
+}
+
+export type CollectionFilterNode = CollectionFilterBlock | CollectionFilterGroup;
+
+/** Legacy recipes store a flat rule list (implicit single AND group). */
+export type CollectionFilters = CollectionFilterBlock[] | CollectionFilterGroup;
 
 export interface CollectionPinnedItem {
   tmdb_id?: number | null;
@@ -561,15 +582,17 @@ export interface CollectionPins {
 
 export interface CollectionDefinition {
   sources: CollectionSourceBlock[];
-  filters: CollectionFilterBlock[];
+  filters: CollectionFilters;
   limit?: number | null;
   sort?: CollectionSortOption | null;
   pins?: CollectionPins;
 }
 
 export interface CollectionRunSummary {
-  status: "ok" | "error";
+  status: "ok" | "error" | "cleared" | "skipped" | "dormant";
   error?: string;
+  reason?: string;
+  window_cleared?: boolean;
   pinned_in?: number;
   pinned_out?: number;
   tmdb_candidates?: number | null;
@@ -581,6 +604,13 @@ export interface CollectionRunSummary {
   synced?: { added: number; removed: number; total: number; created: boolean };
 }
 
+export interface CollectionActiveWindow {
+  /** MM-DD, annually recurring; wrap-around (start > end) spans the new year. */
+  start: string;
+  end: string;
+  when_inactive: "keep" | "clear";
+}
+
 export interface CollectionRecipe {
   id: number;
   name: string;
@@ -589,6 +619,11 @@ export interface CollectionRecipe {
   plex_section_type: "movie" | "show";
   collection_title: string;
   definition: CollectionDefinition;
+  /** Null = follow the global COLLECTIONS_SYNC_INTERVAL_HOURS cadence. */
+  run_interval_hours: number | null;
+  active_window: CollectionActiveWindow | null;
+  /** Whether today falls inside the active window (always true without one). */
+  window_active: boolean;
   last_run_at: string | null;
   last_run_summary: CollectionRunSummary | null;
   created_at: string | null;
@@ -636,13 +671,29 @@ export interface CollectionExplainCheck {
   value?: string | number | boolean | null;
   value_to?: number | null;
   values?: string[] | null;
+  basis?: CollectionReleaseWindowBasis | null;
 }
+
+export interface CollectionExplainRuleNode extends CollectionExplainCheck {
+  kind: "rule";
+}
+
+export interface CollectionExplainGroupNode {
+  kind: "group";
+  op: "and" | "or";
+  status: CollectionExplainStatus;
+  children: CollectionExplainNode[];
+}
+
+export type CollectionExplainNode = CollectionExplainRuleNode | CollectionExplainGroupNode;
 
 export interface CollectionExplainStage {
   key: "sources" | "catalog" | "filters" | "pins" | "limit" | "library";
   status: CollectionExplainStatus;
   detail: string | null;
   checks: CollectionExplainCheck[];
+  /** Filters stage only: verdict tree mirroring the filter structure. */
+  tree?: CollectionExplainGroupNode | null;
 }
 
 export interface CollectionExplainResponse {
