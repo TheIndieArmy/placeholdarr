@@ -655,6 +655,8 @@ export interface CollectionBuilderMeta {
   /** key is "{instance_key}:{profile_id}" — matches engine filter values. */
   quality_profiles: { key: string; name: string; instance_key: string; instance_label: string }[];
   languages: string[];
+  /** Distinct Radarr/Sonarr genre names present in the catalog (matches filter evaluation). */
+  genres: string[];
 }
 
 export type CollectionExplainStatus = "pass" | "fail" | "skip";

@@ -200,7 +200,7 @@ def _fetch_instance_quality_profiles(instance: dict[str, Any]) -> list[dict[str,
 
 @router.get("/api/collections/builder-meta")
 async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$")):
-    """Catalog-backed builder metadata: arr instances, quality profiles per instance, original languages."""
+    """Catalog-backed builder metadata for filter pickers and ARR-scoped options."""
     arr_type = "radarr" if media_type == "movie" else "sonarr"
     instances = [
         item
@@ -235,19 +235,33 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "FROM movie WHERE is_deleted = false "
             "AND radarr_payload_raw->'originalLanguage'->>'name' IS NOT NULL ORDER BY lang"
         )
+        genre_sql = text(
+            "SELECT DISTINCT genre "
+            "FROM movie, jsonb_array_elements_text(radarr_genres::jsonb) AS genre "
+            "WHERE is_deleted = false AND radarr_genres IS NOT NULL "
+            "ORDER BY genre"
+        )
     else:
         lang_sql = text(
             "SELECT DISTINCT sonarr_payload_raw->'originalLanguage'->>'name' AS lang "
             "FROM series WHERE is_deleted = false "
             "AND sonarr_payload_raw->'originalLanguage'->>'name' IS NOT NULL ORDER BY lang"
         )
+        genre_sql = text(
+            "SELECT DISTINCT genre "
+            "FROM series, jsonb_array_elements_text(sonarr_genres::jsonb) AS genre "
+            "WHERE is_deleted = false AND sonarr_genres IS NOT NULL "
+            "ORDER BY genre"
+        )
     with session_scope() as session:
         languages = [str(row[0]) for row in session.execute(lang_sql) if row[0]]
+        genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
 
     return {
         "instances": instance_options,
         "quality_profiles": profile_options,
         "languages": languages,
+        "genres": genres,
     }
 
 

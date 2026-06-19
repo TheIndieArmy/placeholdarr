@@ -1184,10 +1184,10 @@ export function CollectionEditor(props: {
               { value: "excludes", label: "excludes all of" },
             ])}
             <MultiChipPicker
-              options={(baseMeta?.genres ?? []).map((g) => ({ key: g.name, label: g.name }))}
+              options={(builderMeta?.genres ?? []).map((name) => ({ key: name, label: name }))}
               selected={block.values ?? []}
               accentHex={accentHex}
-              emptyHint="Genre list loads from TMDB; type names via ARR metadata otherwise"
+              emptyHint={builderMeta ? "No genres found in your catalog yet" : "Loading genres…"}
               onToggle={(key) => {
                 const current = block.values ?? [];
                 update({
