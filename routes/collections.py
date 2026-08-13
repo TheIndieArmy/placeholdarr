@@ -241,6 +241,12 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "WHERE is_deleted = false AND radarr_genres IS NOT NULL "
             "ORDER BY genre"
         )
+        cert_sql = text(
+            "SELECT DISTINCT radarr_certification AS cert "
+            "FROM movie WHERE is_deleted = false "
+            "AND radarr_certification IS NOT NULL AND TRIM(radarr_certification) <> '' "
+            "ORDER BY cert"
+        )
     else:
         lang_sql = text(
             "SELECT DISTINCT sonarr_payload_raw->'originalLanguage'->>'name' AS lang "
@@ -253,15 +259,23 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "WHERE is_deleted = false AND sonarr_genres IS NOT NULL "
             "ORDER BY genre"
         )
+        cert_sql = text(
+            "SELECT DISTINCT sonarr_certification AS cert "
+            "FROM series WHERE is_deleted = false "
+            "AND sonarr_certification IS NOT NULL AND TRIM(sonarr_certification) <> '' "
+            "ORDER BY cert"
+        )
     with session_scope() as session:
         languages = [str(row[0]) for row in session.execute(lang_sql) if row[0]]
         genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
+        certifications = [str(row[0]).strip() for row in session.execute(cert_sql) if row[0] and str(row[0]).strip()]
 
     return {
         "instances": instance_options,
         "quality_profiles": profile_options,
         "languages": languages,
         "genres": genres,
+        "certifications": certifications,
     }
 
 

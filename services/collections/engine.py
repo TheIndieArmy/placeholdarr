@@ -56,6 +56,8 @@ RELEASE_WINDOW_BASES = (
     "physical",
 )
 MOVIE_RELEASE_BASES = ("theater", "digital", "physical")
+# Radarr nested rating providers (Sonarr is a single flat value/votes).
+MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes")
 DEFAULT_SOURCE_LIMIT = 100
 MAX_COLLECTION_ITEMS = 500
 
@@ -76,6 +78,17 @@ def _validate_filter_rule(rule: Any) -> dict[str, Any]:
     if rule.get("field") == "release_window" and rule.get("basis") is not None:
         if rule["basis"] not in RELEASE_WINDOW_BASES:
             raise RecipeValidationError(f"unknown release_window basis: {rule['basis']!r}")
+    if rule.get("field") == "rating":
+        provider = rule.get("provider")
+        if provider is not None and provider not in MOVIE_RATING_PROVIDERS:
+            raise RecipeValidationError(f"unknown rating provider: {provider!r}")
+        min_votes = rule.get("min_votes")
+        if min_votes is not None:
+            try:
+                if int(min_votes) < 0:
+                    raise RecipeValidationError("rating min_votes must be >= 0")
+            except (TypeError, ValueError) as exc:
+                raise RecipeValidationError("rating min_votes must be an integer") from exc
     return rule
 
 
@@ -386,22 +399,70 @@ def _row_quality_profile_key(row: Any, section_type: str) -> str:
     return f"{str(row.instance_key or '')}:{profile_id}"
 
 
-def _row_rating(row: Any, section_type: str) -> Optional[float]:
-    """Best-effort rating from ARR ratings JSON (Radarr nests by provider, Sonarr is flat)."""
+def _nested_rating_entry(raw: dict[str, Any], provider: str) -> Optional[tuple[float, int]]:
+    nested = raw.get(provider)
+    if not isinstance(nested, dict):
+        return None
+    value = nested.get("value")
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    votes_raw = nested.get("votes")
+    try:
+        votes = int(votes_raw or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    return float(value), max(0, votes)
+
+
+def _row_rating_detail(
+    row: Any,
+    section_type: str,
+    provider: Optional[str] = None,
+) -> Optional[tuple[float, int]]:
+    """Return (value, votes) from ARR ratings JSON.
+
+    Movies (Radarr): ``provider`` selects imdb/tmdb/trakt/metacritic/rottenTomatoes on
+    that provider's native scale. When ``provider`` is omitted, keep the legacy
+    best-effort fallback (IMDb → TMDB → Metacritic → RT), with RT scaled to ~0–10
+    so older recipes that assume a /10 threshold keep working.
+
+    Shows (Sonarr): single flat ``value`` / ``votes`` from Skyhook (typically IMDb
+    when mapped); ``provider`` is ignored.
+    """
     raw = row.radarr_ratings if section_type == "movie" else row.sonarr_ratings
     if not isinstance(raw, dict):
         return None
-    direct = raw.get("value")
-    if isinstance(direct, (int, float)) and direct > 0:
-        return float(direct)
-    for provider in ("imdb", "tmdb", "metacritic", "rottenTomatoes"):
-        nested = raw.get(provider)
-        if isinstance(nested, dict):
-            value = nested.get("value")
-            if isinstance(value, (int, float)) and value > 0:
-                # Rotten Tomatoes is 0-100; normalize to a 0-10 scale.
-                return float(value) / 10.0 if provider == "rottenTomatoes" and value > 10 else float(value)
+
+    if section_type != "movie":
+        direct = raw.get("value")
+        if not isinstance(direct, (int, float)) or direct <= 0:
+            return None
+        try:
+            votes = int(raw.get("votes") or 0)
+        except (TypeError, ValueError):
+            votes = 0
+        return float(direct), max(0, votes)
+
+    if provider:
+        return _nested_rating_entry(raw, str(provider))
+
+    # Legacy movie path (no provider on the rule).
+    for key in ("imdb", "tmdb", "metacritic", "rottenTomatoes", "trakt"):
+        entry = _nested_rating_entry(raw, key)
+        if entry is None:
+            continue
+        value, votes = entry
+        if key == "rottenTomatoes" and value > 10:
+            value = value / 10.0
+        elif key == "metacritic" and value > 10:
+            value = value / 10.0
+        return value, votes
     return None
+
+
+def _row_rating(row: Any, section_type: str, provider: Optional[str] = None) -> Optional[float]:
+    detail = _row_rating_detail(row, section_type, provider)
+    return detail[0] if detail else None
 
 
 def _row_release_date(row: Any, section_type: str) -> Optional[datetime]:
@@ -643,9 +704,20 @@ def _passes_filter(
 
     if field == "rating":
         threshold = float(rule.get("value") or 0)
-        rating = _row_rating(row, section_type)
-        if rating is None:
+        provider = rule.get("provider")
+        if provider is not None:
+            provider = str(provider)
+        detail = _row_rating_detail(row, section_type, provider)
+        if detail is None:
             return False
+        rating, votes = detail
+        min_votes = rule.get("min_votes")
+        if min_votes is not None:
+            try:
+                if votes < int(min_votes):
+                    return False
+            except (TypeError, ValueError):
+                return False
         if op == "lte":
             return rating <= threshold
         return rating >= threshold
@@ -980,6 +1052,8 @@ def _verdict_tree(
             "value_to": node.get("value_to"),
             "values": node.get("values"),
             "basis": node.get("basis"),
+            "provider": node.get("provider"),
+            "min_votes": node.get("min_votes"),
             "status": "pass" if passed else "fail",
         }
     children = [_verdict_tree(row, child, section_type, air_dates) for child in (node.get("children") or [])]

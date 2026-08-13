@@ -34,7 +34,7 @@ Typical use: a “Trending this week” or “Recently aired” collection in a 
 **Collections feature set:**
 
 - **Sources**: TMDB trending (day/week), popular, upcoming, discover (genres, year, providers, ratings), public TMDB lists; public MDBList lists (no API key); public Trakt user lists; full Placeholdarr catalog pool. Multiple sources union and dedupe by id.
-- **Filters**: Genre, year, certification, studio/network, monitored, quality profile, original language, instance, release window, and rating — with field-specific operators.
+- **Filters**: Genre, year, certification, studio/network, monitored, quality profile, original language, instance, release window, and rating — with field-specific operators. Movie rating filters pick an ARR provider (IMDb default; TMDB, Trakt, Metacritic, Rotten Tomatoes) on that source’s native scale; TV uses Sonarr’s single score. Optional **min votes**.
 - **Release window**: *Has been released*, *not yet released*, *released in the past*, and *releasing in the next* — with a **based on** date: movies use theatrical / digital / physical release; TV uses series premiere, latest aired episode, or latest season premiere.
 - **Filter logic**: Simple mode — AND within a group, OR between groups. **Advanced filtering** — nested AND/OR groups up to three levels deep; single-group recipes flatten to a top-level AND when switching modes.
 - **Arrange**: Sort by popularity, release date, latest aired, or title; item limit (up to 500); include pins survive the limit, exclude pins always drop.
@@ -54,6 +54,7 @@ Typical use: a “Trending this week” or “Recently aired” collection in a 
 - **Collections API**: `GET/POST /api/collections`, `GET/PUT/DELETE /api/collections/{id}`, toggle, manual run, `plex-sections`, `tmdb-meta`, `builder-meta`, `POST /api/collections/preview`, and `POST /api/collections/explain`.
 - **Source blocks**: `tmdb_trending`, `tmdb_popular`, `tmdb_upcoming`, `tmdb_discover`, `tmdb_list`, `mdblist`, `trakt_list`, and `catalog` with per-source limits and multi-source union/dedupe.
 - **Filter blocks**: Genre, year, certification, studio/network, monitored, quality profile, original language, instance, release window, and rating — backed by ARR metadata and catalog fields.
+- **Rating filter sources**: Movie recipes choose Radarr provider (`imdb` default, `tmdb`, `trakt`, `metacritic`, `rottenTomatoes`) with native scales (0–10 or 0–100); TV recipes use Sonarr’s flat Skyhook score. Optional `min_votes`. Legacy movie rules without `provider` keep the previous best-effort fallback.
 - **Advanced filter nesting**: Boolean AND/OR filter trees (depth ≤ 3) with simple/advanced editor modes, recursive explain verdict tree, and validation in the engine.
 - **Release window filters**: `has_released`, `not_yet_released`, `within_past`, and `within_next`; movie bases (theatrical, digital, physical); TV bases (series premiere, latest aired episode, latest season premiere) with air-date aggregation for ongoing shows.
 - **Pins**: Include (bypass sources/filters, survive limit) and exclude (always removed) with catalog typeahead from the shared library cache.
@@ -71,6 +72,7 @@ Typical use: a “Trending this week” or “Recently aired” collection in a 
 
 - **Collections editor UX**: Advanced filtering toggle; simple mode stores single AND groups as flat rule lists; converting to advanced flattens redundant OR/AND wrappers so rules sit at top-level AND when appropriate.
 - **Release window defaults**: New movie release-window filters default to **theatrical** release; dropdown order is theatrical → digital → physical.
+- **Rating filter defaults**: New movie rating filters default to **IMDb** on a 0–10 scale; editing a legacy rating rule stamps `provider: imdb` when saved from the UI.
 - **Dashboard navigation**: New Collections tab; library catalog cache passed through for pin search and explain typeahead.
 - **Task scheduler**: Collections sync job respects per-recipe interval overrides; recipe CRUD/toggle refreshes the collections schedule.
 - **Media Integrations cards**: Enable/pause toggle on connected Plex/Jellyfin/Emby cards (Settings and onboarding) without opening Configure; **Remove connection** still clears card fields and returns to Connect.

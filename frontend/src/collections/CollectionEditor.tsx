@@ -27,12 +27,33 @@ import type {
   CollectionPinnedItem,
   CollectionPreviewResponse,
   CollectionRecipe,
+  CollectionRatingProvider,
   CollectionSourceBlock,
   CollectionSourceType,
   CollectionTmdbMeta,
   LibraryItem,
   PlexSectionOption,
 } from "../types/api";
+
+const MOVIE_RATING_PROVIDERS: {
+  value: CollectionRatingProvider;
+  label: string;
+  max: number;
+}[] = [
+  { value: "imdb", label: "IMDb", max: 10 },
+  { value: "tmdb", label: "TMDB", max: 10 },
+  { value: "trakt", label: "Trakt", max: 10 },
+  { value: "metacritic", label: "Metacritic", max: 100 },
+  { value: "rottenTomatoes", label: "Rotten Tomatoes", max: 100 },
+];
+
+const RATING_PROVIDER_LABELS: Record<string, string> = Object.fromEntries(
+  MOVIE_RATING_PROVIDERS.map((p) => [p.value, p.label]),
+);
+
+function ratingProviderMax(provider: string | null | undefined): number {
+  return MOVIE_RATING_PROVIDERS.find((p) => p.value === provider)?.max ?? 10;
+}
 
 const SOURCE_META: Record<
   CollectionSourceType,
@@ -110,7 +131,9 @@ function defaultFilterBlock(field: CollectionFilterField, sectionType: "movie" |
         basis: sectionType === "movie" ? "theater" : "premiered",
       };
     case "rating":
-      return { field, op: "gte", value: 7 };
+      return sectionType === "movie"
+        ? { field, op: "gte", value: 7, provider: "imdb", min_votes: null }
+        : { field, op: "gte", value: 7, min_votes: null };
   }
 }
 
@@ -501,7 +524,17 @@ function explainRuleCheckLabel(check: CollectionExplainCheck): string {
     check.field === "release_window" && check.basis
       ? `(by ${RELEASE_BASIS_LABELS[check.basis] ?? check.basis})`
       : "";
-  return [base, op, value, basis].filter(Boolean).join(" ");
+  const provider =
+    check.field === "rating"
+      ? check.provider
+        ? `(${RATING_PROVIDER_LABELS[check.provider] ?? check.provider})`
+        : "(ARR rating)"
+      : "";
+  const votes =
+    check.field === "rating" && check.min_votes != null && Number(check.min_votes) > 0
+      ? `≥ ${check.min_votes} votes`
+      : "";
+  return [base, provider, op, value, basis, votes].filter(Boolean).join(" ");
 }
 
 /** Skip redundant single-child group wrappers so simple recipes read flat. */
@@ -1224,29 +1257,44 @@ export function CollectionEditor(props: {
             ) : null}
           </div>
         );
-      case "certification":
+      case "certification": {
+        const catalogCerts = builderMeta?.certifications ?? [];
+        const selectedCerts = block.values ?? [];
+        const certByUpper = new Map<string, string>();
+        for (const cert of catalogCerts) {
+          const key = cert.trim().toUpperCase();
+          if (key && !certByUpper.has(key)) certByUpper.set(key, cert.trim());
+        }
+        // Keep legacy free-text selections visible even if they left the catalog.
+        for (const cert of selectedCerts) {
+          const key = cert.trim().toUpperCase();
+          if (key && !certByUpper.has(key)) certByUpper.set(key, cert.trim());
+        }
+        const certOptions = Array.from(certByUpper.values()).map((name) => ({ key: name, label: name }));
+        const selectedNormalized = selectedCerts
+          .map((cert) => certByUpper.get(cert.trim().toUpperCase()) ?? cert.trim())
+          .filter(Boolean);
         return (
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-col gap-2">
             {opSelect([
               { value: "in", label: "is one of" },
               { value: "not_in", label: "is none of" },
             ])}
-            <input
-              className={theme.field}
-              style={{ width: 220 }}
-              placeholder="e.g. PG-13, R (comma separated)"
-              value={(block.values ?? []).join(", ")}
-              onChange={(e) =>
-                update({
-                  values: e.target.value
-                    .split(",")
-                    .map((v) => v.trim())
-                    .filter(Boolean),
-                })
-              }
+            <MultiChipPicker
+              options={certOptions}
+              selected={selectedNormalized}
+              accentHex={accentHex}
+              emptyHint={builderMeta ? "No certifications found in your catalog yet" : "Loading certifications…"}
+              onToggle={(key) => {
+                const current = new Set(selectedNormalized);
+                if (current.has(key)) current.delete(key);
+                else current.add(key);
+                update({ values: Array.from(current) });
+              }}
             />
           </div>
         );
+      }
       case "studio_network":
         return (
           <div className="flex flex-wrap items-center gap-2">
@@ -1383,23 +1431,87 @@ export function CollectionEditor(props: {
           </div>
         );
       }
-      case "rating":
+      case "rating": {
+        const provider =
+          sectionType === "movie"
+            ? ((block.provider as CollectionRatingProvider | null | undefined) ?? "imdb")
+            : null;
+        const scaleMax = sectionType === "movie" ? ratingProviderMax(provider) : 10;
+        const updateRating = (patch: Partial<CollectionFilterBlock>) => {
+          if (sectionType === "movie" && !block.provider && !patch.provider) {
+            update({ provider: "imdb", ...patch });
+            return;
+          }
+          update(patch);
+        };
         return (
-          <div className="flex flex-wrap items-center gap-2">
-            {opSelect([
-              { value: "gte", label: "is at least" },
-              { value: "lte", label: "is at most" },
-            ])}
-            <NumberInput
-              value={typeof block.value === "number" ? block.value : null}
-              min={0}
-              max={10}
-              width={70}
-              onChange={(v) => update({ value: v })}
-            />
-            <span className="text-[13px] text-slate-500">/ 10</span>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {sectionType === "movie" ? (
+                <select
+                  className={theme.selectField}
+                  value={provider ?? "imdb"}
+                  onChange={(e) => {
+                    const next = e.target.value as CollectionRatingProvider;
+                    const prevMax = ratingProviderMax(provider);
+                    const nextMax = ratingProviderMax(next);
+                    let nextValue = typeof block.value === "number" ? block.value : null;
+                    if (nextValue != null && prevMax !== nextMax) {
+                      nextValue = Math.round((nextValue / prevMax) * nextMax * 10) / 10;
+                    }
+                    updateRating({ provider: next, value: nextValue });
+                  }}
+                >
+                  {MOVIE_RATING_PROVIDERS.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span
+                  className="text-[13px] text-slate-500"
+                  title="Sonarr exposes a single score from Skyhook (usually IMDb when mapped)"
+                >
+                  Sonarr rating
+                </span>
+              )}
+              <select
+                className={theme.selectOp}
+                value={block.op ?? "gte"}
+                onChange={(e) => updateRating({ op: e.target.value })}
+              >
+                <option value="gte">is at least</option>
+                <option value="lte">is at most</option>
+              </select>
+              <NumberInput
+                value={typeof block.value === "number" ? block.value : null}
+                min={0}
+                max={scaleMax}
+                width={70}
+                onChange={(v) => updateRating({ value: v })}
+              />
+              <span className="text-[13px] text-slate-500">/ {scaleMax}</span>
+            </div>
+            <label className={`flex flex-wrap items-center gap-2 ${theme.label}`}>
+              Min votes
+              <NumberInput
+                value={typeof block.min_votes === "number" ? block.min_votes : null}
+                min={0}
+                max={10_000_000}
+                width={90}
+                placeholder="optional"
+                onChange={(v) => updateRating({ min_votes: v })}
+              />
+              <span className="text-[12px] text-slate-500 font-normal normal-case tracking-normal">
+                {sectionType === "movie"
+                  ? "on the selected source (titles missing that rating fail)"
+                  : "from Sonarr’s score (titles with no rating fail)"}
+              </span>
+            </label>
           </div>
         );
+      }
     }
   }
 

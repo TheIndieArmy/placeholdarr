@@ -543,6 +543,14 @@ export type CollectionReleaseWindowBasis =
   | "digital"
   | "physical";
 
+/** Radarr nested rating providers for movie rating filters. TV uses Sonarr's flat score. */
+export type CollectionRatingProvider =
+  | "imdb"
+  | "tmdb"
+  | "trakt"
+  | "metacritic"
+  | "rottenTomatoes";
+
 export interface CollectionFilterBlock {
   field: CollectionFilterField;
   op?: string;
@@ -551,6 +559,10 @@ export interface CollectionFilterBlock {
   values?: string[];
   /** release_window only: TV air-date mode or movie release type. */
   basis?: CollectionReleaseWindowBasis | null;
+  /** rating only (movies): which Radarr ratings.* key to use. */
+  provider?: CollectionRatingProvider | null;
+  /** rating only: require at least this many votes on the chosen score. */
+  min_votes?: number | null;
 }
 
 export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title";
@@ -657,6 +669,8 @@ export interface CollectionBuilderMeta {
   languages: string[];
   /** Distinct Radarr/Sonarr genre names present in the catalog (matches filter evaluation). */
   genres: string[];
+  /** Distinct Radarr/Sonarr certifications present in the catalog (matches filter evaluation). */
+  certifications: string[];
 }
 
 export type CollectionExplainStatus = "pass" | "fail" | "skip";
@@ -674,6 +688,8 @@ export interface CollectionExplainCheck {
   value_to?: number | null;
   values?: string[] | null;
   basis?: CollectionReleaseWindowBasis | null;
+  provider?: CollectionRatingProvider | null;
+  min_votes?: number | null;
 }
 
 export interface CollectionExplainRuleNode extends CollectionExplainCheck {
