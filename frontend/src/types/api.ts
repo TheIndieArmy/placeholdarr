@@ -1,8 +1,8 @@
-export type DashboardTab = "activity" | "library" | "calendar" | "errors" | "logs" | "settings" | "setup";
+export type DashboardTab = "activity" | "library" | "collections" | "calendar" | "errors" | "logs" | "settings" | "setup";
 
 export type ActivitySubPage = "placeholders" | "tasks" | "operations";
 
-export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh";
+export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh" | "collections_sync";
 
 export interface ScheduledTaskRow {
   task_key: TaskKey;
@@ -158,6 +158,9 @@ export interface LibraryItem {
   type: LibraryItemType;
   title: string;
   year: number;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
   /** Series network (Sonarr). */
   network?: string | null;
   poster_url?: string | null;
@@ -453,7 +456,8 @@ export interface ReadyResponse {
 export type DashboardEvent =
   | { type: "ping"; ts: number }
   | { type: "startup_sync_complete"; value: boolean }
-  | { type: "library_version"; movies_version: number; series_version: number };
+  | { type: "library_version"; movies_version: number; series_version: number }
+  | { type: "task_runs_version"; version: string };
 
 export interface SettingsStatus {
   setup_complete: boolean;
@@ -484,4 +488,239 @@ export interface SaveSettingsResponse {
 export interface IntegrationTestResponse {
   ok: boolean;
   message: string;
+}
+
+// ---------------------------------------------------------------------------
+// Collections (rule-based Plex collection builder)
+// ---------------------------------------------------------------------------
+
+export type CollectionSourceType =
+  | "tmdb_trending"
+  | "tmdb_popular"
+  | "tmdb_upcoming"
+  | "tmdb_discover"
+  | "tmdb_list"
+  | "mdblist"
+  | "trakt_list"
+  | "catalog";
+
+export interface CollectionSourceBlock {
+  type: CollectionSourceType;
+  /** tmdb_trending */
+  window?: "day" | "week";
+  /** tmdb_discover */
+  genre_ids?: number[];
+  year_from?: number | null;
+  year_to?: number | null;
+  provider_ids?: number[];
+  watch_region?: string;
+  min_vote_average?: number | null;
+  /** tmdb_list */
+  list_id?: string;
+  /** mdblist / trakt_list — pasted list URL or user/slug */
+  list_ref?: string;
+  /** per-source candidate cap */
+  limit?: number;
+}
+
+export type CollectionFilterField =
+  | "genre"
+  | "year"
+  | "certification"
+  | "studio_network"
+  | "monitored"
+  | "quality_profile"
+  | "original_language"
+  | "instance"
+  | "release_window"
+  | "rating";
+
+export type CollectionReleaseWindowBasis =
+  | "premiered"
+  | "latest_episode"
+  | "latest_season"
+  | "theater"
+  | "digital"
+  | "physical";
+
+export interface CollectionFilterBlock {
+  field: CollectionFilterField;
+  op?: string;
+  value?: string | number | boolean | null;
+  value_to?: number | null;
+  values?: string[];
+  /** release_window only: TV air-date mode or movie release type. */
+  basis?: CollectionReleaseWindowBasis | null;
+}
+
+export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title";
+
+/** Boolean filter tree: groups carry and/or and may nest rules or sub-groups (depth ≤ 3). */
+export interface CollectionFilterGroup {
+  op: "and" | "or";
+  children: CollectionFilterNode[];
+}
+
+export type CollectionFilterNode = CollectionFilterBlock | CollectionFilterGroup;
+
+/** Legacy recipes store a flat rule list (implicit single AND group). */
+export type CollectionFilters = CollectionFilterBlock[] | CollectionFilterGroup;
+
+export interface CollectionPinnedItem {
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+  title: string;
+  year?: number | null;
+  poster?: string | null;
+}
+
+export interface CollectionPins {
+  include?: CollectionPinnedItem[];
+  exclude?: CollectionPinnedItem[];
+}
+
+export interface CollectionDefinition {
+  sources: CollectionSourceBlock[];
+  filters: CollectionFilters;
+  limit?: number | null;
+  sort?: CollectionSortOption | null;
+  pins?: CollectionPins;
+}
+
+export interface CollectionRunSummary {
+  status: "ok" | "error" | "cleared" | "skipped" | "dormant";
+  error?: string;
+  reason?: string;
+  window_cleared?: boolean;
+  pinned_in?: number;
+  pinned_out?: number;
+  tmdb_candidates?: number | null;
+  matched_in_catalog?: number;
+  after_filters?: number;
+  selected?: number;
+  in_target_library?: number | null;
+  unresolved?: number | null;
+  synced?: { added: number; removed: number; total: number; created: boolean };
+}
+
+export interface CollectionActiveWindow {
+  /** MM-DD, annually recurring; wrap-around (start > end) spans the new year. */
+  start: string;
+  end: string;
+  when_inactive: "keep" | "clear";
+}
+
+export interface CollectionRecipe {
+  id: number;
+  name: string;
+  enabled: boolean;
+  plex_section_id: number;
+  plex_section_type: "movie" | "show";
+  collection_title: string;
+  definition: CollectionDefinition;
+  /** Null = follow the global COLLECTIONS_SYNC_INTERVAL_HOURS cadence. */
+  run_interval_hours: number | null;
+  active_window: CollectionActiveWindow | null;
+  /** Whether today falls inside the active window (always true without one). */
+  window_active: boolean;
+  last_run_at: string | null;
+  last_run_summary: CollectionRunSummary | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CollectionRecipesResponse {
+  recipes: CollectionRecipe[];
+  tmdb_configured: boolean;
+  trakt_configured: boolean;
+}
+
+export interface PlexSectionOption {
+  id: number;
+  title: string;
+  type: "movie" | "show";
+  item_count: number;
+}
+
+export interface CollectionTmdbMeta {
+  configured: boolean;
+  genres: { id: number; name: string }[];
+  providers: { id: number; name: string; priority?: number | null }[];
+  regions: { code: string; name: string }[];
+}
+
+export interface CollectionBuilderMeta {
+  instances: { instance_key: string; label: string; arr_type: string }[];
+  /** key is "{instance_key}:{profile_id}" — matches engine filter values. */
+  quality_profiles: { key: string; name: string; instance_key: string; instance_label: string }[];
+  languages: string[];
+  /** Distinct Radarr/Sonarr genre names present in the catalog (matches filter evaluation). */
+  genres: string[];
+}
+
+export type CollectionExplainStatus = "pass" | "fail" | "skip";
+
+export interface CollectionExplainCheck {
+  status: CollectionExplainStatus;
+  detail?: string | null;
+  /** Source checks */
+  type?: string;
+  list_ref?: string | null;
+  /** Filter rule checks */
+  field?: string;
+  op?: string | null;
+  value?: string | number | boolean | null;
+  value_to?: number | null;
+  values?: string[] | null;
+  basis?: CollectionReleaseWindowBasis | null;
+}
+
+export interface CollectionExplainRuleNode extends CollectionExplainCheck {
+  kind: "rule";
+}
+
+export interface CollectionExplainGroupNode {
+  kind: "group";
+  op: "and" | "or";
+  status: CollectionExplainStatus;
+  children: CollectionExplainNode[];
+}
+
+export type CollectionExplainNode = CollectionExplainRuleNode | CollectionExplainGroupNode;
+
+export interface CollectionExplainStage {
+  key: "sources" | "catalog" | "filters" | "pins" | "limit" | "library";
+  status: CollectionExplainStatus;
+  detail: string | null;
+  checks: CollectionExplainCheck[];
+  /** Filters stage only: verdict tree mirroring the filter structure. */
+  tree?: CollectionExplainGroupNode | null;
+}
+
+export interface CollectionExplainResponse {
+  in_collection: boolean;
+  stages: CollectionExplainStage[];
+}
+
+export interface CollectionPreviewSampleItem {
+  id: number;
+  title: string;
+  year: number | null;
+  tmdb_id: number | null;
+  tvdb_id: number | null;
+  poster: string | null;
+}
+
+export interface CollectionPreviewResponse {
+  tmdb_candidates: number | null;
+  matched_in_catalog: number;
+  after_filters: number;
+  pinned_in: number;
+  pinned_out: number;
+  selected: number;
+  in_target_library: number | null;
+  unresolved: number | null;
+  plex_error: string | null;
+  sample: CollectionPreviewSampleItem[];
 }

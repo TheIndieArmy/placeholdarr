@@ -8,6 +8,8 @@ export function useDashboardEvents(opts: {
   onDisconnected?: () => void;
   onStartupSyncComplete?: (value: boolean) => void;
   onLibraryVersion?: (versions: LibraryVersionResponse) => void;
+  /** Fires only when the task-runs fingerprint actually changes (a run started/finished). */
+  onTaskRunsVersion?: (version: string) => void;
 }) {
   const [eventsConnected, setEventsConnected] = useState(false);
 
@@ -15,13 +17,16 @@ export function useDashboardEvents(opts: {
   const onDisconnectedRef = useRef(opts.onDisconnected);
   const onStartupSyncRef = useRef(opts.onStartupSyncComplete);
   const onLibraryVersionRef = useRef(opts.onLibraryVersion);
+  const onTaskRunsVersionRef = useRef(opts.onTaskRunsVersion);
+  const lastTaskRunsVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
     onConnectedRef.current = opts.onConnected;
     onDisconnectedRef.current = opts.onDisconnected;
     onStartupSyncRef.current = opts.onStartupSyncComplete;
     onLibraryVersionRef.current = opts.onLibraryVersion;
-  }, [opts.onConnected, opts.onDisconnected, opts.onLibraryVersion, opts.onStartupSyncComplete]);
+    onTaskRunsVersionRef.current = opts.onTaskRunsVersion;
+  }, [opts.onConnected, opts.onDisconnected, opts.onLibraryVersion, opts.onStartupSyncComplete, opts.onTaskRunsVersion]);
 
   useEffect(() => {
     if (!opts.enabled) {
@@ -54,6 +59,18 @@ export function useDashboardEvents(opts: {
           movies_version: Number(event.movies_version) || 0,
           series_version: Number(event.series_version) || 0,
         });
+        return;
+      }
+      if (event.type === "task_runs_version") {
+        const version = String(event.version ?? "");
+        // The SSE loop re-sends all state events whenever any of them changes;
+        // dedupe here so consumers only react to real task-run transitions.
+        if (lastTaskRunsVersionRef.current === version) return;
+        const isFirst = lastTaskRunsVersionRef.current === null;
+        lastTaskRunsVersionRef.current = version;
+        if (!isFirst) {
+          onTaskRunsVersionRef.current?.(version);
+        }
       }
     };
 

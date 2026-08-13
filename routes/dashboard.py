@@ -522,6 +522,16 @@ async def dashboard_calendar_page():
     return _serve_dashboard_index()
 
 
+@router.get("/collections", response_class=HTMLResponse)
+async def dashboard_collections_page():
+    return _serve_dashboard_index()
+
+
+@router.get("/collections/{path:path}", response_class=HTMLResponse)
+async def dashboard_collections_nested(path: str):
+    return _serve_dashboard_index()
+
+
 @router.get("/errors", response_class=HTMLResponse)
 async def dashboard_errors_page():
     return _serve_dashboard_index()
@@ -589,6 +599,44 @@ _OVERLAY_EXAMPLE_MEDIA_TYPES = {
     ".jpeg": "image/jpeg",
     ".json": "application/json",
 }
+
+_FAVICON_FILES = {
+    "favicon.ico": "image/x-icon",
+    "favicon-16x16.png": "image/png",
+    "favicon-32x32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+}
+
+
+def _dashboard_dist_root_file(filename: str, media_types: dict[str, str]) -> FileResponse | JSONResponse:
+    """Serve a single file from frontend/dist (Vite public/ copies)."""
+    if filename not in media_types:
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
+    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    file_path = os.path.join(dist_dir, filename)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
+    return FileResponse(file_path, media_type=media_types[filename])
+
+
+@router.get("/favicon.ico")
+async def dashboard_favicon_ico():
+    return _dashboard_dist_root_file("favicon.ico", _FAVICON_FILES)
+
+
+@router.get("/favicon-16x16.png")
+async def dashboard_favicon_16():
+    return _dashboard_dist_root_file("favicon-16x16.png", _FAVICON_FILES)
+
+
+@router.get("/favicon-32x32.png")
+async def dashboard_favicon_32():
+    return _dashboard_dist_root_file("favicon-32x32.png", _FAVICON_FILES)
+
+
+@router.get("/apple-touch-icon.png")
+async def dashboard_apple_touch_icon():
+    return _dashboard_dist_root_file("apple-touch-icon.png", _FAVICON_FILES)
 
 
 @router.get("/overlay-examples/{asset_path:path}")
@@ -3356,6 +3404,9 @@ def _build_library_payload(
                 "type": "movie",
                 "title": movie.title,
                 "year": movie.year,
+                "tmdb_id": int(movie.tmdbid or 0) or None,
+                "tvdb_id": None,
+                "imdb_id": movie.imdbid,
                 "poster_url": _resolve_library_poster_url(
                     "movie",
                     int(movie.id),
@@ -3436,6 +3487,9 @@ def _build_library_payload(
                 "type": "series",
                 "title": series.title,
                 "year": series.year,
+                "tmdb_id": int(getattr(series, "sonarr_tmdbid", 0) or 0) or None,
+                "tvdb_id": int(series.tvdbid or 0) or None,
+                "imdb_id": series.imdbid,
                 "network": getattr(series, "sonarr_network", None),
                 "poster_url": _resolve_library_poster_url(
                     "series",

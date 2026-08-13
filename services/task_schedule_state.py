@@ -13,6 +13,7 @@ from services.task_run_history import latest_finished_run
 _TASK_KEYS = {
     "full_sync": "SCHEDULED_TASK_NEXT_RUN_FULL_SYNC",
     "lite_sync": "SCHEDULED_TASK_NEXT_RUN_LITE_SYNC",
+    "collections_sync": "SCHEDULED_TASK_NEXT_RUN_COLLECTIONS_SYNC",
 }
 
 _CATCH_UP_MINUTES = 2

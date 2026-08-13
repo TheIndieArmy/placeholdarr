@@ -39,6 +39,7 @@ TASK_LABELS = {
     "lite_sync": "Lite sync",
     "calendar_only": "Calendar only",
     "placeholder_refresh": "Metadata & art refresh",
+    "collections_sync": "Collections sync",
 }
 
 
@@ -122,7 +123,7 @@ def _serialize_run(row: ScheduledTaskRun) -> dict[str, Any]:
 
 
 class TaskRunRequest(BaseModel):
-    task_key: str = Field(..., description="full_sync | lite_sync | calendar_only | placeholder_refresh")
+    task_key: str = Field(..., description="full_sync | lite_sync | calendar_only | placeholder_refresh | collections_sync")
     metadata: bool | None = Field(None, description="When task_key=placeholder_refresh, run metadata refresh phase")
     art: bool | None = Field(None, description="When task_key=placeholder_refresh, run art refresh phase")
 
@@ -139,7 +140,7 @@ class TaskAbandonRequest(BaseModel):
 async def tasks_scheduled():
     meta = get_scheduled_task_metadata()
     rows = []
-    for task_key in ("full_sync", "lite_sync"):
+    for task_key in ("full_sync", "lite_sync", "collections_sync"):
         sched = meta.get(task_key) or {}
         interval = int(sched.get("interval_hours") or 0)
         working = get_working_run(task_key)
@@ -214,7 +215,7 @@ async def tasks_abandon(body: TaskAbandonRequest | None = None):
 @router.post("/api/tasks/run")
 async def tasks_run(body: TaskRunRequest):
     key = str(body.task_key or "").strip().lower()
-    if key not in {"full_sync", "lite_sync", "calendar_only", "placeholder_refresh"}:
+    if key not in {"full_sync", "lite_sync", "calendar_only", "placeholder_refresh", "collections_sync"}:
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
@@ -233,6 +234,9 @@ async def tasks_run(body: TaskRunRequest):
                 status_code=409,
                 detail="Task already running: placeholder refresh or full sync in progress",
             )
+    elif key == "collections_sync":
+        if get_working_run("collections_sync"):
+            raise HTTPException(status_code=409, detail="Task already running: collections sync in progress")
     else:
         if get_working_run() or get_working_run("full_sync"):
             raise HTTPException(status_code=409, detail="Another maintenance task is already running")
@@ -250,6 +254,10 @@ async def tasks_run(body: TaskRunRequest):
                     metadata=bool(True if body.metadata is None else body.metadata),
                     art=bool(True if body.art is None else body.art),
                 )
+            elif key == "collections_sync":
+                from services.collections.scheduled import run_collections_sync
+
+                run_collections_sync(trigger="manual")
             else:
                 run_calendar_only_maintenance(trigger="manual")
         except Exception as exc:

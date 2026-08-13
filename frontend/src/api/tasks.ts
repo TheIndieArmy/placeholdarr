@@ -14,7 +14,7 @@ export function getTasksStatus() {
 }
 
 export function postTaskRun(
-  taskKey: "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh",
+  taskKey: "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh" | "collections_sync",
   opts?: { metadata?: boolean; art?: boolean },
 ) {
   return fetchJson<{ ok: boolean; task_key: string; message: string }>("/api/tasks/run", {
