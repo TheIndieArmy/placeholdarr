@@ -7002,6 +7002,7 @@ function SecurityAccountControls(props: {
   accentHex: string;
   onLogout: () => Promise<void>;
   webhookApiKey: string;
+  onWebhookApiKeyChange: (key: string) => void;
 }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -7027,6 +7028,12 @@ function SecurityAccountControls(props: {
     try {
       const result = await regenerateWebhookApiKey();
       setWebhookKey(result.webhook_api_key);
+      // Propagate into fieldValues so buildArrInstanceWebhookUrls/
+      // PlaybackWebhookSetupModal show the new key immediately, without
+      // needing a full settings reload. WEBHOOK_API_KEY isn't a real
+      // SETTINGS_SCHEMA field (see settingsValuesDirty), so this can't
+      // spuriously trip the unsaved-changes warning.
+      props.onWebhookApiKeyChange(result.webhook_api_key);
       setWebhookKeyRevealed(true);
       setWebhookRegenConfirming(false);
       setWebhookRegenMessage("Webhook key regenerated. Update the URL in every Radarr/Sonarr/Tautulli/Jellyfin/Emby webhook.");
@@ -7536,6 +7543,7 @@ function SettingsPanel(props: {
                   accentHex={accent.hex}
                   onLogout={props.onLogout}
                   webhookApiKey={resolveWebhookApiKey(props.values)}
+                  onWebhookApiKeyChange={(key) => props.onValueChange("WEBHOOK_API_KEY", key)}
                 />
               ) : null}
               {active.name === "Paths" ? (

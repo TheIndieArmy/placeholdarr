@@ -388,7 +388,11 @@ def verify_webhook_api_key(provided: str | None, session=None) -> bool:
     stored = get_webhook_api_key(session=session)
     if not stored:
         return False
-    return secrets.compare_digest(str(provided), stored)
+    # secrets.compare_digest raises TypeError on non-ASCII str input;
+    # provided comes straight from an attacker-controlled query param, so
+    # encode both sides to bytes first rather than let a malformed/non-ASCII
+    # apikey value crash the webhook handler instead of just failing closed.
+    return secrets.compare_digest(str(provided).encode("utf-8", errors="replace"), stored.encode("utf-8"))
 
 
 def change_admin_password(current_password: str, new_password: str, session=None) -> None:

@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import signal
 import subprocess
 import time
@@ -577,9 +578,14 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if get_auth_mode() != "disabled":
             provided_key = request.query_params.get("apikey")
             if not verify_webhook_api_key(provided_key):
+                # ?instance= is attacker-controlled and unvalidated at this point —
+                # allowlist-sanitize before it goes into a log line so a value
+                # like "x\n[INFO] forged log entry" can't inject fake log records.
+                raw_instance = request.query_params.get('instance', '')
+                safe_instance = re.sub(r'[^A-Za-z0-9_-]', '', raw_instance)[:64] or 'unknown'
                 logger.warning(
                     "Webhook rejected: missing or invalid apikey "
-                    f"instance={request.query_params.get('instance', '').strip() or 'unknown'} "
+                    f"instance={safe_instance} "
                     f"present={'yes' if provided_key else 'no'}",
                     extra={'emoji_type': 'warning'},
                 )
