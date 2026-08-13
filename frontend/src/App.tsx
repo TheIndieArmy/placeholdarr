@@ -31,7 +31,7 @@ import {
 } from "./api/dashboard";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
-import { changePassword, getAuthStatus, logoutAuth, type AuthStatus } from "./api/auth";
+import { changePassword, getAuthStatus, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
 import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -7001,6 +7001,7 @@ function SecurityAccountControls(props: {
   authStatus: AuthStatus | null;
   accentHex: string;
   onLogout: () => Promise<void>;
+  webhookApiKey: string;
 }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -7010,6 +7011,31 @@ function SecurityAccountControls(props: {
   const [error, setError] = useState<string | null>(null);
   const mode = props.authStatus?.mode || "builtin";
   const username = props.authStatus?.username;
+
+  const [webhookKey, setWebhookKey] = useState(props.webhookApiKey);
+  useEffect(() => setWebhookKey(props.webhookApiKey), [props.webhookApiKey]);
+  const [webhookKeyRevealed, setWebhookKeyRevealed] = useState(false);
+  const [webhookRegenConfirming, setWebhookRegenConfirming] = useState(false);
+  const [webhookRegenBusy, setWebhookRegenBusy] = useState(false);
+  const [webhookRegenMessage, setWebhookRegenMessage] = useState<string | null>(null);
+  const [webhookRegenError, setWebhookRegenError] = useState<string | null>(null);
+
+  async function onRegenerateWebhookKey() {
+    setWebhookRegenBusy(true);
+    setWebhookRegenError(null);
+    setWebhookRegenMessage(null);
+    try {
+      const result = await regenerateWebhookApiKey();
+      setWebhookKey(result.webhook_api_key);
+      setWebhookKeyRevealed(true);
+      setWebhookRegenConfirming(false);
+      setWebhookRegenMessage("Webhook key regenerated. Update the URL in every Radarr/Sonarr/Tautulli/Jellyfin/Emby webhook.");
+    } catch (err) {
+      setWebhookRegenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWebhookRegenBusy(false);
+    }
+  }
 
   async function onChangePassword(event: FormEvent) {
     event.preventDefault();
@@ -7049,6 +7075,64 @@ function SecurityAccountControls(props: {
                 : "Admin account"}
         </p>
       </div>
+      {mode !== "disabled" ? (
+        <div className="max-w-md space-y-2">
+          <p className="text-[14px] text-slate-400">Webhook API key</p>
+          <p className="ui-field-description text-slate-400">
+            Required as <code>?apikey=</code> on every Radarr/Sonarr/Tautulli/Jellyfin/Emby webhook URL — those services
+            aren&apos;t browser sessions and can&apos;t log in, so this is a separate credential just for them. Already
+            included automatically in the webhook URLs shown during setup.
+          </p>
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-200">
+              {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 px-3 py-2 rounded-lg text-[13px] border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookKeyRevealed((v) => !v)}
+            >
+              {webhookKeyRevealed ? "Hide" : "Reveal"}
+            </button>
+          </div>
+          {!webhookRegenConfirming ? (
+            <button
+              type="button"
+              className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookRegenConfirming(true)}
+            >
+              Regenerate
+            </button>
+          ) : (
+            <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <p className="text-[13px] text-amber-200">
+                This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
+                webhook will start failing until you re-paste the updated URL from onboarding/settings into each of them.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={webhookRegenBusy}
+                  className="px-3 py-1.5 rounded-md text-[13px] bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-50"
+                  onClick={() => void onRegenerateWebhookKey()}
+                >
+                  {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
+                </button>
+                <button
+                  type="button"
+                  disabled={webhookRegenBusy}
+                  className="px-3 py-1.5 rounded-md text-[13px] border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                  onClick={() => setWebhookRegenConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
+          {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
+        </div>
+      ) : null}
       {mode === "builtin" ? (
         <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
           <p className="text-[14px] text-slate-400">Change password</p>
@@ -7451,6 +7535,7 @@ function SettingsPanel(props: {
                   authStatus={props.authStatus}
                   accentHex={accent.hex}
                   onLogout={props.onLogout}
+                  webhookApiKey={resolveWebhookApiKey(props.values)}
                 />
               ) : null}
               {active.name === "Paths" ? (

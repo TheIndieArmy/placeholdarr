@@ -13,6 +13,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Request
+from sqlalchemy.exc import IntegrityError
 from starlette.responses import JSONResponse
 
 from core.logger import logger
@@ -321,6 +322,9 @@ def create_admin_account(username: str, password: str, session=None) -> None:
             session.close()
 
 
+WEBHOOK_API_KEY_DESCRIPTION = "API key required on POST /webhook (?apikey=) for Radarr/Sonarr/Tautulli/Jellyfin/Emby callers"
+
+
 def generate_webhook_api_key() -> str:
     return secrets.token_hex(20)  # 40 hex chars, matches a typical Radarr/Sonarr API key's shape
 
@@ -329,6 +333,15 @@ def get_webhook_api_key(session=None) -> str | None:
     value = _get_config_value(AUTH_WEBHOOK_API_KEY_KEY, session=session)
     text = str(value or "").strip()
     return text or None
+
+
+def _store_webhook_api_key(key: str, session=None) -> None:
+    _set_config_value(
+        AUTH_WEBHOOK_API_KEY_KEY,
+        key,
+        description=WEBHOOK_API_KEY_DESCRIPTION,
+        session=session,
+    )
 
 
 def ensure_webhook_api_key(session=None) -> str:
@@ -346,12 +359,17 @@ def ensure_webhook_api_key(session=None) -> str:
     if existing:
         return existing
     generated = generate_webhook_api_key()
-    _set_config_value(
-        AUTH_WEBHOOK_API_KEY_KEY,
-        generated,
-        description="API key required on POST /webhook (?apikey=) for Radarr/Sonarr/Tautulli/Jellyfin/Emby callers",
-        session=session,
-    )
+    try:
+        _store_webhook_api_key(generated, session=session)
+    except IntegrityError:
+        # Lost a race with a concurrent first-time caller (e.g. two tabs
+        # both loading Settings right after setup). The unique AppConfig.key
+        # index means exactly one insert won — re-read and use that one
+        # instead of returning a key that was never actually persisted.
+        existing = get_webhook_api_key(session=session)
+        if existing:
+            return existing
+        raise
     return generated
 
 
@@ -360,12 +378,7 @@ def regenerate_webhook_api_key(session=None) -> str:
     webhook connection until the URLs are re-pasted with the new key — the
     caller is responsible for warning about that before invoking this."""
     generated = generate_webhook_api_key()
-    _set_config_value(
-        AUTH_WEBHOOK_API_KEY_KEY,
-        generated,
-        description="API key required on POST /webhook (?apikey=) for Radarr/Sonarr/Tautulli/Jellyfin/Emby callers",
-        session=session,
-    )
+    _store_webhook_api_key(generated, session=session)
     return generated
 
 

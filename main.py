@@ -577,6 +577,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if get_auth_mode() != "disabled":
             provided_key = request.query_params.get("apikey")
             if not verify_webhook_api_key(provided_key):
+                logger.warning(
+                    "Webhook rejected: missing or invalid apikey "
+                    f"instance={request.query_params.get('instance', '').strip() or 'unknown'} "
+                    f"present={'yes' if provided_key else 'no'}",
+                    extra={'emoji_type': 'warning'},
+                )
                 raise HTTPException(status_code=401, detail="Invalid or missing apikey")
 
         payload = await request.json()
