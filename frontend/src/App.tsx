@@ -1398,6 +1398,10 @@ export function App() {
         nextValues[field.key] = field.value;
       });
     });
+    // Not a settings field — read-only, used only by the webhook-URL builders
+    // below (resolveWebhookApiKey). See services/auth.py's
+    // ensure_webhook_api_key() for where this comes from.
+    nextValues.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
 
     setFieldValues(nextValues);
     setBaselineValues(nextValues);
@@ -5237,11 +5241,24 @@ function resolveWebhookDisplayOrigin(values: FieldValueMap): string {
   return typeof window !== "undefined" ? window.location.origin : "";
 }
 
-function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string) {
+/** /webhook requires ?apikey= (see services/auth.py's verify_webhook_api_key) —
+ * read from the same values map the settings payload already populates it
+ * into (App.tsx's loadSettings), so no separate fetch/prop-threading is needed. */
+function resolveWebhookApiKey(values: FieldValueMap): string {
+  return String(values.WEBHOOK_API_KEY ?? "").trim();
+}
+
+function appendWebhookApiKey(url: string, apiKey: string): string {
+  if (!url || !apiKey) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}apikey=${encodeURIComponent(apiKey)}`;
+}
+
+function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string, apiKey: string) {
   const id = String(instance_id || "").trim().toLowerCase();
   const key = normalizeInstanceKey(String(instance_key || ""));
-  const byId = id ? `${origin}/webhook?instance_id=${encodeURIComponent(id)}` : "";
-  const byKey = `${origin}/webhook?instance=${encodeURIComponent(key)}`;
+  const byId = id ? appendWebhookApiKey(`${origin}/webhook?instance_id=${encodeURIComponent(id)}`, apiKey) : "";
+  const byKey = appendWebhookApiKey(`${origin}/webhook?instance=${encodeURIComponent(key)}`, apiKey);
   const uuidLike = id.length > 0 && arrInstanceIdEmbedsUuid(id);
   const primary = id ? byId : byKey;
   return { primary, byId: id ? byId : "", byKey, uuidLike };
@@ -5839,7 +5856,8 @@ function ArrInstancesEditor(props: {
 
   function instanceWebhookUrls(instance_id: string, instance_key: string) {
     const origin = resolveWebhookDisplayOrigin(props.values);
-    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key);
+    const apiKey = resolveWebhookApiKey(props.values);
+    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key, apiKey);
   }
 
   function onSlotPanelSaveClick() {
@@ -7872,6 +7890,7 @@ function SettingsPanel(props: {
         onClose={() => setPlaybackWebhookDialog(null)}
         accent={accent}
         displayOrigin={resolveWebhookDisplayOrigin(props.values)}
+        webhookApiKey={resolveWebhookApiKey(props.values)}
       />
     ) : null}
     </>
@@ -9304,9 +9323,13 @@ function PlaybackWebhookSetupModal(props: {
   onClose: () => void;
   accent: { hex: string };
   displayOrigin: string;
+  webhookApiKey: string;
 }) {
   const pb = props.dialog;
-  const webhookUrl = `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
+  const webhookUrl = appendWebhookApiKey(
+    `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`,
+    props.webhookApiKey,
+  );
   const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
   const name = svcMeta?.name ?? pb.serviceId;
   return (
@@ -10681,6 +10704,7 @@ function OnboardingWizard(props: {
           onClose={() => setPlaybackWebhookDialog(null)}
           accent={accent}
           displayOrigin={resolveWebhookDisplayOrigin(props.values)}
+          webhookApiKey={resolveWebhookApiKey(props.values)}
         />
       ) : null}
     </>

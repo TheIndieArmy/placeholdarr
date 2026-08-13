@@ -471,6 +471,8 @@ export interface SettingsStatus {
 export interface SettingsPayload {
   status: SettingsStatus;
   sections: SettingsSection[];
+  /** Not a settings field — read-only, used to display the webhook URLs Radarr/Sonarr/etc. need. */
+  webhook_api_key?: string | null;
 }
 
 export interface SaveSettingsResponse {

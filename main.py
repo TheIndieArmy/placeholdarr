@@ -567,6 +567,18 @@ app.add_middleware(
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
+        from services.auth import get_auth_mode, verify_webhook_api_key
+
+        # /webhook is exempt from the cookie/CSRF checks in AuthGateMiddleware
+        # (Radarr/Sonarr/Tautulli/Jellyfin/Emby aren't browser sessions and
+        # can't log in) — it needs its own, independent credential instead.
+        # Skipped only in AUTH_MODE=disabled, matching that mode's explicit
+        # "no login checks anywhere" intent.
+        if get_auth_mode() != "disabled":
+            provided_key = request.query_params.get("apikey")
+            if not verify_webhook_api_key(provided_key):
+                raise HTTPException(status_code=401, detail="Invalid or missing apikey")
+
         payload = await request.json()
         instance_raw = request.query_params.get("instance", "").strip() or None
         instance_id_raw = request.query_params.get("instance_id", "").strip() or None

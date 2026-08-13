@@ -25,6 +25,7 @@ AUTH_PASSWORD_HASH_KEY = "AUTH_PASSWORD_HASH"
 AUTH_SESSION_SECRET_KEY = "AUTH_SESSION_SECRET"
 AUTH_MODE_KEY = "AUTH_MODE"
 AUTH_TRUSTED_PROXIES_KEY = "AUTH_TRUSTED_PROXIES"
+AUTH_WEBHOOK_API_KEY_KEY = "AUTH_WEBHOOK_API_KEY"
 
 SESSION_USER_KEY = "auth_user"
 SESSION_CSRF_KEY = "csrf_token"
@@ -312,9 +313,69 @@ def create_admin_account(username: str, password: str, session=None) -> None:
             setattr(settings, AUTH_MODE_KEY, DEFAULT_AUTH_MODE)
         except Exception:
             pass
+        # Provision a webhook key alongside the account so it's ready the
+        # moment onboarding shows Radarr/Sonarr/Tautulli/Jellyfin webhook URLs.
+        ensure_webhook_api_key(session=session)
     finally:
         if owns:
             session.close()
+
+
+def generate_webhook_api_key() -> str:
+    return secrets.token_hex(20)  # 40 hex chars, matches a typical Radarr/Sonarr API key's shape
+
+
+def get_webhook_api_key(session=None) -> str | None:
+    value = _get_config_value(AUTH_WEBHOOK_API_KEY_KEY, session=session)
+    text = str(value or "").strip()
+    return text or None
+
+
+def ensure_webhook_api_key(session=None) -> str:
+    """Return the current webhook API key, creating one on first use.
+
+    Kept separate from AUTH_SESSION_SECRET / the password hash: this key
+    authenticates POST /webhook (called by Radarr/Sonarr/Tautulli/Jellyfin/
+    Emby, not a browser — see is_auth_allowlisted, which exempts /webhook
+    from the cookie/CSRF checks entirely since those callers can't log in).
+    Never rotated implicitly by create_admin_account/change_admin_password —
+    only regenerate_webhook_api_key() rotates it, since doing so silently
+    would break every already-configured webhook connection.
+    """
+    existing = get_webhook_api_key(session=session)
+    if existing:
+        return existing
+    generated = generate_webhook_api_key()
+    _set_config_value(
+        AUTH_WEBHOOK_API_KEY_KEY,
+        generated,
+        description="API key required on POST /webhook (?apikey=) for Radarr/Sonarr/Tautulli/Jellyfin/Emby callers",
+        session=session,
+    )
+    return generated
+
+
+def regenerate_webhook_api_key(session=None) -> str:
+    """Explicit rotation, e.g. from a Settings action. Breaks every existing
+    webhook connection until the URLs are re-pasted with the new key — the
+    caller is responsible for warning about that before invoking this."""
+    generated = generate_webhook_api_key()
+    _set_config_value(
+        AUTH_WEBHOOK_API_KEY_KEY,
+        generated,
+        description="API key required on POST /webhook (?apikey=) for Radarr/Sonarr/Tautulli/Jellyfin/Emby callers",
+        session=session,
+    )
+    return generated
+
+
+def verify_webhook_api_key(provided: str | None, session=None) -> bool:
+    if not provided:
+        return False
+    stored = get_webhook_api_key(session=session)
+    if not stored:
+        return False
+    return secrets.compare_digest(str(provided), stored)
 
 
 def change_admin_password(current_password: str, new_password: str, session=None) -> None:
