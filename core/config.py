@@ -199,6 +199,16 @@ class Settings(BaseSettings):
     # How often to run enabled collection recipes. <= 0 disables the scheduled job.
     COLLECTIONS_SYNC_INTERVAL_HOURS: int = 24
 
+    # Dashboard authentication (see services/auth.py). Env AUTH_MODE overrides DB when set.
+    AUTH_MODE: str = os.getenv("AUTH_MODE", "builtin").split("#")[0].strip().lower() or "builtin"
+    AUTH_TRUSTED_PROXIES: str = os.getenv("AUTH_TRUSTED_PROXIES", "").split("#")[0].strip()
+    AUTH_COOKIE_SECURE: bool = os.getenv("AUTH_COOKIE_SECURE", "false").split("#")[0].strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
     # Library Paths
     LIBRARY_ROOT: str = ""
     MOVIE_LIBRARY_FOLDER: str = ""

@@ -7,11 +7,23 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-08-13
+
 ### Summary
 
-This unreleased build adds **Plex Collections automation**: saved recipes pull titles from TMDB, MDBList, Trakt, or your Placeholdarr catalog, filter and sort them, then sync membership into a Plex collection on a schedule. A new **Collections** dashboard tab provides a block-based editor with **live preview**, per-title **explain**, manual runs, and integration with Activity → Tasks.
+This release adds **Plex Collections automation (Beta)**: saved recipes pull titles from TMDB, MDBList, Trakt, or your Placeholdarr catalog, filter and sort them, then sync membership into a Plex collection on a schedule. A new **Collections** dashboard tab provides a block-based editor with **live preview**, per-title **explain**, manual runs, and integration with Activity → Tasks.
 
-Also included: **favicon** assets for the dashboard, a shared **toggle switch** component, and **TMDB attribution** in Settings.
+It also closes **[#58](https://github.com/TheIndieArmy/placeholdarr/issues/58)** with **dashboard authentication on by default** (stronger than a bare *arr-style login): Argon2id passwords, signed sessions, CSRF, rate limits, and optional reverse-proxy **forward auth**. ARR instance **API keys are redacted** in settings responses. Media Integrations cards gain an **enable/pause toggle** while keeping **Remove connection**.
+
+Also included: **favicon** assets, a shared **toggle switch** component, and **TMDB attribution** in Settings.
+
+### Security
+
+- **Dashboard auth (default on):** first-run / post-upgrade admin account with Argon2id password hashing, signed session cookies (14-day lifetime), CSRF protection on mutating `/api` calls, and login rate limiting.
+- **Auth modes:** `builtin` (default), `forward_auth` (trust `Remote-User` / `X-Forwarded-User` only from `AUTH_TRUSTED_PROXIES`), and `disabled` (explicit opt-out; documented as unsafe if the port is exposed).
+- **Secret redaction:** `ARR_INSTANCES_JSON` no longer returns plaintext `api_key` values to the browser; blank keys retain the saved server value on save (same UX as other secret fields).
+- **Docs:** README Security section and docker-compose port warning for trusted-network / reverse-proxy deployments.
+- **Fixes [#58](https://github.com/TheIndieArmy/placeholdarr/issues/58):** unauthenticated dashboard/API credential exposure.
 
 ### Collections — overview
 
@@ -32,10 +44,13 @@ Typical use: a “Trending this week” or “Recently aired” collection in a 
 - **Scheduling**: Global `collections_sync` interval (Settings) plus per-recipe override (hourly through weekly). Seasonal **active windows** (`MM-DD` ranges, including wrap-around) with *keep* or *clear collection when inactive*.
 - **Plex sync**: Lists all Plex movie/show sections; resolves by TMDB/TVDB provider ids; diffs membership; does not delete the Plex collection when a recipe is removed.
 - **Tasks**: `collections_sync` in Activity → Tasks (Run now, history); per-recipe Run now from the list.
+- **Plex required**: When Plex is not configured or unreachable, Collections shows a banner with a Settings shortcut; **New Collection** and **Run now** are disabled. Existing recipes remain listed.
 
 ### Added
 
+- **Dashboard authentication**: Admin setup/login UI, `/api/auth/*` routes, session middleware, CSRF + rate limits, Settings → Security (`AUTH_MODE`, trusted proxies, change password, logout).
 - **Collections builder (end-to-end)**: Recipe CRUD API, rule engine, Plex collection sync, TMDB/MDBList/Trakt list clients, `collection_recipe` DB table (Alembic `0022`), and Collections dashboard tab with list view + block editor pipeline (Sources → Filters → Pins → Arrange).
+- **Collections Beta label**: Sidebar nav and Collections page header show a Beta chip while the feature stabilizes.
 - **Collections API**: `GET/POST /api/collections`, `GET/PUT/DELETE /api/collections/{id}`, toggle, manual run, `plex-sections`, `tmdb-meta`, `builder-meta`, `POST /api/collections/preview`, and `POST /api/collections/explain`.
 - **Source blocks**: `tmdb_trending`, `tmdb_popular`, `tmdb_upcoming`, `tmdb_discover`, `tmdb_list`, `mdblist`, `trakt_list`, and `catalog` with per-source limits and multi-source union/dedupe.
 - **Filter blocks**: Genre, year, certification, studio/network, monitored, quality profile, original language, instance, release window, and rating — backed by ARR metadata and catalog fields.
@@ -50,6 +65,7 @@ Typical use: a “Trending this week” or “Recently aired” collection in a 
 - **Collections UI theming**: `collectionTheme.ts` with light/dark tokens; responsive editor layout with preview rail.
 - **Shared `ToggleSwitch`**: Reusable toggle used in Collections and across Settings/other dashboard controls.
 - **Favicon**: `favicon.ico`, 16×16 and 32×32 PNGs, and `apple-touch-icon.png`; served from the dashboard static routes; link tags in `index.html`.
+- **Dependencies**: `argon2-cffi`, `itsdangerous`, and `httpx` for auth sessions and tests.
 
 ### Changed
 
@@ -57,11 +73,15 @@ Typical use: a “Trending this week” or “Recently aired” collection in a 
 - **Release window defaults**: New movie release-window filters default to **theatrical** release; dropdown order is theatrical → digital → physical.
 - **Dashboard navigation**: New Collections tab; library catalog cache passed through for pin search and explain typeahead.
 - **Task scheduler**: Collections sync job respects per-recipe interval overrides; recipe CRUD/toggle refreshes the collections schedule.
+- **Media Integrations cards**: Enable/pause toggle on connected Plex/Jellyfin/Emby cards (Settings and onboarding) without opening Configure; **Remove connection** still clears card fields and returns to Connect.
+- **Collections without Plex**: Banner + Settings shortcut; New Collection and Run now disabled until Plex libraries are available.
 
 ### Fixed
 
 - **Collections preview validation**: Engine accepts movie release-window bases (theatrical, digital, physical) for live preview and saved recipes.
 - **Advanced filter toggle**: Empty or linear filter trees no longer grey out the Advanced filtering switch incorrectly.
+- **Auth mode dropdown**: `AUTH_MODE` options use `{value, label}` objects so the Security settings select is not blank.
+- **Collections nav label**: Beta chip no longer truncates “Collections” in the sidebar.
 
 ## [0.9.14] - 2026-06-09
 

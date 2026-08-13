@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type FormEvent,
   type ReactNode,
 } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -29,7 +30,9 @@ import {
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
 import { postTaskRun } from "./api/tasks";
-import { fetchJson, postJson } from "./api/client";
+import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
+import { changePassword, getAuthStatus, logoutAuth, type AuthStatus } from "./api/auth";
+import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
 import plexIcon from "./assets/services/plex.svg";
@@ -166,6 +169,7 @@ function readStoredThemeMode(): ThemeMode {
   return "dark";
 }
 const SETTINGS_SECTION_ORDER = [
+  "Security",
   "Media Integrations",
   "ARR Integrations",
   "Paths",
@@ -176,24 +180,26 @@ const SETTINGS_SECTION_ORDER = [
   "Advanced",
 ];
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
+  Security: "shield_lock",
   "Media Integrations": "hub",
   "ARR Integrations": "dns",
-  "Paths": "folder",
+  Paths: "folder",
   "Library sync": "sync",
-  "Calendar": "calendar_month",
-  "Lookahead": "fast_forward",
+  Calendar: "calendar_month",
+  Lookahead: "fast_forward",
   "Status Updates": "edit_notifications",
-  "Advanced": "tune",
+  Advanced: "tune",
 };
 const SETTINGS_SECTION_SLUGS: Record<string, string> = {
+  Security: "security",
   "Media Integrations": "media-integrations",
   "ARR Integrations": "arr-integrations",
-  "Paths": "paths",
+  Paths: "paths",
   "Library sync": "library-sync",
-  "Calendar": "calendar",
-  "Lookahead": "lookahead",
+  Calendar: "calendar",
+  Lookahead: "lookahead",
   "Status Updates": "status-updates",
-  "Advanced": "advanced",
+  Advanced: "advanced",
 };
 
 const LOOKAHEAD_FILTER_KEYS = [
@@ -711,6 +717,10 @@ export function App() {
     setupCompleteRef.current = setupStatus?.setup_complete;
   }, [setupStatus]);
 
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authBootError, setAuthBootError] = useState<string | null>(null);
+  const authReady = Boolean(authStatus?.authenticated);
+
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -757,7 +767,7 @@ export function App() {
   const refreshTasksRef = useRef<() => Promise<void>>(async () => {});
 
   const { eventsConnected } = useDashboardEvents({
-    enabled: true,
+    enabled: authReady,
     onConnected: clearReconnectError,
     onDisconnected: () => {
       /* health fallback hook takes over */
@@ -778,7 +788,7 @@ export function App() {
   });
 
   useApiHealthCheck({
-    enabled: !eventsConnected,
+    enabled: authReady && !eventsConnected,
     onHealthy: clearReconnectError,
     onUnhealthy: markApiUnhealthy,
   });
@@ -790,7 +800,7 @@ export function App() {
     refreshLibraryShelves,
   } = useLibraryShelves({
     listShelf: libraryListShelf,
-    enabled: currentTab === "library" && libraryListShelf !== null,
+    enabled: authReady && currentTab === "library" && libraryListShelf !== null,
     liveVersionSync: eventsConnected,
     onSuccess: () => setLastDashboardSuccessAt(Date.now()),
     onError: (message) => setErrorMessage(message),
@@ -822,7 +832,7 @@ export function App() {
     taskHistory,
     refreshTasks,
   } = useActivityTasks({
-    enabled: currentTab === "activity" && activitySubPage === "tasks",
+    enabled: authReady && currentTab === "activity" && activitySubPage === "tasks",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
     onRefreshing: setDashboardRefreshing,
@@ -836,13 +846,13 @@ export function App() {
 
   const { activity, placeholderActivity } = useActivityFeed({
     subPage: activitySubPage,
-    enabled: currentTab === "activity" && activitySubPage !== "tasks",
+    enabled: authReady && currentTab === "activity" && activitySubPage !== "tasks",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
   });
 
   const { calendar } = useCalendarData({
-    enabled: currentTab === "calendar",
+    enabled: authReady && currentTab === "calendar",
     month: calendarMonth,
     onMonthResolved: setCalendarMonth,
     onSuccess: markTabDataFresh,
@@ -850,13 +860,13 @@ export function App() {
   });
 
   const { errors } = useErrorsFeed({
-    enabled: currentTab === "errors",
+    enabled: authReady && currentTab === "errors",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
   });
 
   const { logs, logFile, logCaptureLevel } = useLogsStream({
-    enabled: currentTab === "logs",
+    enabled: authReady && currentTab === "logs",
     level: logLevel,
     tailLines: LOG_TAIL_LINES,
     onSuccess: markTabDataFresh,
@@ -864,7 +874,7 @@ export function App() {
   });
 
   useSetupStatusPoll({
-    enabled: currentTab !== "setup" || setupStatus?.setup_complete === true,
+    enabled: authReady && (currentTab !== "setup" || setupStatus?.setup_complete === true),
     onStatus: (status) => {
       setSetupStatus(status);
       setOnboardingVisible(!status.setup_complete);
@@ -876,6 +886,7 @@ export function App() {
 
   useStartupReadyPoll({
     enabled:
+      authReady &&
       setupStatus?.setup_complete === true &&
       setupStatus.startup_sync_complete === false &&
       !eventsConnected,
@@ -1049,6 +1060,7 @@ export function App() {
 
   /** Setup wizard — load on tab enter and tab focus only (no periodic 5s poll). */
   useEffect(() => {
+    if (!authReady) return;
     if (currentTab !== "setup") return;
 
     let stopped = false;
@@ -1105,10 +1117,11 @@ export function App() {
       stopped = true;
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [currentTab, location.pathname, location.search]);
+  }, [authReady, currentTab, location.pathname, location.search]);
 
   /** Settings: reload on tab focus when there are no unsaved edits (no periodic 5s poll). */
   useEffect(() => {
+    if (!authReady) return;
     if (currentTab !== "settings") return;
 
     let stopped = false;
@@ -1272,6 +1285,7 @@ export function App() {
   }, [onboardingVisible]);
 
   useEffect(() => {
+    if (!authReady) return;
     if (setupStatus?.setup_complete !== false) return;
     if (settingsPayload) return;
     // `/setup` bootstrap uses `loadSettings` from the tab refresh loop — avoid a duplicate first fetch.
@@ -1285,7 +1299,7 @@ export function App() {
     return () => {
       stopped = true;
     };
-  }, [settingsPayload, setupStatus?.setup_complete, location.pathname]);
+  }, [authReady, settingsPayload, setupStatus?.setup_complete, location.pathname]);
 
   useEffect(() => {
     if (loading || !setupStatus) return;
@@ -1699,6 +1713,7 @@ export function App() {
           libraryItems={allLibraryItems}
           libraryLoading={libraryLoading}
           onEnsureLibrary={ensureLibraryLoaded}
+          onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
         />
       );
     }
@@ -1767,6 +1782,11 @@ export function App() {
           feedbackKind={settingsFeedbackKind}
           brand={brand}
           themeMode={themeMode}
+          authStatus={authStatus}
+          onLogout={async () => {
+            const status = await logoutAuth();
+            setAuthStatus(status);
+          }}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
           onStatusMessagesMetaChange={handleStatusMessagesMetaChange}
           registerStatusMessagesSaveFlow={registerStatusMessagesSaveFlow}
@@ -1895,6 +1915,74 @@ export function App() {
       /* ignore */
     }
   }, [themeMode]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAuthStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              authenticated: false,
+              username: null,
+            }
+          : prev,
+      );
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await getAuthStatus();
+        if (!cancelled) {
+          setAuthStatus(status);
+          setAuthBootError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setAuthBootError(err instanceof Error ? err.message : "Unable to load authentication status.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const authShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
+
+  if (authStatus == null) {
+    return (
+      <SetupBootShell
+        setupShellClass={authShellClass}
+        surfaceStyle={setupLoadingShellStyle}
+        brand={brand}
+        accentHex={brandAccent.hex}
+        appLabel={brandMeta.label}
+        errorMessage={authBootError || errorMessage}
+        statusMessage={authBootError ? "Authentication unavailable" : "Checking authentication…"}
+      />
+    );
+  }
+
+  if (!authStatus.authenticated) {
+    return (
+      <AuthGate
+        status={authStatus}
+        shellClass={authShellClass}
+        surfaceStyle={setupLoadingShellStyle}
+        accentHex={brandAccent.hex}
+        appLabel={brandMeta.label}
+        onAuthenticated={(status) => {
+          setAuthStatus(status);
+          setAuthBootError(null);
+          setErrorMessage(null);
+        }}
+      />
+    );
+  }
 
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
@@ -2127,21 +2215,35 @@ export function App() {
                   ) : null}
 
                   {[
-                    { icon: "video_library", label: "Collections", path: "/collections" },
-                    { icon: "calendar_month", label: "Calendar", path: "/calendar" },
-                    { icon: "error", label: "Errors", path: "/errors" },
-                    { icon: "terminal", label: "Logs", path: "/logs" },
-                    { icon: "settings", label: "Settings", path: "/settings" },
-                  ].map(({ icon, label, path }) =>
+                    { icon: "video_library", label: "Collections", path: "/collections", beta: true },
+                    { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
+                    { icon: "error", label: "Errors", path: "/errors", beta: false },
+                    { icon: "terminal", label: "Logs", path: "/logs", beta: false },
+                    { icon: "settings", label: "Settings", path: "/settings", beta: false },
+                  ].map(({ icon, label, path, beta }) =>
                     isActive(path) ? (
                       <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass} style={navActiveStyle}>
                         <span className="material-symbols-outlined">{icon}</span>
-                        <span>{label}</span>
+                        <span className="flex items-center gap-1.5">
+                          <span>{label}</span>
+                          {beta ? (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+                              Beta
+                            </span>
+                          ) : null}
+                        </span>
                       </button>
                     ) : (
                       <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navInactiveClass}>
                         <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
-                        <span>{label}</span>
+                        <span className="flex items-center gap-1.5">
+                          <span>{label}</span>
+                          {beta ? (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+                              Beta
+                            </span>
+                          ) : null}
+                        </span>
                       </button>
                     ),
                   )}
@@ -5087,6 +5189,7 @@ type ArrInstanceDraft = {
   instance_key_aliases?: string[];
   url: string;
   api_key: string;
+  api_key_saved?: boolean;
   role: "primary" | "secondary" | "additional";
   priority: number;
   is_4k: boolean;
@@ -5208,6 +5311,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
               instance_key_aliases,
               url: String(obj.url || ""),
               api_key: String(obj.api_key || obj.apikey || ""),
+              api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
               role,
               priority: Number.isFinite(Number(obj.priority)) ? Number(obj.priority) : rank,
               is_4k: deriveIs4kFromRole(role),
@@ -5258,7 +5362,15 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
       }
       return out;
     })
-    .filter((row) => row.instance_key && row.url && row.api_key);
+    .filter((row) => {
+      const keyOk = Boolean(row.instance_key && row.url);
+      if (!keyOk) return false;
+      const apiKey = String(row.api_key || "").trim();
+      if (apiKey) return true;
+      // Blank key allowed when the server already has a saved key for this slot.
+      const draft = instances.find((d) => String(d.instance_id || "").toLowerCase() === String(row.instance_id || "").toLowerCase());
+      return Boolean(draft?.api_key_saved);
+    });
   return JSON.stringify(clean);
 }
 
@@ -5300,7 +5412,10 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
   const instances = parseArrInstancesFromValues(values);
   const first = instances.find((row) => row.arr_type === arrType);
   if (!first) return false;
-  return String(first.url || "").trim().length > 0 && String(first.api_key || "").trim().length > 0;
+  return (
+    String(first.url || "").trim().length > 0 &&
+    (String(first.api_key || "").trim().length > 0 || Boolean(first.api_key_saved))
+  );
 }
 
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
@@ -5596,6 +5711,7 @@ function ArrInstancesEditor(props: {
       instance_key: instanceKey,
       url: "",
       api_key: "",
+      api_key_saved: false,
       role,
       priority: slotIndex,
       is_4k: deriveIs4kFromRole(role),
@@ -5673,6 +5789,22 @@ function ArrInstancesEditor(props: {
 
   async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: 0 | 1) {
     setTestState((prev) => ({ ...prev, [item.id]: { ok: true, message: "Testing..." } }));
+    if (!String(item.api_key || "").trim() && item.api_key_saved) {
+      const result = {
+        ok: false,
+        message: "Re-enter the API key to test (saved key is not sent to the browser).",
+      };
+      setTestState((prev) => ({ ...prev, [item.id]: result }));
+      if (slotIndex === 0 && primaryEnabled[arrType]) {
+        setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
+        props.onPrimaryTestStatusChange?.(arrType, false);
+        props.onSecondaryTestStatusChange?.(arrType, false);
+      }
+      if (slotIndex === 1 && secondaryEnabled[arrType]) {
+        props.onSecondaryTestStatusChange?.(arrType, false);
+      }
+      return result;
+    }
     const result = await testIntegrationConnection({
       service: item.arr_type,
       url: String(item.url || ""),
@@ -5713,7 +5845,9 @@ function ArrInstancesEditor(props: {
   function onSlotPanelSaveClick() {
     if (!slotPanel) return;
     const snap = slotFor(slotPanel.arrType, slotPanel.slotIndex);
-    const credsOk = Boolean(String(snap.url || "").trim() && String(snap.api_key || "").trim());
+    const credsOk = Boolean(
+      String(snap.url || "").trim() && (String(snap.api_key || "").trim() || snap.api_key_saved),
+    );
     const rawSnap = slotPanelSnapshotRef.current;
     let prevNorm = "";
     if (rawSnap != null) {
@@ -5880,7 +6014,7 @@ function ArrInstancesEditor(props: {
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
             value={item.api_key}
             onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
-            placeholder="API key"
+            placeholder={item.api_key_saved ? "Saved value retained unless overwritten" : "API key"}
             type="password"
             disabled={isDisabled}
           />
@@ -6218,10 +6352,12 @@ function ArrInstancesEditor(props: {
             const serviceLabel = arrType === "radarr" ? "Radarr" : "Sonarr";
             const slotCommitLabel = isNew ? `Add ${serviceLabel}` : `Save ${serviceLabel}`;
             const detailsComplete =
-              String(item.url || "").trim().length > 0 && String(item.api_key || "").trim().length > 0;
+              String(item.url || "").trim().length > 0 &&
+              (String(item.api_key || "").trim().length > 0 || Boolean(item.api_key_saved));
             const dupBlocks = Boolean(slotPanelDupPeer);
-            const testDisabled = !detailsComplete || dupBlocks || slotFooterTestBusy;
-            const saveDisabled = !slotPanelTestPassed || dupBlocks || slotFooterTestBusy;
+            const testDisabled = !detailsComplete || dupBlocks || slotFooterTestBusy || (!String(item.api_key || "").trim() && Boolean(item.api_key_saved));
+            const retainedKeyOk = Boolean(!isNew && item.api_key_saved && detailsComplete);
+            const saveDisabled = (!(slotPanelTestPassed || retainedKeyOk)) || dupBlocks || slotFooterTestBusy;
             return (
               <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6">
                 <button
@@ -6282,7 +6418,7 @@ function ArrInstancesEditor(props: {
                         className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.api_key}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
-                        placeholder="API key"
+                        placeholder={item.api_key_saved ? "Saved value retained unless overwritten" : "API key"}
                         type="password"
                       />
                     </div>
@@ -6843,6 +6979,123 @@ function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" 
   );
 }
 
+function SecurityAccountControls(props: {
+  authStatus: AuthStatus | null;
+  accentHex: string;
+  onLogout: () => Promise<void>;
+}) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const mode = props.authStatus?.mode || "builtin";
+  const username = props.authStatus?.username;
+
+  async function onChangePassword(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setMessage(null);
+    if (newPassword !== confirmPassword) {
+      setError("New passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setMessage("Password updated.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-6 py-5 space-y-5">
+      <div>
+        <p className="text-[13px] font-semibold text-slate-400 mb-1">Signed in</p>
+        <p className="text-[16px] text-white font-headline">
+          {mode === "disabled"
+            ? "Authentication disabled"
+            : mode === "forward_auth"
+              ? username
+                ? `Proxy user: ${username}`
+                : "Forward-auth mode"
+              : username
+                ? `Admin: ${username}`
+                : "Admin account"}
+        </p>
+      </div>
+      {mode === "builtin" ? (
+        <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
+          <p className="text-[14px] text-slate-400">Change password</p>
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="Current password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            required
+            disabled={busy}
+          />
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="New password (min 8 characters)"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            required
+            minLength={8}
+            disabled={busy}
+          />
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="Confirm new password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            required
+            minLength={8}
+            disabled={busy}
+          />
+          {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
+          {message ? <p className="text-[14px] text-emerald-400">{message}</p> : null}
+          <button
+            type="submit"
+            disabled={busy}
+            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+            style={{ backgroundColor: props.accentHex }}
+          >
+            {busy ? "Updating…" : "Update password"}
+          </button>
+        </form>
+      ) : null}
+      {mode === "builtin" ? (
+        <div>
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+            onClick={() => void props.onLogout()}
+          >
+            Log out
+          </button>
+        </div>
+      ) : null}
+      {mode === "disabled" ? (
+        <p className="text-[14px] text-amber-300">
+          Authentication is disabled. Anyone who can reach this port has full access. Prefer builtin or forward_auth unless the
+          instance is on a private network with no published port.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 /** Keep sentences in sync with `STARTUP_SYNC_MODE` description in `services/app_config.py`. */
 function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
@@ -6890,6 +7143,8 @@ function SettingsPanel(props: {
   feedbackKind: "" | "success" | "error";
   brand: Brand;
   themeMode: ThemeMode;
+  authStatus: AuthStatus | null;
+  onLogout: () => Promise<void>;
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
@@ -7173,6 +7428,13 @@ function SettingsPanel(props: {
               <h2 className="text-[18px] font-bold text-white font-headline">{active.name}</h2>
             </div>
             <div className="divide-y divide-[#424753]/20">
+              {active.name === "Security" ? (
+                <SecurityAccountControls
+                  authStatus={props.authStatus}
+                  accentHex={accent.hex}
+                  onLogout={props.onLogout}
+                />
+              ) : null}
               {active.name === "Paths" ? (
                 <LibraryPathsForm
                   fields={active.fields}
@@ -7193,6 +7455,7 @@ function SettingsPanel(props: {
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                         {ONBOARDING_MEDIA_CARDS.map((card) => {
                           const enabled = Boolean(props.values[card.enabledKey]);
+                          const hasConnection = mediaCardHasStoredConnection(card, props.values);
                           const availableFields = card.keys.map((key) => fieldByKey.get(key)).filter(Boolean) as SettingsField[];
                           const urlField = availableFields.find((f) => URL_TEST_TARGET[f.key]);
                           const urlTest = urlField ? testResults[urlField.key] : undefined;
@@ -7202,7 +7465,10 @@ function SettingsPanel(props: {
                           const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
                           const mediaDetailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
                           return (
-                            <div key={card.id} className={`group relative flex min-h-[250px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200`}>
+                            <div
+                              key={card.id}
+                              className={`group relative flex min-h-[250px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
+                            >
                               <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
                                 {card.id === "plex" ? (
                                   <div className="flex max-w-full items-center justify-center gap-2 px-2 sm:px-3">
@@ -7221,7 +7487,7 @@ function SettingsPanel(props: {
                                 )}
                               </div>
                               <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
-                              {!enabled ? (
+                              {!hasConnection ? (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -7234,6 +7500,18 @@ function SettingsPanel(props: {
                                 </button>
                               ) : (
                                 <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
+                                  <label className="mb-3 flex items-center justify-between gap-3 select-none">
+                                    <span className="text-[14px] font-semibold text-slate-300">
+                                      {enabled ? "Enabled" : "Paused"}
+                                    </span>
+                                    <ToggleSwitch
+                                      checked={enabled}
+                                      onChange={(v) => props.onValueChange(card.enabledKey, v)}
+                                      accentHex={accent.hex}
+                                      size="sm"
+                                      ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
+                                    />
+                                  </label>
                                   {card.id === "plex" && "note" in card && card.note ? <p className="ui-field-description-compact mb-2">{card.note}</p> : null}
                                   <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
                                     <div className="flex min-w-0 gap-2">
@@ -7254,7 +7532,13 @@ function SettingsPanel(props: {
                                     ) : null}
                                   </dl>
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
-                                    {urlTest && !urlTest.ok ? <p className="text-red-400">{urlTest.message}</p> : !mediaDetailsComplete ? <p className="ui-field-description">Add URL and credentials in Configure.</p> : null}
+                                    {!enabled ? (
+                                      <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                                    ) : urlTest && !urlTest.ok ? (
+                                      <p className="text-red-400">{urlTest.message}</p>
+                                    ) : !mediaDetailsComplete ? (
+                                      <p className="ui-field-description">Add URL and credentials in Configure.</p>
+                                    ) : null}
                                   </div>
                                   <div className="mt-auto flex flex-col gap-2 pt-4">
                                     <button
@@ -7282,7 +7566,7 @@ function SettingsPanel(props: {
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        props.onValueChange(card.enabledKey, false);
+                                        clearMediaCardConnection(card, props.onValueChange);
                                         setMediaPanel((p) => (p === card.id ? null : p));
                                       }}
                                       className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
@@ -8065,7 +8349,10 @@ function StatusMessagesPanel(props: {
       }
       const resp = await fetch("/api/messages/templates", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(getCsrfToken() ? { "X-CSRF-Token": getCsrfToken() as string } : {}),
+        },
         credentials: "same-origin",
         body: JSON.stringify({
           separator,
@@ -8158,7 +8445,10 @@ function StatusMessagesPanel(props: {
     try {
       const resp = await fetch("/api/messages/templates/reset", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(getCsrfToken() ? { "X-CSRF-Token": getCsrfToken() as string } : {}),
+        },
         credentials: "same-origin",
         body: JSON.stringify({ all: true }),
       });
@@ -9129,6 +9419,28 @@ function mediaCardConnectionDetailsComplete(
   return Boolean(credField?.secret && credField.has_saved_value);
 }
 
+/** True when the card should show the connected shell (toggle / configure), not the empty Connect CTA. */
+function mediaCardHasStoredConnection(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  values: FieldValueMap,
+): boolean {
+  if (Boolean(values[card.enabledKey])) return true;
+  for (const key of card.keys) {
+    if (String(values[key] ?? "").trim().length > 0) return true;
+  }
+  return false;
+}
+
+function clearMediaCardConnection(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  onValueChange: (key: string, value: unknown) => void,
+) {
+  onValueChange(card.enabledKey, false);
+  for (const key of card.keys) {
+    onValueChange(key, "");
+  }
+}
+
 /**
  * **Spectral Data** palette (marketing guide) — recorded for hero + future UI:
  * - **SLATE** (primary dark) `#0F172A` → token `surfacePanel`
@@ -9680,6 +9992,7 @@ function OnboardingWizard(props: {
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   {ONBOARDING_MEDIA_CARDS.map((card) => {
                     const enabled = Boolean(props.values[card.enabledKey]);
+                    const hasConnection = mediaCardHasStoredConnection(card, props.values);
                     const availableFields = card.keys
                       .map((key) => fieldByKey.get(key))
                       .filter(Boolean) as SettingsField[];
@@ -9694,7 +10007,7 @@ function OnboardingWizard(props: {
                     return (
                       <div
                         key={card.id}
-                        className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200`}
+                        className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
                       >
                         <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
                           {card.id === "plex" ? (
@@ -9726,7 +10039,7 @@ function OnboardingWizard(props: {
                         </div>
                         <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
 
-                        {!enabled ? (
+                        {!hasConnection ? (
                           <button
                             type="button"
                             aria-label={`Connect ${card.title}`}
@@ -9747,6 +10060,18 @@ function OnboardingWizard(props: {
                           </button>
                         ) : (
                           <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
+                            <label className="mb-3 flex items-center justify-between gap-3 select-none">
+                              <span className="text-[14px] font-semibold text-slate-300">
+                                {enabled ? "Enabled" : "Paused"}
+                              </span>
+                              <ToggleSwitch
+                                checked={enabled}
+                                onChange={(v) => props.onChange(card.enabledKey, v)}
+                                accentHex={accent.hex}
+                                size="sm"
+                                ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
+                              />
+                            </label>
                             {card.id === "plex" && "note" in card && card.note ? (
                               <p className="ui-field-description-compact mb-2">{card.note}</p>
                             ) : null}
@@ -9775,7 +10100,9 @@ function OnboardingWizard(props: {
                               ) : null}
                             </dl>
                             <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
-                              {urlTest && !urlTest.ok ? (
+                              {!enabled ? (
+                                <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                              ) : urlTest && !urlTest.ok ? (
                                 <p className="text-red-400">{urlTest.message}</p>
                               ) : !mediaDetailsComplete ? (
                                 <p className="ui-field-description">Add URL and credentials in Configure.</p>
@@ -9818,7 +10145,7 @@ function OnboardingWizard(props: {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  props.onChange(card.enabledKey, false);
+                                  clearMediaCardConnection(card, props.onChange);
                                   setMediaPanel((p) => (p === card.id ? null : p));
                                 }}
                                 className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"

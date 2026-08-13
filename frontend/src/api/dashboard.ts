@@ -1,4 +1,4 @@
-import { fetchJson } from "./client";
+import { fetchJson, postJson } from "./client";
 import type {
   ActivityRow,
   CalendarErrorResponse,
@@ -63,12 +63,19 @@ export async function getLibrary(
 
   let response: Response;
   try {
-    response = await fetch(`/api/library?${q.toString()}`, { headers });
+    response = await fetch(`/api/library?${q.toString()}`, {
+      credentials: "same-origin",
+      headers,
+    });
   } catch (err) {
     if (err instanceof TypeError) {
       throw new Error("Cannot reach the Placeholdarr API (network error). Trying to reconnect…");
     }
     throw err instanceof Error ? err : new Error(String(err));
+  }
+
+  if (response.status === 401) {
+    throw new Error("authentication required");
   }
 
   if (response.status === 304) {
@@ -259,12 +266,7 @@ export async function saveSettings(
   if (applyScope) {
     body.apply_scope = applyScope;
   }
-  const response = await fetch("/api/settings/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  return (await response.json()) as SaveSettingsResponse;
+  return postJson<SaveSettingsResponse>("/api/settings/save", body);
 }
 
 export async function testIntegrationConnection(input: {
@@ -272,10 +274,5 @@ export async function testIntegrationConnection(input: {
   url: string;
   credential: string;
 }): Promise<IntegrationTestResponse> {
-  const response = await fetch("/api/integrations/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(input),
-  });
-  return (await response.json()) as IntegrationTestResponse;
+  return postJson<IntegrationTestResponse>("/api/integrations/test", input);
 }

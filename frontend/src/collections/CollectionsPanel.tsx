@@ -41,6 +41,8 @@ export function CollectionsPanel(props: {
   libraryItems: LibraryItem[];
   libraryLoading: boolean;
   onEnsureLibrary: () => void;
+  /** Navigate to Settings → Media Integrations (Plex). */
+  onOpenPlexSettings?: () => void;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
@@ -51,6 +53,7 @@ export function CollectionsPanel(props: {
   const [traktConfigured, setTraktConfigured] = useState(true);
   const [sections, setSections] = useState<PlexSectionOption[]>([]);
   const [sectionsError, setSectionsError] = useState<string | null>(null);
+  const [sectionsLoaded, setSectionsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -60,6 +63,8 @@ export function CollectionsPanel(props: {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<number>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const plexReady = sectionsLoaded && !sectionsError;
 
   const refresh = useCallback(async () => {
     try {
@@ -83,7 +88,11 @@ export function CollectionsPanel(props: {
         setSectionsError(null);
       })
       .catch((err) => {
+        setSections([]);
         setSectionsError(err instanceof Error ? err.message : "Plex libraries unavailable");
+      })
+      .finally(() => {
+        setSectionsLoaded(true);
       });
   }, [refresh]);
 
@@ -124,6 +133,10 @@ export function CollectionsPanel(props: {
   };
 
   const handleRun = async (recipe: CollectionRecipe) => {
+    if (!plexReady) {
+      setActionError("Plex must be configured before a collection can run.");
+      return;
+    }
     setActionError(null);
     try {
       await runCollectionRecipe(recipe.id);
@@ -156,6 +169,29 @@ export function CollectionsPanel(props: {
     }
   };
 
+  const plexBanner = sectionsError ? (
+    <div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3 text-[14px] text-yellow-300">
+      <p>
+        Collections sync membership into Plex. Enable Plex and add a URL and token under{" "}
+        <span className="font-semibold text-yellow-200">Settings → Media Integrations</span>
+        {recipes.length ? ". Existing recipes stay listed, but new collections and runs are disabled until Plex is ready." : "."}
+      </p>
+      {props.onOpenPlexSettings ? (
+        <button
+          type="button"
+          onClick={props.onOpenPlexSettings}
+          className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+            settings
+          </span>
+          Open Plex settings
+        </button>
+      ) : null}
+      <p className={`mt-2 text-[12px] ${isLight ? "text-amber-800/80" : "text-yellow-400/70"}`}>{sectionsError}</p>
+    </div>
+  ) : null;
+
   if (editing !== null) {
     return (
       <div>
@@ -176,11 +212,7 @@ export function CollectionsPanel(props: {
             {editing === "new" ? "New Collection" : `Edit: ${editing.name}`}
           </h1>
         </div>
-        {sectionsError ? (
-          <div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-2.5 text-[14px] text-yellow-300">
-            {sectionsError}
-          </div>
-        ) : null}
+        {plexBanner}
         <CollectionEditor
           recipe={editing === "new" ? null : editing}
           sections={sections}
@@ -212,16 +244,22 @@ export function CollectionsPanel(props: {
         </span>
       </div>
       <div className="flex justify-between items-center mb-6">
-        <h1 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
+        <h1 className={`text-[32px] font-black tracking-tight font-headline flex items-center gap-3 ${isLight ? "text-slate-900" : "text-white"}`}>
           Collections
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+            Beta
+          </span>
         </h1>
         <button
           type="button"
+          disabled={!plexReady}
+          title={!plexReady ? "Configure Plex in Settings before creating a collection" : undefined}
           onClick={() => {
+            if (!plexReady) return;
             setSaveError(null);
             setEditing("new");
           }}
-          className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14]"
+          className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ backgroundColor: accentHex }}
         >
           <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
@@ -231,6 +269,7 @@ export function CollectionsPanel(props: {
         </button>
       </div>
 
+      {plexBanner}
       {!tmdbConfigured ? (
         <div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-2.5 text-[14px] text-yellow-300">
           No TMDB API key configured. TMDB sources (Trending, Popular, Discover…) are disabled — add a key under
@@ -362,11 +401,11 @@ export function CollectionsPanel(props: {
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          disabled={running}
+                          disabled={running || !plexReady}
                           onClick={() => void handleRun(recipe)}
-                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors disabled:opacity-40 ${theme.iconMuted} ${isLight ? "hover:text-slate-900 hover:bg-slate-100" : "hover:text-white hover:bg-[#1e2430]"}`}
+                          className={`material-symbols-outlined rounded-md p-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${theme.iconMuted} ${isLight ? "hover:text-slate-900 hover:bg-slate-100" : "hover:text-white hover:bg-[#1e2430]"}`}
                           style={{ fontSize: 18 }}
-                          title="Run now"
+                          title={!plexReady ? "Configure Plex before running" : "Run now"}
                         >
                           play_arrow
                         </button>

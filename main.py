@@ -530,6 +530,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Dashboard authentication (session cookie + API gate). SessionMiddleware must wrap AuthGate.
+from starlette.middleware.sessions import SessionMiddleware
+from services.auth import ensure_session_secret
+from services.auth_middleware import AuthGateMiddleware
+from routes.auth import router as auth_router
+
+app.include_router(auth_router)
+
 # Dashboard UI
 from routes.dashboard import router as dashboard_router
 app.include_router(dashboard_router)
@@ -544,6 +552,17 @@ app.include_router(collections_router)
 # Customizable status message templates
 from routes.messages import router as messages_router
 app.include_router(messages_router)
+
+app.add_middleware(AuthGateMiddleware)
+_session_https_only = bool(getattr(settings, "AUTH_COOKIE_SECURE", False))
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=ensure_session_secret(),
+    session_cookie="placeholdarr_session",
+    same_site="lax",
+    https_only=_session_https_only,
+    max_age=60 * 60 * 24 * 14,
+)
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):

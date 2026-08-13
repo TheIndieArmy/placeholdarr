@@ -53,6 +53,43 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
 SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
     [
         (
+            "AUTH_MODE",
+            {
+                "section": "Security",
+                "label": "Authentication mode",
+                "description": (
+                    "builtin: Placeholdarr username/password (default). "
+                    "forward_auth: trust Remote-User / X-Forwarded-User only from AUTH_TRUSTED_PROXIES. "
+                    "disabled: no login checks (unsafe if the port is reachable)."
+                ),
+                "type": "choice",
+                "options": [
+                    {"value": "builtin", "label": "Builtin — Placeholdarr username/password (default)"},
+                    {
+                        "value": "forward_auth",
+                        "label": "Forward auth — trust Remote-User / X-Forwarded-User from trusted proxies",
+                    },
+                    {"value": "disabled", "label": "Disabled — no login checks (unsafe if the port is reachable)"},
+                ],
+                "required": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "AUTH_TRUSTED_PROXIES",
+            {
+                "section": "Security",
+                "label": "Trusted proxy CIDRs",
+                "description": (
+                    "Comma-separated IPs or CIDRs allowed to assert forward-auth identity headers "
+                    "(e.g. 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16). Required for forward_auth."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
             "ENABLE_PLEX",
             {
                 "section": "Media Integrations",
@@ -813,6 +850,7 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
     """Normalize instance_id values and carry forward prior instance_key values as webhook aliases.
 
     New rows get deterministic ids (``radarr_primary``, …). Rows that already use UUID-based ids keep them.
+    Blank ``api_key`` values on matched rows are retained from the previous JSON (secret redaction UX).
     """
     try:
         incoming = json.loads(incoming_json)
@@ -834,8 +872,16 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             str(item.get("api_key") or item.get("apikey") or "").strip(),
         )
 
+    def fp_url(item: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(item.get("arr_type") or item.get("type") or "").strip().lower(),
+            _normalize_arr_instance_url(item.get("url")),
+        )
+
     old_by_id: dict[str, dict[str, Any]] = {}
     old_by_fp: dict[tuple[str, str, str], dict[str, Any]] = {}
+    old_by_url: dict[tuple[str, str], dict[str, Any]] = {}
+    old_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for o in previous:
         if not isinstance(o, dict):
             continue
@@ -844,8 +890,13 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             old_by_id[oid] = o
         try:
             old_by_fp[fp(o)] = o
+            old_by_url[fp_url(o)] = o
         except Exception:
             continue
+        ok = _normalize_instance_key(o.get("instance_key") or o.get("key") or o.get("name") or "")
+        otype = str(o.get("arr_type") or o.get("type") or "").strip().lower()
+        if ok and otype:
+            old_by_key[(otype, ok)] = o
 
     alias_cap = 32
 
@@ -865,6 +916,20 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
                 matched = old_by_fp.get(fp(item))
             except Exception:
                 matched = None
+        if matched is None and new_key:
+            matched = old_by_key.get((arr_type, new_key))
+        if matched is None:
+            try:
+                matched = old_by_url.get(fp_url(item))
+            except Exception:
+                matched = None
+
+        # Retain previous API key when the client sends a blank (redacted) value.
+        incoming_key = str(item.get("api_key") or item.get("apikey") or "").strip()
+        if not incoming_key and matched:
+            prev_key = str(matched.get("api_key") or matched.get("apikey") or "").strip()
+            if prev_key:
+                item["api_key"] = prev_key
 
         aliases: list[str] = []
         raw_aliases = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
@@ -905,8 +970,39 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
                 deduped.append(a)
                 seen.add(a)
         item["instance_key_aliases"] = deduped[:alias_cap]
+        # Never persist client-only redaction flags.
+        item.pop("api_key_saved", None)
 
     return json.dumps(incoming)
+
+
+def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
+    """Return redacted ARR_INSTANCES_JSON string and whether any api_key was saved server-side."""
+    text = "" if raw is None else (raw if isinstance(raw, str) else json.dumps(raw))
+    text = str(text or "").strip()
+    if not text:
+        return ("[]", False)
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return (text, False)
+    if not isinstance(payload, list):
+        return (text, False)
+    any_saved = False
+    redacted: list[Any] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            redacted.append(item)
+            continue
+        row = dict(item)
+        key_present = bool(str(row.get("api_key") or row.get("apikey") or "").strip())
+        if key_present:
+            any_saved = True
+        row["api_key"] = ""
+        row.pop("apikey", None)
+        row["api_key_saved"] = key_present
+        redacted.append(row)
+    return (json.dumps(redacted), any_saved)
 
 
 def _validate_value(key: str, raw_value: Any) -> Any:
@@ -1091,6 +1187,11 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["disabled_when"] = str(meta["disabled_when"])
             if meta.get("nested"):
                 entry["nested"] = True
+            if key == "ARR_INSTANCES_JSON":
+                redacted_value, any_saved = _redact_arr_instances_json_for_payload(effective_value)
+                entry["value"] = redacted_value
+                entry["saved_value"] = None
+                entry["has_saved_value"] = any_saved or bool((row and row.value not in (None, "")))
             grouped[meta["section"]].append(entry)
         return {
             "status": get_onboarding_status(session=session),

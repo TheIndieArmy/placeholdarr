@@ -19,6 +19,8 @@ services:
       # Placeholder/media root mapping used by onboarding/settings path fields.
       - /path/on/host:/path/on/container
     ports:
+      # Dashboard listens on 8000. Auth is enabled by default (create admin on first open).
+      # Do not publish this port to the internet without builtin auth or an authenticating reverse proxy (forward_auth).
       - "8000:8000"
     restart: unless-stopped
 
