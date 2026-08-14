@@ -318,7 +318,6 @@ export function CollectionsPanel(props: {
             <tbody className={isLight ? "divide-y divide-slate-200/80" : "divide-y divide-[#424753]/15"}>
               {recipes.map((recipe) => {
                 const summary = recipe.last_run_summary;
-                const section = sections.find((s) => s.id === recipe.plex_section_id);
                 const running = runningIds.has(recipe.id);
                 return (
                   <tr
@@ -354,7 +353,11 @@ export function CollectionsPanel(props: {
                       ) : null}
                     </td>
                     <td className={`px-5 py-4 text-[15px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
-                      {section ? section.title : `Section ${recipe.plex_section_id}`}
+                      {(() => {
+                        const ids = recipe.plex_section_ids?.length ? recipe.plex_section_ids : [recipe.plex_section_id];
+                        const names = ids.map((id) => sections.find((s) => s.id === id)?.title ?? `Section ${id}`);
+                        return names.join(", ");
+                      })()}
                       <span className={`ml-1.5 text-[12px] uppercase ${isLight ? "text-slate-400" : "text-slate-600"}`}>
                         {recipe.plex_section_type === "movie" ? "Movies" : "TV"}
                       </span>

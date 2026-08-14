@@ -18,7 +18,9 @@ from services import list_sources, tmdb_client
 from services.collections.engine import (
     RecipeValidationError,
     explain_definition_item,
+    normalize_section_ids,
     preview_definition,
+    recipe_section_ids,
     run_recipe,
     validate_active_window,
     validate_definition,
@@ -41,11 +43,13 @@ def _iso(dt: datetime | None) -> str | None:
 
 def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
     window = row.active_window if isinstance(row.active_window, dict) else None
+    section_ids = recipe_section_ids(row)
     return {
         "id": row.id,
         "name": row.name,
         "enabled": bool(row.enabled),
-        "plex_section_id": row.plex_section_id,
+        "plex_section_id": section_ids[0] if section_ids else row.plex_section_id,
+        "plex_section_ids": section_ids,
         "plex_section_type": row.plex_section_type,
         "collection_title": row.collection_title,
         "definition": row.definition or {},
@@ -76,6 +80,7 @@ class RecipePayload(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     enabled: bool = True
     plex_section_id: int = Field(..., ge=1)
+    plex_section_ids: list[int] | None = None
     plex_section_type: str = Field(..., pattern="^(movie|show)$")
     collection_title: str = Field(..., min_length=1, max_length=200)
     definition: dict[str, Any]
@@ -85,6 +90,7 @@ class RecipePayload(BaseModel):
 
 class PreviewPayload(BaseModel):
     plex_section_id: int = Field(..., ge=1)
+    plex_section_ids: list[int] | None = None
     plex_section_type: str = Field(..., pattern="^(movie|show)$")
     definition: dict[str, Any]
 
@@ -106,13 +112,15 @@ async def create_recipe(body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
         window = validate_active_window(body.active_window)
+        section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
         row = CollectionRecipe(
             name=body.name.strip(),
             enabled=body.enabled,
-            plex_section_id=body.plex_section_id,
+            plex_section_id=section_ids[0],
+            plex_section_ids=section_ids,
             plex_section_type=body.plex_section_type,
             collection_title=body.collection_title.strip(),
             definition=normalized,
@@ -286,7 +294,12 @@ async def preview(body: PreviewPayload):
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
-        result = preview_definition(body.definition, body.plex_section_id, body.plex_section_type)
+        result = preview_definition(
+            body.definition,
+            body.plex_section_id,
+            body.plex_section_type,
+            extra_section_ids=body.plex_section_ids,
+        )
     except (tmdb_client.TmdbError, list_sources.ListSourceError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return result
@@ -325,6 +338,7 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
         window = validate_active_window(body.active_window)
+        section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
@@ -333,7 +347,8 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
             raise HTTPException(status_code=404, detail=f"Collection recipe {recipe_id} not found")
         row.name = body.name.strip()
         row.enabled = body.enabled
-        row.plex_section_id = body.plex_section_id
+        row.plex_section_id = section_ids[0]
+        row.plex_section_ids = section_ids
         row.plex_section_type = body.plex_section_type
         row.collection_title = body.collection_title.strip()
         row.definition = normalized

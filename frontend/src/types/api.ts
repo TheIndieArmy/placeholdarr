@@ -565,7 +565,7 @@ export interface CollectionFilterBlock {
   min_votes?: number | null;
 }
 
-export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title";
+export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title" | "rating";
 
 /** Boolean filter tree: groups carry and/or and may nest rules or sub-groups (depth ≤ 3). */
 export interface CollectionFilterGroup {
@@ -597,6 +597,8 @@ export interface CollectionDefinition {
   filters: CollectionFilters;
   limit?: number | null;
   sort?: CollectionSortOption | null;
+  /** When sort is rating (movies): which Radarr ratings.* key to order by. */
+  sort_provider?: CollectionRatingProvider | null;
   pins?: CollectionPins;
 }
 
@@ -614,6 +616,15 @@ export interface CollectionRunSummary {
   in_target_library?: number | null;
   unresolved?: number | null;
   synced?: { added: number; removed: number; total: number; created: boolean };
+  libraries?: CollectionLibrarySyncSummary[];
+}
+
+export interface CollectionLibrarySyncSummary {
+  plex_section_id: number;
+  in_target_library?: number | null;
+  unresolved?: number | null;
+  plex_error?: string | null;
+  synced?: { added: number; removed: number; total: number; created: boolean };
 }
 
 export interface CollectionActiveWindow {
@@ -628,6 +639,8 @@ export interface CollectionRecipe {
   name: string;
   enabled: boolean;
   plex_section_id: number;
+  /** Extra + primary Plex section ids (same type). First id matches plex_section_id. */
+  plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   collection_title: string;
   definition: CollectionDefinition;
@@ -738,5 +751,6 @@ export interface CollectionPreviewResponse {
   in_target_library: number | null;
   unresolved: number | null;
   plex_error: string | null;
+  libraries?: CollectionLibrarySyncSummary[];
   sample: CollectionPreviewSampleItem[];
 }

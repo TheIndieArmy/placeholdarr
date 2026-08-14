@@ -443,12 +443,20 @@ const MONTH_NAMES = [
 ];
 
 function splitMonthDay(raw: string): { month: number; day: number } {
-  const [m, d] = raw.split("-").map((p) => Number(p));
-  return { month: Math.min(Math.max(m || 1, 1), 12), day: Math.min(Math.max(d || 1, 1), 31) };
+  const parts = String(raw || "").trim().split("-").map((p) => Number(p));
+  // MM-DD or YYYY-MM-DD (last two segments are month/day).
+  const m = parts.length >= 3 ? parts[1] : parts[0];
+  const d = parts.length >= 3 ? parts[2] : parts[1];
+  return {
+    month: Math.min(Math.max(Number.isFinite(m) && m > 0 ? m : 1, 1), 12),
+    day: Math.min(Math.max(Number.isFinite(d) && d > 0 ? d : 1, 1), 31),
+  };
 }
 
 function joinMonthDay(month: number, day: number): string {
-  return `${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const m = Math.min(Math.max(Number.isFinite(month) && month > 0 ? month : 1, 1), 12);
+  const d = Math.min(Math.max(Number.isFinite(day) && day > 0 ? day : 1, 1), 31);
+  return `${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
 function MonthDayPicker(props: { value: string; onChange: (value: string) => void }) {
@@ -467,7 +475,13 @@ function MonthDayPicker(props: { value: string; onChange: (value: string) => voi
           </option>
         ))}
       </select>
-      <NumberInput value={day} min={1} max={31} width={58} onChange={(v) => props.onChange(joinMonthDay(month, v ?? 1))} />
+      <NumberInput
+        value={day}
+        min={1}
+        max={31}
+        width={58}
+        onChange={(v) => props.onChange(joinMonthDay(month, v == null || v < 1 ? 1 : v))}
+      />
     </span>
   );
 }
@@ -757,7 +771,11 @@ export function CollectionEditor(props: {
 
   const [name, setName] = useState(props.recipe?.name ?? "");
   const [enabled, setEnabled] = useState(props.recipe?.enabled ?? true);
-  const [sectionId, setSectionId] = useState<number | null>(props.recipe?.plex_section_id ?? null);
+  const [sectionIds, setSectionIds] = useState<number[]>(() => {
+    const extras = props.recipe?.plex_section_ids?.filter((id) => Number.isFinite(id) && id >= 1) ?? [];
+    if (extras.length) return extras;
+    return props.recipe?.plex_section_id ? [props.recipe.plex_section_id] : [];
+  });
   const [collectionTitle, setCollectionTitle] = useState(props.recipe?.collection_title ?? "");
   const [runIntervalHours, setRunIntervalHours] = useState<number | null>(props.recipe?.run_interval_hours ?? null);
   const [activeWindow, setActiveWindow] = useState<CollectionActiveWindow | null>(props.recipe?.active_window ?? null);
@@ -767,6 +785,7 @@ export function CollectionEditor(props: {
       : { sources: [defaultSourceBlock(props.tmdbConfigured ? "tmdb_trending" : "catalog")], filters: [], limit: 50, sort: "popularity" },
   );
 
+  const sectionId = sectionIds[0] ?? null;
   const section = useMemo(
     () => props.sections.find((s) => s.id === sectionId) ?? null,
     [props.sections, sectionId],
@@ -946,6 +965,7 @@ export function CollectionEditor(props: {
     const timer = window.setTimeout(() => {
       previewCollectionDefinition({
         plex_section_id: sectionId,
+        plex_section_ids: sectionIds,
         plex_section_type: sectionType,
         definition: JSON.parse(definitionJson) as CollectionDefinition,
       })
@@ -962,7 +982,7 @@ export function CollectionEditor(props: {
     }, 900);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [definitionJson, sectionId, sectionType]);
+  }, [definitionJson, sectionId, sectionIds, sectionType]);
 
   // ----- explain ("why isn't this title in the collection?") -----
   const [explainQuery, setExplainQuery] = useState("");
@@ -1597,7 +1617,10 @@ export function CollectionEditor(props: {
     ...(preview?.pinned_out ? [{ label: "Pinned out", value: preview.pinned_out }] : []),
     ...(preview?.pinned_in ? [{ label: "Pinned in", value: preview.pinned_in }] : []),
     { label: "Selected (sort + limit)", value: preview?.selected },
-    { label: "In target library", value: preview?.in_target_library },
+    {
+      label: sectionIds.length > 1 ? "In libraries (combined)" : "In target library",
+      value: preview?.in_target_library,
+    },
   ];
 
   return (
@@ -1608,21 +1631,43 @@ export function CollectionEditor(props: {
         {/* Recipe identity + target — picking the library first drives media type, genres, pins, and preview */}
         <div className={`${theme.identityCard} flex flex-col gap-3`}>
           <div className="flex flex-wrap items-center gap-4">
-            <label className={`flex items-center gap-2 ${theme.label}`}>
-              Plex library
-              <select
-                className={`${theme.selectField} min-w-[14rem]`}
-                value={sectionId ?? ""}
-                onChange={(e) => setSectionId(e.target.value === "" ? null : Number(e.target.value))}
-              >
-                <option value="">Select a library…</option>
-                {props.sections.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title} ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="flex flex-col gap-1.5 min-w-[16rem]">
+              <span className={theme.label}>Plex libraries</span>
+              <p className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
+                Same collection name is created in each selected library (same type only).
+              </p>
+              <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
+                {props.sections.map((s) => {
+                  const selected = sectionIds.includes(s.id);
+                  const typeLocked = sectionType && s.type !== sectionType && sectionIds.length > 0;
+                  return (
+                    <label
+                      key={s.id}
+                      className={`flex items-center gap-2 text-[13px] ${typeLocked ? "opacity-40 pointer-events-none" : "cursor-pointer"} ${theme.label}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={typeLocked}
+                        onChange={() => {
+                          setSectionIds((prev) => {
+                            if (prev.includes(s.id)) return prev.filter((id) => id !== s.id);
+                            if (prev.length && s.type !== sectionType) return prev;
+                            return [...prev, s.id];
+                          });
+                        }}
+                      />
+                      <span>
+                        {s.title}{" "}
+                        <span className="opacity-70">
+                          ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Collection title
               <input
@@ -1939,16 +1984,54 @@ export function CollectionEditor(props: {
               <select
                 className={theme.selectField}
                 value={definition.sort ?? "popularity"}
-                onChange={(e) =>
-                  setDefinition((prev) => ({ ...prev, sort: e.target.value as CollectionDefinition["sort"] }))
-                }
+                onChange={(e) => {
+                  const next = e.target.value as CollectionDefinition["sort"];
+                  setDefinition((prev) => ({
+                    ...prev,
+                    sort: next,
+                    sort_provider:
+                      next === "rating"
+                        ? sectionType === "movie"
+                          ? (prev.sort_provider ?? "imdb")
+                          : null
+                        : null,
+                  }));
+                }}
               >
                 <option value="popularity">Popularity / list rank</option>
                 <option value="release_date">Release date (newest)</option>
                 <option value="latest_aired">Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}</option>
+                <option value="rating">Rating (highest first)</option>
                 <option value="title">Title (A–Z)</option>
               </select>
             </label>
+            {definition.sort === "rating" ? (
+              sectionType === "movie" ? (
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  Source
+                  <select
+                    className={theme.selectField}
+                    value={definition.sort_provider ?? "imdb"}
+                    onChange={(e) =>
+                      setDefinition((prev) => ({
+                        ...prev,
+                        sort_provider: e.target.value as CollectionRatingProvider,
+                      }))
+                    }
+                  >
+                    {MOVIE_RATING_PROVIDERS.map((p) => (
+                      <option key={p.value} value={p.value}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <span className="text-[13px] text-slate-500" title="Sonarr exposes a single score from Skyhook (usually IMDb when mapped)">
+                  Sonarr rating
+                </span>
+              )
+            ) : null}
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Max items
               <NumberInput
@@ -1978,11 +2061,24 @@ export function CollectionEditor(props: {
                 name: name.trim(),
                 enabled,
                 plex_section_id: sectionId,
+                plex_section_ids: sectionIds,
                 plex_section_type: sectionType,
                 collection_title: collectionTitle.trim(),
                 definition,
                 run_interval_hours: runIntervalHours,
-                active_window: activeWindow,
+                active_window: activeWindow
+                  ? {
+                      start: joinMonthDay(
+                        splitMonthDay(activeWindow.start).month,
+                        splitMonthDay(activeWindow.start).day,
+                      ),
+                      end: joinMonthDay(
+                        splitMonthDay(activeWindow.end).month,
+                        splitMonthDay(activeWindow.end).day,
+                      ),
+                      when_inactive: activeWindow.when_inactive === "clear" ? "clear" : "keep",
+                    }
+                  : null,
               });
             }}
             className="rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] transition-opacity disabled:opacity-40"
@@ -2036,9 +2132,23 @@ export function CollectionEditor(props: {
                 ) : null}
                 {preview && preview.unresolved != null && preview.unresolved > 0 ? (
                   <p className="mt-2 text-[12px] text-slate-500">
-                    {preview.unresolved} matched title{preview.unresolved === 1 ? " is" : "s are"} not present in the
-                    target library and will be skipped.
+                    {preview.unresolved} matched title{preview.unresolved === 1 ? "" : "s"} not present in
+                    {sectionIds.length > 1 ? " a selected library" : " the target library"} and will be skipped there.
                   </p>
+                ) : null}
+                {preview?.libraries && preview.libraries.length > 1 ? (
+                  <div className="mt-2 flex flex-col gap-0.5">
+                    {preview.libraries.map((lib) => {
+                      const title = props.sections.find((s) => s.id === lib.plex_section_id)?.title ?? `Section ${lib.plex_section_id}`;
+                      return (
+                        <p key={lib.plex_section_id} className={`text-[12px] ${theme.muted}`}>
+                          {title}: {lib.in_target_library ?? "—"} in library
+                          {lib.unresolved ? ` · ${lib.unresolved} missing` : ""}
+                          {lib.plex_error ? ` · ${lib.plex_error}` : ""}
+                        </p>
+                      );
+                    })}
+                  </div>
                 ) : null}
 
                 <div className={`mt-3 border-t pt-3 ${theme.divider}`}>

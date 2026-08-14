@@ -16,6 +16,7 @@ export interface RecipeWritePayload {
   name: string;
   enabled: boolean;
   plex_section_id: number;
+  plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   collection_title: string;
   definition: CollectionDefinition;
@@ -56,6 +57,7 @@ export function runCollectionRecipe(id: number): Promise<{ ok: boolean; recipe_i
 
 export function previewCollectionDefinition(payload: {
   plex_section_id: number;
+  plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   definition: CollectionDefinition;
 }): Promise<CollectionPreviewResponse> {

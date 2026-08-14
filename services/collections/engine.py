@@ -45,7 +45,7 @@ FILTER_FIELDS = (
     "release_window",
     "rating",
 )
-SORT_OPTIONS = ("popularity", "release_date", "latest_aired", "title")
+SORT_OPTIONS = ("popularity", "release_date", "latest_aired", "title", "rating")
 # release_window basis: TV air-date modes + per-type movie release dates.
 RELEASE_WINDOW_BASES = (
     "premiered",
@@ -176,6 +176,12 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
     sort = definition.get("sort")
     if sort is not None and sort not in SORT_OPTIONS:
         raise RecipeValidationError(f"unknown sort option: {sort!r}")
+    sort_provider = definition.get("sort_provider")
+    if sort_provider is not None:
+        if sort_provider not in MOVIE_RATING_PROVIDERS:
+            raise RecipeValidationError(f"unknown sort_provider: {sort_provider!r}")
+        if sort != "rating":
+            sort_provider = None
 
     pins = definition.get("pins") or {}
     if not isinstance(pins, dict):
@@ -197,6 +203,7 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         "filters": filters,
         "limit": limit,
         "sort": sort,
+        "sort_provider": sort_provider,
         "pins": normalized_pins,
     }
 
@@ -775,6 +782,7 @@ def _sort_rows(
     section_type: str,
     candidate_index: dict[tuple[str, Any], dict[str, Any]],
     air_dates: Optional[dict[int, dict[str, Optional[datetime]]]] = None,
+    sort_provider: Optional[str] = None,
 ) -> list[Any]:
     if sort == "title":
         return sorted(rows, key=lambda r: str(r.title or "").lower())
@@ -790,6 +798,18 @@ def _sort_rows(
             return value or _row_release_date(row, section_type) or epoch
 
         return sorted(rows, key=aired_key, reverse=True)
+    if sort == "rating":
+        provider = sort_provider if section_type == "movie" else None
+        if section_type == "movie" and not provider:
+            provider = "imdb"
+
+        def rating_key(row: Any) -> float:
+            detail = _row_rating_detail(row, section_type, provider)
+            if detail is None:
+                return float("-inf")
+            return detail[0]
+
+        return sorted(rows, key=rating_key, reverse=True)
     if sort == "popularity" and candidate_index:
         def popularity(row: Any) -> float:
             tmdb_id = row.tmdbid if section_type == "movie" else row.sonarr_tmdbid
@@ -961,7 +981,14 @@ def _evaluate(
     rows, pinned_out = _apply_exclude_pins(rows, normalized["pins"], section_type)
     rows = _merge_include_pins(rows, normalized["pins"], section_type)
 
-    rows = _sort_rows(rows, normalized["sort"], section_type, _candidate_index(candidates), air_dates)
+    rows = _sort_rows(
+        rows,
+        normalized["sort"],
+        section_type,
+        _candidate_index(candidates),
+        air_dates,
+        normalized.get("sort_provider"),
+    )
     limit = normalized["limit"] or MAX_COLLECTION_ITEMS
     rows, pinned_in = _apply_limit_with_pins(rows, normalized["pins"], section_type, limit)
 
@@ -993,26 +1020,79 @@ def _evaluate(
     return result
 
 
+def recipe_section_ids(recipe: Any, extra_ids: Any = None) -> list[int]:
+    """Ordered unique Plex section ids for a recipe (primary first)."""
+    ids: list[int] = []
+    raw = extra_ids if extra_ids is not None else getattr(recipe, "plex_section_ids", None)
+    if isinstance(raw, list):
+        for value in raw:
+            try:
+                sid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if sid >= 1 and sid not in ids:
+                ids.append(sid)
+    try:
+        primary = int(getattr(recipe, "plex_section_id"))
+    except (TypeError, ValueError, AttributeError):
+        primary = 0
+    if primary >= 1 and primary not in ids:
+        ids.insert(0, primary)
+    elif primary >= 1 and ids and ids[0] != primary:
+        ids = [primary] + [sid for sid in ids if sid != primary]
+    return ids
+
+
+def normalize_section_ids(section_id: int, extra_ids: Any = None) -> list[int]:
+    class _Shim:
+        plex_section_id = section_id
+        plex_section_ids = extra_ids
+
+    ids = recipe_section_ids(_Shim())
+    if not ids:
+        raise RecipeValidationError("at least one Plex library is required")
+    return ids
+
+
 def preview_definition(
     definition: dict[str, Any],
     section_id: int,
     section_type: str,
     *,
     sample_size: int = 48,
+    extra_section_ids: Any = None,
 ) -> dict[str, Any]:
     """Evaluate a definition without writing to Plex. Returns staged counts + sample items."""
-    outcome = _evaluate(definition, section_id, section_type, resolve=True)
-    sample = [_row_summary(row, section_type) for row in outcome["rows"][:sample_size]]
+    section_ids = normalize_section_ids(section_id, extra_section_ids)
+    primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+    sample = [_row_summary(row, section_type) for row in primary["rows"][:sample_size]]
+    libraries: list[dict[str, Any]] = []
+    plex_errors: list[str] = []
+    for sid in section_ids:
+        outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+        libraries.append(
+            {
+                "plex_section_id": sid,
+                "in_target_library": outcome["in_target_library"],
+                "unresolved": outcome["unresolved"],
+                "plex_error": outcome["plex_error"],
+            }
+        )
+        if outcome["plex_error"]:
+            plex_errors.append(str(outcome["plex_error"]))
+    in_library_total = sum(int(lib["in_target_library"] or 0) for lib in libraries)
+    unresolved_total = sum(int(lib["unresolved"] or 0) for lib in libraries)
     return {
-        "tmdb_candidates": outcome["tmdb_candidates"],
-        "matched_in_catalog": outcome["matched_in_catalog"],
-        "after_filters": outcome["after_filters"],
-        "pinned_in": outcome["pinned_in"],
-        "pinned_out": outcome["pinned_out"],
-        "selected": outcome["selected"],
-        "in_target_library": outcome["in_target_library"],
-        "unresolved": outcome["unresolved"],
-        "plex_error": outcome["plex_error"],
+        "tmdb_candidates": primary["tmdb_candidates"],
+        "matched_in_catalog": primary["matched_in_catalog"],
+        "after_filters": primary["after_filters"],
+        "pinned_in": primary["pinned_in"],
+        "pinned_out": primary["pinned_out"],
+        "selected": primary["selected"],
+        "in_target_library": in_library_total if len(section_ids) == 1 else in_library_total,
+        "unresolved": unresolved_total if any(lib["unresolved"] is not None for lib in libraries) else None,
+        "plex_error": plex_errors[0] if plex_errors else None,
+        "libraries": libraries,
         "sample": sample,
     }
 
@@ -1240,7 +1320,14 @@ def explain_definition_item(
         rows = _dedupe_rows(rows, section_type)
         rows, _ = _apply_exclude_pins(rows, pins, section_type)
         rows = _merge_include_pins(rows, pins, section_type)
-        rows = _sort_rows(rows, normalized["sort"], section_type, _candidate_index(candidates), full_air_dates)
+        rows = _sort_rows(
+            rows,
+            normalized["sort"],
+            section_type,
+            _candidate_index(candidates),
+            full_air_dates,
+            normalized.get("sort_provider"),
+        )
         limit = normalized["limit"] or MAX_COLLECTION_ITEMS
         selected, _ = _apply_limit_with_pins(rows, pins, section_type, limit)
 
@@ -1295,35 +1382,66 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         if recipe is None:
             raise RecipeValidationError(f"collection recipe {recipe_id} not found")
         definition = dict(recipe.definition or {})
-        section_id = int(recipe.plex_section_id)
+        section_ids = recipe_section_ids(recipe)
         section_type = str(recipe.plex_section_type)
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
 
     summary: dict[str, Any]
     try:
-        outcome = _evaluate(definition, section_id, section_type, resolve=True)
-        if outcome["plex_error"]:
-            raise plex_collections.PlexCollectionsError(outcome["plex_error"])
-        sync_stats = plex_collections.sync_collection(
-            section_id, section_type, collection_title, outcome["resolved_items"] or []
-        )
+        if not section_ids:
+            raise RecipeValidationError("recipe has no Plex libraries")
+        primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+        libraries: list[dict[str, Any]] = []
+        synced_added = 0
+        synced_removed = 0
+        synced_total = 0
+        created_any = False
+        in_library_total = 0
+        unresolved_total = 0
+        for sid in section_ids:
+            outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+            if outcome["plex_error"]:
+                raise plex_collections.PlexCollectionsError(outcome["plex_error"])
+            sync_stats = plex_collections.sync_collection(
+                sid, section_type, collection_title, outcome["resolved_items"] or []
+            )
+            libraries.append(
+                {
+                    "plex_section_id": sid,
+                    "in_target_library": outcome["in_target_library"],
+                    "unresolved": outcome["unresolved"],
+                    "synced": sync_stats,
+                }
+            )
+            in_library_total += int(outcome["in_target_library"] or 0)
+            unresolved_total += int(outcome["unresolved"] or 0)
+            synced_added += int(sync_stats.get("added") or 0)
+            synced_removed += int(sync_stats.get("removed") or 0)
+            synced_total += int(sync_stats.get("total") or 0)
+            created_any = created_any or bool(sync_stats.get("created"))
         summary = {
             "status": "ok",
-            "tmdb_candidates": outcome["tmdb_candidates"],
-            "matched_in_catalog": outcome["matched_in_catalog"],
-            "after_filters": outcome["after_filters"],
-            "pinned_in": outcome["pinned_in"],
-            "pinned_out": outcome["pinned_out"],
-            "selected": outcome["selected"],
-            "in_target_library": outcome["in_target_library"],
-            "unresolved": outcome["unresolved"],
-            "synced": sync_stats,
+            "tmdb_candidates": primary["tmdb_candidates"],
+            "matched_in_catalog": primary["matched_in_catalog"],
+            "after_filters": primary["after_filters"],
+            "pinned_in": primary["pinned_in"],
+            "pinned_out": primary["pinned_out"],
+            "selected": primary["selected"],
+            "in_target_library": in_library_total,
+            "unresolved": unresolved_total,
+            "synced": {
+                "added": synced_added,
+                "removed": synced_removed,
+                "total": synced_total,
+                "created": created_any,
+            },
+            "libraries": libraries,
         }
         logger.info(
             f"Collections: recipe {recipe_name!r} synced "
-            f"(selected={outcome['selected']}, in_library={outcome['in_target_library']}, "
-            f"added={sync_stats['added']}, removed={sync_stats['removed']})",
+            f"(selected={primary['selected']}, libraries={len(section_ids)}, "
+            f"in_library={in_library_total}, added={synced_added}, removed={synced_removed})",
             extra={"emoji_type": "info"},
         )
     except (
@@ -1353,9 +1471,19 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _parse_month_day(raw: Any) -> Optional[tuple[int, int]]:
+    """Parse MM-DD (or YYYY-MM-DD) into (month, day). Invalid calendar values → None."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parts = text.split("-")
     try:
-        month_str, day_str = str(raw or "").strip().split("-", 1)
-        month, day = int(month_str), int(day_str)
+        if len(parts) == 2:
+            month, day = int(parts[0]), int(parts[1])
+        elif len(parts) == 3:
+            # Accept full dates from <input type="date"> and keep month/day.
+            month, day = int(parts[1]), int(parts[2])
+        else:
+            return None
     except (TypeError, ValueError):
         return None
     if not (1 <= month <= 12 and 1 <= day <= 31):
@@ -1369,10 +1497,20 @@ def validate_active_window(window: Any) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(window, dict):
         raise RecipeValidationError("active_window must be an object")
-    start = _parse_month_day(window.get("start"))
-    end = _parse_month_day(window.get("end"))
+    start_raw = window.get("start")
+    end_raw = window.get("end")
+    start = _parse_month_day(start_raw)
+    end = _parse_month_day(end_raw)
     if start is None or end is None:
-        raise RecipeValidationError("active_window needs start and end as MM-DD")
+        bad = []
+        if start is None:
+            bad.append(f"start={start_raw!r}")
+        if end is None:
+            bad.append(f"end={end_raw!r}")
+        raise RecipeValidationError(
+            "active_window needs start and end as MM-DD (month 01–12, day 01–31); "
+            + ", ".join(bad)
+        )
     when_inactive = str(window.get("when_inactive") or "keep")
     if when_inactive not in ("keep", "clear"):
         raise RecipeValidationError("active_window when_inactive must be 'keep' or 'clear'")
@@ -1436,17 +1574,30 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
         recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
         if recipe is None:
             raise RecipeValidationError(f"recipe {recipe_id} not found")
-        section_id = int(recipe.plex_section_id)
+        section_ids = recipe_section_ids(recipe)
         section_type = str(recipe.plex_section_type)
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
 
     try:
-        sync_stats = plex_collections.sync_collection(section_id, section_type, collection_title, [])
-        summary = {"status": "cleared", "synced": sync_stats, "window_cleared": True}
+        libraries: list[dict[str, Any]] = []
+        removed = 0
+        last_stats: dict[str, Any] | None = None
+        for sid in section_ids:
+            sync_stats = plex_collections.sync_collection(sid, section_type, collection_title, [])
+            libraries.append({"plex_section_id": sid, "synced": sync_stats})
+            removed += int(sync_stats.get("removed") or 0)
+            last_stats = sync_stats
+        summary = {
+            "status": "cleared",
+            "synced": last_stats
+            or {"added": 0, "removed": removed, "total": 0, "created": False},
+            "libraries": libraries,
+            "window_cleared": True,
+        }
         logger.info(
             f"Collections: recipe {recipe_name!r} left its active window — collection cleared "
-            f"(removed={sync_stats['removed']})",
+            f"(libraries={len(section_ids)}, removed={removed})",
             extra={"emoji_type": "info"},
         )
     except plex_collections.PlexCollectionsError as exc:
