@@ -446,6 +446,8 @@ export interface SettingsSection {
 
 export interface HealthResponse {
   ok: boolean;
+  app_version?: string;
+  frontend_build?: string;
 }
 
 export interface ReadyResponse {
@@ -471,6 +473,8 @@ export interface SettingsStatus {
 export interface SettingsPayload {
   status: SettingsStatus;
   sections: SettingsSection[];
+  /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
+  webhook_api_key?: string | null;
 }
 
 export interface SaveSettingsResponse {
@@ -543,6 +547,14 @@ export type CollectionReleaseWindowBasis =
   | "digital"
   | "physical";
 
+/** Radarr nested rating providers for movie rating filters. TV uses Sonarr's flat score. */
+export type CollectionRatingProvider =
+  | "imdb"
+  | "tmdb"
+  | "trakt"
+  | "metacritic"
+  | "rottenTomatoes";
+
 export interface CollectionFilterBlock {
   field: CollectionFilterField;
   op?: string;
@@ -551,9 +563,13 @@ export interface CollectionFilterBlock {
   values?: string[];
   /** release_window only: TV air-date mode or movie release type. */
   basis?: CollectionReleaseWindowBasis | null;
+  /** rating only (movies): which Radarr ratings.* key to use. */
+  provider?: CollectionRatingProvider | null;
+  /** rating only: require at least this many votes on the chosen score. */
+  min_votes?: number | null;
 }
 
-export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title";
+export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title" | "rating";
 
 /** Boolean filter tree: groups carry and/or and may nest rules or sub-groups (depth ≤ 3). */
 export interface CollectionFilterGroup {
@@ -585,6 +601,8 @@ export interface CollectionDefinition {
   filters: CollectionFilters;
   limit?: number | null;
   sort?: CollectionSortOption | null;
+  /** When sort is rating (movies): which Radarr ratings.* key to order by. */
+  sort_provider?: CollectionRatingProvider | null;
   pins?: CollectionPins;
 }
 
@@ -601,6 +619,20 @@ export interface CollectionRunSummary {
   selected?: number;
   in_target_library?: number | null;
   unresolved?: number | null;
+  /** Source titles not in ARR (last run). Pre-filter; not Plex unresolved. */
+  missing_from_arr_count?: number;
+  /** Titles missing now that were not in the previous run's missing set. Null = no baseline yet. */
+  missing_from_arr_new?: number | null;
+  missing_from_arr_keys?: string[];
+  synced?: { added: number; removed: number; total: number; created: boolean };
+  libraries?: CollectionLibrarySyncSummary[];
+}
+
+export interface CollectionLibrarySyncSummary {
+  plex_section_id: number;
+  in_target_library?: number | null;
+  unresolved?: number | null;
+  plex_error?: string | null;
   synced?: { added: number; removed: number; total: number; created: boolean };
 }
 
@@ -616,6 +648,8 @@ export interface CollectionRecipe {
   name: string;
   enabled: boolean;
   plex_section_id: number;
+  /** Extra + primary Plex section ids (same type). First id matches plex_section_id. */
+  plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   collection_title: string;
   definition: CollectionDefinition;
@@ -657,6 +691,8 @@ export interface CollectionBuilderMeta {
   languages: string[];
   /** Distinct Radarr/Sonarr genre names present in the catalog (matches filter evaluation). */
   genres: string[];
+  /** Distinct Radarr/Sonarr certifications present in the catalog (matches filter evaluation). */
+  certifications: string[];
 }
 
 export type CollectionExplainStatus = "pass" | "fail" | "skip";
@@ -674,6 +710,8 @@ export interface CollectionExplainCheck {
   value_to?: number | null;
   values?: string[] | null;
   basis?: CollectionReleaseWindowBasis | null;
+  provider?: CollectionRatingProvider | null;
+  min_votes?: number | null;
 }
 
 export interface CollectionExplainRuleNode extends CollectionExplainCheck {
@@ -712,6 +750,15 @@ export interface CollectionPreviewSampleItem {
   poster: string | null;
 }
 
+export interface CollectionMissingFromArrItem {
+  title: string;
+  year: number | null;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+  poster: string | null;
+}
+
 export interface CollectionPreviewResponse {
   tmdb_candidates: number | null;
   matched_in_catalog: number;
@@ -722,5 +769,46 @@ export interface CollectionPreviewResponse {
   in_target_library: number | null;
   unresolved: number | null;
   plex_error: string | null;
+  libraries?: CollectionLibrarySyncSummary[];
   sample: CollectionPreviewSampleItem[];
+  missing_from_arr?: CollectionMissingFromArrItem[];
+  missing_from_arr_count?: number;
+  missing_from_arr_prefilter_count?: number;
+  missing_from_arr_filter_gaps?: string[];
+}
+
+export interface CollectionArrAddInstanceOptions {
+  instance_key: string;
+  label: string;
+  arr_type: string;
+  quality_profiles: { id: number; name: string }[];
+  root_folders: { id?: number | null; path: string }[];
+}
+
+export interface CollectionArrAddOptionsResponse {
+  instances: CollectionArrAddInstanceOptions[];
+}
+
+export interface CollectionArrAddItem {
+  title: string;
+  year?: number | null;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+}
+
+export interface CollectionArrAddResult {
+  title: string;
+  instance_key: string;
+  status: "ok" | "skipped" | "error";
+  error?: string | null;
+}
+
+export interface CollectionArrAddResponse {
+  ok: boolean;
+  added: number;
+  skipped: number;
+  errors: number;
+  results: CollectionArrAddResult[];
+  message: string;
 }

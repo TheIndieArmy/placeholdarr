@@ -1,4 +1,5 @@
 import { fetchJson, postJson } from "./client";
+import { reloadIfFrontendStale } from "../frontendBuild";
 import type {
   ActivityRow,
   CalendarErrorResponse,
@@ -208,8 +209,10 @@ export function openLogsEventSource(
   return () => source.close();
 }
 
-export function getHealth(): Promise<HealthResponse> {
-  return fetchJson<HealthResponse>("/api/health");
+export async function getHealth(): Promise<HealthResponse> {
+  const health = await fetchJson<HealthResponse>("/api/health");
+  reloadIfFrontendStale(health);
+  return health;
 }
 
 export function getReady(): Promise<ReadyResponse> {

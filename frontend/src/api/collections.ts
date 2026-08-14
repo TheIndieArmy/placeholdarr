@@ -1,6 +1,9 @@
 import { fetchJson, postJson } from "./client";
 import type {
   CollectionActiveWindow,
+  CollectionArrAddItem,
+  CollectionArrAddOptionsResponse,
+  CollectionArrAddResponse,
   CollectionBuilderMeta,
   CollectionDefinition,
   CollectionExplainResponse,
@@ -16,6 +19,7 @@ export interface RecipeWritePayload {
   name: string;
   enabled: boolean;
   plex_section_id: number;
+  plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   collection_title: string;
   definition: CollectionDefinition;
@@ -56,6 +60,7 @@ export function runCollectionRecipe(id: number): Promise<{ ok: boolean; recipe_i
 
 export function previewCollectionDefinition(payload: {
   plex_section_id: number;
+  plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   definition: CollectionDefinition;
 }): Promise<CollectionPreviewResponse> {
@@ -83,4 +88,21 @@ export function explainCollectionItem(payload: {
   item: CollectionPinnedItem;
 }): Promise<CollectionExplainResponse> {
   return postJson("/api/collections/explain", payload);
+}
+
+export function getCollectionArrAddOptions(mediaType: "movie" | "show"): Promise<CollectionArrAddOptionsResponse> {
+  const params = new URLSearchParams({ media_type: mediaType });
+  return fetchJson(`/api/collections/arr-add-options?${params.toString()}`);
+}
+
+export function addCollectionTitlesToArr(payload: {
+  media_type: "movie" | "show";
+  items: CollectionArrAddItem[];
+  instance_keys: string[];
+  instance_options: Record<string, { quality_profile_id: number; root_folder_path: string }>;
+  monitored: boolean;
+  search: boolean;
+  tag: string;
+}): Promise<CollectionArrAddResponse> {
+  return postJson("/api/collections/arr-add", payload);
 }

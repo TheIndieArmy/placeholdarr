@@ -45,7 +45,7 @@ FILTER_FIELDS = (
     "release_window",
     "rating",
 )
-SORT_OPTIONS = ("popularity", "release_date", "latest_aired", "title")
+SORT_OPTIONS = ("popularity", "release_date", "latest_aired", "title", "rating")
 # release_window basis: TV air-date modes + per-type movie release dates.
 RELEASE_WINDOW_BASES = (
     "premiered",
@@ -56,8 +56,12 @@ RELEASE_WINDOW_BASES = (
     "physical",
 )
 MOVIE_RELEASE_BASES = ("theater", "digital", "physical")
+# Radarr nested rating providers (Sonarr is a single flat value/votes).
+MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes")
 DEFAULT_SOURCE_LIMIT = 100
 MAX_COLLECTION_ITEMS = 500
+MISSING_FROM_ARR_CAP = 200
+TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
 
 
 class RecipeValidationError(Exception):
@@ -76,6 +80,17 @@ def _validate_filter_rule(rule: Any) -> dict[str, Any]:
     if rule.get("field") == "release_window" and rule.get("basis") is not None:
         if rule["basis"] not in RELEASE_WINDOW_BASES:
             raise RecipeValidationError(f"unknown release_window basis: {rule['basis']!r}")
+    if rule.get("field") == "rating":
+        provider = rule.get("provider")
+        if provider is not None and provider not in MOVIE_RATING_PROVIDERS:
+            raise RecipeValidationError(f"unknown rating provider: {provider!r}")
+        min_votes = rule.get("min_votes")
+        if min_votes is not None:
+            try:
+                if int(min_votes) < 0:
+                    raise RecipeValidationError("rating min_votes must be >= 0")
+            except (TypeError, ValueError) as exc:
+                raise RecipeValidationError("rating min_votes must be an integer") from exc
     return rule
 
 
@@ -163,6 +178,12 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
     sort = definition.get("sort")
     if sort is not None and sort not in SORT_OPTIONS:
         raise RecipeValidationError(f"unknown sort option: {sort!r}")
+    sort_provider = definition.get("sort_provider")
+    if sort_provider is not None:
+        if sort_provider not in MOVIE_RATING_PROVIDERS:
+            raise RecipeValidationError(f"unknown sort_provider: {sort_provider!r}")
+        if sort != "rating":
+            sort_provider = None
 
     pins = definition.get("pins") or {}
     if not isinstance(pins, dict):
@@ -184,6 +205,7 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         "filters": filters,
         "limit": limit,
         "sort": sort,
+        "sort_provider": sort_provider,
         "pins": normalized_pins,
     }
 
@@ -323,6 +345,457 @@ def _load_catalog_rows(section_type: str, id_sets: Optional[dict[str, set]]) -> 
     return rows
 
 
+def _catalog_id_sets(rows: list[Any], section_type: str) -> dict[str, set]:
+    tmdb: set[int] = set()
+    imdb: set[str] = set()
+    tvdb: set[int] = set()
+    for row in rows:
+        if section_type == "movie":
+            if row.tmdbid:
+                tmdb.add(int(row.tmdbid))
+            if getattr(row, "imdbid", None):
+                imdb.add(str(row.imdbid))
+        else:
+            if getattr(row, "sonarr_tmdbid", None):
+                tmdb.add(int(row.sonarr_tmdbid))
+            if getattr(row, "tvdbid", None):
+                tvdb.add(int(row.tvdbid))
+            if getattr(row, "imdbid", None):
+                imdb.add(str(row.imdbid))
+    return {"tmdb": tmdb, "imdb": imdb, "tvdb": tvdb}
+
+
+def _candidate_in_catalog(candidate: dict[str, Any], catalog_ids: dict[str, set]) -> bool:
+    tmdb = candidate.get("tmdb_id")
+    if tmdb and int(tmdb) in catalog_ids.get("tmdb", set()):
+        return True
+    imdb = candidate.get("imdb_id")
+    if imdb and str(imdb) in catalog_ids.get("imdb", set()):
+        return True
+    tvdb = candidate.get("tvdb_id")
+    if tvdb and int(tvdb) in catalog_ids.get("tvdb", set()):
+        return True
+    return False
+
+
+def _candidate_poster_url(candidate: dict[str, Any]) -> Optional[str]:
+    path = candidate.get("poster_path") or candidate.get("poster")
+    if not path:
+        return None
+    text = str(path).strip()
+    if not text:
+        return None
+    if text.startswith("http://") or text.startswith("https://"):
+        return text
+    if not text.startswith("/"):
+        text = f"/{text}"
+    return f"{TMDB_POSTER_BASE}{text}"
+
+
+def _missing_from_arr_items(
+    candidates: Optional[list[dict[str, Any]]],
+    rows: list[Any],
+    section_type: str,
+    *,
+    filters: Any = None,
+    pins: Any = None,
+    genre_map: Optional[dict[int, str]] = None,
+    cap: int = MISSING_FROM_ARR_CAP,
+) -> tuple[list[dict[str, Any]], int, int, list[str]]:
+    """Source candidates not in the catalog, after recipe filters that can run off-list.
+
+    Returns (items, filtered_count, prefilter_count, gap_labels).
+    """
+    if candidates is None:
+        return [], 0, 0, []
+    catalog_ids = _catalog_id_sets(rows, section_type)
+    tree = _filters_tree(filters)
+    gaps = _missing_filter_gap_labels(tree, section_type)
+    raw: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if _candidate_in_catalog(candidate, catalog_ids):
+            continue
+        if _candidate_excluded_by_pins(candidate, pins):
+            continue
+        raw.append(candidate)
+    prefilter = len(raw)
+    kept = [c for c in raw if tree is None or _candidate_node_passes(c, tree, section_type, genre_map or {})]
+    items = [
+        {
+            "title": candidate.get("title") or "Untitled",
+            "year": candidate.get("year"),
+            "tmdb_id": candidate.get("tmdb_id"),
+            "tvdb_id": candidate.get("tvdb_id"),
+            "imdb_id": candidate.get("imdb_id"),
+            "poster": _candidate_poster_url(candidate),
+        }
+        for candidate in kept[:cap]
+    ]
+    return items, len(kept), prefilter, gaps
+
+
+_ISO639_ENGLISH = {
+    "en": "english",
+    "es": "spanish",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+    "ja": "japanese",
+    "ko": "korean",
+    "zh": "chinese",
+    "hi": "hindi",
+    "pt": "portuguese",
+    "ru": "russian",
+    "ar": "arabic",
+    "nl": "dutch",
+    "sv": "swedish",
+    "no": "norwegian",
+    "da": "danish",
+    "fi": "finnish",
+    "pl": "polish",
+    "tr": "turkish",
+    "th": "thai",
+    "cs": "czech",
+    "hu": "hungarian",
+    "el": "greek",
+    "he": "hebrew",
+    "id": "indonesian",
+    "vi": "vietnamese",
+    "uk": "ukrainian",
+    "ro": "romanian",
+    "ta": "tamil",
+    "te": "telugu",
+    "fa": "persian",
+    "ms": "malay",
+    "cn": "chinese",
+}
+
+
+def _candidate_genre_names(candidate: dict[str, Any], genre_map: dict[int, str]) -> set[str]:
+    names = {str(n).strip().lower() for n in (candidate.get("genre_names") or []) if n}
+    for gid in candidate.get("genre_ids") or []:
+        try:
+            mapped = genre_map.get(int(gid))
+        except (TypeError, ValueError):
+            mapped = None
+        if mapped:
+            names.add(str(mapped).strip().lower())
+    return names
+
+
+def _candidate_language_names(candidate: dict[str, Any]) -> set[str]:
+    raw = candidate.get("original_language")
+    if not raw:
+        return set()
+    text = str(raw).strip().lower()
+    names = {text}
+    if len(text) <= 3:
+        mapped = _ISO639_ENGLISH.get(text)
+        if mapped:
+            names.add(mapped)
+    return names
+
+
+def _candidate_year(candidate: dict[str, Any]) -> Optional[int]:
+    try:
+        year = int(candidate.get("year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year:
+        return year
+    date = str(candidate.get("date") or "")
+    if len(date) >= 4 and date[:4].isdigit():
+        return int(date[:4])
+    return None
+
+
+def _candidate_release_dt(candidate: dict[str, Any]) -> Optional[datetime]:
+    date = str(candidate.get("date") or "").strip()
+    if date:
+        try:
+            parsed = datetime.fromisoformat(date.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            if len(date) >= 10 and date[4] == "-" and date[7] == "-":
+                try:
+                    return datetime(int(date[0:4]), int(date[5:7]), int(date[8:10]), tzinfo=timezone.utc)
+                except ValueError:
+                    pass
+    year = _candidate_year(candidate)
+    if year:
+        return datetime(year, 1, 1, tzinfo=timezone.utc)
+    return None
+
+
+def _candidate_rating(candidate: dict[str, Any], section_type: str, provider: Optional[str]) -> Optional[tuple[float, int]]:
+    ratings = candidate.get("ratings") if isinstance(candidate.get("ratings"), dict) else {}
+    key = None
+    if section_type == "movie" and provider:
+        key = {"imdb": "imdb", "tmdb": "tmdb", "trakt": "trakt", "metacritic": "metacritic", "rottenTomatoes": "rottentomatoes"}.get(
+            provider, str(provider).lower()
+        )
+        if key == "rottentomatoes":
+            for alias in ("rottentomatoes", "rotten_tomatoes", "rt"):
+                if alias in ratings:
+                    key = alias
+                    break
+        hit = ratings.get(key) if key else None
+        if isinstance(hit, dict) and hit.get("value") is not None:
+            try:
+                return float(hit["value"]), int(hit.get("votes") or 0)
+            except (TypeError, ValueError):
+                return None
+        if provider == "tmdb" and candidate.get("vote_average") is not None:
+            try:
+                return float(candidate["vote_average"]), int(candidate.get("vote_count") or 0)
+            except (TypeError, ValueError):
+                return None
+        return None
+    if section_type != "movie":
+        hit = ratings.get("imdb") or ratings.get("tmdb") or ratings.get("trakt")
+        if isinstance(hit, dict) and hit.get("value") is not None:
+            try:
+                return float(hit["value"]), int(hit.get("votes") or 0)
+            except (TypeError, ValueError):
+                return None
+        if candidate.get("vote_average") is not None:
+            try:
+                return float(candidate["vote_average"]), int(candidate.get("vote_count") or 0)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _missing_filter_gap_labels(tree: Optional[dict[str, Any]], section_type: str) -> list[str]:
+    if tree is None:
+        return []
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    def walk(node: dict[str, Any]) -> None:
+        if "field" in node:
+            field = str(node.get("field") or "")
+            label = None
+            if field == "certification" and (node.get("values") or []):
+                label = "Certification"
+            elif field == "studio_network" and str(node.get("value") or "").strip():
+                label = "Studio / network"
+            elif field == "genre" and (node.get("values") or []):
+                label = "Genre"
+            elif field == "original_language" and (node.get("values") or []):
+                label = "Original language"
+            elif field == "rating":
+                provider = node.get("provider")
+                if section_type != "movie" or (provider and str(provider) != "tmdb") or not provider:
+                    label = "Rating"
+            elif field == "release_window":
+                basis = str(node.get("basis") or "premiered")
+                if basis not in {"premiered", "theater"}:
+                    label = {
+                        "digital": "Digital release",
+                        "physical": "Physical release",
+                        "latest_episode": "Latest episode air date",
+                        "latest_season": "Latest season",
+                    }.get(basis, "Release window")
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+            return
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(tree)
+    return labels
+
+
+def _candidate_excluded_by_pins(candidate: dict[str, Any], pins: Any) -> bool:
+    if not isinstance(pins, dict):
+        return False
+    for pin in pins.get("exclude") or []:
+        if isinstance(pin, dict) and _candidate_matches_ids(candidate, _item_id_sets(pin)):
+            return True
+    return False
+
+
+def _candidate_passes_filter(
+    candidate: dict[str, Any],
+    rule: dict[str, Any],
+    section_type: str,
+    genre_map: dict[int, str],
+) -> bool:
+    field = rule.get("field")
+    op = str(rule.get("op") or "")
+
+    if field == "year":
+        year = _candidate_year(candidate)
+        if not year:
+            return False
+        if op == "gte":
+            return year >= int(rule.get("value") or 0)
+        if op == "lte":
+            return year <= int(rule.get("value") or 9999)
+        if op == "between":
+            low = int(rule.get("value") or 0)
+            high = int(rule.get("value_to") or 9999)
+            return low <= year <= high
+        return year == int(rule.get("value") or 0)
+
+    if field == "genre":
+        values = {str(v).strip().lower() for v in (rule.get("values") or []) if v}
+        if not values:
+            return True
+        genres = _candidate_genre_names(candidate, genre_map)
+        if op == "excludes":
+            if not genres:
+                return True
+            return not (genres & values)
+        if not genres:
+            return True
+        return bool(genres & values)
+
+    if field == "original_language":
+        values = {str(v).strip().lower() for v in (rule.get("values") or []) if v}
+        if not values:
+            return True
+        languages = _candidate_language_names(candidate)
+        if op == "not_in":
+            if not languages:
+                return True
+            return not (languages & values)
+        if not languages:
+            return True
+        return bool(languages & values)
+
+    if field == "certification":
+        return True
+
+    if field == "studio_network":
+        return True
+
+    if field == "monitored":
+        expected = bool(rule.get("value", True))
+        return not expected
+
+    if field == "quality":
+        needle = str(rule.get("value") or "").strip().lower()
+        if not needle:
+            return True
+        return op == "not_contains"
+
+    if field == "quality_profile":
+        values = {str(v).strip() for v in (rule.get("values") or []) if v}
+        if not values:
+            return True
+        return op == "not_in"
+
+    if field == "instance":
+        expected = str(rule.get("value") or "").strip()
+        if not expected:
+            return True
+        return False
+
+    if field == "release_window":
+        basis = str(rule.get("basis") or "premiered")
+        if basis not in {"premiered", "theater"}:
+            return True
+        release = _candidate_release_dt(candidate)
+        now = datetime.now(timezone.utc)
+        if op in ("has_released", "not_yet_released"):
+            if release is None:
+                return False
+            released = release <= now
+            return released if op == "has_released" else not released
+        days = int(rule.get("value") or 0)
+        if days <= 0:
+            return True
+        if release is None:
+            return False
+        if op == "within_next":
+            return now <= release <= now + timedelta(days=days)
+        return now - timedelta(days=days) <= release <= now
+
+    if field == "rating":
+        threshold = float(rule.get("value") or 0)
+        provider = rule.get("provider")
+        if provider is not None:
+            provider = str(provider)
+        detail = _candidate_rating(candidate, section_type, provider)
+        if detail is None:
+            return True
+        rating, votes = detail
+        min_votes = rule.get("min_votes")
+        if min_votes is not None:
+            try:
+                if votes < int(min_votes):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if op == "lte":
+            return rating <= threshold
+        return rating >= threshold
+
+    return True
+
+
+def _candidate_node_passes(
+    candidate: dict[str, Any],
+    node: dict[str, Any],
+    section_type: str,
+    genre_map: dict[int, str],
+) -> bool:
+    if "field" in node:
+        return _candidate_passes_filter(candidate, node, section_type, genre_map)
+    children = node.get("children") or []
+    if not children:
+        return True
+    if node.get("op") == "or":
+        return any(_candidate_node_passes(candidate, child, section_type, genre_map) for child in children)
+    return all(_candidate_node_passes(candidate, child, section_type, genre_map) for child in children)
+
+
+def _tmdb_genre_map(media_type: str) -> dict[int, str]:
+    try:
+        return {int(g["id"]): str(g.get("name") or "").strip().lower() for g in tmdb_client.fetch_genres(media_type) if g.get("id")}
+    except Exception:
+        return {}
+
+
+def _missing_identity_key(item: dict[str, Any]) -> Optional[str]:
+    if item.get("tmdb_id"):
+        return f"tmdb:{int(item['tmdb_id'])}"
+    if item.get("tvdb_id"):
+        return f"tvdb:{int(item['tvdb_id'])}"
+    if item.get("imdb_id"):
+        return f"imdb:{item['imdb_id']}"
+    return None
+
+
+def _missing_identity_keys(items: list[dict[str, Any]]) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = _missing_identity_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _new_missing_count(current_keys: list[str], previous_summary: Any) -> Optional[int]:
+    """Titles missing now that were not missing on the last successful keyed run.
+
+    Returns None when there is no prior baseline (first run or legacy summaries).
+    """
+    if not isinstance(previous_summary, dict) or "missing_from_arr_keys" not in previous_summary:
+        return None
+    previous = {str(k) for k in (previous_summary.get("missing_from_arr_keys") or []) if k}
+    return sum(1 for key in current_keys if key not in previous)
+
+
 def _dedupe_rows(rows: list[Any], section_type: str) -> list[Any]:
     """Collapse multi-instance rows for the same title into one entry."""
     seen: set[Any] = set()
@@ -386,22 +859,70 @@ def _row_quality_profile_key(row: Any, section_type: str) -> str:
     return f"{str(row.instance_key or '')}:{profile_id}"
 
 
-def _row_rating(row: Any, section_type: str) -> Optional[float]:
-    """Best-effort rating from ARR ratings JSON (Radarr nests by provider, Sonarr is flat)."""
+def _nested_rating_entry(raw: dict[str, Any], provider: str) -> Optional[tuple[float, int]]:
+    nested = raw.get(provider)
+    if not isinstance(nested, dict):
+        return None
+    value = nested.get("value")
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    votes_raw = nested.get("votes")
+    try:
+        votes = int(votes_raw or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    return float(value), max(0, votes)
+
+
+def _row_rating_detail(
+    row: Any,
+    section_type: str,
+    provider: Optional[str] = None,
+) -> Optional[tuple[float, int]]:
+    """Return (value, votes) from ARR ratings JSON.
+
+    Movies (Radarr): ``provider`` selects imdb/tmdb/trakt/metacritic/rottenTomatoes on
+    that provider's native scale. When ``provider`` is omitted, keep the legacy
+    best-effort fallback (IMDb → TMDB → Metacritic → RT), with RT scaled to ~0–10
+    so older recipes that assume a /10 threshold keep working.
+
+    Shows (Sonarr): single flat ``value`` / ``votes`` from Skyhook (typically IMDb
+    when mapped); ``provider`` is ignored.
+    """
     raw = row.radarr_ratings if section_type == "movie" else row.sonarr_ratings
     if not isinstance(raw, dict):
         return None
-    direct = raw.get("value")
-    if isinstance(direct, (int, float)) and direct > 0:
-        return float(direct)
-    for provider in ("imdb", "tmdb", "metacritic", "rottenTomatoes"):
-        nested = raw.get(provider)
-        if isinstance(nested, dict):
-            value = nested.get("value")
-            if isinstance(value, (int, float)) and value > 0:
-                # Rotten Tomatoes is 0-100; normalize to a 0-10 scale.
-                return float(value) / 10.0 if provider == "rottenTomatoes" and value > 10 else float(value)
+
+    if section_type != "movie":
+        direct = raw.get("value")
+        if not isinstance(direct, (int, float)) or direct <= 0:
+            return None
+        try:
+            votes = int(raw.get("votes") or 0)
+        except (TypeError, ValueError):
+            votes = 0
+        return float(direct), max(0, votes)
+
+    if provider:
+        return _nested_rating_entry(raw, str(provider))
+
+    # Legacy movie path (no provider on the rule).
+    for key in ("imdb", "tmdb", "metacritic", "rottenTomatoes", "trakt"):
+        entry = _nested_rating_entry(raw, key)
+        if entry is None:
+            continue
+        value, votes = entry
+        if key == "rottenTomatoes" and value > 10:
+            value = value / 10.0
+        elif key == "metacritic" and value > 10:
+            value = value / 10.0
+        return value, votes
     return None
+
+
+def _row_rating(row: Any, section_type: str, provider: Optional[str] = None) -> Optional[float]:
+    detail = _row_rating_detail(row, section_type, provider)
+    return detail[0] if detail else None
 
 
 def _row_release_date(row: Any, section_type: str) -> Optional[datetime]:
@@ -643,9 +1164,20 @@ def _passes_filter(
 
     if field == "rating":
         threshold = float(rule.get("value") or 0)
-        rating = _row_rating(row, section_type)
-        if rating is None:
+        provider = rule.get("provider")
+        if provider is not None:
+            provider = str(provider)
+        detail = _row_rating_detail(row, section_type, provider)
+        if detail is None:
             return False
+        rating, votes = detail
+        min_votes = rule.get("min_votes")
+        if min_votes is not None:
+            try:
+                if votes < int(min_votes):
+                    return False
+            except (TypeError, ValueError):
+                return False
         if op == "lte":
             return rating <= threshold
         return rating >= threshold
@@ -703,6 +1235,7 @@ def _sort_rows(
     section_type: str,
     candidate_index: dict[tuple[str, Any], dict[str, Any]],
     air_dates: Optional[dict[int, dict[str, Optional[datetime]]]] = None,
+    sort_provider: Optional[str] = None,
 ) -> list[Any]:
     if sort == "title":
         return sorted(rows, key=lambda r: str(r.title or "").lower())
@@ -718,6 +1251,18 @@ def _sort_rows(
             return value or _row_release_date(row, section_type) or epoch
 
         return sorted(rows, key=aired_key, reverse=True)
+    if sort == "rating":
+        provider = sort_provider if section_type == "movie" else None
+        if section_type == "movie" and not provider:
+            provider = "imdb"
+
+        def rating_key(row: Any) -> float:
+            detail = _row_rating_detail(row, section_type, provider)
+            if detail is None:
+                return float("-inf")
+            return detail[0]
+
+        return sorted(rows, key=rating_key, reverse=True)
     if sort == "popularity" and candidate_index:
         def popularity(row: Any) -> float:
             tmdb_id = row.tmdbid if section_type == "movie" else row.sonarr_tmdbid
@@ -873,6 +1418,14 @@ def _evaluate(
 
     rows = _load_catalog_rows(section_type, id_sets)
     matched_count = len(_dedupe_rows(rows, section_type))
+    missing_items, missing_count, missing_prefilter, missing_gaps = _missing_from_arr_items(
+        candidates,
+        rows,
+        section_type,
+        filters=normalized["filters"],
+        pins=normalized["pins"],
+        genre_map=_tmdb_genre_map(media_type),
+    )
 
     air_dates = (
         _load_air_date_lookup([int(r.id) for r in rows])
@@ -889,7 +1442,14 @@ def _evaluate(
     rows, pinned_out = _apply_exclude_pins(rows, normalized["pins"], section_type)
     rows = _merge_include_pins(rows, normalized["pins"], section_type)
 
-    rows = _sort_rows(rows, normalized["sort"], section_type, _candidate_index(candidates), air_dates)
+    rows = _sort_rows(
+        rows,
+        normalized["sort"],
+        section_type,
+        _candidate_index(candidates),
+        air_dates,
+        normalized.get("sort_provider"),
+    )
     limit = normalized["limit"] or MAX_COLLECTION_ITEMS
     rows, pinned_in = _apply_limit_with_pins(rows, normalized["pins"], section_type, limit)
 
@@ -905,6 +1465,10 @@ def _evaluate(
         "in_target_library": None,
         "unresolved": None,
         "plex_error": None,
+        "missing_from_arr": missing_items,
+        "missing_from_arr_count": missing_count,
+        "missing_from_arr_prefilter_count": missing_prefilter,
+        "missing_from_arr_filter_gaps": missing_gaps,
     }
 
     if resolve:
@@ -921,27 +1485,84 @@ def _evaluate(
     return result
 
 
+def recipe_section_ids(recipe: Any, extra_ids: Any = None) -> list[int]:
+    """Ordered unique Plex section ids for a recipe (primary first)."""
+    ids: list[int] = []
+    raw = extra_ids if extra_ids is not None else getattr(recipe, "plex_section_ids", None)
+    if isinstance(raw, list):
+        for value in raw:
+            try:
+                sid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if sid >= 1 and sid not in ids:
+                ids.append(sid)
+    try:
+        primary = int(getattr(recipe, "plex_section_id"))
+    except (TypeError, ValueError, AttributeError):
+        primary = 0
+    if primary >= 1 and primary not in ids:
+        ids.insert(0, primary)
+    elif primary >= 1 and ids and ids[0] != primary:
+        ids = [primary] + [sid for sid in ids if sid != primary]
+    return ids
+
+
+def normalize_section_ids(section_id: int, extra_ids: Any = None) -> list[int]:
+    class _Shim:
+        plex_section_id = section_id
+        plex_section_ids = extra_ids
+
+    ids = recipe_section_ids(_Shim())
+    if not ids:
+        raise RecipeValidationError("at least one Plex library is required")
+    return ids
+
+
 def preview_definition(
     definition: dict[str, Any],
     section_id: int,
     section_type: str,
     *,
     sample_size: int = 48,
+    extra_section_ids: Any = None,
 ) -> dict[str, Any]:
     """Evaluate a definition without writing to Plex. Returns staged counts + sample items."""
-    outcome = _evaluate(definition, section_id, section_type, resolve=True)
-    sample = [_row_summary(row, section_type) for row in outcome["rows"][:sample_size]]
+    section_ids = normalize_section_ids(section_id, extra_section_ids)
+    primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+    sample = [_row_summary(row, section_type) for row in primary["rows"][:sample_size]]
+    libraries: list[dict[str, Any]] = []
+    plex_errors: list[str] = []
+    for sid in section_ids:
+        outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+        libraries.append(
+            {
+                "plex_section_id": sid,
+                "in_target_library": outcome["in_target_library"],
+                "unresolved": outcome["unresolved"],
+                "plex_error": outcome["plex_error"],
+            }
+        )
+        if outcome["plex_error"]:
+            plex_errors.append(str(outcome["plex_error"]))
+    in_library_total = sum(int(lib["in_target_library"] or 0) for lib in libraries)
+    unresolved_total = sum(int(lib["unresolved"] or 0) for lib in libraries)
     return {
-        "tmdb_candidates": outcome["tmdb_candidates"],
-        "matched_in_catalog": outcome["matched_in_catalog"],
-        "after_filters": outcome["after_filters"],
-        "pinned_in": outcome["pinned_in"],
-        "pinned_out": outcome["pinned_out"],
-        "selected": outcome["selected"],
-        "in_target_library": outcome["in_target_library"],
-        "unresolved": outcome["unresolved"],
-        "plex_error": outcome["plex_error"],
+        "tmdb_candidates": primary["tmdb_candidates"],
+        "matched_in_catalog": primary["matched_in_catalog"],
+        "after_filters": primary["after_filters"],
+        "pinned_in": primary["pinned_in"],
+        "pinned_out": primary["pinned_out"],
+        "selected": primary["selected"],
+        "in_target_library": in_library_total if len(section_ids) == 1 else in_library_total,
+        "unresolved": unresolved_total if any(lib["unresolved"] is not None for lib in libraries) else None,
+        "plex_error": plex_errors[0] if plex_errors else None,
+        "libraries": libraries,
         "sample": sample,
+        "missing_from_arr": primary.get("missing_from_arr") or [],
+        "missing_from_arr_count": int(primary.get("missing_from_arr_count") or 0),
+        "missing_from_arr_prefilter_count": int(primary.get("missing_from_arr_prefilter_count") or 0),
+        "missing_from_arr_filter_gaps": primary.get("missing_from_arr_filter_gaps") or [],
     }
 
 
@@ -980,6 +1601,8 @@ def _verdict_tree(
             "value_to": node.get("value_to"),
             "values": node.get("values"),
             "basis": node.get("basis"),
+            "provider": node.get("provider"),
+            "min_votes": node.get("min_votes"),
             "status": "pass" if passed else "fail",
         }
     children = [_verdict_tree(row, child, section_type, air_dates) for child in (node.get("children") or [])]
@@ -1166,7 +1789,14 @@ def explain_definition_item(
         rows = _dedupe_rows(rows, section_type)
         rows, _ = _apply_exclude_pins(rows, pins, section_type)
         rows = _merge_include_pins(rows, pins, section_type)
-        rows = _sort_rows(rows, normalized["sort"], section_type, _candidate_index(candidates), full_air_dates)
+        rows = _sort_rows(
+            rows,
+            normalized["sort"],
+            section_type,
+            _candidate_index(candidates),
+            full_air_dates,
+            normalized.get("sort_provider"),
+        )
         limit = normalized["limit"] or MAX_COLLECTION_ITEMS
         selected, _ = _apply_limit_with_pins(rows, pins, section_type, limit)
 
@@ -1221,35 +1851,73 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         if recipe is None:
             raise RecipeValidationError(f"collection recipe {recipe_id} not found")
         definition = dict(recipe.definition or {})
-        section_id = int(recipe.plex_section_id)
+        section_ids = recipe_section_ids(recipe)
         section_type = str(recipe.plex_section_type)
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
+        previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
 
     summary: dict[str, Any]
     try:
-        outcome = _evaluate(definition, section_id, section_type, resolve=True)
-        if outcome["plex_error"]:
-            raise plex_collections.PlexCollectionsError(outcome["plex_error"])
-        sync_stats = plex_collections.sync_collection(
-            section_id, section_type, collection_title, outcome["resolved_items"] or []
-        )
+        if not section_ids:
+            raise RecipeValidationError("recipe has no Plex libraries")
+        primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+        libraries: list[dict[str, Any]] = []
+        synced_added = 0
+        synced_removed = 0
+        synced_total = 0
+        created_any = False
+        in_library_total = 0
+        unresolved_total = 0
+        for sid in section_ids:
+            outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+            if outcome["plex_error"]:
+                raise plex_collections.PlexCollectionsError(outcome["plex_error"])
+            sync_stats = plex_collections.sync_collection(
+                sid, section_type, collection_title, outcome["resolved_items"] or []
+            )
+            libraries.append(
+                {
+                    "plex_section_id": sid,
+                    "in_target_library": outcome["in_target_library"],
+                    "unresolved": outcome["unresolved"],
+                    "synced": sync_stats,
+                }
+            )
+            in_library_total += int(outcome["in_target_library"] or 0)
+            unresolved_total += int(outcome["unresolved"] or 0)
+            synced_added += int(sync_stats.get("added") or 0)
+            synced_removed += int(sync_stats.get("removed") or 0)
+            synced_total += int(sync_stats.get("total") or 0)
+            created_any = created_any or bool(sync_stats.get("created"))
+        missing_items = primary.get("missing_from_arr") or []
+        missing_keys = _missing_identity_keys(missing_items)
+        missing_count = int(primary.get("missing_from_arr_count") or 0)
         summary = {
             "status": "ok",
-            "tmdb_candidates": outcome["tmdb_candidates"],
-            "matched_in_catalog": outcome["matched_in_catalog"],
-            "after_filters": outcome["after_filters"],
-            "pinned_in": outcome["pinned_in"],
-            "pinned_out": outcome["pinned_out"],
-            "selected": outcome["selected"],
-            "in_target_library": outcome["in_target_library"],
-            "unresolved": outcome["unresolved"],
-            "synced": sync_stats,
+            "tmdb_candidates": primary["tmdb_candidates"],
+            "matched_in_catalog": primary["matched_in_catalog"],
+            "after_filters": primary["after_filters"],
+            "pinned_in": primary["pinned_in"],
+            "pinned_out": primary["pinned_out"],
+            "selected": primary["selected"],
+            "in_target_library": in_library_total,
+            "unresolved": unresolved_total,
+            "missing_from_arr_count": missing_count,
+            "missing_from_arr_new": _new_missing_count(missing_keys, previous_summary),
+            "missing_from_arr_keys": missing_keys,
+            "synced": {
+                "added": synced_added,
+                "removed": synced_removed,
+                "total": synced_total,
+                "created": created_any,
+            },
+            "libraries": libraries,
         }
         logger.info(
             f"Collections: recipe {recipe_name!r} synced "
-            f"(selected={outcome['selected']}, in_library={outcome['in_target_library']}, "
-            f"added={sync_stats['added']}, removed={sync_stats['removed']})",
+            f"(selected={primary['selected']}, libraries={len(section_ids)}, "
+            f"in_library={in_library_total}, added={synced_added}, removed={synced_removed})",
             extra={"emoji_type": "info"},
         )
     except (
@@ -1279,9 +1947,19 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _parse_month_day(raw: Any) -> Optional[tuple[int, int]]:
+    """Parse MM-DD (or YYYY-MM-DD) into (month, day). Invalid calendar values → None."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parts = text.split("-")
     try:
-        month_str, day_str = str(raw or "").strip().split("-", 1)
-        month, day = int(month_str), int(day_str)
+        if len(parts) == 2:
+            month, day = int(parts[0]), int(parts[1])
+        elif len(parts) == 3:
+            # Accept full dates from <input type="date"> and keep month/day.
+            month, day = int(parts[1]), int(parts[2])
+        else:
+            return None
     except (TypeError, ValueError):
         return None
     if not (1 <= month <= 12 and 1 <= day <= 31):
@@ -1295,10 +1973,20 @@ def validate_active_window(window: Any) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(window, dict):
         raise RecipeValidationError("active_window must be an object")
-    start = _parse_month_day(window.get("start"))
-    end = _parse_month_day(window.get("end"))
+    start_raw = window.get("start")
+    end_raw = window.get("end")
+    start = _parse_month_day(start_raw)
+    end = _parse_month_day(end_raw)
     if start is None or end is None:
-        raise RecipeValidationError("active_window needs start and end as MM-DD")
+        bad = []
+        if start is None:
+            bad.append(f"start={start_raw!r}")
+        if end is None:
+            bad.append(f"end={end_raw!r}")
+        raise RecipeValidationError(
+            "active_window needs start and end as MM-DD (month 01–12, day 01–31); "
+            + ", ".join(bad)
+        )
     when_inactive = str(window.get("when_inactive") or "keep")
     if when_inactive not in ("keep", "clear"):
         raise RecipeValidationError("active_window when_inactive must be 'keep' or 'clear'")
@@ -1362,17 +2050,30 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
         recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
         if recipe is None:
             raise RecipeValidationError(f"recipe {recipe_id} not found")
-        section_id = int(recipe.plex_section_id)
+        section_ids = recipe_section_ids(recipe)
         section_type = str(recipe.plex_section_type)
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
 
     try:
-        sync_stats = plex_collections.sync_collection(section_id, section_type, collection_title, [])
-        summary = {"status": "cleared", "synced": sync_stats, "window_cleared": True}
+        libraries: list[dict[str, Any]] = []
+        removed = 0
+        last_stats: dict[str, Any] | None = None
+        for sid in section_ids:
+            sync_stats = plex_collections.sync_collection(sid, section_type, collection_title, [])
+            libraries.append({"plex_section_id": sid, "synced": sync_stats})
+            removed += int(sync_stats.get("removed") or 0)
+            last_stats = sync_stats
+        summary = {
+            "status": "cleared",
+            "synced": last_stats
+            or {"added": 0, "removed": removed, "total": 0, "created": False},
+            "libraries": libraries,
+            "window_cleared": True,
+        }
         logger.info(
             f"Collections: recipe {recipe_name!r} left its active window — collection cleared "
-            f"(removed={sync_stats['removed']})",
+            f"(libraries={len(section_ids)}, removed={removed})",
             extra={"emoji_type": "info"},
         )
     except plex_collections.PlexCollectionsError as exc:

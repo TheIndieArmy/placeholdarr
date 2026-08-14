@@ -96,3 +96,21 @@ async def auth_change_password(request: Request, body: ChangePasswordBody):
     except ValueError as exc:
         return auth_svc.json_error(400, str(exc))
     return {"ok": True, "message": "password updated"}
+
+
+@router.get("/webhook-key")
+async def auth_webhook_key(request: Request):
+    user, _source = auth_svc.resolve_request_identity(request)
+    if not user:
+        return auth_svc.json_error(401, "authentication required")
+    return {"webhook_api_key": auth_svc.ensure_webhook_api_key()}
+
+
+@router.post("/webhook-key/regenerate")
+async def auth_webhook_key_regenerate(request: Request):
+    user, _source = auth_svc.resolve_request_identity(request)
+    if not user:
+        return auth_svc.json_error(401, "authentication required")
+    if not auth_svc.validate_csrf(request):
+        return auth_svc.json_error(403, "CSRF token missing or invalid")
+    return {"webhook_api_key": auth_svc.regenerate_webhook_api_key()}

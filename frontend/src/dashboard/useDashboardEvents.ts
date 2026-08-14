@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { openDashboardEventSource } from "../api/dashboard";
+import { getHealth, openDashboardEventSource } from "../api/dashboard";
 import type { DashboardEvent, LibraryVersionResponse } from "../types/api";
 
 export function useDashboardEvents(opts: {
@@ -89,6 +89,9 @@ export function useDashboardEvents(opts: {
           if (stopped) return;
           setEventsConnected(true);
           onConnectedRef.current?.();
+          void getHealth().catch(() => {
+            /* Stale-bundle reload is best-effort. */
+          });
         },
         onEvent: handleEvent,
         onError: () => {

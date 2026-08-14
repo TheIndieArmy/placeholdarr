@@ -7,6 +7,7 @@ import {
   previewCollectionDefinition,
   type RecipeWritePayload,
 } from "../api/collections";
+import { ArrAddModal } from "./ArrAddModal";
 import {
   CollectionThemeProvider,
   getCollectionTheme,
@@ -24,15 +25,38 @@ import type {
   CollectionFilterField,
   CollectionFilterGroup,
   CollectionFilterNode,
+  CollectionFilters,
   CollectionPinnedItem,
+  CollectionMissingFromArrItem,
   CollectionPreviewResponse,
   CollectionRecipe,
+  CollectionRatingProvider,
   CollectionSourceBlock,
   CollectionSourceType,
   CollectionTmdbMeta,
   LibraryItem,
   PlexSectionOption,
 } from "../types/api";
+
+const MOVIE_RATING_PROVIDERS: {
+  value: CollectionRatingProvider;
+  label: string;
+  max: number;
+}[] = [
+  { value: "imdb", label: "IMDb", max: 10 },
+  { value: "tmdb", label: "TMDB", max: 10 },
+  { value: "trakt", label: "Trakt", max: 10 },
+  { value: "metacritic", label: "Metacritic", max: 100 },
+  { value: "rottenTomatoes", label: "Rotten Tomatoes", max: 100 },
+];
+
+const RATING_PROVIDER_LABELS: Record<string, string> = Object.fromEntries(
+  MOVIE_RATING_PROVIDERS.map((p) => [p.value, p.label]),
+);
+
+function ratingProviderMax(provider: string | null | undefined): number {
+  return MOVIE_RATING_PROVIDERS.find((p) => p.value === provider)?.max ?? 10;
+}
 
 const SOURCE_META: Record<
   CollectionSourceType,
@@ -64,6 +88,33 @@ const FILTER_META: Record<CollectionFilterField, { label: string; icon: string }
 // Legacy fields (e.g. the removed downloaded-file "quality" filter) may still exist in saved recipes.
 function filterMeta(field: string): { label: string; icon: string } {
   return FILTER_META[field as CollectionFilterField] ?? { label: field, icon: "filter_alt" };
+}
+
+function arrIncludeConstraintLabels(filters: CollectionFilters | undefined): string[] {
+  const labels: string[] = [];
+  const walk = (node: CollectionFilterNode | CollectionFilters | undefined) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (typeof node !== "object") return;
+    if ("field" in node && node.field) {
+      if (node.field === "instance" && String(node.value || "").trim()) {
+        labels.push(FILTER_META.instance.label);
+      }
+      if (node.field === "quality_profile" && node.op !== "not_in" && (node.values?.length ?? 0) > 0) {
+        labels.push(FILTER_META.quality_profile.label);
+      }
+      if (node.field === "monitored" && node.value !== false) {
+        labels.push(FILTER_META.monitored.label);
+      }
+      return;
+    }
+    if ("children" in node) (node.children || []).forEach(walk);
+  };
+  walk(filters);
+  return [...new Set(labels)];
 }
 
 function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
@@ -110,7 +161,9 @@ function defaultFilterBlock(field: CollectionFilterField, sectionType: "movie" |
         basis: sectionType === "movie" ? "theater" : "premiered",
       };
     case "rating":
-      return { field, op: "gte", value: 7 };
+      return sectionType === "movie"
+        ? { field, op: "gte", value: 7, provider: "imdb", min_votes: null }
+        : { field, op: "gte", value: 7, min_votes: null };
   }
 }
 
@@ -420,12 +473,20 @@ const MONTH_NAMES = [
 ];
 
 function splitMonthDay(raw: string): { month: number; day: number } {
-  const [m, d] = raw.split("-").map((p) => Number(p));
-  return { month: Math.min(Math.max(m || 1, 1), 12), day: Math.min(Math.max(d || 1, 1), 31) };
+  const parts = String(raw || "").trim().split("-").map((p) => Number(p));
+  // MM-DD or YYYY-MM-DD (last two segments are month/day).
+  const m = parts.length >= 3 ? parts[1] : parts[0];
+  const d = parts.length >= 3 ? parts[2] : parts[1];
+  return {
+    month: Math.min(Math.max(Number.isFinite(m) && m > 0 ? m : 1, 1), 12),
+    day: Math.min(Math.max(Number.isFinite(d) && d > 0 ? d : 1, 1), 31),
+  };
 }
 
 function joinMonthDay(month: number, day: number): string {
-  return `${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const m = Math.min(Math.max(Number.isFinite(month) && month > 0 ? month : 1, 1), 12);
+  const d = Math.min(Math.max(Number.isFinite(day) && day > 0 ? day : 1, 1), 31);
+  return `${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
 function MonthDayPicker(props: { value: string; onChange: (value: string) => void }) {
@@ -444,7 +505,13 @@ function MonthDayPicker(props: { value: string; onChange: (value: string) => voi
           </option>
         ))}
       </select>
-      <NumberInput value={day} min={1} max={31} width={58} onChange={(v) => props.onChange(joinMonthDay(month, v ?? 1))} />
+      <NumberInput
+        value={day}
+        min={1}
+        max={31}
+        width={58}
+        onChange={(v) => props.onChange(joinMonthDay(month, v == null || v < 1 ? 1 : v))}
+      />
     </span>
   );
 }
@@ -501,7 +568,17 @@ function explainRuleCheckLabel(check: CollectionExplainCheck): string {
     check.field === "release_window" && check.basis
       ? `(by ${RELEASE_BASIS_LABELS[check.basis] ?? check.basis})`
       : "";
-  return [base, op, value, basis].filter(Boolean).join(" ");
+  const provider =
+    check.field === "rating"
+      ? check.provider
+        ? `(${RATING_PROVIDER_LABELS[check.provider] ?? check.provider})`
+        : "(ARR rating)"
+      : "";
+  const votes =
+    check.field === "rating" && check.min_votes != null && Number(check.min_votes) > 0
+      ? `≥ ${check.min_votes} votes`
+      : "";
+  return [base, provider, op, value, basis, votes].filter(Boolean).join(" ");
 }
 
 /** Skip redundant single-child group wrappers so simple recipes read flat. */
@@ -724,7 +801,11 @@ export function CollectionEditor(props: {
 
   const [name, setName] = useState(props.recipe?.name ?? "");
   const [enabled, setEnabled] = useState(props.recipe?.enabled ?? true);
-  const [sectionId, setSectionId] = useState<number | null>(props.recipe?.plex_section_id ?? null);
+  const [sectionIds, setSectionIds] = useState<number[]>(() => {
+    const extras = props.recipe?.plex_section_ids?.filter((id) => Number.isFinite(id) && id >= 1) ?? [];
+    if (extras.length) return extras;
+    return props.recipe?.plex_section_id ? [props.recipe.plex_section_id] : [];
+  });
   const [collectionTitle, setCollectionTitle] = useState(props.recipe?.collection_title ?? "");
   const [runIntervalHours, setRunIntervalHours] = useState<number | null>(props.recipe?.run_interval_hours ?? null);
   const [activeWindow, setActiveWindow] = useState<CollectionActiveWindow | null>(props.recipe?.active_window ?? null);
@@ -734,6 +815,7 @@ export function CollectionEditor(props: {
       : { sources: [defaultSourceBlock(props.tmdbConfigured ? "tmdb_trending" : "catalog")], filters: [], limit: 50, sort: "popularity" },
   );
 
+  const sectionId = sectionIds[0] ?? null;
   const section = useMemo(
     () => props.sections.find((s) => s.id === sectionId) ?? null,
     [props.sections, sectionId],
@@ -900,6 +982,9 @@ export function CollectionEditor(props: {
   const [preview, setPreview] = useState<CollectionPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewPane, setPreviewPane] = useState<"catalog" | "missing">("catalog");
+  const [selectedMissing, setSelectedMissing] = useState<Set<string>>(new Set());
+  const [arrModalOpen, setArrModalOpen] = useState(false);
   const previewSeq = useRef(0);
   const definitionJson = JSON.stringify(definition);
   useEffect(() => {
@@ -913,12 +998,17 @@ export function CollectionEditor(props: {
     const timer = window.setTimeout(() => {
       previewCollectionDefinition({
         plex_section_id: sectionId,
+        plex_section_ids: sectionIds,
         plex_section_type: sectionType,
         definition: JSON.parse(definitionJson) as CollectionDefinition,
       })
         .then((result) => {
           if (previewSeq.current !== seq) return;
           setPreview(result);
+          setSelectedMissing(new Set());
+          if (!(result.missing_from_arr_count || result.missing_from_arr_prefilter_count || 0)) {
+            setPreviewPane("catalog");
+          }
           setPreviewLoading(false);
         })
         .catch((err) => {
@@ -929,7 +1019,7 @@ export function CollectionEditor(props: {
     }, 900);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [definitionJson, sectionId, sectionType]);
+  }, [definitionJson, sectionId, sectionIds, sectionType]);
 
   // ----- explain ("why isn't this title in the collection?") -----
   const [explainQuery, setExplainQuery] = useState("");
@@ -1224,29 +1314,44 @@ export function CollectionEditor(props: {
             ) : null}
           </div>
         );
-      case "certification":
+      case "certification": {
+        const catalogCerts = builderMeta?.certifications ?? [];
+        const selectedCerts = block.values ?? [];
+        const certByUpper = new Map<string, string>();
+        for (const cert of catalogCerts) {
+          const key = cert.trim().toUpperCase();
+          if (key && !certByUpper.has(key)) certByUpper.set(key, cert.trim());
+        }
+        // Keep legacy free-text selections visible even if they left the catalog.
+        for (const cert of selectedCerts) {
+          const key = cert.trim().toUpperCase();
+          if (key && !certByUpper.has(key)) certByUpper.set(key, cert.trim());
+        }
+        const certOptions = Array.from(certByUpper.values()).map((name) => ({ key: name, label: name }));
+        const selectedNormalized = selectedCerts
+          .map((cert) => certByUpper.get(cert.trim().toUpperCase()) ?? cert.trim())
+          .filter(Boolean);
         return (
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-col gap-2">
             {opSelect([
               { value: "in", label: "is one of" },
               { value: "not_in", label: "is none of" },
             ])}
-            <input
-              className={theme.field}
-              style={{ width: 220 }}
-              placeholder="e.g. PG-13, R (comma separated)"
-              value={(block.values ?? []).join(", ")}
-              onChange={(e) =>
-                update({
-                  values: e.target.value
-                    .split(",")
-                    .map((v) => v.trim())
-                    .filter(Boolean),
-                })
-              }
+            <MultiChipPicker
+              options={certOptions}
+              selected={selectedNormalized}
+              accentHex={accentHex}
+              emptyHint={builderMeta ? "No certifications found in your catalog yet" : "Loading certifications…"}
+              onToggle={(key) => {
+                const current = new Set(selectedNormalized);
+                if (current.has(key)) current.delete(key);
+                else current.add(key);
+                update({ values: Array.from(current) });
+              }}
             />
           </div>
         );
+      }
       case "studio_network":
         return (
           <div className="flex flex-wrap items-center gap-2">
@@ -1383,23 +1488,87 @@ export function CollectionEditor(props: {
           </div>
         );
       }
-      case "rating":
+      case "rating": {
+        const provider =
+          sectionType === "movie"
+            ? ((block.provider as CollectionRatingProvider | null | undefined) ?? "imdb")
+            : null;
+        const scaleMax = sectionType === "movie" ? ratingProviderMax(provider) : 10;
+        const updateRating = (patch: Partial<CollectionFilterBlock>) => {
+          if (sectionType === "movie" && !block.provider && !patch.provider) {
+            update({ provider: "imdb", ...patch });
+            return;
+          }
+          update(patch);
+        };
         return (
-          <div className="flex flex-wrap items-center gap-2">
-            {opSelect([
-              { value: "gte", label: "is at least" },
-              { value: "lte", label: "is at most" },
-            ])}
-            <NumberInput
-              value={typeof block.value === "number" ? block.value : null}
-              min={0}
-              max={10}
-              width={70}
-              onChange={(v) => update({ value: v })}
-            />
-            <span className="text-[13px] text-slate-500">/ 10</span>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {sectionType === "movie" ? (
+                <select
+                  className={theme.selectField}
+                  value={provider ?? "imdb"}
+                  onChange={(e) => {
+                    const next = e.target.value as CollectionRatingProvider;
+                    const prevMax = ratingProviderMax(provider);
+                    const nextMax = ratingProviderMax(next);
+                    let nextValue = typeof block.value === "number" ? block.value : null;
+                    if (nextValue != null && prevMax !== nextMax) {
+                      nextValue = Math.round((nextValue / prevMax) * nextMax * 10) / 10;
+                    }
+                    updateRating({ provider: next, value: nextValue });
+                  }}
+                >
+                  {MOVIE_RATING_PROVIDERS.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span
+                  className="text-[13px] text-slate-500"
+                  title="Sonarr exposes a single score from Skyhook (usually IMDb when mapped)"
+                >
+                  Sonarr rating
+                </span>
+              )}
+              <select
+                className={theme.selectOp}
+                value={block.op ?? "gte"}
+                onChange={(e) => updateRating({ op: e.target.value })}
+              >
+                <option value="gte">is at least</option>
+                <option value="lte">is at most</option>
+              </select>
+              <NumberInput
+                value={typeof block.value === "number" ? block.value : null}
+                min={0}
+                max={scaleMax}
+                width={70}
+                onChange={(v) => updateRating({ value: v })}
+              />
+              <span className="text-[13px] text-slate-500">/ {scaleMax}</span>
+            </div>
+            <label className={`flex flex-wrap items-center gap-2 ${theme.label}`}>
+              Min votes
+              <NumberInput
+                value={typeof block.min_votes === "number" ? block.min_votes : null}
+                min={0}
+                max={10_000_000}
+                width={90}
+                placeholder="optional"
+                onChange={(v) => updateRating({ min_votes: v })}
+              />
+              <span className="text-[12px] text-slate-500 font-normal normal-case tracking-normal">
+                {sectionType === "movie"
+                  ? "on the selected source (titles missing that rating fail)"
+                  : "from Sonarr’s score (titles with no rating fail)"}
+              </span>
+            </label>
           </div>
         );
+      }
     }
   }
 
@@ -1478,14 +1647,26 @@ export function CollectionEditor(props: {
     );
   }
 
+  const missingCount = preview?.missing_from_arr_count ?? 0;
+  const missingPrefilter = preview?.missing_from_arr_prefilter_count ?? 0;
+  const missingGaps = preview?.missing_from_arr_filter_gaps ?? [];
+  const missingItems = preview?.missing_from_arr ?? [];
+  const arrIncludeLabels = arrIncludeConstraintLabels(definition.filters);
+  const showMissingPane = missingCount > 0 || missingPrefilter > 0 || missingGaps.length > 0;
+  const missingKey = (item: CollectionMissingFromArrItem) =>
+    `${item.tmdb_id ?? ""}:${item.tvdb_id ?? ""}:${item.imdb_id ?? ""}:${item.title}:${item.year ?? ""}`;
   const previewStages: { label: string; value: number | null | undefined }[] = [
     { label: "List candidates", value: preview?.tmdb_candidates },
     { label: "Matched in catalog", value: preview?.matched_in_catalog },
+    ...(showMissingPane ? [{ label: "Missing from ARR", value: missingCount }] : []),
     { label: "After filters", value: preview?.after_filters },
     ...(preview?.pinned_out ? [{ label: "Pinned out", value: preview.pinned_out }] : []),
     ...(preview?.pinned_in ? [{ label: "Pinned in", value: preview.pinned_in }] : []),
     { label: "Selected (sort + limit)", value: preview?.selected },
-    { label: "In target library", value: preview?.in_target_library },
+    {
+      label: sectionIds.length > 1 ? "In libraries (combined)" : "In target library",
+      value: preview?.in_target_library,
+    },
   ];
 
   return (
@@ -1496,21 +1677,43 @@ export function CollectionEditor(props: {
         {/* Recipe identity + target — picking the library first drives media type, genres, pins, and preview */}
         <div className={`${theme.identityCard} flex flex-col gap-3`}>
           <div className="flex flex-wrap items-center gap-4">
-            <label className={`flex items-center gap-2 ${theme.label}`}>
-              Plex library
-              <select
-                className={`${theme.selectField} min-w-[14rem]`}
-                value={sectionId ?? ""}
-                onChange={(e) => setSectionId(e.target.value === "" ? null : Number(e.target.value))}
-              >
-                <option value="">Select a library…</option>
-                {props.sections.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title} ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="flex flex-col gap-1.5 min-w-[16rem]">
+              <span className={theme.label}>Plex libraries</span>
+              <p className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
+                Same collection name is created in each selected library (same type only).
+              </p>
+              <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
+                {props.sections.map((s) => {
+                  const selected = sectionIds.includes(s.id);
+                  const typeLocked = sectionType && s.type !== sectionType && sectionIds.length > 0;
+                  return (
+                    <label
+                      key={s.id}
+                      className={`flex items-center gap-2 text-[13px] ${typeLocked ? "opacity-40 pointer-events-none" : "cursor-pointer"} ${theme.label}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={typeLocked}
+                        onChange={() => {
+                          setSectionIds((prev) => {
+                            if (prev.includes(s.id)) return prev.filter((id) => id !== s.id);
+                            if (prev.length && s.type !== sectionType) return prev;
+                            return [...prev, s.id];
+                          });
+                        }}
+                      />
+                      <span>
+                        {s.title}{" "}
+                        <span className="opacity-70">
+                          ({s.type === "movie" ? "Movies" : "TV"}, {s.item_count})
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Collection title
               <input
@@ -1827,16 +2030,54 @@ export function CollectionEditor(props: {
               <select
                 className={theme.selectField}
                 value={definition.sort ?? "popularity"}
-                onChange={(e) =>
-                  setDefinition((prev) => ({ ...prev, sort: e.target.value as CollectionDefinition["sort"] }))
-                }
+                onChange={(e) => {
+                  const next = e.target.value as CollectionDefinition["sort"];
+                  setDefinition((prev) => ({
+                    ...prev,
+                    sort: next,
+                    sort_provider:
+                      next === "rating"
+                        ? sectionType === "movie"
+                          ? (prev.sort_provider ?? "imdb")
+                          : null
+                        : null,
+                  }));
+                }}
               >
                 <option value="popularity">Popularity / list rank</option>
                 <option value="release_date">Release date (newest)</option>
                 <option value="latest_aired">Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}</option>
+                <option value="rating">Rating (highest first)</option>
                 <option value="title">Title (A–Z)</option>
               </select>
             </label>
+            {definition.sort === "rating" ? (
+              sectionType === "movie" ? (
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  Source
+                  <select
+                    className={theme.selectField}
+                    value={definition.sort_provider ?? "imdb"}
+                    onChange={(e) =>
+                      setDefinition((prev) => ({
+                        ...prev,
+                        sort_provider: e.target.value as CollectionRatingProvider,
+                      }))
+                    }
+                  >
+                    {MOVIE_RATING_PROVIDERS.map((p) => (
+                      <option key={p.value} value={p.value}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <span className="text-[13px] text-slate-500" title="Sonarr exposes a single score from Skyhook (usually IMDb when mapped)">
+                  Sonarr rating
+                </span>
+              )
+            ) : null}
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Max items
               <NumberInput
@@ -1866,11 +2107,24 @@ export function CollectionEditor(props: {
                 name: name.trim(),
                 enabled,
                 plex_section_id: sectionId,
+                plex_section_ids: sectionIds,
                 plex_section_type: sectionType,
                 collection_title: collectionTitle.trim(),
                 definition,
                 run_interval_hours: runIntervalHours,
-                active_window: activeWindow,
+                active_window: activeWindow
+                  ? {
+                      start: joinMonthDay(
+                        splitMonthDay(activeWindow.start).month,
+                        splitMonthDay(activeWindow.start).day,
+                      ),
+                      end: joinMonthDay(
+                        splitMonthDay(activeWindow.end).month,
+                        splitMonthDay(activeWindow.end).day,
+                      ),
+                      when_inactive: activeWindow.when_inactive === "clear" ? "clear" : "keep",
+                    }
+                  : null,
               });
             }}
             className="rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] transition-opacity disabled:opacity-40"
@@ -1924,9 +2178,23 @@ export function CollectionEditor(props: {
                 ) : null}
                 {preview && preview.unresolved != null && preview.unresolved > 0 ? (
                   <p className="mt-2 text-[12px] text-slate-500">
-                    {preview.unresolved} matched title{preview.unresolved === 1 ? " is" : "s are"} not present in the
-                    target library and will be skipped.
+                    {preview.unresolved} matched title{preview.unresolved === 1 ? "" : "s"} not present in
+                    {sectionIds.length > 1 ? " a selected library" : " the target library"} and will be skipped there.
                   </p>
+                ) : null}
+                {preview?.libraries && preview.libraries.length > 1 ? (
+                  <div className="mt-2 flex flex-col gap-0.5">
+                    {preview.libraries.map((lib) => {
+                      const title = props.sections.find((s) => s.id === lib.plex_section_id)?.title ?? `Section ${lib.plex_section_id}`;
+                      return (
+                        <p key={lib.plex_section_id} className={`text-[12px] ${theme.muted}`}>
+                          {title}: {lib.in_target_library ?? "—"} in library
+                          {lib.unresolved ? ` · ${lib.unresolved} missing` : ""}
+                          {lib.plex_error ? ` · ${lib.plex_error}` : ""}
+                        </p>
+                      );
+                    })}
+                  </div>
                 ) : null}
 
                 <div className={`mt-3 border-t pt-3 ${theme.divider}`}>
@@ -2060,31 +2328,169 @@ export function CollectionEditor(props: {
               )}
                 </div>
 
-                {preview?.sample?.length ? (
+                {preview?.sample?.length || showMissingPane ? (
                   <div className={`mt-3 border-t pt-3 ${theme.divider}`}>
-                    <div className={`${theme.sectionLabel} mb-2`}>Sample</div>
-                    <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
-                      {preview.sample.map((item) =>
-                        item.poster ? (
-                          <img
-                            key={item.id}
-                            src={item.poster}
-                            alt={item.title}
-                            title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                            className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
-                            loading="lazy"
-                          />
-                        ) : (
-                          <div
-                            key={item.id}
-                            title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                            className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
+                    {showMissingPane ? (
+                      <div className="mb-2 flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewPane("catalog")}
+                          className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                            previewPane === "catalog" ? "text-[#0a0e14]" : theme.chipInactive
+                          }`}
+                          style={previewPane === "catalog" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
+                        >
+                          In catalog
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPreviewPane("missing")}
+                          className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                            previewPane === "missing" ? "text-[#0a0e14]" : theme.chipInactive
+                          }`}
+                          style={previewPane === "missing" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
+                        >
+                          Missing from ARR ({missingCount})
+                        </button>
+                      </div>
+                    ) : (
+                      <div className={`${theme.sectionLabel} mb-2`}>Sample</div>
+                    )}
+                    {previewPane === "missing" && showMissingPane ? (
+                      <>
+                        {missingItems.length ? (
+                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
+                            onClick={() => setSelectedMissing(new Set(missingItems.map(missingKey)))}
                           >
-                            {item.title}
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
+                            onClick={() => setSelectedMissing(new Set())}
+                          >
+                            Select none
+                          </button>
+                          <span className={`text-[12px] ${theme.muted}`}>
+                            {selectedMissing.size} selected
+                          </span>
+                          <button
+                            type="button"
+                            disabled={selectedMissing.size < 1}
+                            onClick={() => setArrModalOpen(true)}
+                            className="ml-auto rounded-lg px-4 py-1.5 text-[13px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40"
+                            style={{ backgroundColor: accentHex }}
+                          >
+                            Add to {sectionType === "movie" ? "Radarr" : "Sonarr"}
+                          </button>
+                        </div>
+                        ) : null}
+                        {missingItems.length && missingGaps.length ? (
+                          <div className="mb-2 text-[12px] text-yellow-400/90">
+                            <p>The following filters cannot be applied because the source list did not include this data:</p>
+                            <ul className="mt-1 list-disc pl-4">
+                              {missingGaps.map((gap) => (
+                                <li key={gap}>{gap}</li>
+                              ))}
+                            </ul>
+                            <p className="mt-1">
+                              This list may include extra {sectionType === "movie" ? "titles" : "series"} that would
+                              not pass those filters. Add the {sectionType === "movie" ? "titles" : "series"} you want
+                              to {sectionType === "movie" ? "Radarr" : "Sonarr"}. After the next Placeholdarr sync, the
+                              collection recipe filters them in or out as usual.
+                            </p>
                           </div>
-                        ),
-                      )}
-                    </div>
+                        ) : null}
+                        {missingItems.length ? (
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
+                          {missingItems.map((item) => {
+                            const key = missingKey(item);
+                            const selected = selectedMissing.has(key);
+                            return (
+                              <button
+                                type="button"
+                                key={key}
+                                title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                                onClick={() => {
+                                  setSelectedMissing((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(key)) next.delete(key);
+                                    else next.add(key);
+                                    return next;
+                                  });
+                                }}
+                                className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback}`}
+                                style={selected ? { boxShadow: `0 0 0 2px ${accentHex}` } : undefined}
+                              >
+                                {item.poster ? (
+                                  <img
+                                    src={item.poster}
+                                    alt={item.title}
+                                    className="h-full w-full object-cover"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <span className="block p-1 text-[9px] leading-tight">{item.title}</span>
+                                )}
+                                <span className="absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] text-white">
+                                  {selected ? "✓" : ""}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        ) : arrIncludeLabels.length ? (
+                          <div className={`mb-2 ${theme.muted}`}>
+                            <p>
+                              The following filters only apply to {sectionType === "movie" ? "titles" : "series"} already
+                              in {sectionType === "movie" ? "Radarr" : "Sonarr"}:
+                            </p>
+                            <ul className="mt-1 list-disc pl-4">
+                              {arrIncludeLabels.map((label) => (
+                                <li key={label}>{label}</li>
+                              ))}
+                            </ul>
+                            <p className="mt-1">
+                              {sectionType === "movie" ? "Titles" : "Series"} that are not in{" "}
+                              {sectionType === "movie" ? "Radarr" : "Sonarr"} cannot satisfy them, so none are listed.
+                            </p>
+                          </div>
+                        ) : (
+                          <p className={`mb-2 ${theme.muted}`}>
+                            No {sectionType === "movie" ? "titles" : "series"} left after the filters we could apply from
+                            the list.
+                          </p>
+                        )}
+                      </>
+                    ) : preview?.sample?.length ? (
+                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
+                        {preview.sample.map((item) =>
+                          item.poster ? (
+                            <img
+                              key={item.id}
+                              src={item.poster}
+                              alt={item.title}
+                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                              className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div
+                              key={item.id}
+                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                              className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
+                            >
+                              {item.title}
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : (
+                      <p className={theme.muted}>No catalog sample for this recipe.</p>
+                    )}
                   </div>
                 ) : null}
               </>
@@ -2094,6 +2500,15 @@ export function CollectionEditor(props: {
         </div>
       </aside>
     </div>
+      {arrModalOpen ? (
+        <ArrAddModal
+          mediaType={sectionType}
+          items={missingItems.filter((item) => selectedMissing.has(missingKey(item)))}
+          defaultTag={name.trim() || "placeholdarr"}
+          accentHex={accentHex}
+          onClose={() => setArrModalOpen(false)}
+        />
+      ) : null}
     </CollectionThemeProvider>
   );
 }

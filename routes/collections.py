@@ -18,7 +18,9 @@ from services import list_sources, tmdb_client
 from services.collections.engine import (
     RecipeValidationError,
     explain_definition_item,
+    normalize_section_ids,
     preview_definition,
+    recipe_section_ids,
     run_recipe,
     validate_active_window,
     validate_definition,
@@ -41,11 +43,13 @@ def _iso(dt: datetime | None) -> str | None:
 
 def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
     window = row.active_window if isinstance(row.active_window, dict) else None
+    section_ids = recipe_section_ids(row)
     return {
         "id": row.id,
         "name": row.name,
         "enabled": bool(row.enabled),
-        "plex_section_id": row.plex_section_id,
+        "plex_section_id": section_ids[0] if section_ids else row.plex_section_id,
+        "plex_section_ids": section_ids,
         "plex_section_type": row.plex_section_type,
         "collection_title": row.collection_title,
         "definition": row.definition or {},
@@ -76,6 +80,7 @@ class RecipePayload(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     enabled: bool = True
     plex_section_id: int = Field(..., ge=1)
+    plex_section_ids: list[int] | None = None
     plex_section_type: str = Field(..., pattern="^(movie|show)$")
     collection_title: str = Field(..., min_length=1, max_length=200)
     definition: dict[str, Any]
@@ -85,6 +90,7 @@ class RecipePayload(BaseModel):
 
 class PreviewPayload(BaseModel):
     plex_section_id: int = Field(..., ge=1)
+    plex_section_ids: list[int] | None = None
     plex_section_type: str = Field(..., pattern="^(movie|show)$")
     definition: dict[str, Any]
 
@@ -106,13 +112,15 @@ async def create_recipe(body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
         window = validate_active_window(body.active_window)
+        section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
         row = CollectionRecipe(
             name=body.name.strip(),
             enabled=body.enabled,
-            plex_section_id=body.plex_section_id,
+            plex_section_id=section_ids[0],
+            plex_section_ids=section_ids,
             plex_section_type=body.plex_section_type,
             collection_title=body.collection_title.strip(),
             definition=normalized,
@@ -198,6 +206,53 @@ def _fetch_instance_quality_profiles(instance: dict[str, Any]) -> list[dict[str,
     return profiles
 
 
+_root_cache_lock = threading.Lock()
+_root_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_ROOT_CACHE_TTL_SECONDS = 600.0
+
+
+def _fetch_instance_root_folders(instance: dict[str, Any]) -> list[dict[str, Any]]:
+    identity = str(instance.get("instance_id") or instance.get("instance_key") or "")
+    now = time.monotonic()
+    with _root_cache_lock:
+        hit = _root_cache.get(identity)
+        if hit and (now - hit[0]) <= _ROOT_CACHE_TTL_SECONDS:
+            return hit[1]
+
+    url = str(instance.get("url") or "").rstrip("/")
+    api_key = str(instance.get("api_key") or "")
+    folders: list[dict[str, Any]] = []
+    if url and api_key:
+        try:
+            resp = requests.get(
+                f"{url}/api/v3/rootfolder",
+                headers={"X-Api-Key": api_key, "Accept": "application/json"},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                for raw in resp.json() or []:
+                    if isinstance(raw, dict) and raw.get("path"):
+                        folders.append({"id": raw.get("id"), "path": str(raw["path"])})
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning(
+                f"Collections: failed to fetch root folders from {instance.get('instance_key')}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
+    with _root_cache_lock:
+        _root_cache[identity] = (now, folders)
+    return folders
+
+
+def _arr_instances_for_media(media_type: str) -> list[dict[str, Any]]:
+    arr_type = "radarr" if media_type == "movie" else "sonarr"
+    return [
+        item
+        for item in (getattr(settings, "configured_arr_instances", []) or [])
+        if str(item.get("arr_type") or "").lower() == arr_type
+    ]
+
+
 @router.get("/api/collections/builder-meta")
 async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$")):
     """Catalog-backed builder metadata for filter pickers and ARR-scoped options."""
@@ -241,6 +296,12 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "WHERE is_deleted = false AND radarr_genres IS NOT NULL "
             "ORDER BY genre"
         )
+        cert_sql = text(
+            "SELECT DISTINCT radarr_certification AS cert "
+            "FROM movie WHERE is_deleted = false "
+            "AND radarr_certification IS NOT NULL AND TRIM(radarr_certification) <> '' "
+            "ORDER BY cert"
+        )
     else:
         lang_sql = text(
             "SELECT DISTINCT sonarr_payload_raw->'originalLanguage'->>'name' AS lang "
@@ -253,15 +314,23 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "WHERE is_deleted = false AND sonarr_genres IS NOT NULL "
             "ORDER BY genre"
         )
+        cert_sql = text(
+            "SELECT DISTINCT sonarr_certification AS cert "
+            "FROM series WHERE is_deleted = false "
+            "AND sonarr_certification IS NOT NULL AND TRIM(sonarr_certification) <> '' "
+            "ORDER BY cert"
+        )
     with session_scope() as session:
         languages = [str(row[0]) for row in session.execute(lang_sql) if row[0]]
         genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
+        certifications = [str(row[0]).strip() for row in session.execute(cert_sql) if row[0] and str(row[0]).strip()]
 
     return {
         "instances": instance_options,
         "quality_profiles": profile_options,
         "languages": languages,
         "genres": genres,
+        "certifications": certifications,
     }
 
 
@@ -272,10 +341,178 @@ async def preview(body: PreviewPayload):
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
-        result = preview_definition(body.definition, body.plex_section_id, body.plex_section_type)
+        result = preview_definition(
+            body.definition,
+            body.plex_section_id,
+            body.plex_section_type,
+            extra_section_ids=body.plex_section_ids,
+        )
     except (tmdb_client.TmdbError, list_sources.ListSourceError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return result
+
+
+class ArrAddItem(BaseModel):
+    title: str = ""
+    year: int | None = None
+    tmdb_id: int | None = None
+    tvdb_id: int | None = None
+    imdb_id: str | None = None
+
+
+class ArrAddInstanceOptions(BaseModel):
+    quality_profile_id: int = Field(..., ge=1)
+    root_folder_path: str = Field(..., min_length=1)
+
+
+class ArrAddPayload(BaseModel):
+    media_type: str = Field(..., pattern="^(movie|show)$")
+    items: list[ArrAddItem]
+    instance_keys: list[str]
+    instance_options: dict[str, ArrAddInstanceOptions]
+    monitored: bool = True
+    search: bool = False
+    tag: str = "placeholdarr"
+
+
+ARR_ADD_BATCH_CAP = 100
+
+
+@router.get("/api/collections/arr-add-options")
+async def arr_add_options(media_type: str = Query("movie", pattern="^(movie|show)$")):
+    instances = _arr_instances_for_media(media_type)
+    payload = []
+    for item in instances:
+        payload.append(
+            {
+                "instance_key": item.get("instance_key"),
+                "label": item.get("label") or item.get("instance_key"),
+                "arr_type": item.get("arr_type"),
+                "quality_profiles": _fetch_instance_quality_profiles(item),
+                "root_folders": _fetch_instance_root_folders(item),
+            }
+        )
+    return {"instances": payload}
+
+
+@router.post("/api/collections/arr-add")
+async def arr_add(body: ArrAddPayload):
+    from services.source_of_truth import arr_api
+
+    if not body.items:
+        raise HTTPException(status_code=400, detail="Select at least one title")
+    if len(body.items) > ARR_ADD_BATCH_CAP:
+        raise HTTPException(status_code=400, detail=f"Batch is capped at {ARR_ADD_BATCH_CAP} titles")
+    keys = [str(k).strip() for k in body.instance_keys if str(k).strip()]
+    if not keys:
+        raise HTTPException(status_code=400, detail="Select at least one ARR instance")
+
+    arr_type = "radarr" if body.media_type == "movie" else "sonarr"
+    results: list[dict[str, Any]] = []
+    tag_label = str(body.tag or "").strip()
+
+    for key in keys:
+        instance = settings.resolve_arr_instance(arr_type, instance_key=key)
+        if not instance:
+            for item in body.items:
+                results.append(
+                    {
+                        "title": item.title,
+                        "instance_key": key,
+                        "status": "error",
+                        "error": f"Unknown {arr_type} instance {key!r}",
+                    }
+                )
+            continue
+        opts = body.instance_options.get(key)
+        if opts is None:
+            for item in body.items:
+                results.append(
+                    {
+                        "title": item.title,
+                        "instance_key": key,
+                        "status": "error",
+                        "error": "Quality profile and root folder are required",
+                    }
+                )
+            continue
+        url = str(instance.get("url") or "")
+        api_key = str(instance.get("api_key") or "")
+        tag_ids: list[int] = []
+        if tag_label:
+            tag_id = arr_api.ensure_arr_tag(url=url, api_key=api_key, label=tag_label)
+            if tag_id is None:
+                for item in body.items:
+                    results.append(
+                        {
+                            "title": item.title,
+                            "instance_key": key,
+                            "status": "error",
+                            "error": f"Could not create or find tag {tag_label!r}",
+                        }
+                    )
+                continue
+            tag_ids = [tag_id]
+
+        for item in body.items:
+            title = item.title or "Untitled"
+            try:
+                if body.media_type == "movie":
+                    lookup = arr_api.lookup_movie(url=url, api_key=api_key, tmdb_id=item.tmdb_id, imdb_id=item.imdb_id)
+                    if not lookup:
+                        results.append(
+                            {"title": title, "instance_key": key, "status": "error", "error": "Radarr lookup found nothing"}
+                        )
+                        continue
+                    status, error = arr_api.add_movie_to_radarr(
+                        url=url,
+                        api_key=api_key,
+                        lookup=lookup,
+                        quality_profile_id=opts.quality_profile_id,
+                        root_folder_path=opts.root_folder_path,
+                        monitored=body.monitored,
+                        search=body.search,
+                        tag_ids=tag_ids,
+                    )
+                else:
+                    lookup = arr_api.lookup_series(
+                        url=url,
+                        api_key=api_key,
+                        tvdb_id=item.tvdb_id,
+                        tmdb_id=item.tmdb_id,
+                        imdb_id=item.imdb_id,
+                    )
+                    if not lookup:
+                        results.append(
+                            {"title": title, "instance_key": key, "status": "error", "error": "Sonarr lookup found nothing"}
+                        )
+                        continue
+                    status, error = arr_api.add_series_to_sonarr(
+                        url=url,
+                        api_key=api_key,
+                        lookup=lookup,
+                        quality_profile_id=opts.quality_profile_id,
+                        root_folder_path=opts.root_folder_path,
+                        monitored=body.monitored,
+                        search=body.search,
+                        tag_ids=tag_ids,
+                    )
+            except Exception as exc:
+                results.append({"title": title, "instance_key": key, "status": "error", "error": str(exc)})
+                continue
+            results.append({"title": title, "instance_key": key, "status": status, "error": error})
+
+    ok = sum(1 for row in results if row.get("status") == "ok")
+    skipped = sum(1 for row in results if row.get("status") == "skipped")
+    errors = sum(1 for row in results if row.get("status") == "error")
+    return {
+        "ok": errors == 0,
+        "added": ok,
+        "skipped": skipped,
+        "errors": errors,
+        "results": results,
+        "message": "Titles are in ARR. Collection membership updates after sync and placeholders — not instantly in Plex.",
+    }
 
 
 class ExplainPayload(BaseModel):
@@ -311,6 +548,7 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
     try:
         normalized = validate_definition(body.definition)
         window = validate_active_window(body.active_window)
+        section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
     except RecipeValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with session_scope() as session:
@@ -319,7 +557,8 @@ async def update_recipe(recipe_id: int, body: RecipePayload):
             raise HTTPException(status_code=404, detail=f"Collection recipe {recipe_id} not found")
         row.name = body.name.strip()
         row.enabled = body.enabled
-        row.plex_section_id = body.plex_section_id
+        row.plex_section_id = section_ids[0]
+        row.plex_section_ids = section_ids
         row.plex_section_type = body.plex_section_type
         row.collection_title = body.collection_title.strip()
         row.definition = normalized

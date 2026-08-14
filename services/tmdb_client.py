@@ -149,7 +149,10 @@ def _normalize_item(raw: dict[str, Any], media_type: str) -> dict[str, Any] | No
         "date": date or None,
         "popularity": raw.get("popularity"),
         "vote_average": raw.get("vote_average"),
+        "vote_count": raw.get("vote_count"),
         "poster_path": raw.get("poster_path"),
+        "genre_ids": [int(g) for g in (raw.get("genre_ids") or []) if g is not None],
+        "original_language": raw.get("original_language") or None,
     }
 
 

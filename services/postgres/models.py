@@ -295,8 +295,10 @@ class CollectionRecipe(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False)
     enabled = Column(Boolean, nullable=False, default=True)
-    # Target Plex library section (any section, picked live from the Plex API).
+    # Primary target Plex library section (first of plex_section_ids; kept for back-compat).
     plex_section_id = Column(Integer, nullable=False)
+    # Extra + primary section ids; same plex_section_type. Null/empty → [plex_section_id].
+    plex_section_ids = Column(JSON, nullable=True)
     # "movie" or "show" — mirrors the Plex section type so the engine knows which catalog to query.
     plex_section_type = Column(String(16), nullable=False)
     collection_title = Column(String(200), nullable=False)
