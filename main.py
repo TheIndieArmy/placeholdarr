@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import signal
 import subprocess
 import time
@@ -553,6 +554,9 @@ app.include_router(collections_router)
 from routes.messages import router as messages_router
 app.include_router(messages_router)
 
+from routes.whats_new import router as whats_new_router
+app.include_router(whats_new_router)
+
 app.add_middleware(AuthGateMiddleware)
 _session_https_only = bool(getattr(settings, "AUTH_COOKIE_SECURE", False))
 app.add_middleware(
@@ -567,6 +571,23 @@ app.add_middleware(
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
+        from services.auth import get_auth_mode, verify_webhook_api_key
+
+        # /webhook is exempt from cookie/CSRF checks; machine callers use ?apikey=.
+        # Skipped only in AUTH_MODE=disabled.
+        if get_auth_mode() != "disabled":
+            provided_key = request.query_params.get("apikey")
+            if not verify_webhook_api_key(provided_key):
+                raw_instance = request.query_params.get("instance", "")
+                safe_instance = re.sub(r"[^A-Za-z0-9_-]", "", raw_instance)[:64] or "unknown"
+                logger.warning(
+                    "Webhook rejected: missing or invalid apikey "
+                    f"instance={safe_instance} "
+                    f"present={'yes' if provided_key else 'no'}",
+                    extra={"emoji_type": "warning"},
+                )
+                raise HTTPException(status_code=401, detail="Invalid or missing apikey")
+
         payload = await request.json()
         instance_raw = request.query_params.get("instance", "").strip() or None
         instance_id_raw = request.query_params.get("instance_id", "").strip() or None

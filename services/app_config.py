@@ -1150,6 +1150,10 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped.setdefault(meta["section"], [])
             row = _get_row(session, key)
             effective_value = getattr(settings, key, row.value if row else None)
+            # Settings.ARR_INSTANCES_JSON defaults to "" so getattr never falls back to the DB
+            # row. Prefer a persisted value so a restart cannot look like a disconnect.
+            if key == "ARR_INSTANCES_JSON" and row is not None and not _is_blank(row.value):
+                effective_value = row.value
             if key in {"RADARR_SHARED_PLACEHOLDER_CLEANUP", "SONARR_SHARED_PLACEHOLDER_CLEANUP"}:
                 if _is_blank(effective_value):
                     legacy_row = _get_row(session, "MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP")
@@ -1193,9 +1197,14 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["saved_value"] = None
                 entry["has_saved_value"] = any_saved or bool((row and row.value not in (None, "")))
             grouped[meta["section"]].append(entry)
+
+        from services.auth import ensure_webhook_api_key
+
         return {
             "status": get_onboarding_status(session=session),
             "sections": [{"name": name, "fields": fields} for name, fields in grouped.items()],
+            # Own session: do not commit the settings-read transaction.
+            "webhook_api_key": ensure_webhook_api_key(),
         }
     finally:
         if owns_session:

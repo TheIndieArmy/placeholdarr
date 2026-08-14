@@ -446,6 +446,8 @@ export interface SettingsSection {
 
 export interface HealthResponse {
   ok: boolean;
+  app_version?: string;
+  frontend_build?: string;
 }
 
 export interface ReadyResponse {
@@ -471,6 +473,8 @@ export interface SettingsStatus {
 export interface SettingsPayload {
   status: SettingsStatus;
   sections: SettingsSection[];
+  /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
+  webhook_api_key?: string | null;
 }
 
 export interface SaveSettingsResponse {

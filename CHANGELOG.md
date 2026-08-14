@@ -9,6 +9,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Added
 
+- **Webhook API key**: `POST /webhook` requires `?apikey=` (skipped only when `AUTH_MODE=disabled`). Settings and onboarding copy buttons include the key. View/regenerate under Settings → Security.
+- **What's new notices**: The dashboard tracks `LAST_SEEN_APP_VERSION` and can show upgrade messages after a version jump (including skipped releases). Existing installs see a prompt to re-copy webhook URLs, then a Collections (Beta) intro. New setup stamps the current version so upgrade-only prompts are skipped. A version chip at the bottom of the sidebar reopens What's new.
 - **Add missing list titles to Radarr/Sonarr**: Live preview can switch to **Missing from ARR** (source candidates not in the Placeholdarr catalog, after filters that can run off the list). Year, TMDB genre/language/date, and TMDB/MDBList scores are applied when present. ARR instance/profile/monitored/quality **include** rules treat missing titles as a miss; **exclude** rules treat them as a match. A notice lists filters that cannot be fully applied (certification, studio, non-TMDB ratings, non-premiere release windows). Multi-select and add with monitor, search (default off), tag, quality profile, root folder, and one or more instances. Recipe list shows last-run **N not in Radarr/Sonarr** and **+N new**.
 - **Rating filter sources**: Movie recipes choose Radarr provider (`imdb` default, `tmdb`, `trakt`, `metacritic`, `rottenTomatoes`) with native scales (0–10 or 0–100); TV recipes use Sonarr’s flat Skyhook score. Optional `min_votes`. Legacy movie rules without `provider` keep the previous best-effort fallback.
 - **Sort by rating**: Arrange option `rating` with optional `sort_provider` (movies); missing scores sort last. Independent of the rating filter.
@@ -17,6 +19,11 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Changed
 
 - **Rating filter defaults**: New movie rating filters default to **IMDb** on a 0–10 scale; editing a legacy rating rule stamps `provider: imdb` when saved from the UI.
+- **Dashboard HTML is not cached**: SPA `index.html` is served with `Cache-Control: no-store` so a refresh on `/library`, `/collections`, or Settings loads the current UI. After reconnect, an already-open tab reloads if the JS bundle on disk is newer.
+
+### Security
+
+- **Webhook API key (breaking):** existing Radarr/Sonarr/Tautulli/Jellyfin/Emby notification URLs must be re-copied from Placeholdarr so they include `?apikey=`. The in-app What's new prompt is shown until dismissed.
 
 ### Fixed
 

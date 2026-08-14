@@ -46,3 +46,11 @@ export async function changePassword(currentPassword: string, newPassword: strin
     new_password: newPassword,
   });
 }
+
+export async function getWebhookApiKey(): Promise<{ webhook_api_key: string | null }> {
+  return fetchJson<{ webhook_api_key: string | null }>("/api/auth/webhook-key");
+}
+
+export async function regenerateWebhookApiKey(): Promise<{ webhook_api_key: string }> {
+  return postJson<{ webhook_api_key: string }>("/api/auth/webhook-key/regenerate");
+}

@@ -31,7 +31,8 @@ import {
 } from "./api/dashboard";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
-import { changePassword, getAuthStatus, logoutAuth, type AuthStatus } from "./api/auth";
+import { changePassword, getAuthStatus, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
+import { dismissWhatsNew, getWhatsNew, type WhatsNewNotice } from "./api/whatsNew";
 import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -659,6 +660,11 @@ export function App() {
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
   const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
+  const [whatsNewNotices, setWhatsNewNotices] = useState<WhatsNewNotice[]>([]);
+  const [whatsNewBusy, setWhatsNewBusy] = useState(false);
+  const [appVersionLabel, setAppVersionLabel] = useState("");
+  const whatsNewDismissedRef = useRef(false);
+  const whatsNewCatalogOpenRef = useRef(false);
   const [taskRunPending, setTaskRunPending] = useState(false);
   const [taskRunError, setTaskRunError] = useState<string | null>(null);
 
@@ -917,6 +923,27 @@ export function App() {
   const homeRedirectPath =
     setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
+
+  useEffect(() => {
+    if (!authReady || whatsNewDismissedRef.current) return;
+    if (showReconnectPanel) return;
+    if (whatsNewCatalogOpenRef.current) return;
+    let cancelled = false;
+    void getWhatsNew()
+      .then((payload) => {
+        if (!cancelled && !whatsNewDismissedRef.current && !whatsNewCatalogOpenRef.current) {
+          if (payload.app_version) setAppVersionLabel(payload.app_version);
+          setWhatsNewNotices(payload.notices || []);
+        }
+      })
+      .catch(() => {
+        /* Retry when the API is reachable again (eventsConnected / reconnect). */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, setupStatus?.setup_complete, eventsConnected, showReconnectPanel]);
+
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
   const brandMeta = BRAND_META;
@@ -1398,6 +1425,7 @@ export function App() {
         nextValues[field.key] = field.value;
       });
     });
+    nextValues.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
 
     setFieldValues(nextValues);
     setBaselineValues(nextValues);
@@ -1475,6 +1503,17 @@ export function App() {
     const shouldLeave = window.confirm("You have unsaved settings changes. Leave this section without saving?");
     if (shouldLeave) {
       navigate(path);
+    }
+  }
+
+  async function openWhatsNewCatalog() {
+    whatsNewCatalogOpenRef.current = true;
+    try {
+      const payload = await getWhatsNew({ catalog: true });
+      if (payload.app_version) setAppVersionLabel(payload.app_version);
+      setWhatsNewNotices(payload.notices || []);
+    } catch {
+      whatsNewCatalogOpenRef.current = false;
     }
   }
 
@@ -2281,7 +2320,21 @@ export function App() {
             ) : null}
           </nav>
 
-          <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
+          <div className="mt-auto w-full shrink-0">
+            <button
+              type="button"
+              onClick={() => void openWhatsNewCatalog()}
+              title="What's new"
+              className={`mx-4 mb-3 flex w-[calc(100%-2rem)] items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
+                isStudioGlass
+                  ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+                  : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              v{appVersionLabel || "…"}
+            </button>
+            <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
+          </div>
         </aside>
 
         {/* Main area */}
@@ -2595,6 +2648,55 @@ export function App() {
             brand={brand}
             themeMode={themeMode}
           />
+        ) : null}
+
+        {whatsNewNotices.length > 0 ? (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-5">
+              <p className="text-[13px] font-headline uppercase tracking-widest text-slate-400">What&apos;s new</p>
+              {whatsNewNotices.map((notice) => (
+                <div key={notice.id} className="space-y-2">
+                  <h3 className="text-[20px] font-headline font-bold text-white">{notice.title}</h3>
+                  <p className="text-[16px] text-slate-300 leading-relaxed whitespace-pre-wrap">{notice.body}</p>
+                  {notice.cta_path && notice.cta_label ? (
+                    <button
+                      type="button"
+                      className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
+                      onClick={() => tryNavigate(notice.cta_path as string)}
+                    >
+                      {notice.cta_label}
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+              <div className="flex flex-wrap justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={whatsNewBusy}
+                  className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+                  style={{ backgroundColor: brandAccent.hex }}
+                  onClick={() => {
+                    const ids = whatsNewNotices.map((n) => n.id);
+                    void (async () => {
+                      setWhatsNewBusy(true);
+                      try {
+                        const next = await dismissWhatsNew(ids);
+                        whatsNewDismissedRef.current = (next.notices || []).length === 0;
+                        whatsNewCatalogOpenRef.current = false;
+                        setWhatsNewNotices(next.notices || []);
+                      } catch {
+                        /* Keep the dialog so they can retry. */
+                      } finally {
+                        setWhatsNewBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  Got it
+                </button>
+              </div>
+            </div>
+          </div>
         ) : null}
       </div>
     </LibraryReconcileProvider>
@@ -3746,7 +3848,7 @@ function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
 
   return (
     <div
-      className={`mt-auto w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
+      className={`w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
       aria-live="polite"
     >
       <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
@@ -5237,11 +5339,35 @@ function resolveWebhookDisplayOrigin(values: FieldValueMap): string {
   return typeof window !== "undefined" ? window.location.origin : "";
 }
 
-function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string) {
+/** /webhook requires ?apikey= — populated from settings payload webhook_api_key. */
+function resolveWebhookApiKey(values: FieldValueMap): string {
+  return String(values.WEBHOOK_API_KEY ?? "").trim();
+}
+
+function appendWebhookApiKey(url: string, apiKey: string): string {
+  if (!url || !apiKey) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}apikey=${encodeURIComponent(apiKey)}`;
+}
+
+function maskWebhookApiKeyInUrl(url: string): string {
+  return url.replace(/([?&]apikey=)([^&]*)/i, (_match, prefix: string, value: string) => {
+    let decoded = value;
+    try {
+      decoded = decodeURIComponent(value);
+    } catch {
+      decoded = value;
+    }
+    const bullets = "•".repeat(Math.min(40, Math.max(8, decoded.length || 8)));
+    return `${prefix}${bullets}`;
+  });
+}
+
+function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string, apiKey: string) {
   const id = String(instance_id || "").trim().toLowerCase();
   const key = normalizeInstanceKey(String(instance_key || ""));
-  const byId = id ? `${origin}/webhook?instance_id=${encodeURIComponent(id)}` : "";
-  const byKey = `${origin}/webhook?instance=${encodeURIComponent(key)}`;
+  const byId = id ? appendWebhookApiKey(`${origin}/webhook?instance_id=${encodeURIComponent(id)}`, apiKey) : "";
+  const byKey = appendWebhookApiKey(`${origin}/webhook?instance=${encodeURIComponent(key)}`, apiKey);
   const uuidLike = id.length > 0 && arrInstanceIdEmbedsUuid(id);
   const primary = id ? byId : byKey;
   return { primary, byId: id ? byId : "", byKey, uuidLike };
@@ -5839,7 +5965,7 @@ function ArrInstancesEditor(props: {
 
   function instanceWebhookUrls(instance_id: string, instance_key: string) {
     const origin = resolveWebhookDisplayOrigin(props.values);
-    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key);
+    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key, resolveWebhookApiKey(props.values));
   }
 
   function onSlotPanelSaveClick() {
@@ -6138,10 +6264,7 @@ function ArrInstancesEditor(props: {
                 <li>Go to Settings → Webhooks → Add (+)</li>
                 <li>
                   <span className="text-slate-200">Webhook URL</span>
-                  <div className="mt-1 flex items-start gap-2 pl-0">
-                    <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                    <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${serviceLabel} webhook URL`} className="mt-0.5 shrink-0" />
-                  </div>
+                  <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${serviceLabel} webhook URL`} />
                 </li>
                 <li>Enable these events (required):</li>
               </ol>
@@ -6983,6 +7106,9 @@ function SecurityAccountControls(props: {
   authStatus: AuthStatus | null;
   accentHex: string;
   onLogout: () => Promise<void>;
+  webhookApiKey: string;
+  onWebhookApiKeyChange: (key: string) => void;
+  values: FieldValueMap;
 }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -6992,6 +7118,38 @@ function SecurityAccountControls(props: {
   const [error, setError] = useState<string | null>(null);
   const mode = props.authStatus?.mode || "builtin";
   const username = props.authStatus?.username;
+
+  const [webhookKey, setWebhookKey] = useState(props.webhookApiKey);
+  useEffect(() => setWebhookKey(props.webhookApiKey), [props.webhookApiKey]);
+  const [webhookKeyRevealed, setWebhookKeyRevealed] = useState(false);
+  const [webhookUrlsRevealed, setWebhookUrlsRevealed] = useState(false);
+  const [webhookUrlsModalOpen, setWebhookUrlsModalOpen] = useState(false);
+  const [webhookRegenConfirming, setWebhookRegenConfirming] = useState(false);
+  const [webhookRegenBusy, setWebhookRegenBusy] = useState(false);
+  const [webhookRegenMessage, setWebhookRegenMessage] = useState<string | null>(null);
+  const [webhookRegenError, setWebhookRegenError] = useState<string | null>(null);
+
+  async function onRegenerateWebhookKey() {
+    setWebhookRegenBusy(true);
+    setWebhookRegenError(null);
+    setWebhookRegenMessage(null);
+    try {
+      const result = await regenerateWebhookApiKey();
+      setWebhookKey(result.webhook_api_key);
+      props.onWebhookApiKeyChange(result.webhook_api_key);
+      setWebhookKeyRevealed(true);
+      setWebhookUrlsRevealed(true);
+      setWebhookUrlsModalOpen(true);
+      setWebhookRegenConfirming(false);
+      setWebhookRegenMessage(
+        "Webhook key regenerated. Update the URL in every Radarr/Sonarr/Tautulli/Jellyfin/Emby webhook.",
+      );
+    } catch (err) {
+      setWebhookRegenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWebhookRegenBusy(false);
+    }
+  }
 
   async function onChangePassword(event: FormEvent) {
     event.preventDefault();
@@ -7015,6 +7173,8 @@ function SecurityAccountControls(props: {
     }
   }
 
+  const webhookDestinations = collectWebhookDestinations(props.values);
+
   return (
     <div className="px-6 py-5 space-y-5">
       <div>
@@ -7031,6 +7191,74 @@ function SecurityAccountControls(props: {
                 : "Admin account"}
         </p>
       </div>
+      {mode !== "disabled" ? (
+        <div className="space-y-3 max-w-xl">
+          <p className="text-[13px] font-semibold text-slate-400 mb-1">Webhook API key</p>
+          <p className="text-[14px] text-slate-400 leading-relaxed">
+            Required as <span className="font-mono text-slate-300">?apikey=</span> on every Radarr/Sonarr/Tautulli/Jellyfin/Emby
+            webhook URL — those services are not browser sessions and cannot log in. Setup screens include it automatically and
+            hide it until you reveal.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 break-all rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-300">
+              {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
+            </code>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookKeyRevealed((v) => !v)}
+            >
+              {webhookKeyRevealed ? "Hide" : "Reveal"}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!webhookRegenConfirming ? (
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                onClick={() => setWebhookRegenConfirming(true)}
+              >
+                Regenerate
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookUrlsModalOpen(true)}
+            >
+              Webhook URLs
+            </button>
+          </div>
+          {webhookRegenConfirming ? (
+            <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3">
+              <p className="text-[14px] text-amber-200 leading-relaxed">
+                This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
+                webhook will start failing until you re-paste the updated URL from Webhook URLs into each of them.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={webhookRegenBusy}
+                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
+                  style={{ backgroundColor: props.accentHex }}
+                  onClick={() => void onRegenerateWebhookKey()}
+                >
+                  {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
+                </button>
+                <button
+                  type="button"
+                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                  onClick={() => setWebhookRegenConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
+          {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
+        </div>
+      ) : null}
       {mode === "builtin" ? (
         <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
           <p className="text-[14px] text-slate-400">Change password</p>
@@ -7091,6 +7319,56 @@ function SecurityAccountControls(props: {
           Authentication is disabled. Anyone who can reach this port has full access. Prefer builtin or forward_auth unless the
           instance is on a private network with no published port.
         </p>
+      ) : null}
+      {webhookUrlsModalOpen ? (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+          <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h3 className="text-[20px] font-headline font-bold text-white">Webhook URLs</h3>
+              {webhookDestinations.length ? (
+                <button
+                  type="button"
+                  className="px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                  onClick={() => setWebhookUrlsRevealed((v) => !v)}
+                >
+                  {webhookUrlsRevealed ? "Hide URLs" : "Reveal URLs"}
+                </button>
+              ) : null}
+            </div>
+            <p className="text-[16px] text-slate-300">
+              Copy into each connected service after you rotate the key. The API key stays hidden until you reveal.
+            </p>
+            {webhookDestinations.length ? (
+              <ul className="space-y-3">
+                {webhookDestinations.map((dest) => (
+                  <li key={dest.id} className="space-y-1">
+                    <div className="text-[13px] font-medium text-slate-300">{dest.label}</div>
+                    <MaskedWebhookUrlField
+                      url={dest.url}
+                      ariaLabel={`Copy ${dest.label} webhook URL`}
+                      revealed={webhookUrlsRevealed}
+                      showRevealButton={false}
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[14px] text-slate-500">
+                Connect Radarr, Sonarr, or a playback source to see copyable webhook URLs here.
+              </p>
+            )}
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
+                style={{ backgroundColor: props.accentHex }}
+                onClick={() => setWebhookUrlsModalOpen(false)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -7433,6 +7711,9 @@ function SettingsPanel(props: {
                   authStatus={props.authStatus}
                   accentHex={accent.hex}
                   onLogout={props.onLogout}
+                  webhookApiKey={resolveWebhookApiKey(props.values)}
+                  onWebhookApiKeyChange={(key) => props.onValueChange("WEBHOOK_API_KEY", key)}
+                  values={props.values}
                 />
               ) : null}
               {active.name === "Paths" ? (
@@ -7872,6 +8153,7 @@ function SettingsPanel(props: {
         onClose={() => setPlaybackWebhookDialog(null)}
         accent={accent}
         displayOrigin={resolveWebhookDisplayOrigin(props.values)}
+        webhookApiKey={resolveWebhookApiKey(props.values)}
       />
     ) : null}
     </>
@@ -9256,6 +9538,34 @@ function mediaCardPlaybackWebhookConfig(cardId: (typeof ONBOARDING_MEDIA_CARDS)[
   return null;
 }
 
+function collectWebhookDestinations(values: FieldValueMap): { id: string; label: string; url: string }[] {
+  const origin = resolveWebhookDisplayOrigin(values);
+  const apiKey = resolveWebhookApiKey(values);
+  const rows: { id: string; label: string; url: string }[] = [];
+  for (const inst of parseArrInstancesFromValues(values)) {
+    if (!String(inst.url || "").trim()) continue;
+    const urls = buildArrInstanceWebhookUrls(origin, inst.instance_id, inst.instance_key, apiKey);
+    const typeLabel = inst.arr_type === "sonarr" ? "Sonarr" : "Radarr";
+    rows.push({
+      id: `arr-${inst.instance_id || inst.id}`,
+      label: `${typeLabel} · ${inst.label || inst.instance_key}`,
+      url: urls.primary,
+    });
+  }
+  for (const card of ONBOARDING_MEDIA_CARDS) {
+    const cfg = mediaCardPlaybackWebhookConfig(card.id);
+    if (!cfg || !mediaCardHasStoredConnection(card, values)) continue;
+    const instanceParam = String(values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+    const name = cfg.serviceId === "tautulli" ? "Tautulli (Plex)" : cfg.serviceId === "jellyfin" ? "Jellyfin" : "Emby";
+    rows.push({
+      id: `pb-${cfg.serviceId}`,
+      label: name,
+      url: appendWebhookApiKey(`${origin}/webhook?instance=${encodeURIComponent(instanceParam)}`, apiKey),
+    });
+  }
+  return rows;
+}
+
 /** Plex × Tautulli on the media step card: smaller wells + `h-8` marks so the row fits the panel with side padding. */
 const MEDIA_PLEX_PAIR_WELL_FRAME = "flex items-center justify-center rounded-2xl";
 const MEDIA_PLEX_PAIR_LOGO_INSET = "p-[calc((4rem-2rem)/2)]";
@@ -9299,14 +9609,56 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
   );
 }
 
+function MaskedWebhookUrlField(props: {
+  url: string;
+  ariaLabel: string;
+  revealed?: boolean;
+  onRevealedChange?: (next: boolean) => void;
+  showRevealButton?: boolean;
+}) {
+  const [localRevealed, setLocalRevealed] = useState(false);
+  const controlled = props.revealed !== undefined;
+  const revealed = controlled ? Boolean(props.revealed) : localRevealed;
+  const hasKey = /[?&]apikey=/i.test(props.url);
+  const display = hasKey && !revealed ? maskWebhookApiKeyInUrl(props.url) : props.url;
+  const showReveal = (props.showRevealButton ?? true) && hasKey;
+
+  function setRevealed(next: boolean) {
+    props.onRevealedChange?.(next);
+    if (!controlled) setLocalRevealed(next);
+  }
+
+  return (
+    <div className="mt-1 flex items-start gap-2 pl-0">
+      <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">
+        {display}
+      </span>
+      <WebhookStepCopyButton text={props.url} ariaLabel={props.ariaLabel} className="mt-0.5 shrink-0" />
+      {showReveal ? (
+        <button
+          type="button"
+          className="mt-0.5 inline-flex h-6 shrink-0 items-center justify-center rounded border border-[#424753]/50 bg-[#252e3a]/80 px-2 text-[11px] font-headline uppercase tracking-wider text-slate-300 transition hover:border-[#424753]/80 hover:text-white"
+          onClick={() => setRevealed(!revealed)}
+        >
+          {revealed ? "Hide" : "Show"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function PlaybackWebhookSetupModal(props: {
   dialog: { serviceId: PlaybackWebhookServiceId; instanceParam: string };
   onClose: () => void;
   accent: { hex: string };
   displayOrigin: string;
+  webhookApiKey: string;
 }) {
   const pb = props.dialog;
-  const webhookUrl = `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
+  const webhookUrl = appendWebhookApiKey(
+    `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`,
+    props.webhookApiKey,
+  );
   const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
   const name = svcMeta?.name ?? pb.serviceId;
   return (
@@ -9326,10 +9678,7 @@ function PlaybackWebhookSetupModal(props: {
               <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
               <li>
                 <span className="text-slate-200">Webhook URL</span>
-                <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                </div>
+                <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} />
               </li>
               <li>Paste the JSON payload template below, then save.</li>
             </>
@@ -9340,10 +9689,7 @@ function PlaybackWebhookSetupModal(props: {
               <li>Set Events to include Playback Start and Content Type to application/json.</li>
               <li>
                 <span className="text-slate-200">Webhook URL</span>
-                <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                </div>
+                <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} />
               </li>
               <li>Paste the JSON payload template below, then save the webhook.</li>
             </>
@@ -9353,28 +9699,12 @@ function PlaybackWebhookSetupModal(props: {
               <li>Add or edit a webhook notification.</li>
               <li>
                 <span className="text-slate-200">Webhook URL</span>
-                <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                </div>
+                <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} />
               </li>
-              <li>Enable the playback events you want Placeholdarr to process, then save.</li>
+              <li>Enable Playback Start, then save.</li>
             </>
           )}
         </ol>
-        {svcMeta && svcMeta.triggers.length ? (
-          <div>
-            <div className="text-[14px] font-semibold text-slate-400 mb-1.5">Suggested events</div>
-            <div className="ml-1 space-y-1">
-              {svcMeta.triggers.map((t) => (
-                <div key={t.event} className="text-[14px] text-slate-300">
-                  {t.displayName}
-                </div>
-              ))}
-            </div>
-            <p className="mt-2 text-[13px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
-          </div>
-        ) : null}
         {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -10681,6 +11011,7 @@ function OnboardingWizard(props: {
           onClose={() => setPlaybackWebhookDialog(null)}
           accent={accent}
           displayOrigin={resolveWebhookDisplayOrigin(props.values)}
+          webhookApiKey={resolveWebhookApiKey(props.values)}
         />
       ) : null}
     </>

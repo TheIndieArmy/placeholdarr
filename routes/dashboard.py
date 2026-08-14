@@ -459,8 +459,27 @@ def _iso(value) -> str | None:
 # HTML page
 # ---------------------------------------------------------------------------
 
+_HTML_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 def _dashboard_dist_index_path() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "index.html")
+
+
+def frontend_build_id() -> str:
+    """Vite hashed bundle path from dist/index.html, e.g. ``/assets/index-abc123.js``."""
+    index_path = _dashboard_dist_index_path()
+    try:
+        with open(index_path, encoding="utf-8") as handle:
+            html = handle.read()
+    except OSError:
+        return ""
+    match = re.search(r"/assets/index-[^\"']+\.js", html)
+    return match.group(0) if match else ""
 
 
 def _dashboard_not_built_response() -> PlainTextResponse:
@@ -478,17 +497,17 @@ def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse |
     if not os.path.isfile(index_path):
         return _dashboard_not_built_response()
     if not inject_setup_preview:
-        return FileResponse(index_path, media_type="text/html")
+        return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     try:
         with open(index_path, encoding="utf-8") as handle:
             html = handle.read()
     except OSError:
-        return FileResponse(index_path, media_type="text/html")
+        return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     if "<head>" in html:
         html = html.replace("<head>", "<head>" + _SETUP_PREVIEW_SNIPPET, 1)
     else:
         html = _SETUP_PREVIEW_SNIPPET + html
-    return HTMLResponse(content=html, media_type="text/html")
+    return HTMLResponse(content=html, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -663,7 +682,15 @@ async def dashboard_overlay_examples(asset_path: str):
 @router.get("/api/health")
 async def api_health():
     """Liveness probe: no database access. Use from the browser host to verify TCP/process."""
-    return JSONResponse({"ok": True})
+    from core.version import APP_VERSION
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "app_version": APP_VERSION,
+            "frontend_build": frontend_build_id(),
+        }
+    )
 
 
 @router.get("/api/ready")
