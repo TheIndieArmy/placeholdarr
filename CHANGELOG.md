@@ -7,11 +7,35 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-08-14
+
+### Action required
+
+**Webhook URLs must be updated.** `POST /webhook` now requires `?apikey=` unless `AUTH_MODE=disabled`. Existing Radarr, Sonarr, Tautulli, Jellyfin, and Emby notification URLs **without** that query parameter will be rejected.
+
+1. Open Settings → Security (or the in-app **What's new** prompt).
+2. Use **Webhook URLs** to copy each destination (API key is masked until you reveal).
+3. Paste the URL into that service and save.
+4. Regenerating the key invalidates every previous URL until you recopy.
+
+Follows **[#61](https://github.com/TheIndieArmy/placeholdarr/pull/61)**.
+
+### Summary
+
+This release makes **dashboard-authenticated webhooks** work: *arr and playback sources are not browser sessions, so they send a dedicated webhook API key. Setup and Security copy buttons include it; the key is hidden in the UI until you reveal. Existing installs get an **Action required** What's new notice; new setup stamps the current version so upgrade-only prompts are skipped.
+
+Collections (Beta) gains **Missing from ARR** add-to-*arr, **rating filter providers**, **sort by rating**, and **multi-library recipes**. Dashboard HTML is no longer cached so a refresh actually loads this UI.
+
+### Security
+
+- **Webhook API key (breaking):** `POST /webhook` requires `?apikey=` (skipped only when `AUTH_MODE=disabled`). View, copy, and regenerate under Settings → Security. Cookie/CSRF login does not replace this key.
+- **Masked webhook URLs:** Setup modals and the Security **Webhook URLs** modal hide `apikey=` until Reveal; Copy still places the full URL on the clipboard.
+
 ### Added
 
-- **Webhook API key**: `POST /webhook` requires `?apikey=` (skipped only when `AUTH_MODE=disabled`). Settings and onboarding copy buttons include the key. View/regenerate under Settings → Security.
-- **What's new notices**: The dashboard tracks `LAST_SEEN_APP_VERSION` and can show upgrade messages after a version jump (including skipped releases). Existing installs see a prompt to re-copy webhook URLs, then a Collections (Beta) intro. New setup stamps the current version so upgrade-only prompts are skipped. A version chip at the bottom of the sidebar reopens What's new.
-- **Add missing list titles to Radarr/Sonarr**: Live preview can switch to **Missing from ARR** (source candidates not in the Placeholdarr catalog, after filters that can run off the list). Year, TMDB genre/language/date, and TMDB/MDBList scores are applied when present. ARR instance/profile/monitored/quality **include** rules treat missing titles as a miss; **exclude** rules treat them as a match. A notice lists filters that cannot be fully applied (certification, studio, non-TMDB ratings, non-premiere release windows). Multi-select and add with monitor, search (default off), tag, quality profile, root folder, and one or more instances. Recipe list shows last-run **N not in Radarr/Sonarr** and **+N new**.
+- **Webhook API key**: `AUTH_WEBHOOK_API_KEY` / Settings payload `webhook_api_key`; `GET/POST /api/auth/webhook-key`. Copy URLs in onboarding, ARR, and playback setup append `&apikey=`.
+- **What's new notices**: Tracks `LAST_SEEN_APP_VERSION` and dismissed notice ids. Upgrade messages after a version jump (including skipped releases). Sidebar version chip reopens the catalog. Webhook recopy prompt, then Collections (Beta) intro.
+- **Add missing list titles to Radarr/Sonarr**: Live preview **Missing from ARR** (source candidates not in the Placeholdarr catalog, after filters that can run off the list). Year, TMDB genre/language/date, and TMDB/MDBList scores when present. ARR instance/profile/monitored/quality **include** rules treat missing titles as a miss; **exclude** rules treat them as a match. A notice lists filters that cannot be fully applied (certification, studio, non-TMDB ratings, non-premiere release windows). Multi-select add with monitor, search (default off), tag, quality profile, root folder, and one or more instances. Recipe list shows last-run **N not in Radarr/Sonarr** and **+N new**.
 - **Rating filter sources**: Movie recipes choose Radarr provider (`imdb` default, `tmdb`, `trakt`, `metacritic`, `rottenTomatoes`) with native scales (0–10 or 0–100); TV recipes use Sonarr’s flat Skyhook score. Optional `min_votes`. Legacy movie rules without `provider` keep the previous best-effort fallback.
 - **Sort by rating**: Arrange option `rating` with optional `sort_provider` (movies); missing scores sort last. Independent of the rating filter.
 - **Multi-library recipes**: `plex_section_ids` JSON (Alembic `0024`); editor multi-select (same movie/TV type); preview and last-run show per-library in-library counts. `plex_section_id` remains the first target for compatibility. Same collection title is created/updated in each selected library (membership is per library).
@@ -20,10 +44,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Rating filter defaults**: New movie rating filters default to **IMDb** on a 0–10 scale; editing a legacy rating rule stamps `provider: imdb` when saved from the UI.
 - **Dashboard HTML is not cached**: SPA `index.html` is served with `Cache-Control: no-store` so a refresh on `/library`, `/collections`, or Settings loads the current UI. After reconnect, an already-open tab reloads if the JS bundle on disk is newer.
-
-### Security
-
-- **Webhook API key (breaking):** existing Radarr/Sonarr/Tautulli/Jellyfin/Emby notification URLs must be re-copied from Placeholdarr so they include `?apikey=`. The in-app What's new prompt is shown until dismissed.
+- **Playback webhooks**: Only **Playback Started** is documented and processed. Stop/Resume are not listed in setup.
+- **Webhook URL inventory**: Settings → Security **Webhook URLs** opens a modal listing every connected Radarr/Sonarr/Tautulli/Jellyfin/Emby URL for recopy after key rotation.
 
 ### Fixed
 
