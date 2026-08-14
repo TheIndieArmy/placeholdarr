@@ -576,3 +576,135 @@ def trigger_sonarr_search(
 
     result = _request_json('POST', endpoint, payload=payload, api_key=api_key)
     return result is not None
+
+
+def lookup_movie(*, url: str, api_key: str, tmdb_id: Optional[int] = None, imdb_id: Optional[str] = None) -> Optional[dict]:
+    if not url or not api_key:
+        return None
+    term = f"tmdb:{int(tmdb_id)}" if tmdb_id else (f"imdb:{imdb_id}" if imdb_id else None)
+    if not term:
+        return None
+    endpoint = _build_endpoint(url, "movie/lookup")
+    result = _get_json(endpoint, {"apikey": api_key, "term": term}, timeout=30)
+    if isinstance(result, list) and result:
+        return result[0] if isinstance(result[0], dict) else None
+    return result if isinstance(result, dict) else None
+
+
+def lookup_series(
+    *,
+    url: str,
+    api_key: str,
+    tvdb_id: Optional[int] = None,
+    tmdb_id: Optional[int] = None,
+    imdb_id: Optional[str] = None,
+) -> Optional[dict]:
+    if not url or not api_key:
+        return None
+    terms: list[str] = []
+    if tvdb_id:
+        terms.append(f"tvdb:{int(tvdb_id)}")
+    if tmdb_id:
+        terms.append(f"tmdb:{int(tmdb_id)}")
+    if imdb_id:
+        terms.append(f"imdb:{imdb_id}")
+    for term in terms:
+        endpoint = _build_endpoint(url, "series/lookup")
+        result = _get_json(endpoint, {"apikey": api_key, "term": term}, timeout=30)
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0]
+        if isinstance(result, dict):
+            return result
+    return None
+
+
+def ensure_arr_tag(*, url: str, api_key: str, label: str) -> Optional[int]:
+    """Return the id of an existing tag, creating it if needed."""
+    name = str(label or "").strip()
+    if not name or not url or not api_key:
+        return None
+    endpoint = _build_endpoint(url, "tag")
+    existing = _get_json(endpoint, {"apikey": api_key}, timeout=20)
+    if isinstance(existing, list):
+        for row in existing:
+            if isinstance(row, dict) and str(row.get("label") or "").strip().lower() == name.lower():
+                try:
+                    return int(row["id"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+    created = _request_json("POST", endpoint, payload={"label": name}, api_key=api_key, timeout=20)
+    if isinstance(created, dict) and created.get("id") is not None:
+        try:
+            return int(created["id"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _existing_arr_id(lookup: dict) -> bool:
+    try:
+        return int(lookup.get("id") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def add_movie_to_radarr(
+    *,
+    url: str,
+    api_key: str,
+    lookup: dict,
+    quality_profile_id: int,
+    root_folder_path: str,
+    monitored: bool,
+    search: bool,
+    tag_ids: Optional[List[int]] = None,
+) -> tuple[str, Optional[str]]:
+    """Returns (status, error) where status is ok|skipped|error."""
+    if _existing_arr_id(lookup):
+        return "skipped", "Already in this Radarr instance"
+    payload = dict(lookup)
+    payload["qualityProfileId"] = int(quality_profile_id)
+    payload["rootFolderPath"] = str(root_folder_path).rstrip("/")
+    payload["monitored"] = bool(monitored)
+    payload["minimumAvailability"] = payload.get("minimumAvailability") or "released"
+    payload["addOptions"] = {"searchForMovie": bool(search)}
+    if tag_ids:
+        payload["tags"] = [int(t) for t in tag_ids]
+    endpoint = _build_endpoint(url, "movie")
+    result = _request_json("POST", endpoint, payload=payload, api_key=api_key, timeout=30)
+    if result is None:
+        return "error", "Radarr rejected the add (already present or invalid payload)"
+    return "ok", None
+
+
+def add_series_to_sonarr(
+    *,
+    url: str,
+    api_key: str,
+    lookup: dict,
+    quality_profile_id: int,
+    root_folder_path: str,
+    monitored: bool,
+    search: bool,
+    tag_ids: Optional[List[int]] = None,
+) -> tuple[str, Optional[str]]:
+    if _existing_arr_id(lookup):
+        return "skipped", "Already in this Sonarr instance"
+    payload = dict(lookup)
+    payload["qualityProfileId"] = int(quality_profile_id)
+    payload["rootFolderPath"] = str(root_folder_path).rstrip("/")
+    payload["monitored"] = bool(monitored)
+    payload["addOptions"] = {"searchForMissingEpisodes": bool(search), "monitor": "all" if monitored else "none"}
+    if tag_ids:
+        payload["tags"] = [int(t) for t in tag_ids]
+    seasons = payload.get("seasons")
+    if isinstance(seasons, list) and monitored:
+        for season in seasons:
+            if isinstance(season, dict) and int(season.get("seasonNumber") or 0) != 0:
+                season["monitored"] = True
+    endpoint = _build_endpoint(url, "series")
+    result = _request_json("POST", endpoint, payload=payload, api_key=api_key, timeout=30)
+    if result is None:
+        return "error", "Sonarr rejected the add (already present or invalid payload)"
+    return "ok", None
+

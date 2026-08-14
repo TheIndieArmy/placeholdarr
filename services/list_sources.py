@@ -82,6 +82,13 @@ def _normalize_candidate(
     imdb_id: Optional[str],
     tvdb_id: Optional[int],
     rank: Optional[int],
+    date: Optional[str] = None,
+    poster_path: Optional[str] = None,
+    genre_names: Optional[list[str]] = None,
+    original_language: Optional[str] = None,
+    vote_average: Optional[float] = None,
+    vote_count: Optional[int] = None,
+    ratings: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     return {
         "tmdb_id": int(tmdb_id) if tmdb_id else None,
@@ -89,11 +96,14 @@ def _normalize_candidate(
         "tvdb_id": int(tvdb_id) if tvdb_id else None,
         "title": title,
         "year": year,
-        "date": None,
-        # List rank doubles as a popularity stand-in for sorting (lower = better).
+        "date": date,
         "popularity": float(-(rank or 0)) if rank else None,
-        "vote_average": None,
-        "poster_path": None,
+        "vote_average": vote_average,
+        "vote_count": vote_count,
+        "poster_path": poster_path,
+        "genre_names": [str(g).strip().lower() for g in (genre_names or []) if g],
+        "original_language": original_language,
+        "ratings": ratings or {},
     }
 
 
@@ -167,6 +177,27 @@ def fetch_mdblist(reference: str, media_type: str, limit: int = 200) -> list[dic
             year = int(raw.get("release_year") or 0) or None
         except (TypeError, ValueError):
             year = None
+        genre_raw = raw.get("genre") or raw.get("genres") or []
+        if isinstance(genre_raw, str):
+            genre_names = [g.strip() for g in genre_raw.split(",") if g.strip()]
+        elif isinstance(genre_raw, list):
+            genre_names = [str(g) for g in genre_raw if g]
+        else:
+            genre_names = []
+        ratings: dict[str, Any] = {}
+        for entry in raw.get("ratings") or []:
+            if not isinstance(entry, dict):
+                continue
+            source = str(entry.get("source") or entry.get("name") or "").strip().lower()
+            if not source:
+                continue
+            try:
+                ratings[source] = {
+                    "value": float(entry.get("value") or entry.get("score") or 0),
+                    "votes": int(entry.get("votes") or 0),
+                }
+            except (TypeError, ValueError):
+                continue
         items.append(
             _normalize_candidate(
                 title=str(raw.get("title") or ""),
@@ -175,6 +206,12 @@ def fetch_mdblist(reference: str, media_type: str, limit: int = 200) -> list[dic
                 imdb_id=imdb_id,
                 tvdb_id=tvdb_id,
                 rank=raw.get("rank"),
+                date=str(raw.get("released") or raw.get("release_date") or "") or None,
+                poster_path=raw.get("poster") or raw.get("poster_path"),
+                genre_names=genre_names,
+                original_language=raw.get("language") or raw.get("original_language"),
+                vote_average=raw.get("score_average") or raw.get("tmdb_percent") or raw.get("score"),
+                ratings=ratings,
             )
         )
         if len(items) >= limit:

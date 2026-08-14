@@ -7,6 +7,7 @@ import {
   previewCollectionDefinition,
   type RecipeWritePayload,
 } from "../api/collections";
+import { ArrAddModal } from "./ArrAddModal";
 import {
   CollectionThemeProvider,
   getCollectionTheme,
@@ -24,7 +25,9 @@ import type {
   CollectionFilterField,
   CollectionFilterGroup,
   CollectionFilterNode,
+  CollectionFilters,
   CollectionPinnedItem,
+  CollectionMissingFromArrItem,
   CollectionPreviewResponse,
   CollectionRecipe,
   CollectionRatingProvider,
@@ -85,6 +88,33 @@ const FILTER_META: Record<CollectionFilterField, { label: string; icon: string }
 // Legacy fields (e.g. the removed downloaded-file "quality" filter) may still exist in saved recipes.
 function filterMeta(field: string): { label: string; icon: string } {
   return FILTER_META[field as CollectionFilterField] ?? { label: field, icon: "filter_alt" };
+}
+
+function arrIncludeConstraintLabels(filters: CollectionFilters | undefined): string[] {
+  const labels: string[] = [];
+  const walk = (node: CollectionFilterNode | CollectionFilters | undefined) => {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (typeof node !== "object") return;
+    if ("field" in node && node.field) {
+      if (node.field === "instance" && String(node.value || "").trim()) {
+        labels.push(FILTER_META.instance.label);
+      }
+      if (node.field === "quality_profile" && node.op !== "not_in" && (node.values?.length ?? 0) > 0) {
+        labels.push(FILTER_META.quality_profile.label);
+      }
+      if (node.field === "monitored" && node.value !== false) {
+        labels.push(FILTER_META.monitored.label);
+      }
+      return;
+    }
+    if ("children" in node) (node.children || []).forEach(walk);
+  };
+  walk(filters);
+  return [...new Set(labels)];
 }
 
 function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
@@ -952,6 +982,9 @@ export function CollectionEditor(props: {
   const [preview, setPreview] = useState<CollectionPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewPane, setPreviewPane] = useState<"catalog" | "missing">("catalog");
+  const [selectedMissing, setSelectedMissing] = useState<Set<string>>(new Set());
+  const [arrModalOpen, setArrModalOpen] = useState(false);
   const previewSeq = useRef(0);
   const definitionJson = JSON.stringify(definition);
   useEffect(() => {
@@ -972,6 +1005,10 @@ export function CollectionEditor(props: {
         .then((result) => {
           if (previewSeq.current !== seq) return;
           setPreview(result);
+          setSelectedMissing(new Set());
+          if (!(result.missing_from_arr_count || result.missing_from_arr_prefilter_count || 0)) {
+            setPreviewPane("catalog");
+          }
           setPreviewLoading(false);
         })
         .catch((err) => {
@@ -1610,9 +1647,18 @@ export function CollectionEditor(props: {
     );
   }
 
+  const missingCount = preview?.missing_from_arr_count ?? 0;
+  const missingPrefilter = preview?.missing_from_arr_prefilter_count ?? 0;
+  const missingGaps = preview?.missing_from_arr_filter_gaps ?? [];
+  const missingItems = preview?.missing_from_arr ?? [];
+  const arrIncludeLabels = arrIncludeConstraintLabels(definition.filters);
+  const showMissingPane = missingCount > 0 || missingPrefilter > 0 || missingGaps.length > 0;
+  const missingKey = (item: CollectionMissingFromArrItem) =>
+    `${item.tmdb_id ?? ""}:${item.tvdb_id ?? ""}:${item.imdb_id ?? ""}:${item.title}:${item.year ?? ""}`;
   const previewStages: { label: string; value: number | null | undefined }[] = [
     { label: "List candidates", value: preview?.tmdb_candidates },
     { label: "Matched in catalog", value: preview?.matched_in_catalog },
+    ...(showMissingPane ? [{ label: "Missing from ARR", value: missingCount }] : []),
     { label: "After filters", value: preview?.after_filters },
     ...(preview?.pinned_out ? [{ label: "Pinned out", value: preview.pinned_out }] : []),
     ...(preview?.pinned_in ? [{ label: "Pinned in", value: preview.pinned_in }] : []),
@@ -2282,31 +2328,169 @@ export function CollectionEditor(props: {
               )}
                 </div>
 
-                {preview?.sample?.length ? (
+                {preview?.sample?.length || showMissingPane ? (
                   <div className={`mt-3 border-t pt-3 ${theme.divider}`}>
-                    <div className={`${theme.sectionLabel} mb-2`}>Sample</div>
-                    <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
-                      {preview.sample.map((item) =>
-                        item.poster ? (
-                          <img
-                            key={item.id}
-                            src={item.poster}
-                            alt={item.title}
-                            title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                            className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
-                            loading="lazy"
-                          />
-                        ) : (
-                          <div
-                            key={item.id}
-                            title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                            className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
+                    {showMissingPane ? (
+                      <div className="mb-2 flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewPane("catalog")}
+                          className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                            previewPane === "catalog" ? "text-[#0a0e14]" : theme.chipInactive
+                          }`}
+                          style={previewPane === "catalog" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
+                        >
+                          In catalog
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPreviewPane("missing")}
+                          className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                            previewPane === "missing" ? "text-[#0a0e14]" : theme.chipInactive
+                          }`}
+                          style={previewPane === "missing" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
+                        >
+                          Missing from ARR ({missingCount})
+                        </button>
+                      </div>
+                    ) : (
+                      <div className={`${theme.sectionLabel} mb-2`}>Sample</div>
+                    )}
+                    {previewPane === "missing" && showMissingPane ? (
+                      <>
+                        {missingItems.length ? (
+                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
+                            onClick={() => setSelectedMissing(new Set(missingItems.map(missingKey)))}
                           >
-                            {item.title}
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
+                            onClick={() => setSelectedMissing(new Set())}
+                          >
+                            Select none
+                          </button>
+                          <span className={`text-[12px] ${theme.muted}`}>
+                            {selectedMissing.size} selected
+                          </span>
+                          <button
+                            type="button"
+                            disabled={selectedMissing.size < 1}
+                            onClick={() => setArrModalOpen(true)}
+                            className="ml-auto rounded-lg px-4 py-1.5 text-[13px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40"
+                            style={{ backgroundColor: accentHex }}
+                          >
+                            Add to {sectionType === "movie" ? "Radarr" : "Sonarr"}
+                          </button>
+                        </div>
+                        ) : null}
+                        {missingItems.length && missingGaps.length ? (
+                          <div className="mb-2 text-[12px] text-yellow-400/90">
+                            <p>The following filters cannot be applied because the source list did not include this data:</p>
+                            <ul className="mt-1 list-disc pl-4">
+                              {missingGaps.map((gap) => (
+                                <li key={gap}>{gap}</li>
+                              ))}
+                            </ul>
+                            <p className="mt-1">
+                              This list may include extra {sectionType === "movie" ? "titles" : "series"} that would
+                              not pass those filters. Add the {sectionType === "movie" ? "titles" : "series"} you want
+                              to {sectionType === "movie" ? "Radarr" : "Sonarr"}. After the next Placeholdarr sync, the
+                              collection recipe filters them in or out as usual.
+                            </p>
                           </div>
-                        ),
-                      )}
-                    </div>
+                        ) : null}
+                        {missingItems.length ? (
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
+                          {missingItems.map((item) => {
+                            const key = missingKey(item);
+                            const selected = selectedMissing.has(key);
+                            return (
+                              <button
+                                type="button"
+                                key={key}
+                                title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                                onClick={() => {
+                                  setSelectedMissing((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(key)) next.delete(key);
+                                    else next.add(key);
+                                    return next;
+                                  });
+                                }}
+                                className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback}`}
+                                style={selected ? { boxShadow: `0 0 0 2px ${accentHex}` } : undefined}
+                              >
+                                {item.poster ? (
+                                  <img
+                                    src={item.poster}
+                                    alt={item.title}
+                                    className="h-full w-full object-cover"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <span className="block p-1 text-[9px] leading-tight">{item.title}</span>
+                                )}
+                                <span className="absolute left-1 top-1 rounded bg-black/60 px-1 text-[10px] text-white">
+                                  {selected ? "✓" : ""}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        ) : arrIncludeLabels.length ? (
+                          <div className={`mb-2 ${theme.muted}`}>
+                            <p>
+                              The following filters only apply to {sectionType === "movie" ? "titles" : "series"} already
+                              in {sectionType === "movie" ? "Radarr" : "Sonarr"}:
+                            </p>
+                            <ul className="mt-1 list-disc pl-4">
+                              {arrIncludeLabels.map((label) => (
+                                <li key={label}>{label}</li>
+                              ))}
+                            </ul>
+                            <p className="mt-1">
+                              {sectionType === "movie" ? "Titles" : "Series"} that are not in{" "}
+                              {sectionType === "movie" ? "Radarr" : "Sonarr"} cannot satisfy them, so none are listed.
+                            </p>
+                          </div>
+                        ) : (
+                          <p className={`mb-2 ${theme.muted}`}>
+                            No {sectionType === "movie" ? "titles" : "series"} left after the filters we could apply from
+                            the list.
+                          </p>
+                        )}
+                      </>
+                    ) : preview?.sample?.length ? (
+                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
+                        {preview.sample.map((item) =>
+                          item.poster ? (
+                            <img
+                              key={item.id}
+                              src={item.poster}
+                              alt={item.title}
+                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                              className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div
+                              key={item.id}
+                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
+                              className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
+                            >
+                              {item.title}
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : (
+                      <p className={theme.muted}>No catalog sample for this recipe.</p>
+                    )}
                   </div>
                 ) : null}
               </>
@@ -2316,6 +2500,15 @@ export function CollectionEditor(props: {
         </div>
       </aside>
     </div>
+      {arrModalOpen ? (
+        <ArrAddModal
+          mediaType={sectionType}
+          items={missingItems.filter((item) => selectedMissing.has(missingKey(item)))}
+          defaultTag={name.trim() || "placeholdarr"}
+          accentHex={accentHex}
+          onClose={() => setArrModalOpen(false)}
+        />
+      ) : null}
     </CollectionThemeProvider>
   );
 }

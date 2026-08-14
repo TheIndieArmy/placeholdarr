@@ -60,6 +60,8 @@ MOVIE_RELEASE_BASES = ("theater", "digital", "physical")
 MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes")
 DEFAULT_SOURCE_LIMIT = 100
 MAX_COLLECTION_ITEMS = 500
+MISSING_FROM_ARR_CAP = 200
+TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
 
 
 class RecipeValidationError(Exception):
@@ -341,6 +343,457 @@ def _load_catalog_rows(section_type: str, id_sets: Optional[dict[str, set]]) -> 
             rows = query.all()
         session.expunge_all()
     return rows
+
+
+def _catalog_id_sets(rows: list[Any], section_type: str) -> dict[str, set]:
+    tmdb: set[int] = set()
+    imdb: set[str] = set()
+    tvdb: set[int] = set()
+    for row in rows:
+        if section_type == "movie":
+            if row.tmdbid:
+                tmdb.add(int(row.tmdbid))
+            if getattr(row, "imdbid", None):
+                imdb.add(str(row.imdbid))
+        else:
+            if getattr(row, "sonarr_tmdbid", None):
+                tmdb.add(int(row.sonarr_tmdbid))
+            if getattr(row, "tvdbid", None):
+                tvdb.add(int(row.tvdbid))
+            if getattr(row, "imdbid", None):
+                imdb.add(str(row.imdbid))
+    return {"tmdb": tmdb, "imdb": imdb, "tvdb": tvdb}
+
+
+def _candidate_in_catalog(candidate: dict[str, Any], catalog_ids: dict[str, set]) -> bool:
+    tmdb = candidate.get("tmdb_id")
+    if tmdb and int(tmdb) in catalog_ids.get("tmdb", set()):
+        return True
+    imdb = candidate.get("imdb_id")
+    if imdb and str(imdb) in catalog_ids.get("imdb", set()):
+        return True
+    tvdb = candidate.get("tvdb_id")
+    if tvdb and int(tvdb) in catalog_ids.get("tvdb", set()):
+        return True
+    return False
+
+
+def _candidate_poster_url(candidate: dict[str, Any]) -> Optional[str]:
+    path = candidate.get("poster_path") or candidate.get("poster")
+    if not path:
+        return None
+    text = str(path).strip()
+    if not text:
+        return None
+    if text.startswith("http://") or text.startswith("https://"):
+        return text
+    if not text.startswith("/"):
+        text = f"/{text}"
+    return f"{TMDB_POSTER_BASE}{text}"
+
+
+def _missing_from_arr_items(
+    candidates: Optional[list[dict[str, Any]]],
+    rows: list[Any],
+    section_type: str,
+    *,
+    filters: Any = None,
+    pins: Any = None,
+    genre_map: Optional[dict[int, str]] = None,
+    cap: int = MISSING_FROM_ARR_CAP,
+) -> tuple[list[dict[str, Any]], int, int, list[str]]:
+    """Source candidates not in the catalog, after recipe filters that can run off-list.
+
+    Returns (items, filtered_count, prefilter_count, gap_labels).
+    """
+    if candidates is None:
+        return [], 0, 0, []
+    catalog_ids = _catalog_id_sets(rows, section_type)
+    tree = _filters_tree(filters)
+    gaps = _missing_filter_gap_labels(tree, section_type)
+    raw: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if _candidate_in_catalog(candidate, catalog_ids):
+            continue
+        if _candidate_excluded_by_pins(candidate, pins):
+            continue
+        raw.append(candidate)
+    prefilter = len(raw)
+    kept = [c for c in raw if tree is None or _candidate_node_passes(c, tree, section_type, genre_map or {})]
+    items = [
+        {
+            "title": candidate.get("title") or "Untitled",
+            "year": candidate.get("year"),
+            "tmdb_id": candidate.get("tmdb_id"),
+            "tvdb_id": candidate.get("tvdb_id"),
+            "imdb_id": candidate.get("imdb_id"),
+            "poster": _candidate_poster_url(candidate),
+        }
+        for candidate in kept[:cap]
+    ]
+    return items, len(kept), prefilter, gaps
+
+
+_ISO639_ENGLISH = {
+    "en": "english",
+    "es": "spanish",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+    "ja": "japanese",
+    "ko": "korean",
+    "zh": "chinese",
+    "hi": "hindi",
+    "pt": "portuguese",
+    "ru": "russian",
+    "ar": "arabic",
+    "nl": "dutch",
+    "sv": "swedish",
+    "no": "norwegian",
+    "da": "danish",
+    "fi": "finnish",
+    "pl": "polish",
+    "tr": "turkish",
+    "th": "thai",
+    "cs": "czech",
+    "hu": "hungarian",
+    "el": "greek",
+    "he": "hebrew",
+    "id": "indonesian",
+    "vi": "vietnamese",
+    "uk": "ukrainian",
+    "ro": "romanian",
+    "ta": "tamil",
+    "te": "telugu",
+    "fa": "persian",
+    "ms": "malay",
+    "cn": "chinese",
+}
+
+
+def _candidate_genre_names(candidate: dict[str, Any], genre_map: dict[int, str]) -> set[str]:
+    names = {str(n).strip().lower() for n in (candidate.get("genre_names") or []) if n}
+    for gid in candidate.get("genre_ids") or []:
+        try:
+            mapped = genre_map.get(int(gid))
+        except (TypeError, ValueError):
+            mapped = None
+        if mapped:
+            names.add(str(mapped).strip().lower())
+    return names
+
+
+def _candidate_language_names(candidate: dict[str, Any]) -> set[str]:
+    raw = candidate.get("original_language")
+    if not raw:
+        return set()
+    text = str(raw).strip().lower()
+    names = {text}
+    if len(text) <= 3:
+        mapped = _ISO639_ENGLISH.get(text)
+        if mapped:
+            names.add(mapped)
+    return names
+
+
+def _candidate_year(candidate: dict[str, Any]) -> Optional[int]:
+    try:
+        year = int(candidate.get("year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year:
+        return year
+    date = str(candidate.get("date") or "")
+    if len(date) >= 4 and date[:4].isdigit():
+        return int(date[:4])
+    return None
+
+
+def _candidate_release_dt(candidate: dict[str, Any]) -> Optional[datetime]:
+    date = str(candidate.get("date") or "").strip()
+    if date:
+        try:
+            parsed = datetime.fromisoformat(date.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            if len(date) >= 10 and date[4] == "-" and date[7] == "-":
+                try:
+                    return datetime(int(date[0:4]), int(date[5:7]), int(date[8:10]), tzinfo=timezone.utc)
+                except ValueError:
+                    pass
+    year = _candidate_year(candidate)
+    if year:
+        return datetime(year, 1, 1, tzinfo=timezone.utc)
+    return None
+
+
+def _candidate_rating(candidate: dict[str, Any], section_type: str, provider: Optional[str]) -> Optional[tuple[float, int]]:
+    ratings = candidate.get("ratings") if isinstance(candidate.get("ratings"), dict) else {}
+    key = None
+    if section_type == "movie" and provider:
+        key = {"imdb": "imdb", "tmdb": "tmdb", "trakt": "trakt", "metacritic": "metacritic", "rottenTomatoes": "rottentomatoes"}.get(
+            provider, str(provider).lower()
+        )
+        if key == "rottentomatoes":
+            for alias in ("rottentomatoes", "rotten_tomatoes", "rt"):
+                if alias in ratings:
+                    key = alias
+                    break
+        hit = ratings.get(key) if key else None
+        if isinstance(hit, dict) and hit.get("value") is not None:
+            try:
+                return float(hit["value"]), int(hit.get("votes") or 0)
+            except (TypeError, ValueError):
+                return None
+        if provider == "tmdb" and candidate.get("vote_average") is not None:
+            try:
+                return float(candidate["vote_average"]), int(candidate.get("vote_count") or 0)
+            except (TypeError, ValueError):
+                return None
+        return None
+    if section_type != "movie":
+        hit = ratings.get("imdb") or ratings.get("tmdb") or ratings.get("trakt")
+        if isinstance(hit, dict) and hit.get("value") is not None:
+            try:
+                return float(hit["value"]), int(hit.get("votes") or 0)
+            except (TypeError, ValueError):
+                return None
+        if candidate.get("vote_average") is not None:
+            try:
+                return float(candidate["vote_average"]), int(candidate.get("vote_count") or 0)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _missing_filter_gap_labels(tree: Optional[dict[str, Any]], section_type: str) -> list[str]:
+    if tree is None:
+        return []
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    def walk(node: dict[str, Any]) -> None:
+        if "field" in node:
+            field = str(node.get("field") or "")
+            label = None
+            if field == "certification" and (node.get("values") or []):
+                label = "Certification"
+            elif field == "studio_network" and str(node.get("value") or "").strip():
+                label = "Studio / network"
+            elif field == "genre" and (node.get("values") or []):
+                label = "Genre"
+            elif field == "original_language" and (node.get("values") or []):
+                label = "Original language"
+            elif field == "rating":
+                provider = node.get("provider")
+                if section_type != "movie" or (provider and str(provider) != "tmdb") or not provider:
+                    label = "Rating"
+            elif field == "release_window":
+                basis = str(node.get("basis") or "premiered")
+                if basis not in {"premiered", "theater"}:
+                    label = {
+                        "digital": "Digital release",
+                        "physical": "Physical release",
+                        "latest_episode": "Latest episode air date",
+                        "latest_season": "Latest season",
+                    }.get(basis, "Release window")
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+            return
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(tree)
+    return labels
+
+
+def _candidate_excluded_by_pins(candidate: dict[str, Any], pins: Any) -> bool:
+    if not isinstance(pins, dict):
+        return False
+    for pin in pins.get("exclude") or []:
+        if isinstance(pin, dict) and _candidate_matches_ids(candidate, _item_id_sets(pin)):
+            return True
+    return False
+
+
+def _candidate_passes_filter(
+    candidate: dict[str, Any],
+    rule: dict[str, Any],
+    section_type: str,
+    genre_map: dict[int, str],
+) -> bool:
+    field = rule.get("field")
+    op = str(rule.get("op") or "")
+
+    if field == "year":
+        year = _candidate_year(candidate)
+        if not year:
+            return False
+        if op == "gte":
+            return year >= int(rule.get("value") or 0)
+        if op == "lte":
+            return year <= int(rule.get("value") or 9999)
+        if op == "between":
+            low = int(rule.get("value") or 0)
+            high = int(rule.get("value_to") or 9999)
+            return low <= year <= high
+        return year == int(rule.get("value") or 0)
+
+    if field == "genre":
+        values = {str(v).strip().lower() for v in (rule.get("values") or []) if v}
+        if not values:
+            return True
+        genres = _candidate_genre_names(candidate, genre_map)
+        if op == "excludes":
+            if not genres:
+                return True
+            return not (genres & values)
+        if not genres:
+            return True
+        return bool(genres & values)
+
+    if field == "original_language":
+        values = {str(v).strip().lower() for v in (rule.get("values") or []) if v}
+        if not values:
+            return True
+        languages = _candidate_language_names(candidate)
+        if op == "not_in":
+            if not languages:
+                return True
+            return not (languages & values)
+        if not languages:
+            return True
+        return bool(languages & values)
+
+    if field == "certification":
+        return True
+
+    if field == "studio_network":
+        return True
+
+    if field == "monitored":
+        expected = bool(rule.get("value", True))
+        return not expected
+
+    if field == "quality":
+        needle = str(rule.get("value") or "").strip().lower()
+        if not needle:
+            return True
+        return op == "not_contains"
+
+    if field == "quality_profile":
+        values = {str(v).strip() for v in (rule.get("values") or []) if v}
+        if not values:
+            return True
+        return op == "not_in"
+
+    if field == "instance":
+        expected = str(rule.get("value") or "").strip()
+        if not expected:
+            return True
+        return False
+
+    if field == "release_window":
+        basis = str(rule.get("basis") or "premiered")
+        if basis not in {"premiered", "theater"}:
+            return True
+        release = _candidate_release_dt(candidate)
+        now = datetime.now(timezone.utc)
+        if op in ("has_released", "not_yet_released"):
+            if release is None:
+                return False
+            released = release <= now
+            return released if op == "has_released" else not released
+        days = int(rule.get("value") or 0)
+        if days <= 0:
+            return True
+        if release is None:
+            return False
+        if op == "within_next":
+            return now <= release <= now + timedelta(days=days)
+        return now - timedelta(days=days) <= release <= now
+
+    if field == "rating":
+        threshold = float(rule.get("value") or 0)
+        provider = rule.get("provider")
+        if provider is not None:
+            provider = str(provider)
+        detail = _candidate_rating(candidate, section_type, provider)
+        if detail is None:
+            return True
+        rating, votes = detail
+        min_votes = rule.get("min_votes")
+        if min_votes is not None:
+            try:
+                if votes < int(min_votes):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if op == "lte":
+            return rating <= threshold
+        return rating >= threshold
+
+    return True
+
+
+def _candidate_node_passes(
+    candidate: dict[str, Any],
+    node: dict[str, Any],
+    section_type: str,
+    genre_map: dict[int, str],
+) -> bool:
+    if "field" in node:
+        return _candidate_passes_filter(candidate, node, section_type, genre_map)
+    children = node.get("children") or []
+    if not children:
+        return True
+    if node.get("op") == "or":
+        return any(_candidate_node_passes(candidate, child, section_type, genre_map) for child in children)
+    return all(_candidate_node_passes(candidate, child, section_type, genre_map) for child in children)
+
+
+def _tmdb_genre_map(media_type: str) -> dict[int, str]:
+    try:
+        return {int(g["id"]): str(g.get("name") or "").strip().lower() for g in tmdb_client.fetch_genres(media_type) if g.get("id")}
+    except Exception:
+        return {}
+
+
+def _missing_identity_key(item: dict[str, Any]) -> Optional[str]:
+    if item.get("tmdb_id"):
+        return f"tmdb:{int(item['tmdb_id'])}"
+    if item.get("tvdb_id"):
+        return f"tvdb:{int(item['tvdb_id'])}"
+    if item.get("imdb_id"):
+        return f"imdb:{item['imdb_id']}"
+    return None
+
+
+def _missing_identity_keys(items: list[dict[str, Any]]) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = _missing_identity_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _new_missing_count(current_keys: list[str], previous_summary: Any) -> Optional[int]:
+    """Titles missing now that were not missing on the last successful keyed run.
+
+    Returns None when there is no prior baseline (first run or legacy summaries).
+    """
+    if not isinstance(previous_summary, dict) or "missing_from_arr_keys" not in previous_summary:
+        return None
+    previous = {str(k) for k in (previous_summary.get("missing_from_arr_keys") or []) if k}
+    return sum(1 for key in current_keys if key not in previous)
 
 
 def _dedupe_rows(rows: list[Any], section_type: str) -> list[Any]:
@@ -965,6 +1418,14 @@ def _evaluate(
 
     rows = _load_catalog_rows(section_type, id_sets)
     matched_count = len(_dedupe_rows(rows, section_type))
+    missing_items, missing_count, missing_prefilter, missing_gaps = _missing_from_arr_items(
+        candidates,
+        rows,
+        section_type,
+        filters=normalized["filters"],
+        pins=normalized["pins"],
+        genre_map=_tmdb_genre_map(media_type),
+    )
 
     air_dates = (
         _load_air_date_lookup([int(r.id) for r in rows])
@@ -1004,6 +1465,10 @@ def _evaluate(
         "in_target_library": None,
         "unresolved": None,
         "plex_error": None,
+        "missing_from_arr": missing_items,
+        "missing_from_arr_count": missing_count,
+        "missing_from_arr_prefilter_count": missing_prefilter,
+        "missing_from_arr_filter_gaps": missing_gaps,
     }
 
     if resolve:
@@ -1094,6 +1559,10 @@ def preview_definition(
         "plex_error": plex_errors[0] if plex_errors else None,
         "libraries": libraries,
         "sample": sample,
+        "missing_from_arr": primary.get("missing_from_arr") or [],
+        "missing_from_arr_count": int(primary.get("missing_from_arr_count") or 0),
+        "missing_from_arr_prefilter_count": int(primary.get("missing_from_arr_prefilter_count") or 0),
+        "missing_from_arr_filter_gaps": primary.get("missing_from_arr_filter_gaps") or [],
     }
 
 
@@ -1386,6 +1855,7 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         section_type = str(recipe.plex_section_type)
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
+        previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
 
     summary: dict[str, Any]
     try:
@@ -1420,6 +1890,9 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
             synced_removed += int(sync_stats.get("removed") or 0)
             synced_total += int(sync_stats.get("total") or 0)
             created_any = created_any or bool(sync_stats.get("created"))
+        missing_items = primary.get("missing_from_arr") or []
+        missing_keys = _missing_identity_keys(missing_items)
+        missing_count = int(primary.get("missing_from_arr_count") or 0)
         summary = {
             "status": "ok",
             "tmdb_candidates": primary["tmdb_candidates"],
@@ -1430,6 +1903,9 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
             "selected": primary["selected"],
             "in_target_library": in_library_total,
             "unresolved": unresolved_total,
+            "missing_from_arr_count": missing_count,
+            "missing_from_arr_new": _new_missing_count(missing_keys, previous_summary),
+            "missing_from_arr_keys": missing_keys,
             "synced": {
                 "added": synced_added,
                 "removed": synced_removed,

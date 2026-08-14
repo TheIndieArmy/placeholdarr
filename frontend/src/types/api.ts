@@ -615,6 +615,11 @@ export interface CollectionRunSummary {
   selected?: number;
   in_target_library?: number | null;
   unresolved?: number | null;
+  /** Source titles not in ARR (last run). Pre-filter; not Plex unresolved. */
+  missing_from_arr_count?: number;
+  /** Titles missing now that were not in the previous run's missing set. Null = no baseline yet. */
+  missing_from_arr_new?: number | null;
+  missing_from_arr_keys?: string[];
   synced?: { added: number; removed: number; total: number; created: boolean };
   libraries?: CollectionLibrarySyncSummary[];
 }
@@ -741,6 +746,15 @@ export interface CollectionPreviewSampleItem {
   poster: string | null;
 }
 
+export interface CollectionMissingFromArrItem {
+  title: string;
+  year: number | null;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+  poster: string | null;
+}
+
 export interface CollectionPreviewResponse {
   tmdb_candidates: number | null;
   matched_in_catalog: number;
@@ -753,4 +767,44 @@ export interface CollectionPreviewResponse {
   plex_error: string | null;
   libraries?: CollectionLibrarySyncSummary[];
   sample: CollectionPreviewSampleItem[];
+  missing_from_arr?: CollectionMissingFromArrItem[];
+  missing_from_arr_count?: number;
+  missing_from_arr_prefilter_count?: number;
+  missing_from_arr_filter_gaps?: string[];
+}
+
+export interface CollectionArrAddInstanceOptions {
+  instance_key: string;
+  label: string;
+  arr_type: string;
+  quality_profiles: { id: number; name: string }[];
+  root_folders: { id?: number | null; path: string }[];
+}
+
+export interface CollectionArrAddOptionsResponse {
+  instances: CollectionArrAddInstanceOptions[];
+}
+
+export interface CollectionArrAddItem {
+  title: string;
+  year?: number | null;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+}
+
+export interface CollectionArrAddResult {
+  title: string;
+  instance_key: string;
+  status: "ok" | "skipped" | "error";
+  error?: string | null;
+}
+
+export interface CollectionArrAddResponse {
+  ok: boolean;
+  added: number;
+  skipped: number;
+  errors: number;
+  results: CollectionArrAddResult[];
+  message: string;
 }

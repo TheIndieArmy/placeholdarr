@@ -379,9 +379,23 @@ export function CollectionsPanel(props: {
                       </span>
                       {summary ? (
                         summary.status === "ok" ? (
-                          <span className="text-[12px] text-green-400/90">
-                            +{summary.synced?.added ?? 0} / -{summary.synced?.removed ?? 0}
-                          </span>
+                          <>
+                            <span className="text-[12px] text-green-400/90">
+                              +{summary.synced?.added ?? 0} / -{summary.synced?.removed ?? 0}
+                            </span>
+                            {(summary.missing_from_arr_count ?? 0) > 0 ? (
+                              <span
+                                className={`block text-[12px] ${theme.muted}`}
+                                title={`Source list titles not in ${recipe.plex_section_type === "show" ? "Sonarr" : "Radarr"} (last run). +N are titles that were not in that set last time.`}
+                              >
+                                {summary.missing_from_arr_count} not in{" "}
+                                {recipe.plex_section_type === "show" ? "Sonarr" : "Radarr"}
+                                {summary.missing_from_arr_new != null && summary.missing_from_arr_new > 0
+                                  ? ` · +${summary.missing_from_arr_new} new`
+                                  : ""}
+                              </span>
+                            ) : null}
+                          </>
                         ) : summary.status === "cleared" ? (
                           <span className={`text-[12px] ${theme.muted}`}>Cleared (out of window)</span>
                         ) : (
