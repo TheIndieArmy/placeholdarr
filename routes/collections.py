@@ -375,6 +375,7 @@ class ArrAddPayload(BaseModel):
     tag: str = "placeholdarr"
 
 
+# Keep in sync with `ARR_ADD_BATCH_CAP` in frontend/src/api/collections.ts
 ARR_ADD_BATCH_CAP = 100
 
 

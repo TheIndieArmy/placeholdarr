@@ -15,6 +15,9 @@ import type {
   PlexSectionOption,
 } from "../types/api";
 
+/** Must match `ARR_ADD_BATCH_CAP` in `routes/collections.py`. */
+export const ARR_ADD_BATCH_CAP = 100;
+
 export interface RecipeWritePayload {
   name: string;
   enabled: boolean;

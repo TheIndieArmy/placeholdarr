@@ -5,6 +5,7 @@ import {
   getCollectionBuilderMeta,
   getCollectionTmdbMeta,
   previewCollectionDefinition,
+  ARR_ADD_BATCH_CAP,
   type RecipeWritePayload,
 } from "../api/collections";
 import { ArrAddModal } from "./ArrAddModal";
@@ -2363,7 +2364,11 @@ export function CollectionEditor(props: {
                           <button
                             type="button"
                             className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
-                            onClick={() => setSelectedMissing(new Set(missingItems.map(missingKey)))}
+                            onClick={() =>
+                              setSelectedMissing(
+                                new Set(missingItems.slice(0, ARR_ADD_BATCH_CAP).map(missingKey)),
+                              )
+                            }
                           >
                             Select all
                           </button>
@@ -2376,10 +2381,13 @@ export function CollectionEditor(props: {
                           </button>
                           <span className={`text-[12px] ${theme.muted}`}>
                             {selectedMissing.size} selected
+                            {missingItems.length > ARR_ADD_BATCH_CAP
+                              ? ` (max ${ARR_ADD_BATCH_CAP} per add)`
+                              : ""}
                           </span>
                           <button
                             type="button"
-                            disabled={selectedMissing.size < 1}
+                            disabled={selectedMissing.size < 1 || selectedMissing.size > ARR_ADD_BATCH_CAP}
                             onClick={() => setArrModalOpen(true)}
                             className="ml-auto rounded-lg px-4 py-1.5 text-[13px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40"
                             style={{ backgroundColor: accentHex }}
@@ -2418,7 +2426,7 @@ export function CollectionEditor(props: {
                                   setSelectedMissing((prev) => {
                                     const next = new Set(prev);
                                     if (next.has(key)) next.delete(key);
-                                    else next.add(key);
+                                    else if (next.size < ARR_ADD_BATCH_CAP) next.add(key);
                                     return next;
                                   });
                                 }}
@@ -2503,7 +2511,9 @@ export function CollectionEditor(props: {
       {arrModalOpen ? (
         <ArrAddModal
           mediaType={sectionType}
-          items={missingItems.filter((item) => selectedMissing.has(missingKey(item)))}
+          items={missingItems
+            .filter((item) => selectedMissing.has(missingKey(item)))
+            .slice(0, ARR_ADD_BATCH_CAP)}
           defaultTag={name.trim() || "placeholdarr"}
           accentHex={accentHex}
           onClose={() => setArrModalOpen(false)}
