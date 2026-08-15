@@ -10,6 +10,7 @@ collection so the builder UI can show live staged counts.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -1229,6 +1230,19 @@ def _apply_filters(
 # Sort / limit
 # ---------------------------------------------------------------------------
 
+_LEADING_NON_ALNUM = re.compile(r"^[^a-z0-9]+", re.IGNORECASE)
+_LEADING_ARTICLE = re.compile(r"^(the|an|a)\s+", re.IGNORECASE)
+
+
+def _title_sort_key(title: str | None) -> str:
+    """Same rules as frontend `titleSortKey`: drop leading punctuation and a/an/the."""
+    raw = str(title or "").strip().lower()
+    raw = _LEADING_NON_ALNUM.sub("", raw)
+    raw = _LEADING_ARTICLE.sub("", raw)
+    raw = _LEADING_NON_ALNUM.sub("", raw)
+    return raw
+
+
 def _sort_rows(
     rows: list[Any],
     sort: Optional[str],
@@ -1238,7 +1252,7 @@ def _sort_rows(
     sort_provider: Optional[str] = None,
 ) -> list[Any]:
     if sort == "title":
-        return sorted(rows, key=lambda r: str(r.title or "").lower())
+        return sorted(rows, key=lambda r: _title_sort_key(getattr(r, "title", None)))
     if sort == "release_date":
         epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
         return sorted(rows, key=lambda r: _row_release_date(r, section_type) or epoch, reverse=True)

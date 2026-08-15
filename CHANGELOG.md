@@ -7,6 +7,11 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Changed
+
+- **Collection title sort**: Arrange by Title (A–Z) ignores leading *a* / *an* / *the*, matching Library A–Z.
+- **Plex collection order**: Synced collections use Plex custom sort and item order from the recipe (Plex previously kept default release-date order, which looked random vs preview).
+
 ## [0.9.16] - 2026-08-14
 
 ### Action required

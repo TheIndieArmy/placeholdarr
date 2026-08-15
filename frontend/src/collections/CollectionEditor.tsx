@@ -2049,7 +2049,7 @@ export function CollectionEditor(props: {
                 <option value="release_date">Release date (newest)</option>
                 <option value="latest_aired">Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}</option>
                 <option value="rating">Rating (highest first)</option>
-                <option value="title">Title (A–Z)</option>
+        <option value="title">Title (A–Z, ignoring a/an/the)</option>
               </select>
             </label>
             {definition.sort === "rating" ? (
