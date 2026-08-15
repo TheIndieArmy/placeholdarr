@@ -35,11 +35,11 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "Action is required. Placeholdarr now requires an API key on every webhook URL "
             "so Radarr, Sonarr, Tautulli, Jellyfin, and Emby can still call /webhook after "
             "dashboard login. Existing notification URLs without ?apikey= will be rejected "
-            "until you copy the updated URL from Settings (ARR Integrations or each media "
-            "card's webhook button) and paste it into that service."
+            "until you copy the updated URL from Settings → Security → Webhook URLs and paste "
+            "it into each of those services."
         ),
-        cta_label="Open ARR Integrations",
-        cta_path="/settings/arr-integrations",
+        cta_label="Open Security",
+        cta_path="/settings/security",
     ),
     WhatsNewNotice(
         id="collections-beta",
