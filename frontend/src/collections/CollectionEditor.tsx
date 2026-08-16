@@ -30,6 +30,7 @@ import type {
   CollectionPinnedItem,
   CollectionMissingFromArrItem,
   CollectionPreviewResponse,
+  CollectionPreviewSampleItem,
   CollectionRecipe,
   CollectionRatingProvider,
   CollectionSourceBlock,
@@ -795,6 +796,61 @@ function PinPicker(props: {
   );
 }
 
+function fileStateOutline(state: CollectionPreviewSampleItem["file_state"]): string {
+  if (state === "file") return "outline outline-2 outline-offset-[-2px] outline-emerald-400";
+  if (state === "placeholder") return "outline outline-2 outline-dashed outline-offset-[-2px] outline-cyan-400";
+  if (state === "mixed") return "outline outline-2 outline-dashed outline-offset-[-2px] outline-violet-400";
+  return "";
+}
+
+function CatalogSamplePoster(props: {
+  item: CollectionPreviewSampleItem;
+  libraries: PlexSectionOption[];
+  dimmed: boolean;
+  showLibraryTicks: boolean;
+}) {
+  const theme = useCollectionTheme();
+  const state = props.item.file_state ?? "none";
+  const chip =
+    state === "file" ? "File" : state === "placeholder" ? "PH" : state === "mixed" ? "Mix" : null;
+  const inSet = new Set(props.item.in_libraries ?? []);
+  return (
+    <div
+      title={`${props.item.title}${props.item.year ? ` (${props.item.year})` : ""}${
+        chip ? ` · ${chip === "PH" ? "Placeholder" : chip === "Mix" ? "File + placeholder" : "Real file"}` : ""
+      }`}
+      className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback} ${fileStateOutline(state)} ${
+        props.dimmed ? "opacity-35" : ""
+      }`}
+    >
+      {props.item.poster ? (
+        <img src={props.item.poster} alt={props.item.title} className="h-full w-full object-cover" loading="lazy" />
+      ) : (
+        <span className={`block h-full p-1 text-[9px] leading-tight ${theme.sampleFallback}`}>{props.item.title}</span>
+      )}
+      {chip ? (
+        <span className="absolute left-0.5 top-0.5 rounded bg-black/70 px-1 text-[8px] font-headline uppercase tracking-wider text-white">
+          {chip}
+        </span>
+      ) : null}
+      {props.showLibraryTicks ? (
+        <span className="absolute inset-x-0 bottom-0 flex flex-wrap gap-0.5 bg-black/55 px-0.5 py-0.5">
+          {props.libraries.map((lib) => (
+            <span
+              key={lib.id}
+              className={`rounded px-0.5 text-[8px] font-headline uppercase leading-none ${
+                inSet.has(lib.id) ? "text-white" : "text-white/35"
+              }`}
+            >
+              {lib.title.slice(0, 3)}
+            </span>
+          ))}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function CollectionEditor(props: {
   recipe: CollectionRecipe | null;
   sections: PlexSectionOption[];
@@ -999,6 +1055,7 @@ export function CollectionEditor(props: {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewPane, setPreviewPane] = useState<"catalog" | "missing">("catalog");
+  const [sampleLibraryFilter, setSampleLibraryFilter] = useState<number | null>(null);
   const [selectedMissing, setSelectedMissing] = useState<Set<string>>(new Set());
   const [arrModalOpen, setArrModalOpen] = useState(false);
   const previewSeq = useRef(0);
@@ -1712,6 +1769,13 @@ export function CollectionEditor(props: {
   const missingPrefilter = preview?.missing_from_arr_prefilter_count ?? 0;
   const missingGaps = preview?.missing_from_arr_filter_gaps ?? [];
   const missingItems = preview?.missing_from_arr ?? [];
+  const selectFirstCount = Math.min(
+    definition.limit && definition.limit > 0 ? definition.limit : 50,
+    ARR_ADD_BATCH_CAP,
+    missingItems.length,
+  );
+  const targetLibraries = props.sections.filter((s) => sectionIds.includes(s.id));
+  const showLibraryTicks = targetLibraries.length > 1;
   const arrIncludeLabels = arrIncludeConstraintLabels(definition.filters);
   const showMissingPane = missingCount > 0 || missingPrefilter > 0 || missingGaps.length > 0;
   const missingKey = (item: CollectionMissingFromArrItem) =>
@@ -2449,6 +2513,19 @@ export function CollectionEditor(props: {
                           >
                             Select all
                           </button>
+                          {selectFirstCount > 0 ? (
+                            <button
+                              type="button"
+                              className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
+                              onClick={() =>
+                                setSelectedMissing(
+                                  new Set(missingItems.slice(0, selectFirstCount).map(missingKey)),
+                                )
+                              }
+                            >
+                              Select first {selectFirstCount}
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
@@ -2551,28 +2628,71 @@ export function CollectionEditor(props: {
                         )}
                       </>
                     ) : preview?.sample?.length ? (
-                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
-                        {preview.sample.map((item) =>
-                          item.poster ? (
-                            <img
-                              key={item.id}
-                              src={item.poster}
-                              alt={item.title}
-                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                              className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div
-                              key={item.id}
-                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                              className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
+                      <>
+                        <div className={`mb-2 flex flex-wrap items-center gap-2 ${theme.muted}`}>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-emerald-400" />
+                            File
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-dashed outline-cyan-400" />
+                            Placeholder
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-dashed outline-violet-400" />
+                            Both
+                          </span>
+                        </div>
+                        {showLibraryTicks ? (
+                          <div className="mb-2 flex flex-wrap gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setSampleLibraryFilter(null)}
+                              className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                                sampleLibraryFilter == null ? "text-[#0a0e14]" : theme.chipInactive
+                              }`}
+                              style={
+                                sampleLibraryFilter == null
+                                  ? { backgroundColor: accentHex, borderColor: accentHex }
+                                  : undefined
+                              }
                             >
-                              {item.title}
-                            </div>
-                          ),
-                        )}
-                      </div>
+                              All libraries
+                            </button>
+                            {targetLibraries.map((lib) => (
+                              <button
+                                key={lib.id}
+                                type="button"
+                                onClick={() => setSampleLibraryFilter(lib.id)}
+                                className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                                  sampleLibraryFilter === lib.id ? "text-[#0a0e14]" : theme.chipInactive
+                                }`}
+                                style={
+                                  sampleLibraryFilter === lib.id
+                                    ? { backgroundColor: accentHex, borderColor: accentHex }
+                                    : undefined
+                                }
+                              >
+                                {lib.title}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
+                          {preview.sample.map((item) => (
+                            <CatalogSamplePoster
+                              key={item.id}
+                              item={item}
+                              libraries={targetLibraries}
+                              showLibraryTicks={showLibraryTicks}
+                              dimmed={
+                                sampleLibraryFilter != null &&
+                                !(item.in_libraries ?? []).includes(sampleLibraryFilter)
+                              }
+                            />
+                          ))}
+                        </div>
+                      </>
                     ) : (
                       <p className={theme.muted}>No catalog sample for this recipe.</p>
                     )}

@@ -755,6 +755,10 @@ export interface CollectionPreviewSampleItem {
   tmdb_id: number | null;
   tvdb_id: number | null;
   poster: string | null;
+  has_file?: boolean;
+  has_placeholder?: boolean;
+  file_state?: "file" | "placeholder" | "mixed" | "none";
+  in_libraries?: number[];
 }
 
 export interface CollectionMissingFromArrItem {

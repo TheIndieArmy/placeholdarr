@@ -68,6 +68,7 @@ MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes
 DEFAULT_SOURCE_LIMIT = 100
 MAX_COLLECTION_ITEMS = 500
 MISSING_FROM_ARR_CAP = 200
+PREVIEW_SAMPLE_SIZE = 200
 TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
 
 
@@ -424,6 +425,8 @@ def _missing_from_arr_items(
     pins: Any = None,
     genre_map: Optional[dict[int, str]] = None,
     cap: int = MISSING_FROM_ARR_CAP,
+    sort: Optional[str] = None,
+    sort_provider: Optional[str] = None,
 ) -> tuple[list[dict[str, Any]], int, int, list[str]]:
     """Source candidates not in the catalog, after recipe filters that can run off-list.
 
@@ -443,6 +446,7 @@ def _missing_from_arr_items(
         raw.append(candidate)
     prefilter = len(raw)
     kept = [c for c in raw if tree is None or _candidate_node_passes(c, tree, section_type, genre_map or {})]
+    kept = _sort_candidates(kept, sort, sort_provider)
     items = [
         {
             "title": candidate.get("title") or "Untitled",
@@ -1312,6 +1316,55 @@ def _sort_rows(
     return rows
 
 
+def _candidate_rating_score(candidate: dict[str, Any], sort_provider: Optional[str]) -> float:
+    ratings = candidate.get("ratings") if isinstance(candidate.get("ratings"), dict) else {}
+    if sort_provider and ratings:
+        raw = ratings.get(sort_provider) or ratings.get(str(sort_provider).lower())
+        if isinstance(raw, dict):
+            raw = raw.get("value")
+        try:
+            if raw is not None:
+                return float(raw)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(candidate.get("vote_average"))
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _sort_candidates(
+    candidates: list[dict[str, Any]],
+    sort: Optional[str],
+    sort_provider: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Apply the recipe Arrange sort to missing-from-ARR candidates (stable)."""
+    if not sort:
+        return candidates
+    indexed = list(enumerate(candidates))
+    epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+
+    def keyed(item: tuple[int, dict[str, Any]]) -> tuple:
+        index, candidate = item
+        if sort == "title":
+            return (_title_sort_key(candidate.get("title")), index)
+        if sort in ("release_date", "latest_aired"):
+            dt = _candidate_release_dt(candidate) or epoch
+            return (-dt.timestamp(), index)
+        if sort == "rating":
+            score = _candidate_rating_score(candidate, sort_provider)
+            return (-score, index)
+        # popularity / list rank (missing popularity keeps source order)
+        try:
+            pop = float(candidate.get("popularity") or 0)
+        except (TypeError, ValueError):
+            pop = 0.0
+        return (-pop, index)
+
+    indexed.sort(key=keyed)
+    return [candidate for _index, candidate in indexed]
+
+
 # ---------------------------------------------------------------------------
 # Pins (always include / always exclude)
 # ---------------------------------------------------------------------------
@@ -1424,7 +1477,44 @@ def _provider_key_groups(rows: list[Any], section_type: str) -> list[list[str]]:
     return groups
 
 
-def _row_summary(row: Any, section_type: str) -> dict[str, Any]:
+def _row_has_file_placeholder(row: Any, section_type: str) -> tuple[bool, bool]:
+    if section_type == "movie":
+        return bool(getattr(row, "has_file", False)), bool(getattr(row, "has_placeholder", False))
+    has_file = bool(getattr(row, "has_files", False) or int(getattr(row, "episode_files", 0) or 0))
+    has_placeholder = bool(
+        int(getattr(row, "episode_placeholders", 0) or 0) or getattr(row, "has_placeholder", False)
+    )
+    return has_file, has_placeholder
+
+
+def _catalog_file_state(rows: list[Any], section_type: str) -> dict[Any, tuple[bool, bool]]:
+    """OR file/placeholder flags across ARR instances for the same title."""
+    acc: dict[Any, tuple[bool, bool]] = {}
+    for row in rows:
+        ident = _row_identity(row, section_type)
+        if ident in (None, 0):
+            continue
+        has_file, has_placeholder = _row_has_file_placeholder(row, section_type)
+        prev = acc.get(ident, (False, False))
+        acc[ident] = (prev[0] or has_file, prev[1] or has_placeholder)
+    return acc
+
+
+def _row_summary(
+    row: Any,
+    section_type: str,
+    file_state: Optional[dict[Any, tuple[bool, bool]]] = None,
+) -> dict[str, Any]:
+    ident = _row_identity(row, section_type)
+    has_file, has_placeholder = (file_state or {}).get(ident, _row_has_file_placeholder(row, section_type))
+    if has_file and has_placeholder:
+        state = "mixed"
+    elif has_file:
+        state = "file"
+    elif has_placeholder:
+        state = "placeholder"
+    else:
+        state = "none"
     return {
         "id": row.id,
         "title": row.title,
@@ -1432,6 +1522,10 @@ def _row_summary(row: Any, section_type: str) -> dict[str, Any]:
         "tmdb_id": int(row.tmdbid if section_type == "movie" else (row.sonarr_tmdbid or 0)) or None,
         "tvdb_id": int(getattr(row, "tvdbid", 0) or 0) or None,
         "poster": row.remote_poster,
+        "has_file": has_file,
+        "has_placeholder": has_placeholder,
+        "file_state": state,
+        "in_libraries": [],
     }
 
 
@@ -1454,6 +1548,7 @@ def _evaluate(
 
     rows = _load_catalog_rows(section_type, id_sets)
     matched_count = len(_dedupe_rows(rows, section_type))
+    file_state = _catalog_file_state(rows, section_type)
     missing_items, missing_count, missing_prefilter, missing_gaps = _missing_from_arr_items(
         candidates,
         rows,
@@ -1461,6 +1556,8 @@ def _evaluate(
         filters=normalized["filters"],
         pins=normalized["pins"],
         genre_map=_tmdb_genre_map(media_type),
+        sort=normalized["sort"],
+        sort_provider=normalized.get("sort_provider"),
     )
 
     air_dates = (
@@ -1505,6 +1602,7 @@ def _evaluate(
         "missing_from_arr_count": missing_count,
         "missing_from_arr_prefilter_count": missing_prefilter,
         "missing_from_arr_filter_gaps": missing_gaps,
+        "file_state": file_state,
     }
 
     if resolve:
@@ -1560,15 +1658,18 @@ def preview_definition(
     section_id: int,
     section_type: str,
     *,
-    sample_size: int = 48,
+    sample_size: int = PREVIEW_SAMPLE_SIZE,
     extra_section_ids: Any = None,
 ) -> dict[str, Any]:
     """Evaluate a definition without writing to Plex. Returns staged counts + sample items."""
     section_ids = normalize_section_ids(section_id, extra_section_ids)
     primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
-    sample = [_row_summary(row, section_type) for row in primary["rows"][:sample_size]]
+    sample_rows = primary["rows"][:sample_size]
+    file_state = primary.get("file_state") or {}
+    sample = [_row_summary(row, section_type, file_state) for row in sample_rows]
     libraries: list[dict[str, Any]] = []
     plex_errors: list[str] = []
+    key_groups = _provider_key_groups(sample_rows, section_type)
     for sid in section_ids:
         outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
         libraries.append(
@@ -1581,6 +1682,13 @@ def preview_definition(
         )
         if outcome["plex_error"]:
             plex_errors.append(str(outcome["plex_error"]))
+        try:
+            mask = plex_collections.membership_mask(sid, section_type, key_groups)
+        except plex_collections.PlexCollectionsError:
+            mask = [False] * len(sample)
+        for index, present in enumerate(mask):
+            if present and index < len(sample):
+                sample[index]["in_libraries"].append(sid)
     in_library_total = sum(int(lib["in_target_library"] or 0) for lib in libraries)
     unresolved_total = sum(int(lib["unresolved"] or 0) for lib in libraries)
     return {

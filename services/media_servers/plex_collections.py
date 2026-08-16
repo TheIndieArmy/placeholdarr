@@ -130,6 +130,22 @@ def resolve_items_in_section(
     return resolved, missing
 
 
+def membership_mask(
+    section_id: int,
+    section_type: str,
+    provider_key_groups: list[list[str]],
+) -> list[bool]:
+    """True for each provider-key group that exists in the Plex section."""
+    plex = get_plex_server()
+    if not plex:
+        raise PlexCollectionsError("Plex is not configured or unreachable")
+    index = _get_section_index(plex, section_id, section_type)
+    present: list[bool] = []
+    for group in provider_key_groups:
+        present.append(any(index.get(key) is not None for key in group))
+    return present
+
+
 def _find_collection(section, collection_title: str):
     needle = collection_title.strip().lower()
     for collection in section.collections():
