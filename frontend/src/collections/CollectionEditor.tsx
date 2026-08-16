@@ -63,14 +63,20 @@ const SOURCE_META: Record<
   CollectionSourceType,
   { label: string; icon: string; description: string; requires: "tmdb" | "trakt" | null }
 > = {
+  catalog: { label: "My Catalog", icon: "inventory_2", description: "Everything Placeholdarr tracks for this library type", requires: null },
   tmdb_trending: { label: "TMDB Trending", icon: "trending_up", description: "What's trending on TMDB right now", requires: "tmdb" },
   tmdb_popular: { label: "TMDB Popular", icon: "local_fire_department", description: "All-time popular titles on TMDB", requires: "tmdb" },
   tmdb_upcoming: { label: "TMDB Upcoming / On Air", icon: "event_upcoming", description: "Upcoming movies or currently-airing shows", requires: "tmdb" },
   tmdb_discover: { label: "TMDB Discover", icon: "travel_explore", description: "Filter TMDB by genre, year, streaming service", requires: "tmdb" },
-  tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list by ID", requires: "tmdb" },
+  tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list — paste the list URL or id", requires: "tmdb" },
+  tmdb_person: { label: "TMDB Person", icon: "person", description: "Filmography for a person — paste their TMDB page URL", requires: "tmdb" },
+  tmdb_company: { label: "TMDB Company", icon: "apartment", description: "Titles from a studio/company — paste the TMDB company URL", requires: "tmdb" },
+  tmdb_keyword: { label: "TMDB Keyword", icon: "sell", description: "Titles tagged with a TMDB keyword — paste the keyword URL", requires: "tmdb" },
+  tmdb_collection: { label: "TMDB Collection", icon: "collections_bookmark", description: "A TMDB movie collection (Star Wars, MCU) — paste the collection URL", requires: "tmdb" },
   mdblist: { label: "MDBList", icon: "playlist_add_check", description: "A public MDBList — paste the list URL", requires: null },
   trakt_list: { label: "Trakt List", icon: "playlist_play", description: "A public Trakt user list — paste the URL or user/slug", requires: "trakt" },
-  catalog: { label: "My Catalog", icon: "inventory_2", description: "Everything Placeholdarr tracks for this library type", requires: null },
+  stevenlu: { label: "StevenLu", icon: "star", description: "Popular movies JSON (Radarr's StevenLu list), or a compatible URL", requires: null },
+  anilist: { label: "AniList", icon: "animation", description: "A public AniList user anime list — paste the profile/list URL", requires: null },
 };
 
 const FILTER_META: Record<CollectionFilterField, { label: string; icon: string }> = {
@@ -126,8 +132,17 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
       return { type, genre_ids: [], provider_ids: [], watch_region: "US", limit: 100 };
     case "tmdb_list":
       return { type, list_id: "", limit: 200 };
+    case "tmdb_person":
+      return { type, tmdb_ref: "", limit: 500 };
+    case "tmdb_company":
+    case "tmdb_keyword":
+    case "tmdb_collection":
+      return { type, tmdb_ref: "", limit: 200 };
     case "mdblist":
     case "trakt_list":
+    case "anilist":
+      return { type, list_ref: "", limit: 200 };
+    case "stevenlu":
       return { type, list_ref: "", limit: 200 };
     case "catalog":
       return { type };
@@ -813,7 +828,7 @@ export function CollectionEditor(props: {
   const [definition, setDefinition] = useState<CollectionDefinition>(
     props.recipe?.definition && Array.isArray(props.recipe.definition.sources)
       ? props.recipe.definition
-      : { sources: [defaultSourceBlock(props.tmdbConfigured ? "tmdb_trending" : "catalog")], filters: [], limit: 50, sort: "popularity" },
+      : { sources: [], filters: [], limit: 50, sort: "popularity" },
   );
 
   const sectionId = sectionIds[0] ?? null;
@@ -1121,18 +1136,48 @@ export function CollectionEditor(props: {
 
         {block.type === "tmdb_list" ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
-            List ID
+            List
             <input
-              className={theme.field}
-              style={{ width: 160 }}
+              className={`${theme.field} flex-1`}
+              style={{ minWidth: 260 }}
               value={block.list_id ?? ""}
-              placeholder="e.g. 8136"
+              placeholder="Paste a TMDB list URL or id, e.g. themoviedb.org/list/8136"
               onChange={(e) => updateSource(index, { list_id: e.target.value })}
             />
           </label>
         ) : null}
 
-        {block.type === "mdblist" || block.type === "trakt_list" ? (
+        {block.type === "tmdb_person" ||
+        block.type === "tmdb_company" ||
+        block.type === "tmdb_keyword" ||
+        block.type === "tmdb_collection" ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            {block.type === "tmdb_person"
+              ? "Person"
+              : block.type === "tmdb_company"
+                ? "Company"
+                : block.type === "tmdb_keyword"
+                  ? "Keyword"
+                  : "Collection"}
+            <input
+              className={`${theme.field} flex-1`}
+              style={{ minWidth: 260 }}
+              value={block.tmdb_ref ?? ""}
+              placeholder={
+                block.type === "tmdb_person"
+                  ? "Paste the TMDB person URL, e.g. themoviedb.org/person/32982-jane-austen"
+                  : block.type === "tmdb_company"
+                    ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
+                    : block.type === "tmdb_keyword"
+                      ? "Paste the TMDB keyword URL, e.g. themoviedb.org/keyword/9715-superhero"
+                      : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
+              }
+              onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
+            />
+          </label>
+        ) : null}
+
+        {block.type === "mdblist" || block.type === "trakt_list" || block.type === "anilist" ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             List
             <input
@@ -1142,8 +1187,23 @@ export function CollectionEditor(props: {
               placeholder={
                 block.type === "mdblist"
                   ? "Paste a list URL or user/slug, e.g. linaspurinis/top-watched-movies-of-the-week"
-                  : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
+                  : block.type === "anilist"
+                    ? "Paste an AniList URL, e.g. anilist.co/user/NAME/animelist"
+                    : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
               }
+              onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+            />
+          </label>
+        ) : null}
+
+        {block.type === "stevenlu" ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            JSON URL
+            <input
+              className={`${theme.field} flex-1`}
+              style={{ minWidth: 260 }}
+              value={block.list_ref ?? ""}
+              placeholder="Leave blank for the default StevenLu popular-movies list"
               onChange={(e) => updateSource(index, { list_ref: e.target.value })}
             />
           </label>
@@ -1242,7 +1302,7 @@ export function CollectionEditor(props: {
           <NumberInput
             value={block.limit}
             min={1}
-            max={200}
+            max={block.type === "tmdb_person" ? 1000 : 500}
             placeholder="100"
             onChange={(v) => updateSource(index, { limit: v ?? undefined })}
           />
@@ -1810,24 +1870,39 @@ export function CollectionEditor(props: {
         {/* Sources */}
         <div className="flex flex-col gap-2.5">
           <div className={theme.sectionLabel}>Sources</div>
-          {definition.sources.map((block, index) => (
+          {definition.sources.length === 0 ? (
+            <p className="text-[13px] text-slate-500">
+              No source yet. Add one below — nothing is selected by default.
+            </p>
+          ) : null}
+          {definition.sources.map((block, index) => {
+            const meta = SOURCE_META[block.type] ?? {
+              label: block.type,
+              icon: "help",
+              description: "",
+            };
+            return (
             <BlockCard
               key={`${block.type}-${index}`}
-              icon={SOURCE_META[block.type].icon}
-              title={SOURCE_META[block.type].label}
-              subtitle={SOURCE_META[block.type].description}
+              icon={meta.icon}
+              title={meta.label}
+              subtitle={meta.description}
               accentHex={accentHex}
-              onRemove={definition.sources.length > 1 ? () => removeSource(index) : undefined}
+              onRemove={() => removeSource(index)}
             >
               {renderSourceConfig(block, index)}
             </BlockCard>
-          ))}
+            );
+          })}
           <AddBlockMenu
             label="Add source"
             options={(Object.keys(SOURCE_META) as CollectionSourceType[]).map((type) => {
               const requires = SOURCE_META[type].requires;
+              const movieOnly = type === "stevenlu" || type === "tmdb_collection";
               const disabled =
-                (requires === "tmdb" && !props.tmdbConfigured) || (requires === "trakt" && !props.traktConfigured);
+                (requires === "tmdb" && !props.tmdbConfigured) ||
+                (requires === "trakt" && !props.traktConfigured) ||
+                (movieOnly && sectionType !== "movie");
               return {
                 key: type,
                 label: SOURCE_META[type].label,
@@ -1835,7 +1910,9 @@ export function CollectionEditor(props: {
                 description:
                   requires === "trakt" && !props.traktConfigured
                     ? "Add a Trakt Client ID in Settings to enable"
-                    : SOURCE_META[type].description,
+                    : movieOnly && sectionType !== "movie"
+                      ? "Movie libraries only"
+                      : SOURCE_META[type].description,
                 disabled,
               };
             })}

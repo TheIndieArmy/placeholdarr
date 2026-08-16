@@ -23,14 +23,20 @@ from services.postgres.db import session_scope
 from services.postgres.models import CollectionRecipe, Episode, Movie, Season, Series
 
 SOURCE_TYPES = (
+    "catalog",
     "tmdb_trending",
     "tmdb_popular",
     "tmdb_upcoming",
     "tmdb_discover",
     "tmdb_list",
+    "tmdb_person",
+    "tmdb_company",
+    "tmdb_keyword",
+    "tmdb_collection",
     "mdblist",
     "trakt_list",
-    "catalog",
+    "stevenlu",
+    "anilist",
 )
 FILTER_FIELDS = (
     "genre",
@@ -158,9 +164,13 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         source_type = source.get("type")
         if source_type not in SOURCE_TYPES:
             raise RecipeValidationError(f"unknown source type: {source_type!r}")
-        if source_type == "tmdb_list" and not str(source.get("list_id") or "").strip():
-            raise RecipeValidationError("tmdb_list source requires a list_id")
-        if source_type in ("mdblist", "trakt_list") and not str(source.get("list_ref") or "").strip():
+        if source_type == "tmdb_list" and not str(source.get("list_id") or source.get("tmdb_ref") or "").strip():
+            raise RecipeValidationError("tmdb_list source requires a list id or TMDB list URL")
+        if source_type in ("tmdb_person", "tmdb_company", "tmdb_keyword", "tmdb_collection") and not str(
+            source.get("tmdb_ref") or ""
+        ).strip():
+            raise RecipeValidationError(f"{source_type} source requires a TMDB URL or numeric id")
+        if source_type in ("mdblist", "trakt_list", "anilist") and not str(source.get("list_ref") or "").strip():
             raise RecipeValidationError(f"{source_type} source requires a list URL or user/slug")
         normalized_sources.append(source)
 
@@ -241,11 +251,23 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
             limit=limit,
         )
     if source_type == "tmdb_list":
-        return tmdb_client.fetch_list(str(source.get("list_id")), media_type, limit)
+        return tmdb_client.fetch_list(str(source.get("list_id") or source.get("tmdb_ref") or ""), media_type, limit)
+    if source_type == "tmdb_person":
+        return tmdb_client.fetch_person_credits(str(source.get("tmdb_ref") or ""), media_type, limit)
+    if source_type == "tmdb_company":
+        return tmdb_client.fetch_company(str(source.get("tmdb_ref") or ""), media_type, limit)
+    if source_type == "tmdb_keyword":
+        return tmdb_client.fetch_keyword(str(source.get("tmdb_ref") or ""), media_type, limit)
+    if source_type == "tmdb_collection":
+        return tmdb_client.fetch_collection(str(source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "mdblist":
         return list_sources.fetch_mdblist(str(source.get("list_ref")), media_type, limit)
     if source_type == "trakt_list":
         return list_sources.fetch_trakt_list(str(source.get("list_ref")), media_type, limit)
+    if source_type == "stevenlu":
+        return list_sources.fetch_stevenlu(str(source.get("list_ref") or ""), media_type, limit)
+    if source_type == "anilist":
+        return list_sources.fetch_anilist(str(source.get("list_ref")), media_type, limit)
     return []
 
 

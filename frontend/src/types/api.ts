@@ -499,14 +499,20 @@ export interface IntegrationTestResponse {
 // ---------------------------------------------------------------------------
 
 export type CollectionSourceType =
+  | "catalog"
   | "tmdb_trending"
   | "tmdb_popular"
   | "tmdb_upcoming"
   | "tmdb_discover"
   | "tmdb_list"
+  | "tmdb_person"
+  | "tmdb_company"
+  | "tmdb_keyword"
+  | "tmdb_collection"
   | "mdblist"
   | "trakt_list"
-  | "catalog";
+  | "stevenlu"
+  | "anilist";
 
 export interface CollectionSourceBlock {
   type: CollectionSourceType;
@@ -519,9 +525,10 @@ export interface CollectionSourceBlock {
   provider_ids?: number[];
   watch_region?: string;
   min_vote_average?: number | null;
-  /** tmdb_list */
+  /** tmdb_list / tmdb_person / tmdb_company / tmdb_keyword / tmdb_collection — id or TMDB URL */
   list_id?: string;
-  /** mdblist / trakt_list — pasted list URL or user/slug */
+  tmdb_ref?: string;
+  /** mdblist / trakt_list / anilist / stevenlu — pasted URL or user/slug */
   list_ref?: string;
   /** per-source candidate cap */
   limit?: number;

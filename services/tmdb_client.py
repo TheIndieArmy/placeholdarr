@@ -1,12 +1,14 @@
 """Thin TMDB API client for the Collections rule builder.
 
-Supports the source blocks (trending / popular / upcoming / discover / list) plus
-metadata helpers used by the builder UI (genres, watch providers, regions).
+Supports trending / popular / upcoming / discover / list plus person credits,
+company, keyword, and collection pages (paste a themoviedb.org URL or numeric
+id). Also metadata helpers for the builder UI (genres, watch providers, regions).
 Responses are cached in-process with a TTL so scheduled runs and UI previews do
 not hammer TMDB rate limits.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -20,7 +22,7 @@ TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_HTTP_TIMEOUT_SECONDS = 20
 
 # Discover/list pagination guardrail: TMDB pages hold 20 items.
-MAX_PAGES_PER_SOURCE = 10
+MAX_PAGES_PER_SOURCE = 25
 
 _CACHE_TTL_SECONDS = 12 * 3600
 _META_CACHE_TTL_SECONDS = 24 * 3600
@@ -53,6 +55,29 @@ def _retry_after_seconds(resp: Any, default: float = 2.0, cap: float = 10.0) -> 
 
 class TmdbError(Exception):
     """Raised when TMDB is unconfigured or a request fails."""
+
+
+_TMDB_RESOURCE_RE = re.compile(
+    r"themoviedb\.org/(person|company|keyword|collection|list)/(\d+)",
+    re.IGNORECASE,
+)
+
+
+def parse_tmdb_resource_id(value: str, expected: str) -> str:
+    """Accept a TMDB URL or bare numeric id for person/company/keyword/collection/list."""
+    text = str(value or "").strip()
+    if not text:
+        raise TmdbError(f"TMDB {expected} source needs a URL or numeric id")
+    match = _TMDB_RESOURCE_RE.search(text)
+    if match:
+        kind = match.group(1).lower()
+        if kind != expected:
+            raise TmdbError(f"That TMDB URL is a {kind} page, not a {expected} page")
+        return match.group(2)
+    digits = re.match(r"^(\d+)\b", text)
+    if digits:
+        return digits.group(1)
+    raise TmdbError(f"Could not parse a TMDB {expected} id from {text!r}")
 
 
 def tmdb_configured() -> bool:
@@ -243,6 +268,7 @@ def fetch_discover(
 
 def fetch_list(list_id: int | str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
     """Fetch a public TMDB v3 list, filtered to the requested media type."""
+    list_id = parse_tmdb_resource_id(str(list_id), "list")
     limit = max(1, min(int(limit or 200), 500))
     cache_key = _cache_key(f"/list/{list_id}", {"_limit": limit, "_mt": media_type})
     cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
@@ -272,6 +298,94 @@ def fetch_list(list_id: int | str, media_type: str, limit: int = 200) -> list[di
 
     _cache_set(cache_key, items)
     return items
+
+
+def fetch_person_credits(person_ref: str, media_type: str, limit: int = 500) -> list[dict[str, Any]]:
+    """All unique movie or TV credits for a person (cast and crew)."""
+    person_id = parse_tmdb_resource_id(person_ref, "person")
+    kind = "movie" if media_type == "movie" else "tv"
+    limit = max(1, min(int(limit or 500), 1000))
+    cache_key = _cache_key(f"/person/{person_id}/{kind}_credits", {"_limit": limit})
+    cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/person/{person_id}/{kind}_credits")
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for bucket in ("cast", "crew"):
+        for raw in data.get(bucket) or []:
+            if not isinstance(raw, dict):
+                continue
+            normalized = _normalize_item(raw, media_type)
+            if not normalized or normalized["tmdb_id"] in seen:
+                continue
+            seen.add(normalized["tmdb_id"])
+            rows.append(normalized)
+    rows.sort(key=lambda item: float(item.get("popularity") or 0), reverse=True)
+    items = rows[:limit]
+    _cache_set(cache_key, items)
+    return items
+
+
+def fetch_company(company_ref: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+    company_id = parse_tmdb_resource_id(company_ref, "company")
+    kind = "movie" if media_type == "movie" else "tv"
+    return _fetch_paged(f"/discover/{kind}", {"with_companies": company_id}, media_type, limit)
+
+
+def fetch_keyword(keyword_ref: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+    keyword_id = parse_tmdb_resource_id(keyword_ref, "keyword")
+    kind = "movie" if media_type == "movie" else "tv"
+    return _fetch_paged(f"/discover/{kind}", {"with_keywords": keyword_id}, media_type, limit)
+
+
+def fetch_collection(collection_ref: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+    """TMDB movie collection (e.g. Star Wars). TV recipes get an empty set."""
+    if media_type != "movie":
+        return []
+    collection_id = parse_tmdb_resource_id(collection_ref, "collection")
+    limit = max(1, min(int(limit or 200), 500))
+    cache_key = _cache_key(f"/collection/{collection_id}", {"_limit": limit})
+    cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/collection/{collection_id}")
+    items: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for raw in data.get("parts") or []:
+        normalized = _normalize_item(raw, "movie")
+        if not normalized or normalized["tmdb_id"] in seen:
+            continue
+        seen.add(normalized["tmdb_id"])
+        items.append(normalized)
+        if len(items) >= limit:
+            break
+    _cache_set(cache_key, items)
+    return items
+
+
+def search_title(title: str, year: Optional[int], media_type: str) -> Optional[int]:
+    """Best-effort first TMDB search hit for AniList (and similar) title matching."""
+    query = str(title or "").strip()
+    if not query:
+        return None
+    kind = "movie" if media_type == "movie" else "tv"
+    params: dict[str, Any] = {"query": query}
+    if year:
+        params["year" if kind == "movie" else "first_air_date_year"] = int(year)
+    cache_key = _cache_key(f"/search/{kind}", params)
+    cached = _cache_get(cache_key, _CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/search/{kind}", params)
+    tmdb_id = None
+    for raw in data.get("results") or []:
+        normalized = _normalize_item(raw, media_type)
+        if normalized:
+            tmdb_id = int(normalized["tmdb_id"])
+            break
+    _cache_set(cache_key, tmdb_id)
+    return tmdb_id
 
 
 # ---------------------------------------------------------------------------

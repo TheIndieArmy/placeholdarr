@@ -272,8 +272,8 @@ export function CollectionsPanel(props: {
       {plexBanner}
       {!tmdbConfigured ? (
         <div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-2.5 text-[14px] text-yellow-300">
-          No TMDB API key configured. TMDB sources (Trending, Popular, Discover…) are disabled — add a key under
-          Settings → Media Integrations to enable them. Catalog-based collections still work.
+          No TMDB API key configured. TMDB sources (Trending, Popular, Discover, person pages…) are disabled — add a
+          key under Settings → Media Integrations to enable them. Catalog, MDBList, StevenLu, and AniList still work.
         </div>
       ) : null}
       {actionError ? (
@@ -297,8 +297,8 @@ export function CollectionsPanel(props: {
             </span>
             <p className={`mt-3 text-[16px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>No collections yet.</p>
             <p className={`mt-1 text-[14px] max-w-md mx-auto ${theme.muted}`}>
-              Build rule-based Plex collections from TMDB trending, streaming services, or your own catalog metadata —
-              they stay in sync automatically.
+              Build rule-based Plex collections from your catalog, TMDB, MDBList, Trakt, StevenLu, or AniList — they
+              stay in sync automatically.
             </p>
           </div>
         ) : (

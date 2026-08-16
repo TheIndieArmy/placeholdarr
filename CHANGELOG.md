@@ -7,10 +7,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+
+- **Collection sources**: StevenLu (default popular-movies JSON or a custom URL), AniList public user anime lists (GraphQL, throttled), and TMDB person / company / keyword / collection. Paste a TMDB page URL (or numeric id); no in-app search picker.
+
 ### Changed
 
 - **Collection title sort**: Arrange by Title (A–Z) ignores leading *a* / *an* / *the*, matching Library A–Z.
 - **Plex collection order**: Synced collections use Plex custom sort and item order from the recipe (Plex previously kept default release-date order, which looked random vs preview).
+- **Collection editor sources**: New recipes start with no source (instead of TMDB Trending or My Catalog). **My Catalog** is first in the add-source menu.
 
 ## [0.9.16] - 2026-08-14
 

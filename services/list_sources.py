@@ -2,7 +2,9 @@
 
 Public lists only — no account linking:
 - MDBList: public list JSON export, no API key required.
-- Trakt: public user lists, requires a free API Client ID (header auth, no OAuth).
+- Trakt: public user lists, requires a Client ID (header auth, no OAuth).
+- StevenLu: public popular-movies JSON (or a compatible custom URL).
+- AniList: public user anime lists via GraphQL (rate-limited).
 
 Items are normalized to the same candidate shape the engine expects, with
 multi-provider ids so catalog matching can fall back to IMDb/TVDB when a
@@ -308,6 +310,245 @@ def fetch_trakt_list(reference: str, media_type: str, limit: int = 200) -> list[
                 imdb_id=imdb_id,
                 tvdb_id=tvdb_id,
                 rank=raw.get("rank"),
+            )
+        )
+        if len(items) >= limit:
+            break
+
+    _cache_set(cache_key, items)
+    return items
+
+
+# ---------------------------------------------------------------------------
+# StevenLu
+# ---------------------------------------------------------------------------
+
+STEVENLU_DEFAULT_URL = "https://s3.amazonaws.com/popular-movies/movies.json"
+
+
+def fetch_stevenlu(reference: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+    """Fetch StevenLu popular-movies JSON (IMDb ids). Movies only."""
+    if media_type != "movie":
+        raise ListSourceError("StevenLu lists are movie-only")
+    url = str(reference or "").strip() or STEVENLU_DEFAULT_URL
+    if not url.startswith("http://") and not url.startswith("https://"):
+        raise ListSourceError("StevenLu source needs an https JSON URL")
+    limit = max(1, min(int(limit or 200), 1000))
+    cache_key = f"stevenlu:{url}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    resp = _get_with_retry(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "Placeholdarr"},
+        source_name="StevenLu",
+    )
+    if resp.status_code != 200:
+        raise ListSourceError(f"StevenLu URL returned HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except ValueError as extra:
+        raise ListSourceError("StevenLu URL did not return JSON") from extra
+    if not isinstance(data, list):
+        raise ListSourceError("Unexpected StevenLu payload (expected a JSON array)")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        imdb_id = raw.get("imdb_id") or raw.get("imdb") or raw.get("imdbid")
+        tmdb_id = raw.get("tmdb") or raw.get("tmdb_id") or raw.get("tmdbid")
+        title = str(raw.get("title") or raw.get("name") or "")
+        key = str(imdb_id or tmdb_id or title)
+        if not key or key in seen:
+            continue
+        if not (imdb_id or tmdb_id):
+            continue
+        seen.add(key)
+        year = None
+        try:
+            year = int(raw.get("year") or 0) or None
+        except (TypeError, ValueError):
+            year = None
+        items.append(
+            _normalize_candidate(
+                title=title,
+                year=year,
+                tmdb_id=int(tmdb_id) if tmdb_id else None,
+                imdb_id=str(imdb_id) if imdb_id else None,
+                tvdb_id=None,
+                rank=len(items) + 1,
+            )
+        )
+        if len(items) >= limit:
+            break
+    _cache_set(cache_key, items)
+    return items
+
+
+# ---------------------------------------------------------------------------
+# AniList
+# ---------------------------------------------------------------------------
+
+ANILIST_GRAPHQL_URL = "https://graphql.anilist.co"
+_ANILIST_MIN_INTERVAL_SECONDS = 2.1
+_anilist_lock = threading.Lock()
+_anilist_last_at = 0.0
+
+_ANILIST_USER_RE = re.compile(
+    r"anilist\.co/user/([^/\s]+)(?:/(?:animelist|mangalist)(?:/([^/\s?#]+))?)?",
+    re.IGNORECASE,
+)
+
+_ANILIST_QUERY = """
+query ($userName: String, $type: MediaType) {
+  MediaListCollection(userName: $userName, type: $type) {
+    lists {
+      name
+      isCustomList
+      entries {
+        media {
+          id
+          idMal
+          format
+          type
+          title { english romaji native }
+          startDate { year }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def parse_anilist_reference(reference: str) -> tuple[str, Optional[str]]:
+    """Return (username, optional custom list name) from a URL or user/list."""
+    text = str(reference or "").strip()
+    if not text:
+        raise ListSourceError("AniList source requires a user list URL")
+    match = _ANILIST_USER_RE.search(text)
+    if match:
+        return match.group(1), match.group(2)
+    parts = [p for p in text.strip("/").split("/") if p]
+    if len(parts) == 1:
+        return parts[0], None
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    raise ListSourceError("Could not parse AniList reference; expected anilist.co/user/NAME/animelist")
+
+
+def _anilist_throttle() -> None:
+    global _anilist_last_at
+    with _anilist_lock:
+        wait = _ANILIST_MIN_INTERVAL_SECONDS - (time.monotonic() - _anilist_last_at)
+        if wait > 0:
+            time.sleep(wait)
+        _anilist_last_at = time.monotonic()
+
+
+def fetch_anilist(reference: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+    """Fetch a public AniList user anime list (one GraphQL call, cached)."""
+    user, list_name = parse_anilist_reference(reference)
+    limit = max(1, min(int(limit or 200), 1000))
+    cache_key = f"anilist:{user}:{list_name or '*'}:{media_type}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    wanted_movie = media_type == "movie"
+    payload = {
+        "query": _ANILIST_QUERY,
+        "variables": {"userName": user, "type": "ANIME"},
+    }
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Placeholdarr",
+        "Content-Type": "application/json",
+    }
+    try:
+        _anilist_throttle()
+        resp = requests.post(ANILIST_GRAPHQL_URL, json=payload, headers=headers, timeout=LIST_HTTP_TIMEOUT_SECONDS)
+        if resp.status_code == 429:
+            try:
+                delay = min(max(float(resp.headers.get("Retry-After", 60)), 2.0), 90.0)
+            except (TypeError, ValueError):
+                delay = 60.0
+            time.sleep(delay)
+            _anilist_throttle()
+            resp = requests.post(ANILIST_GRAPHQL_URL, json=payload, headers=headers, timeout=LIST_HTTP_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        raise ListSourceError(f"AniList request failed: {exc}") from exc
+    if resp.status_code == 429:
+        raise ListSourceError("AniList rate limit exceeded — try again in a minute")
+    if resp.status_code != 200:
+        raise ListSourceError(f"AniList returned HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError as extra:
+        raise ListSourceError("AniList returned invalid JSON") from extra
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if errors:
+        message = errors[0].get("message") if errors and isinstance(errors[0], dict) else "AniList query failed"
+        raise ListSourceError(str(message))
+    collection = ((body.get("data") or {}).get("MediaListCollection") or {})
+    lists = collection.get("lists") or []
+    wanted_slug = (list_name or "").replace("-", " ").strip().lower()
+    entries: list[dict[str, Any]] = []
+    for lst in lists:
+        if not isinstance(lst, dict):
+            continue
+        name = str(lst.get("name") or "")
+        if wanted_slug and name.replace("-", " ").strip().lower() != wanted_slug:
+            continue
+        for entry in lst.get("entries") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("media"), dict):
+                entries.append(entry["media"])
+        if wanted_slug:
+            break
+    if wanted_slug and not entries:
+        raise ListSourceError(f"AniList list {list_name!r} was not found for user {user}")
+
+    movie_formats = {"MOVIE"}
+    tv_formats = {"TV", "TV_SHORT", "OVA", "ONA", "SPECIAL", "MUSIC"}
+    items: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    from services import tmdb_client
+
+    for media in entries:
+        anilist_id = media.get("id")
+        if not anilist_id or int(anilist_id) in seen:
+            continue
+        fmt = str(media.get("format") or "")
+        if wanted_movie and fmt not in movie_formats:
+            continue
+        if not wanted_movie and fmt not in tv_formats and fmt:
+            continue
+        titles = media.get("title") if isinstance(media.get("title"), dict) else {}
+        title = str(titles.get("english") or titles.get("romaji") or titles.get("native") or "")
+        year = None
+        start = media.get("startDate") if isinstance(media.get("startDate"), dict) else {}
+        try:
+            year = int(start.get("year") or 0) or None
+        except (TypeError, ValueError):
+            year = None
+        tmdb_id = None
+        if tmdb_client.tmdb_configured() and title:
+            try:
+                tmdb_id = tmdb_client.search_title(title, year, "movie" if wanted_movie else "tv")
+            except Exception:
+                tmdb_id = None
+        if not tmdb_id:
+            continue
+        seen.add(int(anilist_id))
+        items.append(
+            _normalize_candidate(
+                title=title,
+                year=year,
+                tmdb_id=tmdb_id,
+                imdb_id=None,
+                tvdb_id=None,
+                rank=len(items) + 1,
             )
         )
         if len(items) >= limit:
