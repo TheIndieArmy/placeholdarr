@@ -1442,6 +1442,21 @@ def save_settings(
                 session.add(setup_row)
 
         session.commit()
+        plex_location_cache_keys = {
+            "ENABLE_PLEX",
+            "PLEX_URL",
+            "PLEX_TOKEN",
+            "PLEX_MOVIE_SECTION_ID",
+            "PLEX_TV_SECTION_ID",
+            "LIBRARY_ROOT",
+        }
+        if plex_location_cache_keys.intersection(saved_keys):
+            try:
+                from services.media_servers.plex import clear_plex_section_location_cache
+
+                clear_plex_section_location_cache()
+            except Exception:
+                pass
         if specials_before is not None and specials_after is not None and specials_before != specials_after:
             try:
                 from services.source_of_truth.lite_reconcile import mark_specials_backfill_pending

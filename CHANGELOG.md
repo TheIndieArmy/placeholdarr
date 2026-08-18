@@ -17,6 +17,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Plex collection order**: Synced collections use Plex custom sort and item order from the recipe (Plex previously kept default release-date order, which looked random vs preview).
 - **Collection preview**: Catalog sample shows up to 200 selected titles with file vs placeholder outlines. Multi-library recipes mark which Plex libraries each poster is in (filter chips dim the rest). Missing-from-ARR uses the same Arrange sort; **Select first N** matches the recipe max (capped at the add batch).
 - **Missing-from-ARR add**: Lookups stay per title; Radarr/Sonarr adds go through `movie/import` / `series/import` (chunks of 100) with a **90s** timeout. Timeouts say the *arr may still add the title. Result titles include year.
+- **Plex path refresh**: Path-scoped library scans rewrite Placeholdarr folders onto Plex’s library locations (cached in memory from `/library/sections`, filled on connection test or first refresh). Docker mounts like `/placeholdarr/movies` no longer get skipped as unknown paths.
 
 ## [0.9.16] - 2026-08-14
 
