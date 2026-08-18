@@ -504,6 +504,7 @@ export type CollectionSourceType =
   | "tmdb_popular"
   | "tmdb_upcoming"
   | "tmdb_discover"
+  | "tmdb_url"
   | "tmdb_list"
   | "tmdb_person"
   | "tmdb_company"
@@ -525,6 +526,8 @@ export interface CollectionSourceBlock {
   provider_ids?: number[];
   watch_region?: string;
   min_vote_average?: number | null;
+  /** tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
+  sort_by?: string | null;
   /** tmdb_list / tmdb_person / tmdb_company / tmdb_keyword / tmdb_collection — id or TMDB URL */
   list_id?: string;
   tmdb_ref?: string;

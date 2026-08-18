@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -62,6 +63,53 @@ _TMDB_RESOURCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Discover sorts the TMDB website exposes on keyword/company movie+TV tabs.
+_TMDB_DISCOVER_SORTS = frozenset(
+    {
+        "popularity.asc",
+        "popularity.desc",
+        "vote_average.asc",
+        "vote_average.desc",
+        "vote_count.asc",
+        "vote_count.desc",
+        "primary_release_date.asc",
+        "primary_release_date.desc",
+        "release_date.asc",
+        "release_date.desc",
+        "first_air_date.asc",
+        "first_air_date.desc",
+        "original_title.asc",
+        "original_title.desc",
+        "title.asc",
+        "title.desc",
+        "revenue.asc",
+        "revenue.desc",
+    }
+)
+DEFAULT_DISCOVER_SORT = "popularity.desc"
+
+
+def parse_tmdb_resource_kind(value: str) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _TMDB_RESOURCE_RE.search(text)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
+def parse_tmdb_sort_by(value: str, media_type: str = "movie") -> str:
+    """Read ``sort_by`` from a TMDB URL. Bare ids and unknown values use popularity.desc."""
+    text = str(value or "").strip()
+    raw = None
+    if "sort_by=" in text.lower() or "?" in text:
+        try:
+            raw = (parse_qs(urlparse(text).query).get("sort_by") or [None])[0]
+        except (TypeError, ValueError):
+            raw = None
+    return normalize_tmdb_sort_by(raw, media_type)
+
 
 def parse_tmdb_resource_id(value: str, expected: str) -> str:
     """Accept a TMDB URL or bare numeric id for person/company/keyword/collection/list."""
@@ -78,6 +126,26 @@ def parse_tmdb_resource_id(value: str, expected: str) -> str:
     if digits:
         return digits.group(1)
     raise TmdbError(f"Could not parse a TMDB {expected} id from {text!r}")
+
+
+def normalize_tmdb_sort_by(sort_by: Optional[str], media_type: str = "movie") -> str:
+    raw = str(sort_by or "").strip()
+    if raw in _TMDB_DISCOVER_SORTS:
+        value = raw
+    else:
+        value = DEFAULT_DISCOVER_SORT
+    if media_type != "movie" and value in {
+        "primary_release_date.asc",
+        "primary_release_date.desc",
+        "release_date.asc",
+        "release_date.desc",
+    }:
+        direction = "desc" if value.endswith(".desc") else "asc"
+        return f"first_air_date.{direction}"
+    if media_type == "movie" and value in {"first_air_date.asc", "first_air_date.desc"}:
+        direction = "desc" if value.endswith(".desc") else "asc"
+        return f"primary_release_date.{direction}"
+    return value
 
 
 def tmdb_configured() -> bool:
@@ -338,16 +406,38 @@ def fetch_person_credits(person_ref: str, media_type: str, limit: int = 500) -> 
     return items
 
 
-def fetch_company(company_ref: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+def fetch_company(
+    company_ref: str,
+    media_type: str,
+    limit: int = 200,
+    sort_by: Optional[str] = None,
+) -> list[dict[str, Any]]:
     company_id = parse_tmdb_resource_id(company_ref, "company")
     kind = "movie" if media_type == "movie" else "tv"
-    return _fetch_paged(f"/discover/{kind}", {"with_companies": company_id}, media_type, limit)
+    sort_by = normalize_tmdb_sort_by(sort_by or parse_tmdb_sort_by(company_ref, media_type), media_type)
+    return _fetch_paged(
+        f"/discover/{kind}",
+        {"with_companies": company_id, "sort_by": sort_by},
+        media_type,
+        limit,
+    )
 
 
-def fetch_keyword(keyword_ref: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:
+def fetch_keyword(
+    keyword_ref: str,
+    media_type: str,
+    limit: int = 200,
+    sort_by: Optional[str] = None,
+) -> list[dict[str, Any]]:
     keyword_id = parse_tmdb_resource_id(keyword_ref, "keyword")
     kind = "movie" if media_type == "movie" else "tv"
-    return _fetch_paged(f"/discover/{kind}", {"with_keywords": keyword_id}, media_type, limit)
+    sort_by = normalize_tmdb_sort_by(sort_by or parse_tmdb_sort_by(keyword_ref, media_type), media_type)
+    return _fetch_paged(
+        f"/discover/{kind}",
+        {"with_keywords": keyword_id, "sort_by": sort_by},
+        media_type,
+        limit,
+    )
 
 
 def fetch_collection(collection_ref: str, media_type: str, limit: int = 200) -> list[dict[str, Any]]:

@@ -28,6 +28,7 @@ SOURCE_TYPES = (
     "tmdb_popular",
     "tmdb_upcoming",
     "tmdb_discover",
+    "tmdb_url",
     "tmdb_list",
     "tmdb_person",
     "tmdb_company",
@@ -67,6 +68,18 @@ MOVIE_RELEASE_BASES = ("theater", "digital", "physical")
 YEAR_BASES = ("premiered", "aired_during")
 # Radarr nested rating providers (Sonarr is a single flat value/votes).
 MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes")
+TMDB_SOURCE_SORTS = (
+    "popularity.desc",
+    "popularity.asc",
+    "vote_average.desc",
+    "vote_average.asc",
+    "vote_count.desc",
+    "vote_count.asc",
+    "primary_release_date.desc",
+    "primary_release_date.asc",
+    "title.asc",
+    "title.desc",
+)
 DEFAULT_SOURCE_LIMIT = 100
 MAX_COLLECTION_ITEMS = 500
 MISSING_FROM_ARR_CAP = 200
@@ -172,10 +185,15 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
             raise RecipeValidationError(f"unknown source type: {source_type!r}")
         if source_type == "tmdb_list" and not str(source.get("list_id") or source.get("tmdb_ref") or "").strip():
             raise RecipeValidationError("tmdb_list source requires a list id or TMDB list URL")
+        if source_type == "tmdb_url" and not str(source.get("tmdb_ref") or "").strip():
+            raise RecipeValidationError("tmdb_url source requires a TMDB page URL")
         if source_type in ("tmdb_person", "tmdb_company", "tmdb_keyword", "tmdb_collection") and not str(
             source.get("tmdb_ref") or ""
         ).strip():
             raise RecipeValidationError(f"{source_type} source requires a TMDB URL or numeric id")
+        sort_by = source.get("sort_by")
+        if sort_by is not None and str(sort_by).strip() and str(sort_by) not in TMDB_SOURCE_SORTS:
+            raise RecipeValidationError(f"unknown TMDB source sort: {sort_by!r}")
         if source_type in ("mdblist", "trakt_list", "anilist") and not str(source.get("list_ref") or "").strip():
             raise RecipeValidationError(f"{source_type} source requires a list URL or user/slug")
         normalized_sources.append(source)
@@ -239,6 +257,7 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
     """Fetch candidates for one external source block (cached by the underlying clients)."""
     source_type = source.get("type")
     limit = int(source.get("limit") or DEFAULT_SOURCE_LIMIT)
+    source_sort = tmdb_client.normalize_tmdb_sort_by(source.get("sort_by"), media_type)
     if source_type == "tmdb_trending":
         return tmdb_client.fetch_trending(media_type, str(source.get("window") or "week"), limit)
     if source_type == "tmdb_popular":
@@ -254,16 +273,31 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
             provider_ids=[int(p) for p in (source.get("provider_ids") or [])],
             watch_region=source.get("watch_region"),
             min_vote_average=source.get("min_vote_average"),
+            sort_by=source_sort,
             limit=limit,
         )
+    if source_type == "tmdb_url":
+        tmdb_ref = str(source.get("tmdb_ref") or "")
+        kind = tmdb_client.parse_tmdb_resource_kind(tmdb_ref)
+        if kind == "list":
+            return tmdb_client.fetch_list(tmdb_ref, media_type, limit)
+        if kind == "person":
+            return tmdb_client.fetch_person_credits(tmdb_ref, media_type, limit)
+        if kind == "company":
+            return tmdb_client.fetch_company(tmdb_ref, media_type, limit, source_sort)
+        if kind == "keyword":
+            return tmdb_client.fetch_keyword(tmdb_ref, media_type, limit, source_sort)
+        if kind == "collection":
+            return tmdb_client.fetch_collection(tmdb_ref, media_type, limit)
+        raise tmdb_client.TmdbError("TMDB URL source needs a TMDB list, person, company, keyword, or collection URL")
     if source_type == "tmdb_list":
         return tmdb_client.fetch_list(str(source.get("list_id") or source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "tmdb_person":
         return tmdb_client.fetch_person_credits(str(source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "tmdb_company":
-        return tmdb_client.fetch_company(str(source.get("tmdb_ref") or ""), media_type, limit)
+        return tmdb_client.fetch_company(str(source.get("tmdb_ref") or ""), media_type, limit, source_sort)
     if source_type == "tmdb_keyword":
-        return tmdb_client.fetch_keyword(str(source.get("tmdb_ref") or ""), media_type, limit)
+        return tmdb_client.fetch_keyword(str(source.get("tmdb_ref") or ""), media_type, limit, source_sort)
     if source_type == "tmdb_collection":
         return tmdb_client.fetch_collection(str(source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "mdblist":

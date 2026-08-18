@@ -69,6 +69,7 @@ const SOURCE_META: Record<
   tmdb_popular: { label: "TMDB Popular", icon: "local_fire_department", description: "All-time popular titles on TMDB", requires: "tmdb" },
   tmdb_upcoming: { label: "TMDB Upcoming / On Air", icon: "event_upcoming", description: "Upcoming movies or currently-airing shows", requires: "tmdb" },
   tmdb_discover: { label: "TMDB Discover", icon: "travel_explore", description: "Filter TMDB by genre, year, streaming service", requires: "tmdb" },
+  tmdb_url: { label: "TMDB Page", icon: "link", description: "Paste a TMDB list, person, company, keyword, or collection page URL", requires: "tmdb" },
   tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list — paste the list URL or id", requires: "tmdb" },
   tmdb_person: { label: "TMDB Person", icon: "person", description: "Filmography for a person — paste their TMDB page URL", requires: "tmdb" },
   tmdb_company: { label: "TMDB Company", icon: "apartment", description: "Titles from a studio/company — paste the TMDB company URL", requires: "tmdb" },
@@ -79,6 +80,34 @@ const SOURCE_META: Record<
   stevenlu: { label: "StevenLu", icon: "star", description: "Popular movies JSON (Radarr's StevenLu list), or a compatible URL", requires: null },
   anilist: { label: "AniList", icon: "animation", description: "A public AniList user anime list — paste the profile/list URL", requires: null },
 };
+
+const VISIBLE_SOURCE_TYPES: CollectionSourceType[] = [
+  "catalog",
+  "tmdb_trending",
+  "tmdb_popular",
+  "tmdb_upcoming",
+  "tmdb_discover",
+  "tmdb_url",
+  "mdblist",
+  "trakt_list",
+  "stevenlu",
+  "anilist",
+];
+
+const TMDB_SOURCE_SORT_OPTIONS: { value: NonNullable<CollectionSourceBlock["sort_by"]>; label: string }[] = [
+  { value: "popularity.desc", label: "Popularity (highest first)" },
+  { value: "vote_average.desc", label: "Rating (highest first)" },
+  { value: "vote_count.desc", label: "Votes (most first)" },
+  { value: "primary_release_date.desc", label: "Release date (newest first)" },
+  { value: "primary_release_date.asc", label: "Release date (oldest first)" },
+  { value: "title.asc", label: "Title (A–Z)" },
+  { value: "title.desc", label: "Title (Z–A)" },
+];
+
+function guessTmdbUrlKind(value: string): "list" | "person" | "company" | "keyword" | "collection" | null {
+  const match = /themoviedb\.org\/(list|person|company|keyword|collection)\/\d+/i.exec(String(value || ""));
+  return (match?.[1]?.toLowerCase() as "list" | "person" | "company" | "keyword" | "collection" | undefined) ?? null;
+}
 
 const FILTER_META: Record<CollectionFilterField, { label: string; icon: string }> = {
   genre: { label: "Genre", icon: "theater_comedy" },
@@ -131,6 +160,8 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
       return { type, window: "week", limit: 50 };
     case "tmdb_discover":
       return { type, genre_ids: [], provider_ids: [], watch_region: "US", limit: 100 };
+    case "tmdb_url":
+      return { type, tmdb_ref: "", sort_by: "popularity.desc", limit: 200 };
     case "tmdb_list":
       return { type, list_id: "", limit: 200 };
     case "tmdb_person":
@@ -1216,6 +1247,8 @@ export function CollectionEditor(props: {
     }
     const region = block.watch_region || "US";
     const regionMeta = metaCache[`${mediaType}:${region}`] ?? baseMeta;
+    const tmdbUrlKind = block.type === "tmdb_url" ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
+    const tmdbUrlSupportsSourceSort = tmdbUrlKind === "company" || tmdbUrlKind === "keyword";
     return (
       <div className="flex flex-col gap-3">
         {block.type === "tmdb_trending" ? (
@@ -1245,6 +1278,25 @@ export function CollectionEditor(props: {
           </label>
         ) : null}
 
+        {block.type === "tmdb_url" ? (
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Page URL
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.tmdb_ref ?? ""}
+                placeholder="Paste a TMDB list, person, company, keyword, or collection page URL"
+                onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
+              />
+            </label>
+            <p className="text-[12px] text-slate-500">
+              Supports TMDB list, person, company, keyword, and collection pages. Company and keyword pages can fetch
+              in TMDB’s page order.
+            </p>
+          </>
+        ) : null}
+
         {block.type === "tmdb_person" ||
         block.type === "tmdb_company" ||
         block.type === "tmdb_keyword" ||
@@ -1267,7 +1319,7 @@ export function CollectionEditor(props: {
                   : block.type === "tmdb_company"
                     ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
                     : block.type === "tmdb_keyword"
-                      ? "Paste the TMDB keyword URL, e.g. themoviedb.org/keyword/9715-superhero"
+                      ? "Paste the TMDB keyword URL. sort_by on the URL is used (default popularity)."
                       : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
               }
               onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
@@ -1309,6 +1361,20 @@ export function CollectionEditor(props: {
 
         {block.type === "tmdb_discover" ? (
           <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Sort from TMDB
+              <select
+                className={theme.selectField}
+                value={block.sort_by ?? "popularity.desc"}
+                onChange={(e) => updateSource(index, { sort_by: e.target.value })}
+              >
+                {TMDB_SOURCE_SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div>
               <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1.5">Genres</div>
               <MultiChipPicker
@@ -1393,6 +1459,29 @@ export function CollectionEditor(props: {
               />
             </div>
           </>
+        ) : null}
+
+        {block.type === "tmdb_url" && tmdbUrlSupportsSourceSort ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            Sort from TMDB
+            <select
+              className={theme.selectField}
+              value={block.sort_by ?? "popularity.desc"}
+              onChange={(e) => updateSource(index, { sort_by: e.target.value })}
+            >
+              {TMDB_SOURCE_SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+
+        {block.type === "tmdb_url" && tmdbUrlKind && !tmdbUrlSupportsSourceSort ? (
+          <p className="text-[12px] text-slate-500">
+            This TMDB {tmdbUrlKind} page uses its native order. Recipe Arrange still runs after the source is fetched.
+          </p>
         ) : null}
 
         <label className={`flex items-center gap-2 ${theme.label}`}>
@@ -1998,17 +2087,27 @@ export function CollectionEditor(props: {
             </p>
           ) : null}
           {definition.sources.map((block, index) => {
+            const legacyUrlKind = block.type === "tmdb_url" ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
             const meta = SOURCE_META[block.type] ?? {
               label: block.type,
               icon: "help",
               description: "",
             };
+            const title = block.type === "tmdb_url" && legacyUrlKind ? `TMDB ${legacyUrlKind[0].toUpperCase()}${legacyUrlKind.slice(1)} Page` : meta.label;
+            const subtitle =
+              block.type === "tmdb_url" && legacyUrlKind
+                ? `${meta.description}. ${
+                    legacyUrlKind === "company" || legacyUrlKind === "keyword"
+                      ? "Source sort matches TMDB."
+                      : "Uses TMDB’s native page order."
+                  }`
+                : meta.description;
             return (
             <BlockCard
               key={`${block.type}-${index}`}
               icon={meta.icon}
-              title={meta.label}
-              subtitle={meta.description}
+              title={title}
+              subtitle={subtitle}
               accentHex={accentHex}
               onRemove={() => removeSource(index)}
             >
@@ -2018,7 +2117,7 @@ export function CollectionEditor(props: {
           })}
           <AddBlockMenu
             label="Add source"
-            options={(Object.keys(SOURCE_META) as CollectionSourceType[]).map((type) => {
+            options={VISIBLE_SOURCE_TYPES.map((type) => {
               const requires = SOURCE_META[type].requires;
               const movieOnly = type === "stevenlu" || type === "tmdb_collection";
               const disabled =
