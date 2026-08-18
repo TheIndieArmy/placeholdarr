@@ -130,13 +130,76 @@ def resolve_items_in_section(
     return resolved, missing
 
 
+def membership_mask(
+    section_id: int,
+    section_type: str,
+    provider_key_groups: list[list[str]],
+) -> list[bool]:
+    """True for each provider-key group that exists in the Plex section."""
+    plex = get_plex_server()
+    if not plex:
+        raise PlexCollectionsError("Plex is not configured or unreachable")
+    index = _get_section_index(plex, section_id, section_type)
+    present: list[bool] = []
+    for group in provider_key_groups:
+        present.append(any(index.get(key) is not None for key in group))
+    return present
+
+
+def _find_collection(section, collection_title: str):
+    needle = collection_title.strip().lower()
+    for collection in section.collections():
+        if str(getattr(collection, "title", "")).strip().lower() == needle:
+            return collection
+    return None
+
+
+def _apply_custom_item_order(collection, items: list[Any]) -> None:
+    """Force Plex custom sort so membership order matches Placeholdarr arrange order."""
+    if not items or collection is None or getattr(collection, "smart", False):
+        return
+    try:
+        if int(getattr(collection, "collectionSort", 0) or 0) != 2:
+            collection.sortUpdate(sort="custom")
+            collection.reload()
+    except Exception as exc:
+        logger.warning(
+            f"Collections: could not set custom sort on {getattr(collection, 'title', '')!r}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return
+    try:
+        current = collection.items()
+        current_keys = [str(getattr(item, "ratingKey", "")) for item in current]
+    except Exception:
+        current_keys = []
+    desired_keys = [str(getattr(item, "ratingKey", "")) for item in items]
+    if current_keys == desired_keys:
+        return
+    after = None
+    for item in items:
+        try:
+            collection.moveItem(item, after=after)
+        except Exception as exc:
+            logger.warning(
+                f"Collections: could not move {getattr(item, 'title', item)!r} "
+                f"in {getattr(collection, 'title', '')!r}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+        after = item
+
+
 def sync_collection(
     section_id: int,
     section_type: str,
     collection_title: str,
     items: list[Any],
 ) -> dict[str, Any]:
-    """Create or update a Plex collection so its membership exactly matches `items`.
+    """Create or update a Plex collection so its membership and item order match `items`.
+
+    Plex defaults collections to release-date sort, which ignores recipe order.
+    After membership is synced, the collection is switched to custom order and
+    items are moved to match `items` (Placeholdarr arrange order).
 
     Returns counts: {"added": n, "removed": n, "total": n, "created": bool}.
     """
@@ -147,10 +210,7 @@ def sync_collection(
 
     existing = None
     try:
-        for collection in section.collections():
-            if str(getattr(collection, "title", "")).strip().lower() == collection_title.strip().lower():
-                existing = collection
-                break
+        existing = _find_collection(section, collection_title)
     except Exception as exc:
         raise PlexCollectionsError(f"Failed to list collections for section {section_id}: {exc}") from exc
 
@@ -160,11 +220,12 @@ def sync_collection(
         if not items:
             return {"added": 0, "removed": 0, "total": 0, "created": False}
         try:
-            section.createCollection(collection_title, items=items)
+            created = section.createCollection(collection_title, items=items)
         except Exception as exc:
             raise PlexCollectionsError(
                 f"Failed to create collection {collection_title!r} in section {section_id}: {exc}"
             ) from exc
+        _apply_custom_item_order(created, items)
         logger.info(
             f"Collections: created Plex collection {collection_title!r} "
             f"(section={section_id}, items={len(items)})",
@@ -188,6 +249,9 @@ def sync_collection(
             existing.addItems(to_add)
         if to_remove:
             existing.removeItems(to_remove)
+        if to_add or to_remove:
+            existing.reload()
+        _apply_custom_item_order(existing, items)
     except Exception as exc:
         raise PlexCollectionsError(
             f"Failed to update collection {collection_title!r} membership: {exc}"

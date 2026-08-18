@@ -375,6 +375,7 @@ class ArrAddPayload(BaseModel):
     tag: str = "placeholdarr"
 
 
+# Keep in sync with `ARR_ADD_BATCH_CAP` in frontend/src/api/collections.ts
 ARR_ADD_BATCH_CAP = 100
 
 
@@ -453,54 +454,20 @@ async def arr_add(body: ArrAddPayload):
                     )
                 continue
             tag_ids = [tag_id]
-
-        for item in body.items:
-            title = item.title or "Untitled"
-            try:
-                if body.media_type == "movie":
-                    lookup = arr_api.lookup_movie(url=url, api_key=api_key, tmdb_id=item.tmdb_id, imdb_id=item.imdb_id)
-                    if not lookup:
-                        results.append(
-                            {"title": title, "instance_key": key, "status": "error", "error": "Radarr lookup found nothing"}
-                        )
-                        continue
-                    status, error = arr_api.add_movie_to_radarr(
-                        url=url,
-                        api_key=api_key,
-                        lookup=lookup,
-                        quality_profile_id=opts.quality_profile_id,
-                        root_folder_path=opts.root_folder_path,
-                        monitored=body.monitored,
-                        search=body.search,
-                        tag_ids=tag_ids,
-                    )
-                else:
-                    lookup = arr_api.lookup_series(
-                        url=url,
-                        api_key=api_key,
-                        tvdb_id=item.tvdb_id,
-                        tmdb_id=item.tmdb_id,
-                        imdb_id=item.imdb_id,
-                    )
-                    if not lookup:
-                        results.append(
-                            {"title": title, "instance_key": key, "status": "error", "error": "Sonarr lookup found nothing"}
-                        )
-                        continue
-                    status, error = arr_api.add_series_to_sonarr(
-                        url=url,
-                        api_key=api_key,
-                        lookup=lookup,
-                        quality_profile_id=opts.quality_profile_id,
-                        root_folder_path=opts.root_folder_path,
-                        monitored=body.monitored,
-                        search=body.search,
-                        tag_ids=tag_ids,
-                    )
-            except Exception as exc:
-                results.append({"title": title, "instance_key": key, "status": "error", "error": str(exc)})
-                continue
-            results.append({"title": title, "instance_key": key, "status": status, "error": error})
+        results.extend(
+            arr_api.add_missing_titles(
+                media_type=body.media_type,
+                url=url,
+                api_key=api_key,
+                items=body.items,
+                quality_profile_id=opts.quality_profile_id,
+                root_folder_path=opts.root_folder_path,
+                monitored=body.monitored,
+                search=body.search,
+                tag_ids=tag_ids,
+                instance_key=key,
+            )
+        )
 
     ok = sum(1 for row in results if row.get("status") == "ok")
     skipped = sum(1 for row in results if row.get("status") == "skipped")

@@ -234,7 +234,15 @@ def _assert_media_server_matches_payload(data: dict[str, Any], expected: str) ->
 
 def test_plex_connection(url: str, token: str) -> dict[str, Any]:
     endpoint = _normalize_url(url)
-    ok, message = _test_get(f'{endpoint}/identity', headers={'X-Plex-Token': str(token or '').strip()})
+    token_value = str(token or '').strip()
+    ok, message = _test_get(f'{endpoint}/identity', headers={'X-Plex-Token': token_value})
+    if ok:
+        try:
+            from services.media_servers.plex import prime_plex_section_location_cache
+
+            prime_plex_section_location_cache(plex_url=endpoint, plex_token=token_value)
+        except Exception:
+            pass
     return {'ok': ok, 'message': message, 'service': 'plex'}
 
 

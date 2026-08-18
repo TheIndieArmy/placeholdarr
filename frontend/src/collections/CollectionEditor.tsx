@@ -5,6 +5,7 @@ import {
   getCollectionBuilderMeta,
   getCollectionTmdbMeta,
   previewCollectionDefinition,
+  ARR_ADD_BATCH_CAP,
   type RecipeWritePayload,
 } from "../api/collections";
 import { ArrAddModal } from "./ArrAddModal";
@@ -29,6 +30,7 @@ import type {
   CollectionPinnedItem,
   CollectionMissingFromArrItem,
   CollectionPreviewResponse,
+  CollectionPreviewSampleItem,
   CollectionRecipe,
   CollectionRatingProvider,
   CollectionSourceBlock,
@@ -62,15 +64,50 @@ const SOURCE_META: Record<
   CollectionSourceType,
   { label: string; icon: string; description: string; requires: "tmdb" | "trakt" | null }
 > = {
+  catalog: { label: "My Catalog", icon: "inventory_2", description: "Everything Placeholdarr tracks for this library type", requires: null },
   tmdb_trending: { label: "TMDB Trending", icon: "trending_up", description: "What's trending on TMDB right now", requires: "tmdb" },
   tmdb_popular: { label: "TMDB Popular", icon: "local_fire_department", description: "All-time popular titles on TMDB", requires: "tmdb" },
   tmdb_upcoming: { label: "TMDB Upcoming / On Air", icon: "event_upcoming", description: "Upcoming movies or currently-airing shows", requires: "tmdb" },
   tmdb_discover: { label: "TMDB Discover", icon: "travel_explore", description: "Filter TMDB by genre, year, streaming service", requires: "tmdb" },
-  tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list by ID", requires: "tmdb" },
+  tmdb_url: { label: "TMDB Page", icon: "link", description: "Paste a TMDB list, person, company, keyword, or collection page URL", requires: "tmdb" },
+  tmdb_list: { label: "TMDB List", icon: "format_list_bulleted", description: "A public TMDB list — paste the list URL or id", requires: "tmdb" },
+  tmdb_person: { label: "TMDB Person", icon: "person", description: "Filmography for a person — paste their TMDB page URL", requires: "tmdb" },
+  tmdb_company: { label: "TMDB Company", icon: "apartment", description: "Titles from a studio/company — paste the TMDB company URL", requires: "tmdb" },
+  tmdb_keyword: { label: "TMDB Keyword", icon: "sell", description: "Titles tagged with a TMDB keyword — paste the keyword URL", requires: "tmdb" },
+  tmdb_collection: { label: "TMDB Collection", icon: "collections_bookmark", description: "A TMDB movie collection (Star Wars, MCU) — paste the collection URL", requires: "tmdb" },
   mdblist: { label: "MDBList", icon: "playlist_add_check", description: "A public MDBList — paste the list URL", requires: null },
   trakt_list: { label: "Trakt List", icon: "playlist_play", description: "A public Trakt user list — paste the URL or user/slug", requires: "trakt" },
-  catalog: { label: "My Catalog", icon: "inventory_2", description: "Everything Placeholdarr tracks for this library type", requires: null },
+  stevenlu: { label: "StevenLu", icon: "star", description: "Popular movies JSON (Radarr's StevenLu list), or a compatible URL", requires: null },
+  anilist: { label: "AniList", icon: "animation", description: "A public AniList user anime list — paste the profile/list URL", requires: null },
 };
+
+const VISIBLE_SOURCE_TYPES: CollectionSourceType[] = [
+  "catalog",
+  "tmdb_trending",
+  "tmdb_popular",
+  "tmdb_upcoming",
+  "tmdb_discover",
+  "tmdb_url",
+  "mdblist",
+  "trakt_list",
+  "stevenlu",
+  "anilist",
+];
+
+const TMDB_SOURCE_SORT_OPTIONS: { value: NonNullable<CollectionSourceBlock["sort_by"]>; label: string }[] = [
+  { value: "popularity.desc", label: "Popularity (highest first)" },
+  { value: "vote_average.desc", label: "Rating (highest first)" },
+  { value: "vote_count.desc", label: "Votes (most first)" },
+  { value: "primary_release_date.desc", label: "Release date (newest first)" },
+  { value: "primary_release_date.asc", label: "Release date (oldest first)" },
+  { value: "title.asc", label: "Title (A–Z)" },
+  { value: "title.desc", label: "Title (Z–A)" },
+];
+
+function guessTmdbUrlKind(value: string): "list" | "person" | "company" | "keyword" | "collection" | null {
+  const match = /themoviedb\.org\/(list|person|company|keyword|collection)\/\d+/i.exec(String(value || ""));
+  return (match?.[1]?.toLowerCase() as "list" | "person" | "company" | "keyword" | "collection" | undefined) ?? null;
+}
 
 const FILTER_META: Record<CollectionFilterField, { label: string; icon: string }> = {
   genre: { label: "Genre", icon: "theater_comedy" },
@@ -123,10 +160,21 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
       return { type, window: "week", limit: 50 };
     case "tmdb_discover":
       return { type, genre_ids: [], provider_ids: [], watch_region: "US", limit: 100 };
+    case "tmdb_url":
+      return { type, tmdb_ref: "", sort_by: "popularity.desc", limit: 200 };
     case "tmdb_list":
       return { type, list_id: "", limit: 200 };
+    case "tmdb_person":
+      return { type, tmdb_ref: "", limit: 500 };
+    case "tmdb_company":
+    case "tmdb_keyword":
+    case "tmdb_collection":
+      return { type, tmdb_ref: "", limit: 200 };
     case "mdblist":
     case "trakt_list":
+    case "anilist":
+      return { type, list_ref: "", limit: 200 };
+    case "stevenlu":
       return { type, list_ref: "", limit: 200 };
     case "catalog":
       return { type };
@@ -135,12 +183,24 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
   }
 }
 
+function collectionEditorSnapshot(parts: {
+  name: string;
+  enabled: boolean;
+  sectionIds: number[];
+  collectionTitle: string;
+  runIntervalHours: number | null;
+  activeWindow: CollectionActiveWindow | null;
+  definition: CollectionDefinition;
+}): string {
+  return JSON.stringify(parts);
+}
+
 function defaultFilterBlock(field: CollectionFilterField, sectionType: "movie" | "show"): CollectionFilterBlock {
   switch (field) {
     case "genre":
       return { field, op: "includes_any", values: [] };
     case "year":
-      return { field, op: "gte", value: 2000 };
+      return { field, op: "gte", value: 2000, basis: "premiered" };
     case "certification":
       return { field, op: "in", values: [] };
     case "studio_network":
@@ -557,6 +617,11 @@ const RELEASE_BASIS_LABELS: Record<string, string> = {
   physical: "physical release",
 };
 
+const YEAR_BASIS_LABELS: Record<string, string> = {
+  premiered: "premiere year",
+  aired_during: "was airing during",
+};
+
 function explainRuleCheckLabel(check: CollectionExplainCheck): string {
   const base = filterMeta(String(check.field ?? "")).label;
   const op = FILTER_OP_LABELS[String(check.op ?? "")] ?? String(check.op ?? "");
@@ -567,7 +632,9 @@ function explainRuleCheckLabel(check: CollectionExplainCheck): string {
   const basis =
     check.field === "release_window" && check.basis
       ? `(by ${RELEASE_BASIS_LABELS[check.basis] ?? check.basis})`
-      : "";
+      : check.field === "year"
+        ? `(${YEAR_BASIS_LABELS[String(check.basis || "premiered")] ?? "premiere year"})`
+        : "";
   const provider =
     check.field === "rating"
       ? check.provider
@@ -779,6 +846,61 @@ function PinPicker(props: {
   );
 }
 
+function fileStateOutline(state: CollectionPreviewSampleItem["file_state"]): string {
+  if (state === "file") return "outline outline-2 outline-offset-[-2px] outline-emerald-400";
+  if (state === "placeholder") return "outline outline-2 outline-dashed outline-offset-[-2px] outline-cyan-400";
+  if (state === "mixed") return "outline outline-2 outline-dashed outline-offset-[-2px] outline-violet-400";
+  return "";
+}
+
+function CatalogSamplePoster(props: {
+  item: CollectionPreviewSampleItem;
+  libraries: PlexSectionOption[];
+  dimmed: boolean;
+  showLibraryTicks: boolean;
+}) {
+  const theme = useCollectionTheme();
+  const state = props.item.file_state ?? "none";
+  const chip =
+    state === "file" ? "File" : state === "placeholder" ? "PH" : state === "mixed" ? "Mix" : null;
+  const inSet = new Set(props.item.in_libraries ?? []);
+  return (
+    <div
+      title={`${props.item.title}${props.item.year ? ` (${props.item.year})` : ""}${
+        chip ? ` · ${chip === "PH" ? "Placeholder" : chip === "Mix" ? "File + placeholder" : "Real file"}` : ""
+      }`}
+      className={`relative aspect-[2/3] w-full overflow-hidden rounded-md ${theme.posterFallback} ${fileStateOutline(state)} ${
+        props.dimmed ? "opacity-35" : ""
+      }`}
+    >
+      {props.item.poster ? (
+        <img src={props.item.poster} alt={props.item.title} className="h-full w-full object-cover" loading="lazy" />
+      ) : (
+        <span className={`block h-full p-1 text-[9px] leading-tight ${theme.sampleFallback}`}>{props.item.title}</span>
+      )}
+      {chip ? (
+        <span className="absolute left-0.5 top-0.5 rounded bg-black/70 px-1 text-[8px] font-headline uppercase tracking-wider text-white">
+          {chip}
+        </span>
+      ) : null}
+      {props.showLibraryTicks ? (
+        <span className="absolute inset-x-0 bottom-0 flex flex-wrap gap-0.5 bg-black/55 px-0.5 py-0.5">
+          {props.libraries.map((lib) => (
+            <span
+              key={lib.id}
+              className={`rounded px-0.5 text-[8px] font-headline uppercase leading-none ${
+                inSet.has(lib.id) ? "text-white" : "text-white/35"
+              }`}
+            >
+              {lib.title.slice(0, 3)}
+            </span>
+          ))}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function CollectionEditor(props: {
   recipe: CollectionRecipe | null;
   sections: PlexSectionOption[];
@@ -795,6 +917,7 @@ export function CollectionEditor(props: {
   saveError: string | null;
   onSave: (payload: RecipeWritePayload) => void;
   onCancel: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const accentHex = props.accent.hex;
   const theme = getCollectionTheme(props.themeMode === "light");
@@ -812,8 +935,29 @@ export function CollectionEditor(props: {
   const [definition, setDefinition] = useState<CollectionDefinition>(
     props.recipe?.definition && Array.isArray(props.recipe.definition.sources)
       ? props.recipe.definition
-      : { sources: [defaultSourceBlock(props.tmdbConfigured ? "tmdb_trending" : "catalog")], filters: [], limit: 50, sort: "popularity" },
+      : { sources: [], filters: [], limit: 50, sort: "popularity" },
   );
+  const editorSnapshot = useMemo(
+    () =>
+      collectionEditorSnapshot({
+        name,
+        enabled,
+        sectionIds,
+        collectionTitle,
+        runIntervalHours,
+        activeWindow,
+        definition,
+      }),
+    [name, enabled, sectionIds, collectionTitle, runIntervalHours, activeWindow, definition],
+  );
+  const initialSnapshotRef = useRef(editorSnapshot);
+  const dirty = editorSnapshot !== initialSnapshotRef.current;
+  useEffect(() => {
+    props.onDirtyChange?.(dirty);
+  }, [dirty, props.onDirtyChange]);
+  useEffect(() => {
+    return () => props.onDirtyChange?.(false);
+  }, [props.onDirtyChange]);
 
   const sectionId = sectionIds[0] ?? null;
   const section = useMemo(
@@ -983,6 +1127,7 @@ export function CollectionEditor(props: {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewPane, setPreviewPane] = useState<"catalog" | "missing">("catalog");
+  const [sampleLibraryFilter, setSampleLibraryFilter] = useState<number | null>(null);
   const [selectedMissing, setSelectedMissing] = useState<Set<string>>(new Set());
   const [arrModalOpen, setArrModalOpen] = useState(false);
   const previewSeq = useRef(0);
@@ -1102,6 +1247,8 @@ export function CollectionEditor(props: {
     }
     const region = block.watch_region || "US";
     const regionMeta = metaCache[`${mediaType}:${region}`] ?? baseMeta;
+    const tmdbUrlKind = block.type === "tmdb_url" ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
+    const tmdbUrlSupportsSourceSort = tmdbUrlKind === "company" || tmdbUrlKind === "keyword";
     return (
       <div className="flex flex-col gap-3">
         {block.type === "tmdb_trending" ? (
@@ -1120,18 +1267,67 @@ export function CollectionEditor(props: {
 
         {block.type === "tmdb_list" ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
-            List ID
+            List
             <input
-              className={theme.field}
-              style={{ width: 160 }}
+              className={`${theme.field} flex-1`}
+              style={{ minWidth: 260 }}
               value={block.list_id ?? ""}
-              placeholder="e.g. 8136"
+              placeholder="Paste a TMDB list URL or id, e.g. themoviedb.org/list/8136"
               onChange={(e) => updateSource(index, { list_id: e.target.value })}
             />
           </label>
         ) : null}
 
-        {block.type === "mdblist" || block.type === "trakt_list" ? (
+        {block.type === "tmdb_url" ? (
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Page URL
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.tmdb_ref ?? ""}
+                placeholder="Paste a TMDB list, person, company, keyword, or collection page URL"
+                onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
+              />
+            </label>
+            <p className="text-[12px] text-slate-500">
+              Supports TMDB list, person, company, keyword, and collection pages. Company and keyword pages can fetch
+              in TMDB’s page order.
+            </p>
+          </>
+        ) : null}
+
+        {block.type === "tmdb_person" ||
+        block.type === "tmdb_company" ||
+        block.type === "tmdb_keyword" ||
+        block.type === "tmdb_collection" ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            {block.type === "tmdb_person"
+              ? "Person"
+              : block.type === "tmdb_company"
+                ? "Company"
+                : block.type === "tmdb_keyword"
+                  ? "Keyword"
+                  : "Collection"}
+            <input
+              className={`${theme.field} flex-1`}
+              style={{ minWidth: 260 }}
+              value={block.tmdb_ref ?? ""}
+              placeholder={
+                block.type === "tmdb_person"
+                  ? "Paste the TMDB person URL, e.g. themoviedb.org/person/32982-jane-austen"
+                  : block.type === "tmdb_company"
+                    ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
+                    : block.type === "tmdb_keyword"
+                      ? "Paste the TMDB keyword URL. sort_by on the URL is used (default popularity)."
+                      : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
+              }
+              onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
+            />
+          </label>
+        ) : null}
+
+        {block.type === "mdblist" || block.type === "trakt_list" || block.type === "anilist" ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             List
             <input
@@ -1141,8 +1337,23 @@ export function CollectionEditor(props: {
               placeholder={
                 block.type === "mdblist"
                   ? "Paste a list URL or user/slug, e.g. linaspurinis/top-watched-movies-of-the-week"
-                  : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
+                  : block.type === "anilist"
+                    ? "Paste an AniList URL, e.g. anilist.co/user/NAME/animelist"
+                    : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
               }
+              onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+            />
+          </label>
+        ) : null}
+
+        {block.type === "stevenlu" ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            JSON URL
+            <input
+              className={`${theme.field} flex-1`}
+              style={{ minWidth: 260 }}
+              value={block.list_ref ?? ""}
+              placeholder="Leave blank for the default StevenLu popular-movies list"
               onChange={(e) => updateSource(index, { list_ref: e.target.value })}
             />
           </label>
@@ -1150,6 +1361,20 @@ export function CollectionEditor(props: {
 
         {block.type === "tmdb_discover" ? (
           <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Sort from TMDB
+              <select
+                className={theme.selectField}
+                value={block.sort_by ?? "popularity.desc"}
+                onChange={(e) => updateSource(index, { sort_by: e.target.value })}
+              >
+                {TMDB_SOURCE_SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div>
               <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1.5">Genres</div>
               <MultiChipPicker
@@ -1236,12 +1461,35 @@ export function CollectionEditor(props: {
           </>
         ) : null}
 
+        {block.type === "tmdb_url" && tmdbUrlSupportsSourceSort ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            Sort from TMDB
+            <select
+              className={theme.selectField}
+              value={block.sort_by ?? "popularity.desc"}
+              onChange={(e) => updateSource(index, { sort_by: e.target.value })}
+            >
+              {TMDB_SOURCE_SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+
+        {block.type === "tmdb_url" && tmdbUrlKind && !tmdbUrlSupportsSourceSort ? (
+          <p className="text-[12px] text-slate-500">
+            This TMDB {tmdbUrlKind} page uses its native order. Recipe Arrange still runs after the source is fetched.
+          </p>
+        ) : null}
+
         <label className={`flex items-center gap-2 ${theme.label}`}>
           Max candidates
           <NumberInput
             value={block.limit}
             min={1}
-            max={200}
+            max={block.type === "tmdb_person" ? 1000 : 500}
             placeholder="100"
             onChange={(v) => updateSource(index, { limit: v ?? undefined })}
           />
@@ -1312,6 +1560,23 @@ export function CollectionEditor(props: {
                 />
               </>
             ) : null}
+            {sectionType === "show" ? (
+              <label className={`flex items-center gap-2 ${theme.label}`}>
+                based on
+                <select
+                  className={theme.selectField}
+                  value={block.basis === "aired_during" ? "aired_during" : "premiered"}
+                  onChange={(e) =>
+                    update({ basis: e.target.value as CollectionFilterBlock["basis"] })
+                  }
+                >
+                  <option value="premiered">Premiere year</option>
+                  <option value="aired_during">Was airing during</option>
+                </select>
+              </label>
+            ) : (
+              <span className="text-[13px] text-slate-500">premiere year</span>
+            )}
           </div>
         );
       case "certification": {
@@ -1651,6 +1916,13 @@ export function CollectionEditor(props: {
   const missingPrefilter = preview?.missing_from_arr_prefilter_count ?? 0;
   const missingGaps = preview?.missing_from_arr_filter_gaps ?? [];
   const missingItems = preview?.missing_from_arr ?? [];
+  const selectFirstCount = Math.min(
+    definition.limit && definition.limit > 0 ? definition.limit : 50,
+    ARR_ADD_BATCH_CAP,
+    missingItems.length,
+  );
+  const targetLibraries = props.sections.filter((s) => sectionIds.includes(s.id));
+  const showLibraryTicks = targetLibraries.length > 1;
   const arrIncludeLabels = arrIncludeConstraintLabels(definition.filters);
   const showMissingPane = missingCount > 0 || missingPrefilter > 0 || missingGaps.length > 0;
   const missingKey = (item: CollectionMissingFromArrItem) =>
@@ -1809,24 +2081,49 @@ export function CollectionEditor(props: {
         {/* Sources */}
         <div className="flex flex-col gap-2.5">
           <div className={theme.sectionLabel}>Sources</div>
-          {definition.sources.map((block, index) => (
+          {definition.sources.length === 0 ? (
+            <p className="text-[13px] text-slate-500">
+              No source yet. Add one below — nothing is selected by default.
+            </p>
+          ) : null}
+          {definition.sources.map((block, index) => {
+            const legacyUrlKind = block.type === "tmdb_url" ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
+            const meta = SOURCE_META[block.type] ?? {
+              label: block.type,
+              icon: "help",
+              description: "",
+            };
+            const title = block.type === "tmdb_url" && legacyUrlKind ? `TMDB ${legacyUrlKind[0].toUpperCase()}${legacyUrlKind.slice(1)} Page` : meta.label;
+            const subtitle =
+              block.type === "tmdb_url" && legacyUrlKind
+                ? `${meta.description}. ${
+                    legacyUrlKind === "company" || legacyUrlKind === "keyword"
+                      ? "Source sort matches TMDB."
+                      : "Uses TMDB’s native page order."
+                  }`
+                : meta.description;
+            return (
             <BlockCard
               key={`${block.type}-${index}`}
-              icon={SOURCE_META[block.type].icon}
-              title={SOURCE_META[block.type].label}
-              subtitle={SOURCE_META[block.type].description}
+              icon={meta.icon}
+              title={title}
+              subtitle={subtitle}
               accentHex={accentHex}
-              onRemove={definition.sources.length > 1 ? () => removeSource(index) : undefined}
+              onRemove={() => removeSource(index)}
             >
               {renderSourceConfig(block, index)}
             </BlockCard>
-          ))}
+            );
+          })}
           <AddBlockMenu
             label="Add source"
-            options={(Object.keys(SOURCE_META) as CollectionSourceType[]).map((type) => {
+            options={VISIBLE_SOURCE_TYPES.map((type) => {
               const requires = SOURCE_META[type].requires;
+              const movieOnly = type === "stevenlu" || type === "tmdb_collection";
               const disabled =
-                (requires === "tmdb" && !props.tmdbConfigured) || (requires === "trakt" && !props.traktConfigured);
+                (requires === "tmdb" && !props.tmdbConfigured) ||
+                (requires === "trakt" && !props.traktConfigured) ||
+                (movieOnly && sectionType !== "movie");
               return {
                 key: type,
                 label: SOURCE_META[type].label,
@@ -1834,7 +2131,9 @@ export function CollectionEditor(props: {
                 description:
                   requires === "trakt" && !props.traktConfigured
                     ? "Add a Trakt Client ID in Settings to enable"
-                    : SOURCE_META[type].description,
+                    : movieOnly && sectionType !== "movie"
+                      ? "Movie libraries only"
+                      : SOURCE_META[type].description,
                 disabled,
               };
             })}
@@ -2048,7 +2347,7 @@ export function CollectionEditor(props: {
                 <option value="release_date">Release date (newest)</option>
                 <option value="latest_aired">Newest content first{sectionType === "show" ? " (latest aired episode)" : ""}</option>
                 <option value="rating">Rating (highest first)</option>
-                <option value="title">Title (A–Z)</option>
+        <option value="title">Title (A–Z, ignoring a/an/the)</option>
               </select>
             </label>
             {definition.sort === "rating" ? (
@@ -2363,10 +2662,27 @@ export function CollectionEditor(props: {
                           <button
                             type="button"
                             className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
-                            onClick={() => setSelectedMissing(new Set(missingItems.map(missingKey)))}
+                            onClick={() =>
+                              setSelectedMissing(
+                                new Set(missingItems.slice(0, ARR_ADD_BATCH_CAP).map(missingKey)),
+                              )
+                            }
                           >
                             Select all
                           </button>
+                          {selectFirstCount > 0 ? (
+                            <button
+                              type="button"
+                              className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
+                              onClick={() =>
+                                setSelectedMissing(
+                                  new Set(missingItems.slice(0, selectFirstCount).map(missingKey)),
+                                )
+                              }
+                            >
+                              Select first {selectFirstCount}
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             className={`rounded-md border px-2.5 py-1 text-[11px] font-headline uppercase tracking-wider ${theme.chipInactive}`}
@@ -2376,10 +2692,13 @@ export function CollectionEditor(props: {
                           </button>
                           <span className={`text-[12px] ${theme.muted}`}>
                             {selectedMissing.size} selected
+                            {missingItems.length > ARR_ADD_BATCH_CAP
+                              ? ` (max ${ARR_ADD_BATCH_CAP} per add)`
+                              : ""}
                           </span>
                           <button
                             type="button"
-                            disabled={selectedMissing.size < 1}
+                            disabled={selectedMissing.size < 1 || selectedMissing.size > ARR_ADD_BATCH_CAP}
                             onClick={() => setArrModalOpen(true)}
                             className="ml-auto rounded-lg px-4 py-1.5 text-[13px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40"
                             style={{ backgroundColor: accentHex }}
@@ -2418,7 +2737,7 @@ export function CollectionEditor(props: {
                                   setSelectedMissing((prev) => {
                                     const next = new Set(prev);
                                     if (next.has(key)) next.delete(key);
-                                    else next.add(key);
+                                    else if (next.size < ARR_ADD_BATCH_CAP) next.add(key);
                                     return next;
                                   });
                                 }}
@@ -2466,28 +2785,71 @@ export function CollectionEditor(props: {
                         )}
                       </>
                     ) : preview?.sample?.length ? (
-                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
-                        {preview.sample.map((item) =>
-                          item.poster ? (
-                            <img
-                              key={item.id}
-                              src={item.poster}
-                              alt={item.title}
-                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                              className={`aspect-[2/3] w-full rounded-md object-cover ${theme.posterFallback}`}
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div
-                              key={item.id}
-                              title={`${item.title}${item.year ? ` (${item.year})` : ""}`}
-                              className={`aspect-[2/3] w-full rounded-md p-1 text-[9px] leading-tight overflow-hidden ${theme.sampleFallback}`}
+                      <>
+                        <div className={`mb-2 flex flex-wrap items-center gap-2 ${theme.muted}`}>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-emerald-400" />
+                            File
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-dashed outline-cyan-400" />
+                            Placeholder
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm outline outline-2 outline-dashed outline-violet-400" />
+                            Both
+                          </span>
+                        </div>
+                        {showLibraryTicks ? (
+                          <div className="mb-2 flex flex-wrap gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setSampleLibraryFilter(null)}
+                              className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                                sampleLibraryFilter == null ? "text-[#0a0e14]" : theme.chipInactive
+                              }`}
+                              style={
+                                sampleLibraryFilter == null
+                                  ? { backgroundColor: accentHex, borderColor: accentHex }
+                                  : undefined
+                              }
                             >
-                              {item.title}
-                            </div>
-                          ),
-                        )}
-                      </div>
+                              All libraries
+                            </button>
+                            {targetLibraries.map((lib) => (
+                              <button
+                                key={lib.id}
+                                type="button"
+                                onClick={() => setSampleLibraryFilter(lib.id)}
+                                className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
+                                  sampleLibraryFilter === lib.id ? "text-[#0a0e14]" : theme.chipInactive
+                                }`}
+                                style={
+                                  sampleLibraryFilter === lib.id
+                                    ? { backgroundColor: accentHex, borderColor: accentHex }
+                                    : undefined
+                                }
+                              >
+                                {lib.title}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 xl:grid-cols-6">
+                          {preview.sample.map((item) => (
+                            <CatalogSamplePoster
+                              key={item.id}
+                              item={item}
+                              libraries={targetLibraries}
+                              showLibraryTicks={showLibraryTicks}
+                              dimmed={
+                                sampleLibraryFilter != null &&
+                                !(item.in_libraries ?? []).includes(sampleLibraryFilter)
+                              }
+                            />
+                          ))}
+                        </div>
+                      </>
                     ) : (
                       <p className={theme.muted}>No catalog sample for this recipe.</p>
                     )}
@@ -2503,7 +2865,9 @@ export function CollectionEditor(props: {
       {arrModalOpen ? (
         <ArrAddModal
           mediaType={sectionType}
-          items={missingItems.filter((item) => selectedMissing.has(missingKey(item)))}
+          items={missingItems
+            .filter((item) => selectedMissing.has(missingKey(item)))
+            .slice(0, ARR_ADD_BATCH_CAP)}
           defaultTag={name.trim() || "placeholdarr"}
           accentHex={accentHex}
           onClose={() => setArrModalOpen(false)}

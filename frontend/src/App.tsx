@@ -75,6 +75,7 @@ import {
   readStoredLibrarySort,
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
+import { ConfirmModal } from "./ConfirmModal";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
@@ -961,6 +962,11 @@ export function App() {
     [fieldValues, baselineValues, settingsPayload],
   );
   const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
+  const [collectionsDraftDirty, setCollectionsDraftDirty] = useState(false);
+  const [leaveConfirm, setLeaveConfirm] = useState<null | {
+    path: string;
+    kind: "settings" | "recipe";
+  }>(null);
   const hasUnsavedChangesRef = useRef(false);
   useEffect(() => {
     if (!combinedSettingsDirty) return;
@@ -1077,13 +1083,13 @@ export function App() {
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!combinedSettingsDirty) return;
+      if (!combinedSettingsDirty && !collectionsDraftDirty) return;
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [combinedSettingsDirty]);
+  }, [combinedSettingsDirty, collectionsDraftDirty]);
 
   /** Setup wizard — load on tab enter and tab focus only (no periodic 5s poll). */
   useEffect(() => {
@@ -1494,16 +1500,19 @@ export function App() {
     setSettingsFeedbackKind("success");
   }
 
-  function tryNavigate(path: string) {
+  function tryNavigate(path: string): boolean {
     const stayingWithinSettings = currentTab === "settings" && path.startsWith("/settings");
-    if (!combinedSettingsDirty || currentTab !== "settings" || stayingWithinSettings) {
-      navigate(path);
-      return;
+    if (combinedSettingsDirty && currentTab === "settings" && !stayingWithinSettings) {
+      setLeaveConfirm({ path, kind: "settings" });
+      return false;
     }
-    const shouldLeave = window.confirm("You have unsaved settings changes. Leave this section without saving?");
-    if (shouldLeave) {
-      navigate(path);
+    const stayingOnCollections = currentTab === "collections" && path.startsWith("/collections");
+    if (collectionsDraftDirty && currentTab === "collections" && !stayingOnCollections) {
+      setLeaveConfirm({ path, kind: "recipe" });
+      return false;
     }
+    navigate(path);
+    return true;
   }
 
   async function openWhatsNewCatalog() {
@@ -1539,7 +1548,7 @@ export function App() {
       sessionStorage.setItem("libraryScrollTop", String(currentScrollTop));
       sessionStorage.setItem("libraryScrollRestorePending", "1");
     }
-    navigate(`/library/${item.type}/${item.item_id}`);
+    if (!tryNavigate(`/library/${item.type}/${item.item_id}`)) return;
     setTitleSearchOpen(false);
   }
 
@@ -1753,6 +1762,7 @@ export function App() {
           libraryLoading={libraryLoading}
           onEnsureLibrary={ensureLibraryLoaded}
           onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+          onDraftDirty={setCollectionsDraftDirty}
         />
       );
     }
@@ -2580,6 +2590,28 @@ export function App() {
           />
           <Route path="*" element={null} />
         </Routes>
+
+        {leaveConfirm ? (
+          <ConfirmModal
+            title={leaveConfirm.kind === "recipe" ? "Leave without saving?" : "Unsaved settings"}
+            message={
+              leaveConfirm.kind === "recipe"
+                ? "You have an unsaved collection recipe. If you leave now, this draft will be lost."
+                : "You have unsaved settings changes. Leave this section without saving?"
+            }
+            confirmLabel="Leave"
+            cancelLabel="Stay"
+            accentHex={brandAccent.hex}
+            themeMode={themeMode}
+            onCancel={() => setLeaveConfirm(null)}
+            onConfirm={() => {
+              const path = leaveConfirm.path;
+              setLeaveConfirm(null);
+              if (leaveConfirm.kind === "recipe") setCollectionsDraftDirty(false);
+              navigate(path);
+            }}
+          />
+        ) : null}
 
         <TaskRunConfirmModals
           modal={taskRunModal}

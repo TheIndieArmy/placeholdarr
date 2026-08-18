@@ -10,6 +10,7 @@ collection so the builder UI can show live staged counts.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -22,14 +23,21 @@ from services.postgres.db import session_scope
 from services.postgres.models import CollectionRecipe, Episode, Movie, Season, Series
 
 SOURCE_TYPES = (
+    "catalog",
     "tmdb_trending",
     "tmdb_popular",
     "tmdb_upcoming",
     "tmdb_discover",
+    "tmdb_url",
     "tmdb_list",
+    "tmdb_person",
+    "tmdb_company",
+    "tmdb_keyword",
+    "tmdb_collection",
     "mdblist",
     "trakt_list",
-    "catalog",
+    "stevenlu",
+    "anilist",
 )
 FILTER_FIELDS = (
     "genre",
@@ -56,11 +64,26 @@ RELEASE_WINDOW_BASES = (
     "physical",
 )
 MOVIE_RELEASE_BASES = ("theater", "digital", "physical")
+# Year filter: premiere (series/movie year) vs TV first–last air overlap.
+YEAR_BASES = ("premiered", "aired_during")
 # Radarr nested rating providers (Sonarr is a single flat value/votes).
 MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes")
+TMDB_SOURCE_SORTS = (
+    "popularity.desc",
+    "popularity.asc",
+    "vote_average.desc",
+    "vote_average.asc",
+    "vote_count.desc",
+    "vote_count.asc",
+    "primary_release_date.desc",
+    "primary_release_date.asc",
+    "title.asc",
+    "title.desc",
+)
 DEFAULT_SOURCE_LIMIT = 100
 MAX_COLLECTION_ITEMS = 500
 MISSING_FROM_ARR_CAP = 200
+PREVIEW_SAMPLE_SIZE = 200
 TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
 
 
@@ -80,6 +103,9 @@ def _validate_filter_rule(rule: Any) -> dict[str, Any]:
     if rule.get("field") == "release_window" and rule.get("basis") is not None:
         if rule["basis"] not in RELEASE_WINDOW_BASES:
             raise RecipeValidationError(f"unknown release_window basis: {rule['basis']!r}")
+    if rule.get("field") == "year" and rule.get("basis") is not None:
+        if rule["basis"] not in YEAR_BASES:
+            raise RecipeValidationError(f"unknown year basis: {rule['basis']!r}")
     if rule.get("field") == "rating":
         provider = rule.get("provider")
         if provider is not None and provider not in MOVIE_RATING_PROVIDERS:
@@ -157,9 +183,18 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         source_type = source.get("type")
         if source_type not in SOURCE_TYPES:
             raise RecipeValidationError(f"unknown source type: {source_type!r}")
-        if source_type == "tmdb_list" and not str(source.get("list_id") or "").strip():
-            raise RecipeValidationError("tmdb_list source requires a list_id")
-        if source_type in ("mdblist", "trakt_list") and not str(source.get("list_ref") or "").strip():
+        if source_type == "tmdb_list" and not str(source.get("list_id") or source.get("tmdb_ref") or "").strip():
+            raise RecipeValidationError("tmdb_list source requires a list id or TMDB list URL")
+        if source_type == "tmdb_url" and not str(source.get("tmdb_ref") or "").strip():
+            raise RecipeValidationError("tmdb_url source requires a TMDB page URL")
+        if source_type in ("tmdb_person", "tmdb_company", "tmdb_keyword", "tmdb_collection") and not str(
+            source.get("tmdb_ref") or ""
+        ).strip():
+            raise RecipeValidationError(f"{source_type} source requires a TMDB URL or numeric id")
+        sort_by = source.get("sort_by")
+        if sort_by is not None and str(sort_by).strip() and str(sort_by) not in TMDB_SOURCE_SORTS:
+            raise RecipeValidationError(f"unknown TMDB source sort: {sort_by!r}")
+        if source_type in ("mdblist", "trakt_list", "anilist") and not str(source.get("list_ref") or "").strip():
             raise RecipeValidationError(f"{source_type} source requires a list URL or user/slug")
         normalized_sources.append(source)
 
@@ -222,6 +257,7 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
     """Fetch candidates for one external source block (cached by the underlying clients)."""
     source_type = source.get("type")
     limit = int(source.get("limit") or DEFAULT_SOURCE_LIMIT)
+    source_sort = tmdb_client.normalize_tmdb_sort_by(source.get("sort_by"), media_type)
     if source_type == "tmdb_trending":
         return tmdb_client.fetch_trending(media_type, str(source.get("window") or "week"), limit)
     if source_type == "tmdb_popular":
@@ -237,14 +273,41 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
             provider_ids=[int(p) for p in (source.get("provider_ids") or [])],
             watch_region=source.get("watch_region"),
             min_vote_average=source.get("min_vote_average"),
+            sort_by=source_sort,
             limit=limit,
         )
+    if source_type == "tmdb_url":
+        tmdb_ref = str(source.get("tmdb_ref") or "")
+        kind = tmdb_client.parse_tmdb_resource_kind(tmdb_ref)
+        if kind == "list":
+            return tmdb_client.fetch_list(tmdb_ref, media_type, limit)
+        if kind == "person":
+            return tmdb_client.fetch_person_credits(tmdb_ref, media_type, limit)
+        if kind == "company":
+            return tmdb_client.fetch_company(tmdb_ref, media_type, limit, source_sort)
+        if kind == "keyword":
+            return tmdb_client.fetch_keyword(tmdb_ref, media_type, limit, source_sort)
+        if kind == "collection":
+            return tmdb_client.fetch_collection(tmdb_ref, media_type, limit)
+        raise tmdb_client.TmdbError("TMDB URL source needs a TMDB list, person, company, keyword, or collection URL")
     if source_type == "tmdb_list":
-        return tmdb_client.fetch_list(str(source.get("list_id")), media_type, limit)
+        return tmdb_client.fetch_list(str(source.get("list_id") or source.get("tmdb_ref") or ""), media_type, limit)
+    if source_type == "tmdb_person":
+        return tmdb_client.fetch_person_credits(str(source.get("tmdb_ref") or ""), media_type, limit)
+    if source_type == "tmdb_company":
+        return tmdb_client.fetch_company(str(source.get("tmdb_ref") or ""), media_type, limit, source_sort)
+    if source_type == "tmdb_keyword":
+        return tmdb_client.fetch_keyword(str(source.get("tmdb_ref") or ""), media_type, limit, source_sort)
+    if source_type == "tmdb_collection":
+        return tmdb_client.fetch_collection(str(source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "mdblist":
         return list_sources.fetch_mdblist(str(source.get("list_ref")), media_type, limit)
     if source_type == "trakt_list":
         return list_sources.fetch_trakt_list(str(source.get("list_ref")), media_type, limit)
+    if source_type == "stevenlu":
+        return list_sources.fetch_stevenlu(str(source.get("list_ref") or ""), media_type, limit)
+    if source_type == "anilist":
+        return list_sources.fetch_anilist(str(source.get("list_ref")), media_type, limit)
     return []
 
 
@@ -401,6 +464,8 @@ def _missing_from_arr_items(
     pins: Any = None,
     genre_map: Optional[dict[int, str]] = None,
     cap: int = MISSING_FROM_ARR_CAP,
+    sort: Optional[str] = None,
+    sort_provider: Optional[str] = None,
 ) -> tuple[list[dict[str, Any]], int, int, list[str]]:
     """Source candidates not in the catalog, after recipe filters that can run off-list.
 
@@ -420,6 +485,7 @@ def _missing_from_arr_items(
         raw.append(candidate)
     prefilter = len(raw)
     kept = [c for c in raw if tree is None or _candidate_node_passes(c, tree, section_type, genre_map or {})]
+    kept = _sort_candidates(kept, sort, sort_provider)
     items = [
         {
             "title": candidate.get("title") or "Untitled",
@@ -496,6 +562,48 @@ def _candidate_language_names(candidate: dict[str, Any]) -> set[str]:
     return names
 
 
+def _year_window_bounds(rule: dict[str, Any]) -> tuple[int, int]:
+    op = str(rule.get("op") or "")
+    if op == "gte":
+        return int(rule.get("value") or 0), 9999
+    if op == "lte":
+        return 0, int(rule.get("value") or 9999)
+    if op == "between":
+        return int(rule.get("value") or 0), int(rule.get("value_to") or 9999)
+    value = int(rule.get("value") or 0)
+    return value, value
+
+
+def _year_span_matches(start: Optional[int], end: Optional[int], rule: dict[str, Any]) -> bool:
+    """True when [start, end] overlaps the rule window. ``end is None`` means still running."""
+    if not start:
+        return False
+    low, high = _year_window_bounds(rule)
+    last = int(end) if end else 9999
+    return int(start) <= high and last >= low
+
+
+def _year_from_date_value(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return int(raw.year)
+    if hasattr(raw, "year") and not isinstance(raw, str):
+        try:
+            return int(raw.year)
+        except (TypeError, ValueError):
+            pass
+    text = str(raw).strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        year = int(text[:4])
+        return year if year > 0 else None
+    try:
+        year = int(text)
+    except (TypeError, ValueError):
+        return None
+    return year if year > 0 else None
+
+
 def _candidate_year(candidate: dict[str, Any]) -> Optional[int]:
     try:
         year = int(candidate.get("year") or 0)
@@ -503,10 +611,46 @@ def _candidate_year(candidate: dict[str, Any]) -> Optional[int]:
         year = 0
     if year:
         return year
-    date = str(candidate.get("date") or "")
-    if len(date) >= 4 and date[:4].isdigit():
-        return int(date[:4])
-    return None
+    return _year_from_date_value(candidate.get("date"))
+
+
+def _candidate_last_year(candidate: dict[str, Any]) -> Optional[int]:
+    try:
+        year = int(candidate.get("last_year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year:
+        return year
+    return _year_from_date_value(candidate.get("last_air_date") or candidate.get("last_aired"))
+
+
+def _row_premiere_year(row: Any) -> Optional[int]:
+    try:
+        year = int(row.year or 0)
+    except (TypeError, ValueError):
+        year = 0
+    return year or None
+
+
+def _row_year_span(
+    row: Any,
+    section_type: str,
+    rule: dict[str, Any],
+    air_dates: Optional[dict[int, dict[str, Optional[datetime]]]] = None,
+) -> tuple[Optional[int], Optional[int]]:
+    premiere = _row_premiere_year(row)
+    basis = str(rule.get("basis") or "premiered")
+    if section_type != "show" or basis != "aired_during":
+        return premiere, premiere
+    entry = (air_dates or {}).get(int(getattr(row, "id", 0) or 0)) or {}
+    start_dt = entry.get("aired_start")
+    end_dt = entry.get("aired_end")
+    start = int(start_dt.year) if start_dt is not None else premiere
+    if end_dt is not None:
+        return start, int(end_dt.year)
+    if start_dt is None:
+        return premiere, premiere
+    return start, None
 
 
 def _candidate_release_dt(candidate: dict[str, Any]) -> Optional[datetime]:
@@ -630,18 +774,11 @@ def _candidate_passes_filter(
     op = str(rule.get("op") or "")
 
     if field == "year":
-        year = _candidate_year(candidate)
-        if not year:
-            return False
-        if op == "gte":
-            return year >= int(rule.get("value") or 0)
-        if op == "lte":
-            return year <= int(rule.get("value") or 9999)
-        if op == "between":
-            low = int(rule.get("value") or 0)
-            high = int(rule.get("value_to") or 9999)
-            return low <= year <= high
-        return year == int(rule.get("value") or 0)
+        start = _candidate_year(candidate)
+        basis = str(rule.get("basis") or "premiered")
+        if section_type == "show" and basis == "aired_during":
+            return _year_span_matches(start, _candidate_last_year(candidate), rule)
+        return _year_span_matches(start, start, rule)
 
     if field == "genre":
         values = {str(v).strip().lower() for v in (rule.get("values") or []) if v}
@@ -980,6 +1117,8 @@ def _definition_needs_air_dates(normalized: dict[str, Any], section_type: str) -
     for rule in _iter_filter_rules(normalized["filters"]):
         if rule.get("field") == "release_window" and rule.get("basis") in ("latest_episode", "latest_season"):
             return True
+        if rule.get("field") == "year" and str(rule.get("basis") or "") == "aired_during":
+            return True
     return False
 
 
@@ -1009,6 +1148,23 @@ def _load_air_date_lookup(series_row_ids: list[int]) -> dict[int, dict[str, Opti
         )
         for series_id, latest in latest_episode_rows:
             lookup.setdefault(int(series_id), {})["latest_episode"] = _coerce_utc_datetime(latest)
+
+        aired_span_rows = (
+            session.query(Season.series_id, func.min(Episode.air_date), func.max(Episode.air_date))
+            .join(Episode, Episode.season_id == Season.id)
+            .filter(
+                Season.series_id.in_(series_row_ids),
+                Season.is_deleted.is_(False),
+                Episode.is_deleted.is_(False),
+                Episode.air_date.isnot(None),
+            )
+            .group_by(Season.series_id)
+            .all()
+        )
+        for series_id, earliest, latest in aired_span_rows:
+            entry = lookup.setdefault(int(series_id), {})
+            entry["aired_start"] = _coerce_utc_datetime(earliest)
+            entry["aired_end"] = _coerce_utc_datetime(latest)
 
         # Season premieres: MIN(air_date) per season, then the newest premiere that has
         # already aired. Season 0 (specials) excluded so a one-off special doesn't count
@@ -1076,18 +1232,8 @@ def _passes_filter(
         return bool(genres & values)
 
     if field == "year":
-        year = int(row.year or 0)
-        if not year:
-            return False
-        if op == "gte":
-            return year >= int(rule.get("value") or 0)
-        if op == "lte":
-            return year <= int(rule.get("value") or 9999)
-        if op == "between":
-            low = int(rule.get("value") or 0)
-            high = int(rule.get("value_to") or 9999)
-            return low <= year <= high
-        return year == int(rule.get("value") or 0)
+        start, end = _row_year_span(row, section_type, rule, air_dates)
+        return _year_span_matches(start, end, rule)
 
     if field == "certification":
         values = {str(v).strip().upper() for v in (rule.get("values") or []) if v}
@@ -1229,6 +1375,19 @@ def _apply_filters(
 # Sort / limit
 # ---------------------------------------------------------------------------
 
+_LEADING_NON_ALNUM = re.compile(r"^[^a-z0-9]+", re.IGNORECASE)
+_LEADING_ARTICLE = re.compile(r"^(the|an|a)\s+", re.IGNORECASE)
+
+
+def _title_sort_key(title: str | None) -> str:
+    """Same rules as frontend `titleSortKey`: drop leading punctuation and a/an/the."""
+    raw = str(title or "").strip().lower()
+    raw = _LEADING_NON_ALNUM.sub("", raw)
+    raw = _LEADING_ARTICLE.sub("", raw)
+    raw = _LEADING_NON_ALNUM.sub("", raw)
+    return raw
+
+
 def _sort_rows(
     rows: list[Any],
     sort: Optional[str],
@@ -1238,7 +1397,7 @@ def _sort_rows(
     sort_provider: Optional[str] = None,
 ) -> list[Any]:
     if sort == "title":
-        return sorted(rows, key=lambda r: str(r.title or "").lower())
+        return sorted(rows, key=lambda r: _title_sort_key(getattr(r, "title", None)))
     if sort == "release_date":
         epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
         return sorted(rows, key=lambda r: _row_release_date(r, section_type) or epoch, reverse=True)
@@ -1274,6 +1433,55 @@ def _sort_rows(
             return float(item.get("popularity") or 0) if item else 0.0
         return sorted(rows, key=popularity, reverse=True)
     return rows
+
+
+def _candidate_rating_score(candidate: dict[str, Any], sort_provider: Optional[str]) -> float:
+    ratings = candidate.get("ratings") if isinstance(candidate.get("ratings"), dict) else {}
+    if sort_provider and ratings:
+        raw = ratings.get(sort_provider) or ratings.get(str(sort_provider).lower())
+        if isinstance(raw, dict):
+            raw = raw.get("value")
+        try:
+            if raw is not None:
+                return float(raw)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(candidate.get("vote_average"))
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _sort_candidates(
+    candidates: list[dict[str, Any]],
+    sort: Optional[str],
+    sort_provider: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Apply the recipe Arrange sort to missing-from-ARR candidates (stable)."""
+    if not sort:
+        return candidates
+    indexed = list(enumerate(candidates))
+    epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+
+    def keyed(item: tuple[int, dict[str, Any]]) -> tuple:
+        index, candidate = item
+        if sort == "title":
+            return (_title_sort_key(candidate.get("title")), index)
+        if sort in ("release_date", "latest_aired"):
+            dt = _candidate_release_dt(candidate) or epoch
+            return (-dt.timestamp(), index)
+        if sort == "rating":
+            score = _candidate_rating_score(candidate, sort_provider)
+            return (-score, index)
+        # popularity / list rank (missing popularity keeps source order)
+        try:
+            pop = float(candidate.get("popularity") or 0)
+        except (TypeError, ValueError):
+            pop = 0.0
+        return (-pop, index)
+
+    indexed.sort(key=keyed)
+    return [candidate for _index, candidate in indexed]
 
 
 # ---------------------------------------------------------------------------
@@ -1388,7 +1596,44 @@ def _provider_key_groups(rows: list[Any], section_type: str) -> list[list[str]]:
     return groups
 
 
-def _row_summary(row: Any, section_type: str) -> dict[str, Any]:
+def _row_has_file_placeholder(row: Any, section_type: str) -> tuple[bool, bool]:
+    if section_type == "movie":
+        return bool(getattr(row, "has_file", False)), bool(getattr(row, "has_placeholder", False))
+    has_file = bool(getattr(row, "has_files", False) or int(getattr(row, "episode_files", 0) or 0))
+    has_placeholder = bool(
+        int(getattr(row, "episode_placeholders", 0) or 0) or getattr(row, "has_placeholder", False)
+    )
+    return has_file, has_placeholder
+
+
+def _catalog_file_state(rows: list[Any], section_type: str) -> dict[Any, tuple[bool, bool]]:
+    """OR file/placeholder flags across ARR instances for the same title."""
+    acc: dict[Any, tuple[bool, bool]] = {}
+    for row in rows:
+        ident = _row_identity(row, section_type)
+        if ident in (None, 0):
+            continue
+        has_file, has_placeholder = _row_has_file_placeholder(row, section_type)
+        prev = acc.get(ident, (False, False))
+        acc[ident] = (prev[0] or has_file, prev[1] or has_placeholder)
+    return acc
+
+
+def _row_summary(
+    row: Any,
+    section_type: str,
+    file_state: Optional[dict[Any, tuple[bool, bool]]] = None,
+) -> dict[str, Any]:
+    ident = _row_identity(row, section_type)
+    has_file, has_placeholder = (file_state or {}).get(ident, _row_has_file_placeholder(row, section_type))
+    if has_file and has_placeholder:
+        state = "mixed"
+    elif has_file:
+        state = "file"
+    elif has_placeholder:
+        state = "placeholder"
+    else:
+        state = "none"
     return {
         "id": row.id,
         "title": row.title,
@@ -1396,6 +1641,10 @@ def _row_summary(row: Any, section_type: str) -> dict[str, Any]:
         "tmdb_id": int(row.tmdbid if section_type == "movie" else (row.sonarr_tmdbid or 0)) or None,
         "tvdb_id": int(getattr(row, "tvdbid", 0) or 0) or None,
         "poster": row.remote_poster,
+        "has_file": has_file,
+        "has_placeholder": has_placeholder,
+        "file_state": state,
+        "in_libraries": [],
     }
 
 
@@ -1418,6 +1667,7 @@ def _evaluate(
 
     rows = _load_catalog_rows(section_type, id_sets)
     matched_count = len(_dedupe_rows(rows, section_type))
+    file_state = _catalog_file_state(rows, section_type)
     missing_items, missing_count, missing_prefilter, missing_gaps = _missing_from_arr_items(
         candidates,
         rows,
@@ -1425,6 +1675,8 @@ def _evaluate(
         filters=normalized["filters"],
         pins=normalized["pins"],
         genre_map=_tmdb_genre_map(media_type),
+        sort=normalized["sort"],
+        sort_provider=normalized.get("sort_provider"),
     )
 
     air_dates = (
@@ -1469,6 +1721,7 @@ def _evaluate(
         "missing_from_arr_count": missing_count,
         "missing_from_arr_prefilter_count": missing_prefilter,
         "missing_from_arr_filter_gaps": missing_gaps,
+        "file_state": file_state,
     }
 
     if resolve:
@@ -1524,15 +1777,18 @@ def preview_definition(
     section_id: int,
     section_type: str,
     *,
-    sample_size: int = 48,
+    sample_size: int = PREVIEW_SAMPLE_SIZE,
     extra_section_ids: Any = None,
 ) -> dict[str, Any]:
     """Evaluate a definition without writing to Plex. Returns staged counts + sample items."""
     section_ids = normalize_section_ids(section_id, extra_section_ids)
     primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
-    sample = [_row_summary(row, section_type) for row in primary["rows"][:sample_size]]
+    sample_rows = primary["rows"][:sample_size]
+    file_state = primary.get("file_state") or {}
+    sample = [_row_summary(row, section_type, file_state) for row in sample_rows]
     libraries: list[dict[str, Any]] = []
     plex_errors: list[str] = []
+    key_groups = _provider_key_groups(sample_rows, section_type)
     for sid in section_ids:
         outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
         libraries.append(
@@ -1545,6 +1801,13 @@ def preview_definition(
         )
         if outcome["plex_error"]:
             plex_errors.append(str(outcome["plex_error"]))
+        try:
+            mask = plex_collections.membership_mask(sid, section_type, key_groups)
+        except plex_collections.PlexCollectionsError:
+            mask = [False] * len(sample)
+        for index, present in enumerate(mask):
+            if present and index < len(sample):
+                sample[index]["in_libraries"].append(sid)
     in_library_total = sum(int(lib["in_target_library"] or 0) for lib in libraries)
     unresolved_total = sum(int(lib["unresolved"] or 0) for lib in libraries)
     return {

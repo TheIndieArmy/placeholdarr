@@ -7,6 +7,29 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-08-18
+
+### Summary
+
+Collections (Beta) gains new source types, a unified **TMDB Page** card, explicit **source-level sort**, a TV-specific **Was airing during** year filter, an **unsaved recipe** guard, improved **Plex path refresh** for Docker, and a better **preview** and **Missing-from-ARR** workflow.
+
+### Added
+
+- **Collection sources**: StevenLu (default popular-movies JSON or a custom URL), AniList public user anime lists (GraphQL, throttled), and TMDB person / company / keyword / collection. Paste a TMDB page URL (or numeric id); no in-app search picker.
+- **TMDB Page source card**: One unified source block replaces the separate TMDB Person / Company / Keyword / Collection cards. Paste any TMDB page URL and the card detects the type. Company and keyword pages get a **Sort from TMDB** dropdown that controls which TMDB Discover order the fetch uses (popularity, rating, release date, title). Legacy recipes using the older separate types still work.
+- **Collection year filter (TV)**: New **Was airing during** mode matches shows whose first–last air years overlap the window (unknown last air = still running). Movies and the default **Premiere year** still use release / first-air year.
+- **Unsaved collection recipe prompt**: Leaving the recipe editor (Back, Cancel, Library, or another dashboard page) shows an in-app confirm modal. Closing the browser tab still uses the browser's native leave prompt (not available in all embedded browsers).
+
+### Changed
+
+- **Collection title sort**: Arrange by Title (A–Z) ignores leading *a* / *an* / *the*, matching Library A–Z.
+- **Plex collection order**: Synced collections use Plex custom sort and item order from the recipe (Plex previously kept default release-date order, which looked random vs preview).
+- **Collection preview**: Catalog sample shows up to 200 selected titles with file vs placeholder outlines. Multi-library recipes mark which Plex libraries each poster is in (filter chips dim the rest). Missing-from-ARR uses the same Arrange sort; **Select first N** matches the recipe max (capped at the add batch).
+- **Missing-from-ARR add**: Lookups stay per title; Radarr/Sonarr adds go through `movie/import` / `series/import` (chunks of 100) with a **90s** timeout. Timeouts say the *arr may still add the title. Result titles include year.
+- **Plex path refresh**: Path-scoped library scans rewrite Placeholdarr folders onto Plex's library locations (cached in memory from `/library/sections`, filled on connection test or first refresh). Docker mounts like `/placeholdarr/movies` no longer get skipped as unknown paths.
+- **TMDB keyword/company sort**: Source fetches now send `sort_by` to TMDB Discover (default `popularity.desc`). Previously this was ignored, so the pool of titles could miss popular items and Arrange by popularity only reordered whatever unsorted pages came back.
+- **TMDB source cards simplified**: The Add Source menu now shows **TMDB Page** instead of 4 separate link-type entries. Existing recipes are unaffected.
+
 ## [0.9.16] - 2026-08-14
 
 ### Action required

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import xml.etree.ElementTree as ET
 from typing import Literal
 from urllib.parse import quote
@@ -18,6 +19,176 @@ def _plex_base_and_token() -> tuple[str | None, str | None]:
     if not plex_url or not plex_token:
         return None, None
     return str(plex_url).rstrip('/'), str(plex_token)
+
+
+_section_locations_lock = threading.Lock()
+_section_locations_by_id: dict[int, tuple[str, ...]] | None = None
+_section_locations_creds: tuple[str, str] | None = None
+
+
+def _section_locations_fingerprint(plex_url: str, plex_token: str) -> tuple[str, str]:
+    return (str(plex_url).rstrip("/"), str(plex_token or ""))
+
+
+def clear_plex_section_location_cache() -> None:
+    """Drop cached Plex library folder locations (settings change or tests)."""
+    global _section_locations_by_id, _section_locations_creds
+    with _section_locations_lock:
+        _section_locations_by_id = None
+        _section_locations_creds = None
+
+
+def _relpath_under_root(abs_folder: str, root: str) -> str | None:
+    """Return the relative path of abs_folder under root, or None if it is not inside."""
+    root_abs = os.path.abspath(str(root or "").strip())
+    folder_abs = os.path.abspath(abs_folder)
+    if not root_abs:
+        return None
+    try:
+        if os.path.commonpath([folder_abs, root_abs]) != root_abs:
+            return None
+    except ValueError:
+        return None
+    rel = os.path.relpath(folder_abs, root_abs)
+    if rel.startswith(".."):
+        return None
+    return rel
+
+
+def _join_plex_location(location: str, relative: str) -> str:
+    loc = str(location or "").replace("\\", "/").rstrip("/")
+    rel = str(relative or "").replace("\\", "/").lstrip("/")
+    if not rel or rel == ".":
+        return loc
+    return f"{loc}/{rel}"
+
+
+def rewrite_folder_to_plex_locations(
+    abs_folder: str,
+    *,
+    our_roots: list[str],
+    plex_locations: list[str] | tuple[str, ...],
+) -> list[str]:
+    """Map a Placeholdarr folder onto each Plex library location for that section.
+
+    `/placeholdarr/movies/Title` under our root `/placeholdarr/movies` becomes
+    `/mnt/user/data/placeholdarr/movies/Title` when that is Plex's location.
+    """
+    relative = None
+    for root in our_roots:
+        if not root:
+            continue
+        relative = _relpath_under_root(abs_folder, root)
+        if relative is not None:
+            break
+    if relative is None:
+        return []
+    rewritten: list[str] = []
+    seen: set[str] = set()
+    for location in plex_locations:
+        loc = str(location or "").strip()
+        if not loc:
+            continue
+        path = _join_plex_location(loc, relative)
+        if path in seen:
+            continue
+        seen.add(path)
+        rewritten.append(path)
+    return rewritten
+
+
+def _parse_section_locations_xml(payload_text: str) -> dict[int, tuple[str, ...]]:
+    root = ET.fromstring(payload_text)
+    parsed: dict[int, tuple[str, ...]] = {}
+    for directory in root.findall(".//Directory"):
+        raw_key = directory.attrib.get("key")
+        if raw_key is None:
+            continue
+        try:
+            section_id = int(str(raw_key).strip())
+        except (TypeError, ValueError):
+            continue
+        locations: list[str] = []
+        seen: set[str] = set()
+        for loc in directory.findall("Location"):
+            path = str(loc.attrib.get("path") or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            locations.append(path)
+        parsed[section_id] = tuple(locations)
+    return parsed
+
+
+def fetch_plex_section_locations(
+    *,
+    plex_url: str | None = None,
+    plex_token: str | None = None,
+) -> dict[int, tuple[str, ...]]:
+    """GET /library/sections and return section id -> folder locations."""
+    url = str(plex_url).rstrip("/") if plex_url else None
+    token = str(plex_token or "").strip() if plex_token is not None else None
+    if not url or not token:
+        base, stored = _plex_base_and_token()
+        url = url or base
+        token = token or stored
+    if not url or not token:
+        return {}
+    response = requests.get(
+        f"{url}/library/sections",
+        headers={"X-Plex-Token": token, "Accept": "application/xml"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return _parse_section_locations_xml(response.text)
+
+
+def prime_plex_section_location_cache(
+    *,
+    plex_url: str | None = None,
+    plex_token: str | None = None,
+) -> dict[int, tuple[str, ...]]:
+    """Fetch Plex library locations into the process cache. Empty dict on failure."""
+    global _section_locations_by_id, _section_locations_creds
+    url = str(plex_url).rstrip("/") if plex_url else None
+    token = str(plex_token or "").strip() if plex_token is not None else None
+    if not url or not token:
+        base, stored = _plex_base_and_token()
+        url = url or base
+        token = token or stored
+    if not url or not token:
+        return {}
+    try:
+        parsed = fetch_plex_section_locations(plex_url=url, plex_token=token)
+    except Exception as exc:
+        logger.warning(
+            f"Failed to load Plex library locations: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+        return {}
+    fingerprint = _section_locations_fingerprint(url, token)
+    with _section_locations_lock:
+        _section_locations_by_id = dict(parsed)
+        _section_locations_creds = fingerprint
+    logger.info(
+        f"Cached Plex library locations for {len(parsed)} section(s)",
+        extra={"emoji_type": "info"},
+    )
+    return parsed
+
+
+def _cached_section_locations(section_id: int) -> tuple[str, ...]:
+    """Return cached locations for a section, fetching once per process/credentials."""
+    global _section_locations_by_id, _section_locations_creds
+    plex_url, plex_token = _plex_base_and_token()
+    if not plex_url or not plex_token:
+        return ()
+    fingerprint = _section_locations_fingerprint(plex_url, plex_token)
+    with _section_locations_lock:
+        if _section_locations_by_id is not None and _section_locations_creds == fingerprint:
+            return _section_locations_by_id.get(int(section_id), ())
+    parsed = prime_plex_section_location_cache(plex_url=plex_url, plex_token=plex_token)
+    return parsed.get(int(section_id), ())
 
 
 def get_plex_section_scan_state(section_ids: set[int] | list[int]) -> dict[str, object]:
@@ -283,11 +454,45 @@ def refresh_plex_section_ids(
     return {"refreshed": refreshed, "failed": failed}
 
 
+def _library_roots_and_section(abs_folder: str) -> tuple[list[str], int | None]:
+    movie_roots = [
+        str(r).strip()
+        for r in (
+            getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
+            getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
+        )
+        if r
+    ]
+    tv_roots = [
+        str(r).strip()
+        for r in (
+            getattr(settings, "TV_LIBRARY_FOLDER", None),
+            getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
+        )
+        if r
+    ]
+    movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+    tv_section = getattr(settings, "PLEX_TV_SECTION_ID", None)
+    for root in movie_roots:
+        if _relpath_under_root(abs_folder, root) is not None:
+            try:
+                return movie_roots, int(movie_section) if movie_section is not None else None
+            except (TypeError, ValueError):
+                return movie_roots, None
+    for root in tv_roots:
+        if _relpath_under_root(abs_folder, root) is not None:
+            try:
+                return tv_roots, int(tv_section) if tv_section is not None else None
+            except (TypeError, ValueError):
+                return tv_roots, None
+    return [], None
+
+
 def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:
     """Request path-scoped Plex refresh for changed folders.
 
-    Path-scoped refresh avoids broad library sweeps by targeting only the
-    specific folders where placeholder files were created or deleted.
+    Paths are rewritten onto Plex's library locations so Docker/container
+    mounts (e.g. /placeholdarr/movies) match what Plex actually scans.
     """
     if not paths:
         return {"refreshed": 0, "failed": 0}
@@ -295,10 +500,7 @@ def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict
     if not getattr(settings, "plex_enabled", False):
         return {"refreshed": 0, "failed": 0}
 
-    plex_url = getattr(settings, "PLEX_URL", None)
-    plex_token = getattr(settings, "PLEX_TOKEN", None)
-    movie_section_id = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
-    tv_section_id = getattr(settings, "PLEX_TV_SECTION_ID", None)
+    plex_url, plex_token = _plex_base_and_token()
     if not plex_url or not plex_token:
         return {"refreshed": 0, "failed": 0}
 
@@ -311,53 +513,44 @@ def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict
         normalized_folders.append(os.path.dirname(abs_path) if os.path.isfile(abs_path) else abs_path)
 
     for folder in dict.fromkeys(normalized_folders):
-        try:
-            abs_folder = os.path.abspath(folder)
+        abs_folder = os.path.abspath(folder)
+        our_roots, section_id = _library_roots_and_section(abs_folder)
+        if section_id is None:
+            logger.debug(
+                f"Skipping Plex refresh for out-of-scope folder: {abs_folder}",
+                extra={"emoji_type": "debug"},
+            )
+            continue
 
-            section_id = None
-            movie_roots = [
-                getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
-                getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
-            ]
-            tv_roots = [
-                getattr(settings, "TV_LIBRARY_FOLDER", None),
-                getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
-            ]
-
-            for root in [r for r in movie_roots if r]:
-                try:
-                    if os.path.commonpath([abs_folder, os.path.abspath(root)]) == os.path.abspath(root):
-                        section_id = movie_section_id
-                        break
-                except Exception:
-                    continue
-
-            if section_id is None:
-                for root in [r for r in tv_roots if r]:
-                    try:
-                        if os.path.commonpath([abs_folder, os.path.abspath(root)]) == os.path.abspath(root):
-                            section_id = tv_section_id
-                            break
-                    except Exception:
-                        continue
-
-            if section_id is None:
-                logger.debug(
-                    f"Skipping Plex refresh for out-of-scope folder: {abs_folder}",
-                    extra={"emoji_type": "debug"},
-                )
-                continue
-
-            url = f"{str(plex_url).rstrip('/')}/library/sections/{section_id}/refresh?path={quote(abs_folder)}"
-            response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
-            response.raise_for_status()
-            refreshed += 1
-        except Exception as e:
-            failed += 1
+        plex_locations = _cached_section_locations(section_id)
+        refresh_paths = rewrite_folder_to_plex_locations(
+            abs_folder, our_roots=our_roots, plex_locations=plex_locations
+        )
+        if not refresh_paths:
             logger.warning(
-                f"Path-scoped Plex refresh failed for folder={folder}: {e}",
+                f"Plex library locations unavailable for section {section_id}; "
+                f"sending Placeholdarr path as-is folder={abs_folder}",
                 extra={"emoji_type": "warning"},
             )
+            refresh_paths = [abs_folder]
+        elif any(path != abs_folder for path in refresh_paths):
+            logger.info(
+                f"Plex path refresh rewritten local={abs_folder} plex={refresh_paths} section={section_id}",
+                extra={"emoji_type": "refresh"},
+            )
+
+        for refresh_path in refresh_paths:
+            try:
+                url = f"{plex_url}/library/sections/{section_id}/refresh?path={quote(refresh_path)}"
+                response = requests.get(url, headers={"X-Plex-Token": plex_token}, timeout=15)
+                response.raise_for_status()
+                refreshed += 1
+            except Exception as e:
+                failed += 1
+                logger.warning(
+                    f"Path-scoped Plex refresh failed for folder={refresh_path}: {e}",
+                    extra={"emoji_type": "warning"},
+                )
 
     return {"refreshed": refreshed, "failed": failed}
 

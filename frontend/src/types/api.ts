@@ -499,14 +499,21 @@ export interface IntegrationTestResponse {
 // ---------------------------------------------------------------------------
 
 export type CollectionSourceType =
+  | "catalog"
   | "tmdb_trending"
   | "tmdb_popular"
   | "tmdb_upcoming"
   | "tmdb_discover"
+  | "tmdb_url"
   | "tmdb_list"
+  | "tmdb_person"
+  | "tmdb_company"
+  | "tmdb_keyword"
+  | "tmdb_collection"
   | "mdblist"
   | "trakt_list"
-  | "catalog";
+  | "stevenlu"
+  | "anilist";
 
 export interface CollectionSourceBlock {
   type: CollectionSourceType;
@@ -519,9 +526,12 @@ export interface CollectionSourceBlock {
   provider_ids?: number[];
   watch_region?: string;
   min_vote_average?: number | null;
-  /** tmdb_list */
+  /** tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
+  sort_by?: string | null;
+  /** tmdb_list / tmdb_person / tmdb_company / tmdb_keyword / tmdb_collection — id or TMDB URL */
   list_id?: string;
-  /** mdblist / trakt_list — pasted list URL or user/slug */
+  tmdb_ref?: string;
+  /** mdblist / trakt_list / anilist / stevenlu — pasted URL or user/slug */
   list_ref?: string;
   /** per-source candidate cap */
   limit?: number;
@@ -547,6 +557,9 @@ export type CollectionReleaseWindowBasis =
   | "digital"
   | "physical";
 
+/** Year filter: premiere/release year vs TV first–last air overlap. */
+export type CollectionYearBasis = "premiered" | "aired_during";
+
 /** Radarr nested rating providers for movie rating filters. TV uses Sonarr's flat score. */
 export type CollectionRatingProvider =
   | "imdb"
@@ -561,8 +574,8 @@ export interface CollectionFilterBlock {
   value?: string | number | boolean | null;
   value_to?: number | null;
   values?: string[];
-  /** release_window only: TV air-date mode or movie release type. */
-  basis?: CollectionReleaseWindowBasis | null;
+  /** release_window: TV air-date mode or movie release type. year: premiere vs was-airing-during. */
+  basis?: CollectionReleaseWindowBasis | CollectionYearBasis | null;
   /** rating only (movies): which Radarr ratings.* key to use. */
   provider?: CollectionRatingProvider | null;
   /** rating only: require at least this many votes on the chosen score. */
@@ -709,7 +722,7 @@ export interface CollectionExplainCheck {
   value?: string | number | boolean | null;
   value_to?: number | null;
   values?: string[] | null;
-  basis?: CollectionReleaseWindowBasis | null;
+  basis?: CollectionReleaseWindowBasis | CollectionYearBasis | null;
   provider?: CollectionRatingProvider | null;
   min_votes?: number | null;
 }
@@ -748,6 +761,10 @@ export interface CollectionPreviewSampleItem {
   tmdb_id: number | null;
   tvdb_id: number | null;
   poster: string | null;
+  has_file?: boolean;
+  has_placeholder?: boolean;
+  file_state?: "file" | "placeholder" | "mixed" | "none";
+  in_libraries?: number[];
 }
 
 export interface CollectionMissingFromArrItem {
