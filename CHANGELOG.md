@@ -16,6 +16,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Collection title sort**: Arrange by Title (A–Z) ignores leading *a* / *an* / *the*, matching Library A–Z.
 - **Plex collection order**: Synced collections use Plex custom sort and item order from the recipe (Plex previously kept default release-date order, which looked random vs preview).
 - **Collection preview**: Catalog sample shows up to 200 selected titles with file vs placeholder outlines. Multi-library recipes mark which Plex libraries each poster is in (filter chips dim the rest). Missing-from-ARR uses the same Arrange sort; **Select first N** matches the recipe max (capped at the add batch).
+- **Missing-from-ARR add**: Lookups stay per title; Radarr/Sonarr adds go through `movie/import` / `series/import` (chunks of 100) with a **90s** timeout. Timeouts say the *arr may still add the title. Result titles include year.
 
 ## [0.9.16] - 2026-08-14
 
