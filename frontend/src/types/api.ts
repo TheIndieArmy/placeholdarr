@@ -554,6 +554,9 @@ export type CollectionReleaseWindowBasis =
   | "digital"
   | "physical";
 
+/** Year filter: premiere/release year vs TV first–last air overlap. */
+export type CollectionYearBasis = "premiered" | "aired_during";
+
 /** Radarr nested rating providers for movie rating filters. TV uses Sonarr's flat score. */
 export type CollectionRatingProvider =
   | "imdb"
@@ -568,8 +571,8 @@ export interface CollectionFilterBlock {
   value?: string | number | boolean | null;
   value_to?: number | null;
   values?: string[];
-  /** release_window only: TV air-date mode or movie release type. */
-  basis?: CollectionReleaseWindowBasis | null;
+  /** release_window: TV air-date mode or movie release type. year: premiere vs was-airing-during. */
+  basis?: CollectionReleaseWindowBasis | CollectionYearBasis | null;
   /** rating only (movies): which Radarr ratings.* key to use. */
   provider?: CollectionRatingProvider | null;
   /** rating only: require at least this many votes on the chosen score. */
@@ -716,7 +719,7 @@ export interface CollectionExplainCheck {
   value?: string | number | boolean | null;
   value_to?: number | null;
   values?: string[] | null;
-  basis?: CollectionReleaseWindowBasis | null;
+  basis?: CollectionReleaseWindowBasis | CollectionYearBasis | null;
   provider?: CollectionRatingProvider | null;
   min_votes?: number | null;
 }

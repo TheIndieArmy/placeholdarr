@@ -167,11 +167,22 @@ def _normalize_item(raw: dict[str, Any], media_type: str) -> dict[str, Any] | No
     year = None
     if date and len(date) >= 4 and date[:4].isdigit():
         year = int(date[:4])
+    last_air_date = raw.get("last_air_date") or None
+    last_year = None
+    if last_air_date and len(str(last_air_date)) >= 4 and str(last_air_date)[:4].isdigit():
+        last_year = int(str(last_air_date)[:4])
+    elif raw.get("last_year"):
+        try:
+            last_year = int(raw.get("last_year") or 0) or None
+        except (TypeError, ValueError):
+            last_year = None
     return {
         "tmdb_id": int(tmdb_id),
         "title": title,
         "year": year,
         "date": date or None,
+        "last_air_date": last_air_date,
+        "last_year": last_year,
         "popularity": raw.get("popularity"),
         "vote_average": raw.get("vote_average"),
         "vote_count": raw.get("vote_count"),

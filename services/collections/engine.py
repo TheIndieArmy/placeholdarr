@@ -63,6 +63,8 @@ RELEASE_WINDOW_BASES = (
     "physical",
 )
 MOVIE_RELEASE_BASES = ("theater", "digital", "physical")
+# Year filter: premiere (series/movie year) vs TV first–last air overlap.
+YEAR_BASES = ("premiered", "aired_during")
 # Radarr nested rating providers (Sonarr is a single flat value/votes).
 MOVIE_RATING_PROVIDERS = ("imdb", "tmdb", "trakt", "metacritic", "rottenTomatoes")
 DEFAULT_SOURCE_LIMIT = 100
@@ -88,6 +90,9 @@ def _validate_filter_rule(rule: Any) -> dict[str, Any]:
     if rule.get("field") == "release_window" and rule.get("basis") is not None:
         if rule["basis"] not in RELEASE_WINDOW_BASES:
             raise RecipeValidationError(f"unknown release_window basis: {rule['basis']!r}")
+    if rule.get("field") == "year" and rule.get("basis") is not None:
+        if rule["basis"] not in YEAR_BASES:
+            raise RecipeValidationError(f"unknown year basis: {rule['basis']!r}")
     if rule.get("field") == "rating":
         provider = rule.get("provider")
         if provider is not None and provider not in MOVIE_RATING_PROVIDERS:
@@ -523,6 +528,48 @@ def _candidate_language_names(candidate: dict[str, Any]) -> set[str]:
     return names
 
 
+def _year_window_bounds(rule: dict[str, Any]) -> tuple[int, int]:
+    op = str(rule.get("op") or "")
+    if op == "gte":
+        return int(rule.get("value") or 0), 9999
+    if op == "lte":
+        return 0, int(rule.get("value") or 9999)
+    if op == "between":
+        return int(rule.get("value") or 0), int(rule.get("value_to") or 9999)
+    value = int(rule.get("value") or 0)
+    return value, value
+
+
+def _year_span_matches(start: Optional[int], end: Optional[int], rule: dict[str, Any]) -> bool:
+    """True when [start, end] overlaps the rule window. ``end is None`` means still running."""
+    if not start:
+        return False
+    low, high = _year_window_bounds(rule)
+    last = int(end) if end else 9999
+    return int(start) <= high and last >= low
+
+
+def _year_from_date_value(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return int(raw.year)
+    if hasattr(raw, "year") and not isinstance(raw, str):
+        try:
+            return int(raw.year)
+        except (TypeError, ValueError):
+            pass
+    text = str(raw).strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        year = int(text[:4])
+        return year if year > 0 else None
+    try:
+        year = int(text)
+    except (TypeError, ValueError):
+        return None
+    return year if year > 0 else None
+
+
 def _candidate_year(candidate: dict[str, Any]) -> Optional[int]:
     try:
         year = int(candidate.get("year") or 0)
@@ -530,10 +577,46 @@ def _candidate_year(candidate: dict[str, Any]) -> Optional[int]:
         year = 0
     if year:
         return year
-    date = str(candidate.get("date") or "")
-    if len(date) >= 4 and date[:4].isdigit():
-        return int(date[:4])
-    return None
+    return _year_from_date_value(candidate.get("date"))
+
+
+def _candidate_last_year(candidate: dict[str, Any]) -> Optional[int]:
+    try:
+        year = int(candidate.get("last_year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year:
+        return year
+    return _year_from_date_value(candidate.get("last_air_date") or candidate.get("last_aired"))
+
+
+def _row_premiere_year(row: Any) -> Optional[int]:
+    try:
+        year = int(row.year or 0)
+    except (TypeError, ValueError):
+        year = 0
+    return year or None
+
+
+def _row_year_span(
+    row: Any,
+    section_type: str,
+    rule: dict[str, Any],
+    air_dates: Optional[dict[int, dict[str, Optional[datetime]]]] = None,
+) -> tuple[Optional[int], Optional[int]]:
+    premiere = _row_premiere_year(row)
+    basis = str(rule.get("basis") or "premiered")
+    if section_type != "show" or basis != "aired_during":
+        return premiere, premiere
+    entry = (air_dates or {}).get(int(getattr(row, "id", 0) or 0)) or {}
+    start_dt = entry.get("aired_start")
+    end_dt = entry.get("aired_end")
+    start = int(start_dt.year) if start_dt is not None else premiere
+    if end_dt is not None:
+        return start, int(end_dt.year)
+    if start_dt is None:
+        return premiere, premiere
+    return start, None
 
 
 def _candidate_release_dt(candidate: dict[str, Any]) -> Optional[datetime]:
@@ -657,18 +740,11 @@ def _candidate_passes_filter(
     op = str(rule.get("op") or "")
 
     if field == "year":
-        year = _candidate_year(candidate)
-        if not year:
-            return False
-        if op == "gte":
-            return year >= int(rule.get("value") or 0)
-        if op == "lte":
-            return year <= int(rule.get("value") or 9999)
-        if op == "between":
-            low = int(rule.get("value") or 0)
-            high = int(rule.get("value_to") or 9999)
-            return low <= year <= high
-        return year == int(rule.get("value") or 0)
+        start = _candidate_year(candidate)
+        basis = str(rule.get("basis") or "premiered")
+        if section_type == "show" and basis == "aired_during":
+            return _year_span_matches(start, _candidate_last_year(candidate), rule)
+        return _year_span_matches(start, start, rule)
 
     if field == "genre":
         values = {str(v).strip().lower() for v in (rule.get("values") or []) if v}
@@ -1007,6 +1083,8 @@ def _definition_needs_air_dates(normalized: dict[str, Any], section_type: str) -
     for rule in _iter_filter_rules(normalized["filters"]):
         if rule.get("field") == "release_window" and rule.get("basis") in ("latest_episode", "latest_season"):
             return True
+        if rule.get("field") == "year" and str(rule.get("basis") or "") == "aired_during":
+            return True
     return False
 
 
@@ -1036,6 +1114,23 @@ def _load_air_date_lookup(series_row_ids: list[int]) -> dict[int, dict[str, Opti
         )
         for series_id, latest in latest_episode_rows:
             lookup.setdefault(int(series_id), {})["latest_episode"] = _coerce_utc_datetime(latest)
+
+        aired_span_rows = (
+            session.query(Season.series_id, func.min(Episode.air_date), func.max(Episode.air_date))
+            .join(Episode, Episode.season_id == Season.id)
+            .filter(
+                Season.series_id.in_(series_row_ids),
+                Season.is_deleted.is_(False),
+                Episode.is_deleted.is_(False),
+                Episode.air_date.isnot(None),
+            )
+            .group_by(Season.series_id)
+            .all()
+        )
+        for series_id, earliest, latest in aired_span_rows:
+            entry = lookup.setdefault(int(series_id), {})
+            entry["aired_start"] = _coerce_utc_datetime(earliest)
+            entry["aired_end"] = _coerce_utc_datetime(latest)
 
         # Season premieres: MIN(air_date) per season, then the newest premiere that has
         # already aired. Season 0 (specials) excluded so a one-off special doesn't count
@@ -1103,18 +1198,8 @@ def _passes_filter(
         return bool(genres & values)
 
     if field == "year":
-        year = int(row.year or 0)
-        if not year:
-            return False
-        if op == "gte":
-            return year >= int(rule.get("value") or 0)
-        if op == "lte":
-            return year <= int(rule.get("value") or 9999)
-        if op == "between":
-            low = int(rule.get("value") or 0)
-            high = int(rule.get("value_to") or 9999)
-            return low <= year <= high
-        return year == int(rule.get("value") or 0)
+        start, end = _row_year_span(row, section_type, rule, air_dates)
+        return _year_span_matches(start, end, rule)
 
     if field == "certification":
         values = {str(v).strip().upper() for v in (rule.get("values") or []) if v}

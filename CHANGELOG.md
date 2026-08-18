@@ -10,6 +10,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 
 - **Collection sources**: StevenLu (default popular-movies JSON or a custom URL), AniList public user anime lists (GraphQL, throttled), and TMDB person / company / keyword / collection. Paste a TMDB page URL (or numeric id); no in-app search picker.
+- **Collection year filter (TV)**: **Was airing during** matches shows whose first–last air years overlap the window (unknown last air = still running). Movies and the default **Premiere year** still use release / first-air year.
+- **Unsaved collection recipe**: Leaving the recipe editor (Back, Cancel, Library, or another dashboard page) shows an in-app confirm. Closing the browser tab still uses the browser’s leave prompt, which some embedded browsers (including Cursor’s) do not show.
 
 ### Changed
 

@@ -152,12 +152,24 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
   }
 }
 
+function collectionEditorSnapshot(parts: {
+  name: string;
+  enabled: boolean;
+  sectionIds: number[];
+  collectionTitle: string;
+  runIntervalHours: number | null;
+  activeWindow: CollectionActiveWindow | null;
+  definition: CollectionDefinition;
+}): string {
+  return JSON.stringify(parts);
+}
+
 function defaultFilterBlock(field: CollectionFilterField, sectionType: "movie" | "show"): CollectionFilterBlock {
   switch (field) {
     case "genre":
       return { field, op: "includes_any", values: [] };
     case "year":
-      return { field, op: "gte", value: 2000 };
+      return { field, op: "gte", value: 2000, basis: "premiered" };
     case "certification":
       return { field, op: "in", values: [] };
     case "studio_network":
@@ -574,6 +586,11 @@ const RELEASE_BASIS_LABELS: Record<string, string> = {
   physical: "physical release",
 };
 
+const YEAR_BASIS_LABELS: Record<string, string> = {
+  premiered: "premiere year",
+  aired_during: "was airing during",
+};
+
 function explainRuleCheckLabel(check: CollectionExplainCheck): string {
   const base = filterMeta(String(check.field ?? "")).label;
   const op = FILTER_OP_LABELS[String(check.op ?? "")] ?? String(check.op ?? "");
@@ -584,7 +601,9 @@ function explainRuleCheckLabel(check: CollectionExplainCheck): string {
   const basis =
     check.field === "release_window" && check.basis
       ? `(by ${RELEASE_BASIS_LABELS[check.basis] ?? check.basis})`
-      : "";
+      : check.field === "year"
+        ? `(${YEAR_BASIS_LABELS[String(check.basis || "premiered")] ?? "premiere year"})`
+        : "";
   const provider =
     check.field === "rating"
       ? check.provider
@@ -867,6 +886,7 @@ export function CollectionEditor(props: {
   saveError: string | null;
   onSave: (payload: RecipeWritePayload) => void;
   onCancel: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const accentHex = props.accent.hex;
   const theme = getCollectionTheme(props.themeMode === "light");
@@ -886,6 +906,27 @@ export function CollectionEditor(props: {
       ? props.recipe.definition
       : { sources: [], filters: [], limit: 50, sort: "popularity" },
   );
+  const editorSnapshot = useMemo(
+    () =>
+      collectionEditorSnapshot({
+        name,
+        enabled,
+        sectionIds,
+        collectionTitle,
+        runIntervalHours,
+        activeWindow,
+        definition,
+      }),
+    [name, enabled, sectionIds, collectionTitle, runIntervalHours, activeWindow, definition],
+  );
+  const initialSnapshotRef = useRef(editorSnapshot);
+  const dirty = editorSnapshot !== initialSnapshotRef.current;
+  useEffect(() => {
+    props.onDirtyChange?.(dirty);
+  }, [dirty, props.onDirtyChange]);
+  useEffect(() => {
+    return () => props.onDirtyChange?.(false);
+  }, [props.onDirtyChange]);
 
   const sectionId = sectionIds[0] ?? null;
   const section = useMemo(
@@ -1430,6 +1471,23 @@ export function CollectionEditor(props: {
                 />
               </>
             ) : null}
+            {sectionType === "show" ? (
+              <label className={`flex items-center gap-2 ${theme.label}`}>
+                based on
+                <select
+                  className={theme.selectField}
+                  value={block.basis === "aired_during" ? "aired_during" : "premiered"}
+                  onChange={(e) =>
+                    update({ basis: e.target.value as CollectionFilterBlock["basis"] })
+                  }
+                >
+                  <option value="premiered">Premiere year</option>
+                  <option value="aired_during">Was airing during</option>
+                </select>
+              </label>
+            ) : (
+              <span className="text-[13px] text-slate-500">premiere year</span>
+            )}
           </div>
         );
       case "certification": {

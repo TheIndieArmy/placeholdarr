@@ -11,6 +11,7 @@ import {
   type RecipeWritePayload,
 } from "../api/collections";
 import type { CollectionRecipe, LibraryItem, PlexSectionOption } from "../types/api";
+import { ConfirmModal } from "../ConfirmModal";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { CollectionEditor } from "./CollectionEditor";
 import { getCollectionTheme } from "./collectionTheme";
@@ -43,6 +44,8 @@ export function CollectionsPanel(props: {
   onEnsureLibrary: () => void;
   /** Navigate to Settings → Media Integrations (Plex). */
   onOpenPlexSettings?: () => void;
+  /** True while the recipe editor has unsaved edits (for sidebar leave prompts). */
+  onDraftDirty?: (dirty: boolean) => void;
 }) {
   const accentHex = props.accent.hex;
   const isLight = props.themeMode === "light";
@@ -59,12 +62,41 @@ export function CollectionsPanel(props: {
 
   // null = list view; "new" = creating; recipe = editing
   const [editing, setEditing] = useState<CollectionRecipe | "new" | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<number>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
 
   const plexReady = sectionsLoaded && !sectionsError;
+
+  const handleEditorDirty = useCallback((dirty: boolean) => {
+    setEditorDirty(dirty);
+  }, []);
+
+  useEffect(() => {
+    props.onDraftDirty?.(editing !== null && editorDirty);
+  }, [editing, editorDirty, props.onDraftDirty]);
+
+  useEffect(() => {
+    return () => props.onDraftDirty?.(false);
+  }, [props.onDraftDirty]);
+
+  const discardEditor = () => {
+    setLeaveConfirmOpen(false);
+    setEditing(null);
+    setSaveError(null);
+    setEditorDirty(false);
+  };
+
+  const leaveEditor = () => {
+    if (editorDirty) {
+      setLeaveConfirmOpen(true);
+      return;
+    }
+    discardEditor();
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -195,13 +227,22 @@ export function CollectionsPanel(props: {
   if (editing !== null) {
     return (
       <div>
+        {leaveConfirmOpen ? (
+          <ConfirmModal
+            title="Leave without saving?"
+            message="You have an unsaved collection recipe. If you leave now, this draft will be lost."
+            confirmLabel="Leave"
+            cancelLabel="Stay"
+            accentHex={accentHex}
+            themeMode={props.themeMode}
+            onCancel={() => setLeaveConfirmOpen(false)}
+            onConfirm={discardEditor}
+          />
+        ) : null}
         <div className="flex items-center gap-3 mb-6">
           <button
             type="button"
-            onClick={() => {
-              setEditing(null);
-              setSaveError(null);
-            }}
+            onClick={leaveEditor}
             className={`material-symbols-outlined transition-colors ${theme.iconMuted} ${isLight ? "hover:text-slate-900" : "hover:text-white"}`}
             style={{ fontSize: 22 }}
             title="Back to collections"
@@ -226,10 +267,8 @@ export function CollectionsPanel(props: {
           saving={saving}
           saveError={saveError}
           onSave={(payload) => void handleSave(payload)}
-          onCancel={() => {
-            setEditing(null);
-            setSaveError(null);
-          }}
+          onCancel={leaveEditor}
+          onDirtyChange={handleEditorDirty}
         />
       </div>
     );
