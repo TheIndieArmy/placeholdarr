@@ -104,6 +104,7 @@ async def list_recipes():
         "recipes": payload,
         "tmdb_configured": tmdb_client.tmdb_configured(),
         "trakt_configured": list_sources.trakt_configured(),
+        "tautulli_configured": list_sources.tautulli_configured(),
     }
 
 
@@ -325,12 +326,32 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
         genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
         certifications = [str(row[0]).strip() for row in session.execute(cert_sql) if row[0] and str(row[0]).strip()]
 
+    arr_tags: list[dict[str, Any]] = []
+    for item in instances:
+        key = str(item.get("instance_key") or "")
+        if not key:
+            continue
+        try:
+            for tag in list_sources.fetch_arr_tags(key, arr_type):
+                arr_tags.append(
+                    {
+                        "instance_key": key,
+                        "instance_label": item.get("label") or key,
+                        "tag_id": tag["id"],
+                        "label": tag["label"],
+                    }
+                )
+        except list_sources.ListSourceError:
+            continue
+
     return {
         "instances": instance_options,
         "quality_profiles": profile_options,
         "languages": languages,
         "genres": genres,
         "certifications": certifications,
+        "arr_tags": arr_tags,
+        "tautulli_configured": list_sources.tautulli_configured(),
     }
 
 

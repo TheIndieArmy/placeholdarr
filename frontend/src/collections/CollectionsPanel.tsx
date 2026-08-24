@@ -54,6 +54,7 @@ export function CollectionsPanel(props: {
   const [recipes, setRecipes] = useState<CollectionRecipe[]>([]);
   const [tmdbConfigured, setTmdbConfigured] = useState(true);
   const [traktConfigured, setTraktConfigured] = useState(true);
+  const [tautulliConfigured, setTautulliConfigured] = useState(false);
   const [sections, setSections] = useState<PlexSectionOption[]>([]);
   const [sectionsError, setSectionsError] = useState<string | null>(null);
   const [sectionsLoaded, setSectionsLoaded] = useState(false);
@@ -104,6 +105,7 @@ export function CollectionsPanel(props: {
       setRecipes(payload.recipes);
       setTmdbConfigured(payload.tmdb_configured);
       setTraktConfigured(payload.trakt_configured);
+      setTautulliConfigured(Boolean(payload.tautulli_configured));
       setLoadError(null);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to load collections");
@@ -259,6 +261,7 @@ export function CollectionsPanel(props: {
           sections={sections}
           tmdbConfigured={tmdbConfigured}
           traktConfigured={traktConfigured}
+          tautulliConfigured={tautulliConfigured}
           libraryItems={props.libraryItems}
           libraryLoading={props.libraryLoading}
           onEnsureLibrary={props.onEnsureLibrary}

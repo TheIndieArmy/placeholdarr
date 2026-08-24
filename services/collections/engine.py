@@ -24,6 +24,7 @@ from services.postgres.models import CollectionRecipe, Episode, Movie, Season, S
 
 SOURCE_TYPES = (
     "catalog",
+    "tmdb",
     "tmdb_trending",
     "tmdb_popular",
     "tmdb_upcoming",
@@ -35,10 +36,19 @@ SOURCE_TYPES = (
     "tmdb_keyword",
     "tmdb_collection",
     "mdblist",
+    "trakt",
     "trakt_list",
+    "trakt_chart",
     "stevenlu",
     "anilist",
+    "tautulli",
+    "arr_tag",
 )
+TMDB_SOURCE_SUBTYPES = ("trending", "popular", "upcoming", "discover", "page")
+TRAKT_SOURCE_SUBTYPES = ("list", "trending", "popular", "watched", "played", "collected")
+TRAKT_CHART_SUBTYPES = ("trending", "popular", "watched", "played", "collected")
+TRAKT_CHART_PERIODS = ("daily", "weekly", "monthly", "yearly", "all")
+TAUTULLI_SOURCE_SUBTYPES = ("most_popular", "most_watched")
 FILTER_FIELDS = (
     "genre",
     "year",
@@ -187,6 +197,12 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
             raise RecipeValidationError("tmdb_list source requires a list id or TMDB list URL")
         if source_type == "tmdb_url" and not str(source.get("tmdb_ref") or "").strip():
             raise RecipeValidationError("tmdb_url source requires a TMDB page URL")
+        if source_type == "tmdb":
+            subtype = str(source.get("subtype") or "trending").strip().lower()
+            if subtype not in TMDB_SOURCE_SUBTYPES:
+                raise RecipeValidationError(f"unknown tmdb subtype: {subtype!r}")
+            if subtype == "page" and not str(source.get("tmdb_ref") or "").strip():
+                raise RecipeValidationError("tmdb page source requires a TMDB page URL")
         if source_type in ("tmdb_person", "tmdb_company", "tmdb_keyword", "tmdb_collection") and not str(
             source.get("tmdb_ref") or ""
         ).strip():
@@ -194,8 +210,39 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         sort_by = source.get("sort_by")
         if sort_by is not None and str(sort_by).strip() and str(sort_by) not in TMDB_SOURCE_SORTS:
             raise RecipeValidationError(f"unknown TMDB source sort: {sort_by!r}")
-        if source_type in ("mdblist", "trakt_list", "anilist") and not str(source.get("list_ref") or "").strip():
+        if source_type in ("mdblist", "trakt_list", "anilist") and not str(
+            source.get("list_ref") or ""
+        ).strip():
             raise RecipeValidationError(f"{source_type} source requires a list URL or user/slug")
+        if source_type == "trakt":
+            subtype = str(source.get("subtype") or "trending").strip().lower()
+            if subtype not in TRAKT_SOURCE_SUBTYPES:
+                raise RecipeValidationError(f"unknown trakt subtype: {subtype!r}")
+            if subtype == "list" and not str(source.get("list_ref") or "").strip():
+                raise RecipeValidationError("trakt list source requires a list URL or user/slug")
+            if subtype in ("watched", "played", "collected"):
+                period = str(source.get("period") or "weekly").strip().lower()
+                if period not in TRAKT_CHART_PERIODS:
+                    raise RecipeValidationError(f"unknown trakt chart period: {period!r}")
+        if source_type == "trakt_chart":
+            subtype = str(source.get("subtype") or "trending").strip().lower()
+            if subtype not in TRAKT_CHART_SUBTYPES:
+                raise RecipeValidationError(f"unknown trakt_chart subtype: {subtype!r}")
+            period = str(source.get("period") or "weekly").strip().lower()
+            if period not in TRAKT_CHART_PERIODS:
+                raise RecipeValidationError(f"unknown trakt_chart period: {period!r}")
+        if source_type == "tautulli":
+            subtype = str(source.get("subtype") or "most_popular").strip().lower()
+            if subtype not in TAUTULLI_SOURCE_SUBTYPES:
+                raise RecipeValidationError(f"unknown tautulli subtype: {subtype!r}")
+        if source_type == "arr_tag":
+            if not str(source.get("instance_key") or "").strip():
+                raise RecipeValidationError("arr_tag source requires an instance_key")
+            try:
+                if int(source.get("tag_id")) < 1:
+                    raise RecipeValidationError("arr_tag source requires a tag_id")
+            except (TypeError, ValueError) as exc:
+                raise RecipeValidationError("arr_tag source requires a numeric tag_id") from exc
         normalized_sources.append(source)
 
     filters = _normalize_filters(definition.get("filters"))
@@ -258,6 +305,43 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
     source_type = source.get("type")
     limit = int(source.get("limit") or DEFAULT_SOURCE_LIMIT)
     source_sort = tmdb_client.normalize_tmdb_sort_by(source.get("sort_by"), media_type)
+    if source_type == "tmdb":
+        subtype = str(source.get("subtype") or "trending").strip().lower()
+        if subtype == "trending":
+            return tmdb_client.fetch_trending(media_type, str(source.get("window") or "week"), limit)
+        if subtype == "popular":
+            return tmdb_client.fetch_popular(media_type, limit)
+        if subtype == "upcoming":
+            return tmdb_client.fetch_upcoming(media_type, limit)
+        if subtype == "discover":
+            return tmdb_client.fetch_discover(
+                media_type,
+                genre_ids=[int(g) for g in (source.get("genre_ids") or [])],
+                year_from=source.get("year_from"),
+                year_to=source.get("year_to"),
+                provider_ids=[int(p) for p in (source.get("provider_ids") or [])],
+                watch_region=source.get("watch_region"),
+                min_vote_average=source.get("min_vote_average"),
+                sort_by=source_sort,
+                limit=limit,
+            )
+        if subtype == "page":
+            tmdb_ref = str(source.get("tmdb_ref") or "")
+            kind = tmdb_client.parse_tmdb_resource_kind(tmdb_ref)
+            if kind == "list":
+                return tmdb_client.fetch_list(tmdb_ref, media_type, limit)
+            if kind == "person":
+                return tmdb_client.fetch_person_credits(tmdb_ref, media_type, limit)
+            if kind == "company":
+                return tmdb_client.fetch_company(tmdb_ref, media_type, limit, source_sort)
+            if kind == "keyword":
+                return tmdb_client.fetch_keyword(tmdb_ref, media_type, limit, source_sort)
+            if kind == "collection":
+                return tmdb_client.fetch_collection(tmdb_ref, media_type, limit)
+            raise tmdb_client.TmdbError(
+                "TMDB page source needs a TMDB list, person, company, keyword, or collection URL"
+            )
+        raise RecipeValidationError(f"unknown tmdb subtype: {subtype!r}")
     if source_type == "tmdb_trending":
         return tmdb_client.fetch_trending(media_type, str(source.get("window") or "week"), limit)
     if source_type == "tmdb_popular":
@@ -302,12 +386,44 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
         return tmdb_client.fetch_collection(str(source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "mdblist":
         return list_sources.fetch_mdblist(str(source.get("list_ref")), media_type, limit)
+    if source_type == "trakt":
+        subtype = str(source.get("subtype") or "trending").strip().lower()
+        if subtype == "list":
+            return list_sources.fetch_trakt_list(str(source.get("list_ref")), media_type, limit)
+        return list_sources.fetch_trakt_chart(
+            media_type,
+            subtype,
+            period=str(source.get("period") or "weekly"),
+            limit=limit,
+        )
     if source_type == "trakt_list":
         return list_sources.fetch_trakt_list(str(source.get("list_ref")), media_type, limit)
+    if source_type == "trakt_chart":
+        return list_sources.fetch_trakt_chart(
+            media_type,
+            str(source.get("subtype") or "trending"),
+            period=str(source.get("period") or "weekly"),
+            limit=limit,
+        )
     if source_type == "stevenlu":
         return list_sources.fetch_stevenlu(str(source.get("list_ref") or ""), media_type, limit)
     if source_type == "anilist":
         return list_sources.fetch_anilist(str(source.get("list_ref")), media_type, limit)
+    if source_type == "tautulli":
+        return list_sources.fetch_tautulli(
+            media_type,
+            str(source.get("subtype") or "most_popular"),
+            days=int(source.get("days") or 30),
+            minimum_plays=int(source.get("minimum_plays") or 1),
+            limit=limit,
+        )
+    if source_type == "arr_tag":
+        return list_sources.fetch_arr_tag_items(
+            media_type,
+            instance_key=str(source.get("instance_key") or ""),
+            tag_id=int(source.get("tag_id")),
+            limit=limit,
+        )
     return []
 
 

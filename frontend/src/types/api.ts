@@ -500,6 +500,7 @@ export interface IntegrationTestResponse {
 
 export type CollectionSourceType =
   | "catalog"
+  | "tmdb"
   | "tmdb_trending"
   | "tmdb_popular"
   | "tmdb_upcoming"
@@ -511,28 +512,42 @@ export type CollectionSourceType =
   | "tmdb_keyword"
   | "tmdb_collection"
   | "mdblist"
+  | "trakt"
   | "trakt_list"
+  | "trakt_chart"
   | "stevenlu"
-  | "anilist";
+  | "anilist"
+  | "tautulli"
+  | "arr_tag";
 
 export interface CollectionSourceBlock {
   type: CollectionSourceType;
-  /** tmdb_trending */
+  /** tmdb / tmdb_trending */
   window?: "day" | "week";
-  /** tmdb_discover */
+  /** tmdb discover / tmdb_discover */
   genre_ids?: number[];
   year_from?: number | null;
   year_to?: number | null;
   provider_ids?: number[];
   watch_region?: string;
   min_vote_average?: number | null;
-  /** tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
+  /** tmdb discover|page / tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
   sort_by?: string | null;
   /** tmdb_list / tmdb_person / tmdb_company / tmdb_keyword / tmdb_collection — id or TMDB URL */
   list_id?: string;
   tmdb_ref?: string;
-  /** mdblist / trakt_list / anilist / stevenlu — pasted URL or user/slug */
+  /** mdblist / trakt list / anilist / stevenlu — pasted URL or user/slug */
   list_ref?: string;
+  /** tmdb / trakt / tautulli / legacy trakt_chart subtype */
+  subtype?: string;
+  /** trakt chart period for watched/played/collected */
+  period?: string;
+  /** tautulli */
+  days?: number;
+  minimum_plays?: number;
+  /** arr_tag */
+  instance_key?: string;
+  tag_id?: number | null;
   /** per-source candidate cap */
   limit?: number;
 }
@@ -681,6 +696,7 @@ export interface CollectionRecipesResponse {
   recipes: CollectionRecipe[];
   tmdb_configured: boolean;
   trakt_configured: boolean;
+  tautulli_configured?: boolean;
 }
 
 export interface PlexSectionOption {
@@ -706,6 +722,9 @@ export interface CollectionBuilderMeta {
   genres: string[];
   /** Distinct Radarr/Sonarr certifications present in the catalog (matches filter evaluation). */
   certifications: string[];
+  /** Tags from configured *arr instances for arr_tag sources. */
+  arr_tags?: { instance_key: string; instance_label: string; tag_id: number; label: string }[];
+  tautulli_configured?: boolean;
 }
 
 export type CollectionExplainStatus = "pass" | "fail" | "skip";

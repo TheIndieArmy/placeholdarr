@@ -233,9 +233,39 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Media Integrations",
                 "label": "Trakt Client ID",
                 "description": (
-                    "Trakt API application Client ID used by the Collections builder to read public Trakt lists. "
-                    "Create a free app at trakt.tv/oauth/applications — only the Client ID is needed (no account linking). "
-                    "Optional; only needed for Trakt list collection sources."
+                    "Trakt API Client ID for Collections (public lists and charts). "
+                    "Creating a Trakt API application currently requires Trakt VIP "
+                    "(trakt.tv/oauth/applications). Paste the Client ID here once you have one. "
+                    "Optional; only needed for Trakt collection sources."
+                ),
+                "type": "string",
+                "required": False,
+                "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "TAUTULLI_URL",
+            {
+                "section": "Media Integrations",
+                "label": "Tautulli URL",
+                "description": (
+                    "Base URL for outbound Tautulli API calls used by Collections most-popular / most-watched "
+                    "sources (e.g. http://tautulli:8181). Separate from playback webhooks. Optional."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "TAUTULLI_API_KEY",
+            {
+                "section": "Media Integrations",
+                "label": "Tautulli API Key",
+                "description": (
+                    "Tautulli Settings → Web Interface → API key. Required together with Tautulli URL for "
+                    "Collections Tautulli sources."
                 ),
                 "type": "string",
                 "required": False,
