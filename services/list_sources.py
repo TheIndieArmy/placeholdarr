@@ -677,6 +677,109 @@ def fetch_trakt_chart(
 # ---------------------------------------------------------------------------
 
 TAUTULLI_STAT_SUBTYPES = ("most_popular", "most_watched")
+_PLACEHOLDER_TITLE_SUFFIX_RE = re.compile(r"\s*\(Placeholder\)\s*$", re.IGNORECASE)
+_TMDB_GUID_RE = re.compile(
+    r"(?:tmdb|themoviedb)(?:://|/|_)(\d+)",
+    re.IGNORECASE,
+)
+_IMDB_GUID_RE = re.compile(r"(tt\d+)", re.IGNORECASE)
+_TVDB_GUID_RE = re.compile(
+    r"(?:tvdb|thetvdb)(?:://|/|_)(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _clean_tautulli_title(title: str) -> str:
+    return _PLACEHOLDER_TITLE_SUFFIX_RE.sub("", str(title or "").strip()).strip()
+
+
+def _ids_from_guid_texts(guids: Any) -> tuple[Optional[int], Optional[str], Optional[int]]:
+    """Extract tmdb / imdb / tvdb ids from Plex/Tautulli guid string(s)."""
+    if isinstance(guids, str):
+        texts = [guids]
+    elif isinstance(guids, list):
+        texts = [str(g) for g in guids if g]
+    else:
+        texts = []
+    tmdb_id: Optional[int] = None
+    imdb_id: Optional[str] = None
+    tvdb_id: Optional[int] = None
+    for text in texts:
+        lower = text.lower()
+        if tmdb_id is None:
+            m = _TMDB_GUID_RE.search(text)
+            if m:
+                try:
+                    tmdb_id = int(m.group(1))
+                except (TypeError, ValueError):
+                    pass
+        if imdb_id is None and ("imdb" in lower):
+            m = _IMDB_GUID_RE.search(text)
+            if m:
+                imdb_id = m.group(1)
+        if tvdb_id is None:
+            m = _TVDB_GUID_RE.search(text)
+            if m:
+                try:
+                    tvdb_id = int(m.group(1))
+                except (TypeError, ValueError):
+                    pass
+    return tmdb_id, imdb_id, tvdb_id
+
+
+def _tautulli_metadata_ids(
+    base: str,
+    api_key: str,
+    rating_key: str,
+) -> tuple[Optional[int], Optional[str], Optional[int], Optional[str], Optional[int]]:
+    """Resolve external ids (and title/year) via Tautulli get_metadata.
+
+    Home-stats rows often only carry plex:// or episode-level agent guids; show/movie
+    metadata includes the tmdb/imdb/tvdb guids the collections engine needs.
+    """
+    if not rating_key:
+        return None, None, None, None, None
+    cache_key = f"tautulli:meta:{rating_key}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    resp = _get_with_retry(
+        f"{base}/api/v2",
+        params={"apikey": api_key, "cmd": "get_metadata", "rating_key": rating_key},
+        headers={"Accept": "application/json", "User-Agent": "Placeholdarr"},
+        source_name="Tautulli",
+    )
+    if resp.status_code != 200:
+        empty = (None, None, None, None, None)
+        _cache_set(cache_key, empty)
+        return empty
+    try:
+        body = resp.json()
+    except ValueError:
+        empty = (None, None, None, None, None)
+        _cache_set(cache_key, empty)
+        return empty
+    response = body.get("response") if isinstance(body, dict) else None
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        empty = (None, None, None, None, None)
+        _cache_set(cache_key, empty)
+        return empty
+    guid_blob: list[Any] = []
+    if data.get("guids"):
+        guid_blob.extend(data.get("guids") if isinstance(data.get("guids"), list) else [data.get("guids")])
+    if data.get("guid"):
+        guid_blob.append(data.get("guid"))
+    tmdb_id, imdb_id, tvdb_id = _ids_from_guid_texts(guid_blob)
+    title = _clean_tautulli_title(str(data.get("title") or ""))
+    year = None
+    try:
+        year = int(data.get("year") or 0) or None
+    except (TypeError, ValueError):
+        year = None
+    out = (tmdb_id, imdb_id, tvdb_id, title or None, year)
+    _cache_set(cache_key, out)
+    return out
 
 
 def fetch_tautulli(
@@ -758,42 +861,43 @@ def fetch_tautulli(
                 continue
         except (TypeError, ValueError):
             pass
-        title = str(raw.get("title") or raw.get("grandparent_title") or "").strip()
+        title = _clean_tautulli_title(str(raw.get("title") or raw.get("grandparent_title") or ""))
         year = None
         try:
             year = int(raw.get("year") or 0) or None
         except (TypeError, ValueError):
             year = None
-        # Prefer GUIDs when Tautulli includes them
-        guids = raw.get("guids") or raw.get("guid") or []
-        if isinstance(guids, str):
-            guids = [guids]
-        tmdb_id = None
-        imdb_id = None
-        tvdb_id = None
-        for g in guids if isinstance(guids, list) else []:
-            text = str(g)
-            if "tmdb://" in text or "themoviedb://" in text:
-                try:
-                    tmdb_id = int(re.search(r"(\d+)", text.split("://", 1)[-1]).group(1))  # type: ignore[union-attr]
-                except Exception:
-                    pass
-            elif "imdb://" in text:
-                m = re.search(r"(tt\d+)", text)
-                if m:
-                    imdb_id = m.group(1)
-            elif "tvdb://" in text:
-                try:
-                    tvdb_id = int(re.search(r"(\d+)", text.split("://", 1)[-1]).group(1))  # type: ignore[union-attr]
-                except Exception:
-                    pass
-        rating_key = str(raw.get("rating_key") or raw.get("grandparent_rating_key") or "")
+        # Show-level key when stats are episode-scoped (top_tv / popular_tv)
+        rating_key = str(
+            raw.get("grandparent_rating_key")
+            or raw.get("rating_key")
+            or ""
+        ).strip()
+        row_guids = raw.get("guids") or raw.get("guid") or []
+        tmdb_id, imdb_id, tvdb_id = _ids_from_guid_texts(row_guids)
+        guid_text = str(raw.get("guid") or "")
+        # Home stats often use plex:// or episode agent guids; episode-level tvdb_* is not the
+        # show id. Resolve via get_metadata (guids[] on the show/movie) when needed.
+        if rating_key and (
+            not (tmdb_id or imdb_id or tvdb_id)
+            or guid_text.startswith("plex://")
+            or "/episode/" in guid_text
+        ):
+            meta_tmdb, meta_imdb, meta_tvdb, meta_title, meta_year = _tautulli_metadata_ids(
+                base, api_key, rating_key
+            )
+            tmdb_id = meta_tmdb or tmdb_id
+            imdb_id = meta_imdb or imdb_id
+            tvdb_id = meta_tvdb or tvdb_id
+            if meta_title:
+                title = meta_title
+            if meta_year:
+                year = meta_year
         dedupe = f"{tmdb_id}:{imdb_id}:{tvdb_id}:{rating_key}:{title}:{year}"
         if not title or dedupe in seen:
             continue
         if not (tmdb_id or imdb_id or tvdb_id):
-            # Keep title/year for catalog fuzzy match paths that use imdb/tmdb later;
-            # engine matching needs an id — skip when nothing available.
+            # Engine matching is id-based; skip rows we still cannot resolve.
             continue
         seen.add(dedupe)
         items.append(
