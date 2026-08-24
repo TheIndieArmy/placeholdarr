@@ -206,6 +206,7 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
             "sort": sort,
             "sort_provider": None,
             "pins": {"include": [], "exclude": []},
+            "adopt_existing": bool(definition.get("adopt_existing")),
         }
 
     sources = definition.get("sources") or []
@@ -314,12 +315,24 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         "sort": sort,
         "sort_provider": sort_provider,
         "pins": normalized_pins,
+        "adopt_existing": bool(definition.get("adopt_existing")),
     }
 
 
-# ---------------------------------------------------------------------------
-# Source blocks
-# ---------------------------------------------------------------------------
+def titles_for_conflict_check(
+    *,
+    collection_title: str,
+    definition: dict[str, Any],
+    section_type: str,
+) -> list[str]:
+    """Titles that would be created/synced for conflict detection."""
+    if sets_mod.is_collection_set_definition(definition):
+        normalized = validate_definition(definition)
+        set_cfg = normalized["collection_set"]
+        children = sets_mod.expand_collection_set(set_cfg, section_type)
+        return [str(child.get("title") or "").strip() for child in children if child.get("title")]
+    title = str(collection_title or "").strip()
+    return [title] if title else []
 
 def _media_type_for_section(section_type: str) -> str:
     return "movie" if section_type == "movie" else "tv"
@@ -2427,6 +2440,7 @@ def run_collection_set_recipe(
             if outcome["plex_error"]:
                 raise plex_collections.PlexCollectionsError(outcome["plex_error"])
             known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
+            adopt = bool(normalized.get("adopt_existing"))
             sync_stats = plex_collections.sync_collection(
                 sid,
                 section_type,
@@ -2435,6 +2449,7 @@ def run_collection_set_recipe(
                 recipe_id=recipe_id,
                 set_value=value_label,
                 known_rating_key=known_key,
+                adopt_unlabeled=adopt,
             )
             keys_map = plex_collections.set_stored_key(
                 keys_map, sid, title, sync_stats.get("rating_key")
@@ -2584,6 +2599,7 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                 if outcome["plex_error"]:
                     raise plex_collections.PlexCollectionsError(outcome["plex_error"])
                 known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
+                adopt = bool(definition.get("adopt_existing"))
                 sync_stats = plex_collections.sync_collection(
                     sid,
                     section_type,
@@ -2591,6 +2607,7 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                     outcome["resolved_items"] or [],
                     recipe_id=recipe_id,
                     known_rating_key=known_key,
+                    adopt_unlabeled=adopt,
                 )
                 keys_map = plex_collections.set_stored_key(
                     keys_map, sid, collection_title, sync_stats.get("rating_key")
@@ -2801,6 +2818,7 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                         [],
                         recipe_id=recipe_id,
                         known_rating_key=known_key,
+                        adopt_unlabeled=bool(definition.get("adopt_existing")),
                     )
                     keys_map = plex_collections.set_stored_key(
                         keys_map, sid, title, sync_stats.get("rating_key")
@@ -2827,6 +2845,7 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                     [],
                     recipe_id=recipe_id,
                     known_rating_key=known_key,
+                    adopt_unlabeled=bool(definition.get("adopt_existing")),
                 )
                 keys_map = plex_collections.set_stored_key(
                     keys_map, sid, collection_title, sync_stats.get("rating_key")

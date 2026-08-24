@@ -70,6 +70,26 @@ export function previewCollectionDefinition(payload: {
   return postJson("/api/collections/preview", payload);
 }
 
+export interface CollectionTitleConflict {
+  title: string;
+  section_id: number;
+  section_title: string;
+  rating_key?: string | null;
+  item_count: number;
+  reason: "unlabeled" | "other_recipe" | "ours" | string;
+}
+
+export function checkCollectionTitleConflicts(payload: {
+  plex_section_id: number;
+  plex_section_ids?: number[];
+  plex_section_type: "movie" | "show";
+  collection_title: string;
+  definition: CollectionDefinition;
+  recipe_id?: number | null;
+}): Promise<{ conflicts: CollectionTitleConflict[]; titles_checked: string[] }> {
+  return postJson("/api/collections/title-conflicts", payload);
+}
+
 export function getCollectionPlexSections(): Promise<{ sections: PlexSectionOption[] }> {
   return fetchJson("/api/collections/plex-sections");
 }

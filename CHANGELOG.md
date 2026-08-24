@@ -15,15 +15,20 @@ Collections (Beta) expands with unified **TMDB/Trakt** source cards plus **Tautu
 
 ### Action required
 
-**Existing Collections users:** After upgrading, the next sync may create a new Placeholdarr-owned Plex collection beside an older unmarked duplicate (ownership no longer matches by title alone). Keep the collection whose summary ends with **Managed by Placeholdarr.** and delete the other. A What's new notice covers this.
+**Reconnect existing Collections:** Placeholdarr now tracks Plex collection ownership internally, rather than matching by name. Open each affected recipe and **save** it: you will be prompted to **adopt** the matching collection or rename the recipe. Until you do, scheduled runs for that recipe will fail and leave the Plex collection unchanged. Prefer adopt for collections Placeholdarr already created. If you built the collection in Plex or another tool, rename instead so Placeholdarr does not claim it. Adopting syncs the collection to the recipe, so non-matching items will be removed.
 
 ### Added
 
 - **Collection sources**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**.
 - **Collection Sets**: One config fans out to many Plex collections by **genre**, **decade**, **content rating** (age certification — not critic scores), **\*arr tag**, or **release timing** (Upcoming / released this week|month|year|decade, with a shared release-date basis like recipe filters). Include/exclude value selection, title patterns, live preview, and cleanup of stale child collections this set previously managed.
-- **Collection ownership**: Recipes used to match Plex collections by title only, so a sync could take over (and empty) a hand-made collection with the same name. Synced collections are now marked with a visible summary footer **Managed by Placeholdarr.** (plus internal labels) and tracked by ratingKey, so Placeholdarr only edits collections it owns. Existing summary text is kept; the footer is appended. After upgrade, a recipe may create a new owned copy beside an older unmarked one — keep the footer copy and delete the other.
+- **Collection ownership**: Synced collections are tracked behind the scenes (labels, summary footer **Managed by Placeholdarr.**, and ratingKeys). Placeholdarr only edits collections it owns. If a same-named collection already exists in a selected library, save asks you to **rename** or **adopt**. Prefer adopt for collections Placeholdarr already created; rename if the shelf was built in Plex or another tool. Adopting syncs membership to the recipe, so non-matching items may be removed.
 - **Collection source Validate**: URL/list source cards (TMDB Page, MDBList, Trakt list, AniList, StevenLu, legacy TMDB link types) gain a **Validate** button that resolves the pasted link and shows the title/kind or an error before you run preview. If the collection title is still blank, a successful validate can fill it in.
 - **Collection export/import**: Export selected recipes (or Collection Sets) to a portable JSON file, or import a bundle into this install. Runtime fields (ids, last-run stats, Plex ratingKeys) are stripped on export; import rebinds to your Plex libraries and creates new recipes.
+
+### Fixed
+
+- **Tautulli collection source**: Home-stats rows that only expose modern `plex://` (or episode-level agent) guids no longer yield an empty candidate list. Placeholdarr resolves TMDB/IMDb/TVDB ids via Tautulli `get_metadata` and strips a trailing `(Placeholder)` from titles.
+- **Collection same-title twins**: Sync no longer creates a second Plex collection with the same name in a library (which produced 0-item counts and linked deletes). Conflicts require rename or explicit adopt.
 
 ## [0.9.17] - 2026-08-18
 

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
 import {
+  checkCollectionTitleConflicts,
   getCollectionBuilderMeta,
   previewCollectionDefinition,
+  type CollectionTitleConflict,
   type RecipeWritePayload,
 } from "../api/collections";
 import type {
@@ -102,7 +104,7 @@ function defaultSetConfig(category: SetCategory = "genre"): CollectionSetConfig 
   };
 }
 
-function setDefinition(config: CollectionSetConfig): CollectionDefinition {
+function setDefinition(config: CollectionSetConfig, adoptExisting = false): CollectionDefinition {
   return {
     mode: "collection_set",
     collection_set: config,
@@ -111,6 +113,7 @@ function setDefinition(config: CollectionSetConfig): CollectionDefinition {
     limit: config.limit ?? null,
     sort: config.sort ?? "title",
     pins: { include: [], exclude: [] },
+    ...(adoptExisting ? { adopt_existing: true } : {}),
   };
 }
 
@@ -140,7 +143,8 @@ export function CollectionSetEditor(props: {
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const accentHex = props.accent.hex;
-  const theme = getCollectionTheme(props.themeMode === "light");
+  const isLight = props.themeMode === "light";
+  const theme = getCollectionTheme(isLight);
   const existing = props.recipe?.definition?.collection_set;
 
   const [name, setName] = useState(props.recipe?.name ?? "");
@@ -154,6 +158,14 @@ export function CollectionSetEditor(props: {
   const [activeWindow, setActiveWindow] = useState<CollectionActiveWindow | null>(
     props.recipe?.active_window ?? null,
   );
+  const [adoptExisting, setAdoptExisting] = useState(Boolean(props.recipe?.definition?.adopt_existing));
+  const [nameCheck, setNameCheck] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ok" }
+    | { status: "conflict"; conflicts: CollectionTitleConflict[] }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
   const [setConfig, setSetConfig] = useState<CollectionSetConfig>(() => {
     const cat = setCategoryOf(existing);
     if (!cat) return defaultSetConfig("genre");
@@ -169,6 +181,7 @@ export function CollectionSetEditor(props: {
         sectionIds,
         runIntervalHours,
         activeWindow,
+        adoptExisting,
         setConfig: {
           category: setConfig.category,
           selection_mode: setConfig.selection_mode,
@@ -181,7 +194,7 @@ export function CollectionSetEditor(props: {
           release_basis: setConfig.release_basis,
         },
       }),
-    [name, enabled, sectionIds, runIntervalHours, activeWindow, setConfig],
+    [name, enabled, sectionIds, runIntervalHours, activeWindow, adoptExisting, setConfig],
   );
   const initialRef = useRef(snapshot);
   const dirty = snapshot !== initialRef.current;
@@ -192,6 +205,10 @@ export function CollectionSetEditor(props: {
     return () => props.onDirtyChange?.(false);
   }, [props.onDirtyChange]);
 
+  useEffect(() => {
+    setNameCheck({ status: "idle" });
+  }, [sectionIds, setConfig.title_pattern, setConfig.category, setConfig.selection_mode, setConfig.values]);
+
   const sectionId = sectionIds[0] ?? null;
   const section = useMemo(
     () => props.sections.find((s) => s.id === sectionId) ?? null,
@@ -199,6 +216,43 @@ export function CollectionSetEditor(props: {
   );
   const hasLibrary = sectionIds.length > 0;
   const sectionType: "movie" | "show" = section?.type ?? props.recipe?.plex_section_type ?? "movie";
+
+  const runCheckNames = async () => {
+    if (!sectionId || sectionIds.length === 0) return;
+    const pattern = setConfig.title_pattern.trim() || defaultSetConfig(setConfig.category).title_pattern;
+    if (!pattern.includes("{value}")) return;
+    setNameCheck({ status: "loading" });
+    try {
+      const { dimension: _omit, ...rest } = setConfig;
+      const config: CollectionSetConfig = {
+        ...rest,
+        category: setConfig.category,
+        title_pattern: pattern,
+        values: setConfig.selection_mode === "all" ? [] : setConfig.values,
+        instance_key: setConfig.category === "tag" ? setConfig.instance_key : null,
+        release_basis: setConfig.category === "release_timing" ? setConfig.release_basis : null,
+      };
+      const result = await checkCollectionTitleConflicts({
+        plex_section_id: sectionId,
+        plex_section_ids: sectionIds,
+        plex_section_type: sectionType,
+        collection_title: pattern,
+        definition: setDefinition(config, adoptExisting),
+        recipe_id: props.recipe?.id ?? null,
+      });
+      const blocking = (result.conflicts || []).filter((c) => c.reason !== "ours");
+      if (blocking.length === 0) {
+        setNameCheck({ status: "ok" });
+        return;
+      }
+      setNameCheck({ status: "conflict", conflicts: blocking });
+    } catch (err) {
+      setNameCheck({
+        status: "error",
+        message: err instanceof Error ? err.message : "Could not check those names",
+      });
+    }
+  };
 
   const [builderMeta, setBuilderMeta] = useState<CollectionBuilderMeta | null>(null);
   useEffect(() => {
@@ -367,7 +421,7 @@ export function CollectionSetEditor(props: {
       plex_section_ids: sectionIds,
       plex_section_type: sectionType,
       collection_title: pattern,
-      definition: setDefinition(config),
+      definition: setDefinition(config, adoptExisting),
       run_interval_hours: runIntervalHours,
       active_window: activeWindow,
     });
@@ -624,15 +678,88 @@ export function CollectionSetEditor(props: {
             </label>
           ) : null}
 
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            Title pattern
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 220 }}
-              value={setConfig.title_pattern}
-              onChange={(e) => setSetConfig((prev) => ({ ...prev, title_pattern: e.target.value }))}
-            />
-          </label>
+          <div className="flex flex-col gap-1.5">
+            <label className={`flex flex-wrap items-center gap-2 ${theme.label}`}>
+              Title pattern
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 220 }}
+                value={setConfig.title_pattern}
+                onChange={(e) => {
+                  setSetConfig((prev) => ({ ...prev, title_pattern: e.target.value }));
+                  if (adoptExisting) setAdoptExisting(false);
+                }}
+              />
+              <button
+                type="button"
+                className={theme.cancelButton}
+                disabled={
+                  sectionIds.length === 0 ||
+                  !setConfig.title_pattern.includes("{value}") ||
+                  nameCheck.status === "loading"
+                }
+                onClick={() => void runCheckNames()}
+              >
+                {nameCheck.status === "loading" ? "Checking…" : "Check names"}
+              </button>
+            </label>
+            {adoptExisting ? (
+              <p className="text-[13px] text-amber-300/90 max-w-xl">
+                Will adopt existing Plex collections when names match. That reconnects previous Placeholdarr
+                collections, or takes over non-Placeholdarr ones. Items that do not match this set will be removed on
+                sync.
+              </p>
+            ) : null}
+            {nameCheck.status === "ok" ? (
+              <p className="text-[13px] text-emerald-400">Those names are available in the selected libraries.</p>
+            ) : null}
+            {nameCheck.status === "error" ? (
+              <p className="text-[13px] text-red-400">{nameCheck.message}</p>
+            ) : null}
+            {nameCheck.status === "conflict" ? (
+              <div className={`text-[13px] space-y-2 max-w-xl ${theme.muted}`}>
+                {nameCheck.conflicts.some((c) => c.reason === "other_recipe") ? (
+                  <p className={isLight ? "text-amber-800" : "text-amber-200"}>
+                    One or more generated names are already used by another Placeholdarr recipe. Change the pattern or
+                    values, or rename the other recipe&apos;s collection first.
+                  </p>
+                ) : (
+                  <p className={isLight ? "text-amber-800" : "text-amber-200"}>
+                    One or more generated names are already used. Change the pattern or values, or adopt when you save
+                    to reconnect previous Placeholdarr collections (or take over non-Placeholdarr ones). Items that do
+                    not match are removed on sync.
+                  </p>
+                )}
+                <ul className="space-y-1 max-h-36 overflow-y-auto">
+                  {nameCheck.conflicts.map((c) => (
+                    <li key={`${c.section_id}:${c.title}:${c.rating_key || ""}`}>
+                      <span className={isLight ? "text-slate-800 font-semibold" : "text-slate-200 font-semibold"}>
+                        {c.title}
+                      </span>
+                      {" · "}
+                      {c.section_title}
+                      {c.reason === "other_recipe"
+                        ? " (owned by another Placeholdarr recipe)"
+                        : ` (${c.item_count} item${c.item_count === 1 ? "" : "s"})`}
+                    </li>
+                  ))}
+                </ul>
+                {nameCheck.conflicts.every((c) => c.reason !== "other_recipe") ? (
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded-md text-[12px] font-headline uppercase tracking-wider text-white"
+                    style={{ backgroundColor: accentHex }}
+                    onClick={() => {
+                      setAdoptExisting(true);
+                      setNameCheck({ status: "idle" });
+                    }}
+                  >
+                    Adopt when saving
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
           <p className={`text-[12px] ${theme.muted}`}>
             Use <code className="font-mono">{"{value}"}</code> for the value label. Optional:{" "}
             <code className="font-mono">{"{category}"}</code>.

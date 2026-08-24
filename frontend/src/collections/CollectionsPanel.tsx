@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
 import {
+  checkCollectionTitleConflicts,
   createCollectionRecipe,
   deleteCollectionRecipe,
   exportCollectionRecipes,
@@ -10,6 +11,7 @@ import {
   runCollectionRecipe,
   toggleCollectionRecipe,
   updateCollectionRecipe,
+  type CollectionTitleConflict,
   type RecipeWritePayload,
 } from "../api/collections";
 import type { CollectionRecipe, LibraryItem, PlexSectionOption } from "../types/api";
@@ -70,6 +72,10 @@ export function CollectionsPanel(props: {
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [titleConflict, setTitleConflict] = useState<{
+    payload: RecipeWritePayload;
+    conflicts: CollectionTitleConflict[];
+  } | null>(null);
   const [runningIds, setRunningIds] = useState<Set<number>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -166,17 +172,56 @@ export function CollectionsPanel(props: {
     return () => window.clearInterval(timer);
   }, [runningIds, refresh, recipes]);
 
+  const persistRecipe = async (payload: RecipeWritePayload) => {
+    if (editing && editing !== "new" && editing !== "new-set") {
+      await updateCollectionRecipe(editing.id, payload);
+    } else {
+      await createCollectionRecipe(payload);
+    }
+    setEditing(null);
+    setTitleConflict(null);
+    await refresh();
+  };
+
   const handleSave = async (payload: RecipeWritePayload) => {
     setSaving(true);
     setSaveError(null);
     try {
-      if (editing && editing !== "new") {
-        await updateCollectionRecipe(editing.id, payload);
-      } else {
-        await createCollectionRecipe(payload);
+      if (payload.definition.adopt_existing) {
+        await persistRecipe(payload);
+        return;
       }
-      setEditing(null);
-      await refresh();
+      const recipeId = editing && editing !== "new" && editing !== "new-set" ? editing.id : null;
+      const result = await checkCollectionTitleConflicts({
+        plex_section_id: payload.plex_section_id,
+        plex_section_ids: payload.plex_section_ids,
+        plex_section_type: payload.plex_section_type,
+        collection_title: payload.collection_title,
+        definition: payload.definition,
+        recipe_id: recipeId,
+      });
+      const blocking = (result.conflicts || []).filter((c) => c.reason !== "ours");
+      if (blocking.length > 0) {
+        setTitleConflict({ payload, conflicts: blocking });
+        return;
+      }
+      await persistRecipe(payload);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save collection");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAdoptConflict = async () => {
+    if (!titleConflict) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await persistRecipe({
+        ...titleConflict.payload,
+        definition: { ...titleConflict.payload.definition, adopt_existing: true },
+      });
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save collection");
     } finally {
@@ -337,6 +382,75 @@ export function CollectionsPanel(props: {
             onCancel={() => setLeaveConfirmOpen(false)}
             onConfirm={discardEditor}
           />
+        ) : null}
+        {titleConflict ? (
+          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+            <div
+              className={`w-full max-w-lg rounded-2xl border p-6 shadow-2xl space-y-4 ${
+                isLight ? "border-slate-200 bg-white" : "border-[#424753]/40 bg-[#171c22]"
+              }`}
+            >
+              <h3 className={`text-[20px] font-headline font-bold ${isLight ? "text-slate-900" : "text-white"}`}>
+                {titleConflict.conflicts.some((c) => c.reason === "other_recipe")
+                  ? "Name used by another recipe"
+                  : "Collection name already in use"}
+              </h3>
+              {titleConflict.conflicts.some((c) => c.reason === "other_recipe") ? (
+                <p className={`text-[15px] leading-relaxed ${isLight ? "text-slate-600" : "text-slate-300"}`}>
+                  Another Placeholdarr recipe already uses this name in a selected library. Change this title, or rename
+                  the other recipe&apos;s collection first.
+                </p>
+              ) : (
+                <>
+                  <p className={`text-[15px] leading-relaxed ${isLight ? "text-slate-600" : "text-slate-300"}`}>
+                    A collection with this name already exists in a selected library. Rename this recipe, or adopt to
+                    reconnect it with Placeholdarr&apos;s ownership tracking (or take it over if it was not managed
+                    before).
+                  </p>
+                  <p className={`text-[14px] leading-relaxed ${isLight ? "text-slate-600" : "text-slate-400"}`}>
+                    Adopting reconnects a previous Placeholdarr collection, or takes over a non-Placeholdarr collection
+                    with this name. Items that do not match this recipe&apos;s sources and filters will be removed on
+                    sync.
+                  </p>
+                </>
+              )}
+              <ul className={`text-[13px] space-y-1.5 max-h-40 overflow-y-auto ${isLight ? "text-slate-700" : "text-slate-300"}`}>
+                {titleConflict.conflicts.map((c) => (
+                  <li key={`${c.section_id}:${c.title}:${c.rating_key || ""}`}>
+                    <span className="font-semibold">{c.title}</span>
+                    {" · "}
+                    {c.section_title}
+                    {c.reason === "other_recipe"
+                      ? " (owned by another Placeholdarr recipe)"
+                      : ` (${c.item_count} item${c.item_count === 1 ? "" : "s"} in Plex)`}
+                  </li>
+                ))}
+              </ul>
+              <div className="flex flex-wrap justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${
+                    isLight ? "text-slate-700 hover:bg-slate-100" : "text-slate-300 hover:bg-white/5"
+                  }`}
+                  onClick={() => setTitleConflict(null)}
+                  disabled={saving}
+                >
+                  {titleConflict.conflicts.some((c) => c.reason === "other_recipe") ? "OK" : "Rename"}
+                </button>
+                {titleConflict.conflicts.every((c) => c.reason !== "other_recipe") ? (
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-60"
+                    style={{ backgroundColor: accentHex }}
+                    onClick={() => void handleAdoptConflict()}
+                    disabled={saving}
+                  >
+                    {saving ? "Saving…" : "Adopt and save"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
         ) : null}
         <div className="flex items-center gap-3 mb-6">
           <button

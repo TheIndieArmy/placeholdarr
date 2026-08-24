@@ -6,17 +6,19 @@ membership. Targeting is per-section so recipes can point at any Plex
 library (including dedicated placeholder libraries), not just the
 configured movie/TV sections.
 
-Ownership: Placeholdarr only mutates collections that carry a
-``placeholdarr`` label and/or a visible summary starting with
-``Managed by Placeholdarr.`` as a summary footer (and stores their ratingKeys). Unlabeled
-same-title collections are left alone; sync creates a new owned one.
+Ownership: Placeholdarr only mutates collections it owns (``placeholdarr``
+label and/or ``Managed by Placeholdarr.`` summary footer), tracked by
+ratingKey. Same-title collections in one library share a Plex identity, so
+we never create a second copy: rename, or explicitly adopt the existing
+shelf (adoption syncs membership to the recipe and may remove non-matching
+items).
 """
 from __future__ import annotations
 
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Optional
 
 from core.logger import logger
 from services.media_servers.plex_lookup import (
@@ -29,6 +31,14 @@ from services.media_servers.plex_lookup import (
 
 class PlexCollectionsError(Exception):
     """Raised when Plex is unavailable or a collection operation fails."""
+
+
+class CollectionTitleConflict(PlexCollectionsError):
+    """Same-title collection exists in a target library and was not adopted."""
+
+    def __init__(self, message: str, *, conflicts: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.conflicts = list(conflicts or [])
 
 
 OWNERSHIP_LABEL = "placeholdarr"
@@ -199,6 +209,113 @@ def is_owned_collection(collection) -> bool:
     return has_ownership_label(collection) or has_ownership_summary(collection)
 
 
+def is_owned_by_recipe(collection, recipe_id: int) -> bool:
+    """True when this collection carries the recipe-specific ownership label."""
+    needle = f"placeholdarr-recipe-{int(recipe_id)}"
+    return needle in collection_label_names(collection)
+
+
+def _collection_item_count(collection) -> int:
+    try:
+        count = getattr(collection, "childCount", None)
+        if count is not None:
+            return int(count)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return len(collection.items())
+    except Exception:
+        return 0
+
+
+def find_collections_by_title(section, collection_title: str) -> list[Any]:
+    needle = collection_title.strip().lower()
+    if not needle:
+        return []
+    matches: list[Any] = []
+    for collection in section.collections():
+        if str(getattr(collection, "title", "")).strip().lower() == needle:
+            matches.append(collection)
+    return matches
+
+
+def describe_title_conflict(
+    collection,
+    *,
+    section_id: int,
+    section_title: str,
+    collection_title: str,
+    recipe_id: int | None,
+) -> dict[str, Any]:
+    owned = is_owned_collection(collection)
+    owned_by_this = bool(recipe_id is not None and is_owned_by_recipe(collection, int(recipe_id)))
+    reason = "ours" if owned_by_this else ("other_recipe" if owned else "unlabeled")
+    return {
+        "title": collection_title.strip(),
+        "section_id": int(section_id),
+        "section_title": section_title,
+        "rating_key": str(getattr(collection, "ratingKey", "") or "") or None,
+        "item_count": _collection_item_count(collection),
+        "reason": reason,
+    }
+
+
+def find_title_conflicts(
+    section_ids: list[int],
+    section_type: str,
+    titles: list[str],
+    *,
+    recipe_id: int | None = None,
+    known_keys: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return same-title clashes in any selected library that would create a twin.
+
+    Skips collections already owned by this recipe (label or stored ratingKey).
+    """
+    plex = get_plex_server()
+    if not plex:
+        raise PlexCollectionsError("Plex is not configured or unreachable")
+    unique_titles = []
+    seen_titles: set[str] = set()
+    for raw in titles:
+        title = str(raw or "").strip()
+        key = title.lower()
+        if not title or key in seen_titles:
+            continue
+        seen_titles.add(key)
+        unique_titles.append(title)
+    if not unique_titles or not section_ids:
+        return []
+
+    conflicts: list[dict[str, Any]] = []
+    for section_id in section_ids:
+        section = _get_section(plex, int(section_id))
+        section_title = str(getattr(section, "title", "") or section_id)
+        # Only movie/show sections of the recipe type are valid targets.
+        sec_type = str(getattr(section, "type", "") or "")
+        if section_type == "movie" and sec_type != "movie":
+            continue
+        if section_type == "show" and sec_type != "show":
+            continue
+        for title in unique_titles:
+            known = lookup_stored_key(known_keys, int(section_id), title) if known_keys else None
+            if known:
+                # Already bound to a ratingKey for this recipe — not a create conflict.
+                continue
+            for collection in find_collections_by_title(section, title):
+                row = describe_title_conflict(
+                    collection,
+                    section_id=int(section_id),
+                    section_title=section_title,
+                    collection_title=title,
+                    recipe_id=recipe_id,
+                )
+                if row["reason"] == "ours":
+                    continue
+                conflicts.append(row)
+    return conflicts
+
+
 def desired_ownership_summary(existing_summary: str | None = None) -> str:
     """Ensure the visible Plex summary ends with our ownership footer."""
     current = str(existing_summary or "").strip()
@@ -306,6 +423,14 @@ def _fetch_collection_by_rating_key(plex, rating_key: str):
     return item
 
 
+def _find_unlabeled_by_title(section, collection_title: str):
+    """First same-title collection that is not Placeholdarr-owned."""
+    for collection in find_collections_by_title(section, collection_title):
+        if not is_owned_collection(collection):
+            return collection
+    return None
+
+
 def _find_owned_collection_by_title(section, collection_title: str):
     """Title match only when the collection already has our ownership marker."""
     needle = collection_title.strip().lower()
@@ -381,16 +506,19 @@ def sync_collection(
     recipe_id: int,
     set_value: str | None = None,
     known_rating_key: str | None = None,
+    adopt_unlabeled: bool = False,
 ) -> dict[str, Any]:
     """Create or update a Placeholdarr-owned Plex collection.
 
-    Never mutates an unlabeled same-title collection. Returns counts plus
-    ``rating_key`` for persistence on the recipe.
+    Never creates a same-title twin in a library. Unlabeled same-title shelves
+    are adopted only when ``adopt_unlabeled`` is true (membership then follows
+    the recipe and non-matching items are removed).
     """
     plex = get_plex_server()
     if not plex:
         raise PlexCollectionsError("Plex is not configured or unreachable")
     section = _get_section(plex, section_id)
+    section_title = str(getattr(section, "title", "") or section_id)
 
     existing = resolve_owned_collection(
         plex,
@@ -398,6 +526,42 @@ def sync_collection(
         collection_title=collection_title,
         known_rating_key=known_rating_key,
     )
+    adopted = False
+
+    if existing is None:
+        unlabeled = _find_unlabeled_by_title(section, collection_title)
+        if unlabeled is not None:
+            if not adopt_unlabeled:
+                conflict = describe_title_conflict(
+                    unlabeled,
+                    section_id=int(section_id),
+                    section_title=section_title,
+                    collection_title=collection_title,
+                    recipe_id=recipe_id,
+                )
+                raise CollectionTitleConflict(
+                    f"Plex already has a collection named {collection_title!r} in "
+                    f"{section_title!r}. Rename this recipe or adopt the existing collection.",
+                    conflicts=[conflict],
+                )
+            existing = unlabeled
+            adopted = True
+        else:
+            # Another Placeholdarr recipe may already own this title.
+            for other in find_collections_by_title(section, collection_title):
+                if is_owned_collection(other) and not is_owned_by_recipe(other, recipe_id):
+                    conflict = describe_title_conflict(
+                        other,
+                        section_id=int(section_id),
+                        section_title=section_title,
+                        collection_title=collection_title,
+                        recipe_id=recipe_id,
+                    )
+                    raise CollectionTitleConflict(
+                        f"Collection {collection_title!r} in {section_title!r} is already "
+                        f"managed by another Placeholdarr recipe. Rename this recipe.",
+                        conflicts=[conflict],
+                    )
 
     target_keys = {str(getattr(item, "ratingKey", "")) for item in items}
 
@@ -408,6 +572,7 @@ def sync_collection(
                 "removed": 0,
                 "total": 0,
                 "created": False,
+                "adopted": False,
                 "rating_key": None,
                 "skipped_unlabeled": False,
             }
@@ -430,6 +595,7 @@ def sync_collection(
             "removed": 0,
             "total": len(items),
             "created": True,
+            "adopted": False,
             "rating_key": rating_key,
             "skipped_unlabeled": False,
         }
@@ -462,7 +628,7 @@ def sync_collection(
 
     rating_key = str(getattr(existing, "ratingKey", "") or "") or None
     logger.info(
-        f"Collections: synced Plex collection {collection_title!r} "
+        f"Collections: {'adopted' if adopted else 'synced'} Plex collection {collection_title!r} "
         f"(section={section_id}, added={len(to_add)}, removed={len(to_remove)}, "
         f"total={len(target_keys)}, recipe={recipe_id})",
         extra={"emoji_type": "info"},
@@ -472,6 +638,7 @@ def sync_collection(
         "removed": len(to_remove),
         "total": len(target_keys),
         "created": False,
+        "adopted": adopted,
         "rating_key": rating_key,
         "skipped_unlabeled": False,
     }
