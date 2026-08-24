@@ -111,6 +111,110 @@ async def list_recipes():
     }
 
 
+class ExportRecipesPayload(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+class ImportRecipesPayload(BaseModel):
+    """Import a previously exported collections bundle.
+
+    ``plex_section_ids`` are applied to every recipe of matching type. If omitted,
+    each recipe uses the first available Plex library of its media type.
+    """
+
+    payload: dict[str, Any] | list[Any]
+    plex_section_ids: list[int] | None = None
+
+
+@router.post("/api/collections/export")
+async def export_recipes(body: ExportRecipesPayload):
+    from services.collections.recipe_portability import build_export_bundle
+
+    ids = [int(x) for x in (body.ids or []) if int(x) >= 1]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one collection to export")
+    with session_scope() as session:
+        rows = (
+            session.query(CollectionRecipe)
+            .filter(CollectionRecipe.id.in_(ids))
+            .order_by(CollectionRecipe.id)
+            .all()
+        )
+        by_id = {r.id: _serialize_recipe(r) for r in rows}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Collection recipe(s) not found: {missing}")
+    ordered = [by_id[i] for i in ids if i in by_id]
+    return build_export_bundle(ordered)
+
+
+@router.post("/api/collections/import")
+async def import_recipes(body: ImportRecipesPayload):
+    from services.collections.recipe_portability import (
+        parse_import_bundle,
+        prepare_import_recipe,
+        resolve_import_sections,
+    )
+
+    try:
+        raw_recipes = parse_import_bundle(body.payload)
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        sections = plex_collections.list_plex_sections()
+    except plex_collections.PlexCollectionsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    preferred = [int(x) for x in (body.plex_section_ids or []) if int(x) >= 1]
+    created: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    for raw in raw_recipes:
+        name = str(raw.get("name") or "recipe").strip() or "recipe"
+        try:
+            recipe_type = str(raw.get("plex_section_type") or "").strip().lower()
+            if recipe_type not in ("movie", "show"):
+                raise RecipeValidationError("plex_section_type must be movie or show")
+            section_ids = resolve_import_sections(
+                recipe_type=recipe_type,
+                available=sections,
+                preferred_ids=preferred or None,
+            )
+            prepared = prepare_import_recipe(
+                raw,
+                section_ids=section_ids,
+                section_type=recipe_type,
+            )
+            with session_scope() as session:
+                row = CollectionRecipe(
+                    name=prepared["name"],
+                    enabled=prepared["enabled"],
+                    plex_section_id=prepared["plex_section_id"],
+                    plex_section_ids=prepared["plex_section_ids"],
+                    plex_section_type=prepared["plex_section_type"],
+                    collection_title=prepared["collection_title"],
+                    definition=prepared["definition"],
+                    run_interval_hours=prepared["run_interval_hours"],
+                    active_window=prepared["active_window"],
+                    plex_collection_keys=None,
+                )
+                session.add(row)
+                session.commit()
+                session.refresh(row)
+                created.append(_serialize_recipe(row))
+        except RecipeValidationError as exc:
+            errors.append({"name": name, "error": str(exc)})
+        except Exception as exc:
+            errors.append({"name": name, "error": str(exc)})
+
+    if created:
+        _refresh_collections_schedule()
+    if not created and errors:
+        raise HTTPException(status_code=400, detail=errors[0]["error"])
+    return {"ok": True, "created": created, "errors": errors, "created_count": len(created)}
+
+
 @router.post("/api/collections")
 async def create_recipe(body: RecipePayload):
     try:

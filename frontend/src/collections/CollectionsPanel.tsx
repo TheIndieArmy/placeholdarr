@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
 import {
   createCollectionRecipe,
   deleteCollectionRecipe,
+  exportCollectionRecipes,
   getCollectionPlexSections,
   getCollectionRecipes,
+  importCollectionRecipes,
   runCollectionRecipe,
   toggleCollectionRecipe,
   updateCollectionRecipe,
@@ -70,6 +72,10 @@ export function CollectionsPanel(props: {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<number>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [ioBusy, setIoBusy] = useState(false);
+  const [ioMessage, setIoMessage] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const plexReady = sectionsLoaded && !sectionsError;
 
@@ -130,6 +136,17 @@ export function CollectionsPanel(props: {
         setSectionsLoaded(true);
       });
   }, [refresh]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const valid = new Set(recipes.map((r) => r.id));
+      const next = new Set<number>();
+      for (const id of prev) {
+        if (valid.has(id)) next.add(id);
+      }
+      return next;
+    });
+  }, [recipes]);
 
   // Poll while a manual run is in-flight so last-run summaries land in the list.
   useEffect(() => {
@@ -201,6 +218,83 @@ export function CollectionsPanel(props: {
       await refresh();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to delete collection");
+    }
+  };
+
+  const toggleSelected = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allSelected = recipes.length > 0 && selectedIds.size === recipes.length;
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+      return;
+    }
+    setSelectedIds(new Set(recipes.map((r) => r.id)));
+  };
+
+  const handleExportSelected = async () => {
+    if (!selectedIds.size) {
+      setActionError("Select at least one collection to export");
+      return;
+    }
+    setActionError(null);
+    setIoMessage(null);
+    setIoBusy(true);
+    try {
+      const bundle = await exportCollectionRecipes([...selectedIds]);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `placeholdarr-collections-${stamp}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setIoMessage(`Exported ${bundle.recipes.length} collection${bundle.recipes.length === 1 ? "" : "s"}`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setIoBusy(false);
+    }
+  };
+
+  const handleImportFile = async (file: File) => {
+    setActionError(null);
+    setIoMessage(null);
+    setIoBusy(true);
+    try {
+      const text = await file.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new Error("Import file is not valid JSON");
+      }
+      const sectionIds = sections.map((s) => s.id);
+      const result = await importCollectionRecipes({
+        payload: parsed,
+        plex_section_ids: sectionIds.length ? sectionIds : null,
+      });
+      await refresh();
+      const parts = [`Imported ${result.created_count} collection${result.created_count === 1 ? "" : "s"}`];
+      if (result.errors.length) {
+        parts.push(`${result.errors.length} failed`);
+        setActionError(result.errors.map((e) => `${e.name}: ${e.error}`).join(" · "));
+      }
+      setIoMessage(parts.join(" · "));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setIoBusy(false);
+      if (importInputRef.current) importInputRef.current.value = "";
     }
   };
 
@@ -314,6 +408,48 @@ export function CollectionsPanel(props: {
           </span>
         </h1>
         <div className="flex items-center gap-2">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleImportFile(file);
+            }}
+          />
+          <button
+            type="button"
+            disabled={ioBusy || !plexReady}
+            title={!plexReady ? "Configure Plex before importing" : "Import collections from a JSON file"}
+            onClick={() => importInputRef.current?.click()}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[14px] font-headline uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed ${
+              isLight
+                ? "border-slate-200 text-slate-700 hover:bg-slate-50"
+                : "border-[#424753]/60 text-slate-200 hover:bg-[#1e2430]"
+            }`}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+              upload
+            </span>
+            Import
+          </button>
+          <button
+            type="button"
+            disabled={ioBusy || selectedIds.size === 0}
+            title={selectedIds.size === 0 ? "Select collections to export" : "Export selected collections as JSON"}
+            onClick={() => void handleExportSelected()}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[14px] font-headline uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed ${
+              isLight
+                ? "border-slate-200 text-slate-700 hover:bg-slate-50"
+                : "border-[#424753]/60 text-slate-200 hover:bg-[#1e2430]"
+            }`}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+              download
+            </span>
+            Export{selectedIds.size ? ` (${selectedIds.size})` : ""}
+          </button>
           <button
             type="button"
             disabled={!plexReady}
@@ -361,6 +497,11 @@ export function CollectionsPanel(props: {
           key under Settings → Media Integrations to enable them. Catalog, MDBList, StevenLu, and AniList still work.
         </div>
       ) : null}
+      {ioMessage ? (
+        <div className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-[14px] text-emerald-300">
+          {ioMessage}
+        </div>
+      ) : null}
       {actionError ? (
         <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-[14px] text-red-300">
           {actionError}
@@ -390,12 +531,21 @@ export function CollectionsPanel(props: {
           <table className="w-full">
             <thead>
               <tr className={`border-b ${theme.divider}`}>
-                {["Collection", "Target Library", "Items", "Schedule", "Last Run", "Enabled", "Actions"].map((h) => (
+                {["", "Collection", "Target Library", "Items", "Schedule", "Last Run", "Enabled", "Actions"].map((h) => (
                   <th
-                    key={h}
+                    key={h || "select"}
                     className={`px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${theme.muted}`}
                   >
-                    {h}
+                    {h === "" ? (
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleSelectAll}
+                        aria-label="Select all collections"
+                      />
+                    ) : (
+                      h
+                    )}
                   </th>
                 ))}
               </tr>
@@ -404,11 +554,20 @@ export function CollectionsPanel(props: {
               {recipes.map((recipe) => {
                 const summary = recipe.last_run_summary;
                 const running = runningIds.has(recipe.id);
+                const selected = selectedIds.has(recipe.id);
                 return (
                   <tr
                     key={recipe.id}
                     className={isLight ? "hover:bg-[#f2f7ff] transition-colors" : "hover:bg-[#1e2430]/40 transition-colors"}
                   >
+                    <td className="px-5 py-4">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleSelected(recipe.id)}
+                        aria-label={`Select ${recipe.name}`}
+                      />
+                    </td>
                     <td className="px-5 py-4">
                       <button
                         type="button"
