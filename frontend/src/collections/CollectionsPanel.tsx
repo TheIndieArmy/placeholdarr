@@ -14,6 +14,7 @@ import type { CollectionRecipe, LibraryItem, PlexSectionOption } from "../types/
 import { ConfirmModal } from "../ConfirmModal";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { CollectionEditor } from "./CollectionEditor";
+import { CollectionSetEditor, isCollectionSetRecipe } from "./CollectionSetEditor";
 import { getCollectionTheme } from "./collectionTheme";
 
 function formatSchedule(recipe: CollectionRecipe): string {
@@ -61,8 +62,8 @@ export function CollectionsPanel(props: {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // null = list view; "new" = creating; recipe = editing
-  const [editing, setEditing] = useState<CollectionRecipe | "new" | null>(null);
+  // null = list view; "new" = creating recipe; "new-set" = creating collection set; recipe = editing
+  const [editing, setEditing] = useState<CollectionRecipe | "new" | "new-set" | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -227,6 +228,8 @@ export function CollectionsPanel(props: {
   ) : null;
 
   if (editing !== null) {
+    const setMode =
+      editing === "new-set" || (editing !== "new" && isCollectionSetRecipe(editing));
     return (
       <div>
         {leaveConfirmOpen ? (
@@ -252,27 +255,45 @@ export function CollectionsPanel(props: {
             arrow_back
           </button>
           <h1 className={`text-[32px] font-black tracking-tight font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
-            {editing === "new" ? "New Collection" : `Edit: ${editing.name}`}
+            {editing === "new"
+              ? "New Collection"
+              : editing === "new-set"
+                ? "New Collection Set"
+                : `Edit: ${editing.name}`}
           </h1>
         </div>
         {plexBanner}
-        <CollectionEditor
-          recipe={editing === "new" ? null : editing}
-          sections={sections}
-          tmdbConfigured={tmdbConfigured}
-          traktConfigured={traktConfigured}
-          tautulliConfigured={tautulliConfigured}
-          libraryItems={props.libraryItems}
-          libraryLoading={props.libraryLoading}
-          onEnsureLibrary={props.onEnsureLibrary}
-          accent={props.accent}
-          themeMode={props.themeMode}
-          saving={saving}
-          saveError={saveError}
-          onSave={(payload) => void handleSave(payload)}
-          onCancel={leaveEditor}
-          onDirtyChange={handleEditorDirty}
-        />
+        {setMode ? (
+          <CollectionSetEditor
+            recipe={typeof editing === "string" ? null : editing}
+            sections={sections}
+            accent={props.accent}
+            themeMode={props.themeMode}
+            saving={saving}
+            saveError={saveError}
+            onSave={(payload) => void handleSave(payload)}
+            onCancel={leaveEditor}
+            onDirtyChange={handleEditorDirty}
+          />
+        ) : (
+          <CollectionEditor
+            recipe={editing === "new" ? null : editing}
+            sections={sections}
+            tmdbConfigured={tmdbConfigured}
+            traktConfigured={traktConfigured}
+            tautulliConfigured={tautulliConfigured}
+            libraryItems={props.libraryItems}
+            libraryLoading={props.libraryLoading}
+            onEnsureLibrary={props.onEnsureLibrary}
+            accent={props.accent}
+            themeMode={props.themeMode}
+            saving={saving}
+            saveError={saveError}
+            onSave={(payload) => void handleSave(payload)}
+            onCancel={leaveEditor}
+            onDirtyChange={handleEditorDirty}
+          />
+        )}
       </div>
     );
   }
@@ -292,23 +313,45 @@ export function CollectionsPanel(props: {
             Beta
           </span>
         </h1>
-        <button
-          type="button"
-          disabled={!plexReady}
-          title={!plexReady ? "Configure Plex in Settings before creating a collection" : undefined}
-          onClick={() => {
-            if (!plexReady) return;
-            setSaveError(null);
-            setEditing("new");
-          }}
-          className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ backgroundColor: accentHex }}
-        >
-          <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-            add
-          </span>
-          New Collection
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={!plexReady}
+            title={!plexReady ? "Configure Plex in Settings before creating a collection" : undefined}
+            onClick={() => {
+              if (!plexReady) return;
+              setSaveError(null);
+              setEditing("new-set");
+            }}
+            className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-[14px] font-headline uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed ${
+              isLight
+                ? "border-slate-200 text-slate-700 hover:bg-slate-50"
+                : "border-[#424753]/60 text-slate-200 hover:bg-[#1e2430]"
+            }`}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+              category
+            </span>
+            Collection Set
+          </button>
+          <button
+            type="button"
+            disabled={!plexReady}
+            title={!plexReady ? "Configure Plex in Settings before creating a collection" : undefined}
+            onClick={() => {
+              if (!plexReady) return;
+              setSaveError(null);
+              setEditing("new");
+            }}
+            className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ backgroundColor: accentHex }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+              add
+            </span>
+            New Collection
+          </button>
+        </div>
       </div>
 
       {plexBanner}
@@ -380,7 +423,18 @@ export function CollectionsPanel(props: {
                         >
                           {recipe.name}
                         </span>
-                        <span className={`block text-[13px] ${theme.muted}`}>→ "{recipe.collection_title}"</span>
+                        <span className={`block text-[13px] ${theme.muted}`}>
+                          {isCollectionSetRecipe(recipe)
+                            ? `→ Set · ${
+                                recipe.definition.collection_set?.category ??
+                                recipe.definition.collection_set?.dimension ??
+                                "category"
+                              } (${
+                                recipe.last_run_summary?.collection_set?.collection_count ??
+                                "auto"
+                              } collections)`
+                            : `→ "${recipe.collection_title}"`}
+                        </span>
                       </button>
                       {recipe.active_window && !recipe.window_active ? (
                         <span
@@ -405,7 +459,11 @@ export function CollectionsPanel(props: {
                       </span>
                     </td>
                     <td className={`px-5 py-4 text-[15px] font-mono ${isLight ? "text-slate-800" : "text-slate-300"}`}>
-                      {summary?.synced ? summary.synced.total : "—"}
+                      {summary?.mode === "collection_set" && summary.collection_set?.collection_count != null
+                        ? `${summary.collection_set.collection_count} cols`
+                        : summary?.synced
+                          ? summary.synced.total
+                          : "—"}
                     </td>
                     <td className={`px-5 py-4 text-[14px] ${isLight ? "text-slate-600" : "text-slate-400"}`}>
                       {formatSchedule(recipe)}

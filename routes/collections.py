@@ -303,6 +303,11 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "AND radarr_certification IS NOT NULL AND TRIM(radarr_certification) <> '' "
             "ORDER BY cert"
         )
+        year_sql = text(
+            "SELECT DISTINCT year FROM movie "
+            "WHERE is_deleted = false AND year IS NOT NULL AND year >= 1800 AND year <= 2100 "
+            "ORDER BY year"
+        )
     else:
         lang_sql = text(
             "SELECT DISTINCT sonarr_payload_raw->'originalLanguage'->>'name' AS lang "
@@ -321,10 +326,20 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "AND sonarr_certification IS NOT NULL AND TRIM(sonarr_certification) <> '' "
             "ORDER BY cert"
         )
+        year_sql = text(
+            "SELECT DISTINCT year FROM series "
+            "WHERE is_deleted = false AND year IS NOT NULL AND year >= 1800 AND year <= 2100 "
+            "ORDER BY year"
+        )
     with session_scope() as session:
         languages = [str(row[0]) for row in session.execute(lang_sql) if row[0]]
         genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
         certifications = [str(row[0]).strip() for row in session.execute(cert_sql) if row[0] and str(row[0]).strip()]
+        years = [int(row[0]) for row in session.execute(year_sql) if row[0] is not None]
+
+    from services.collections.collection_sets import decade_label
+
+    decades = sorted({decade_label(y) for y in years}, key=lambda s: int(s.rstrip("s")))
 
     arr_tags: list[dict[str, Any]] = []
     for item in instances:
@@ -350,6 +365,7 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
         "languages": languages,
         "genres": genres,
         "certifications": certifications,
+        "decades": decades,
         "arr_tags": arr_tags,
         "tautulli_configured": list_sources.tautulli_configured(),
     }

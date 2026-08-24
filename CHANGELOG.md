@@ -10,6 +10,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Added
 
 - **Collection sources (Phase 1)**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**. IMDb and Letterboxd are intentionally not included (no supported public API; we won’t scrape).
+- **Collection Sets**: One config fans out to many Plex collections by **genre**, **decade**, **content rating** (age certification — not critic scores), **\*arr tag**, or **release timing** (Upcoming / released this week|month|year|decade, with a shared release-date basis like recipe filters). Include/exclude value selection, title patterns, live preview, and cleanup of stale child collections this set previously managed.
 
 ## [0.9.17] - 2026-08-18
 

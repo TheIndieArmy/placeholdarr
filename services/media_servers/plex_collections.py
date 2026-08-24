@@ -268,3 +268,32 @@ def sync_collection(
         "total": len(target_keys),
         "created": False,
     }
+
+
+def delete_collection(section_id: int, section_type: str, collection_title: str) -> dict[str, Any]:
+    """Delete a Plex collection by title if it exists.
+
+    Used by Collection Sets to drop stale child collections we previously
+    managed. Match is still by title (ownership labels land in a later pass).
+    """
+    plex = get_plex_server()
+    if not plex:
+        raise PlexCollectionsError("Plex is not configured or unreachable")
+    section = _get_section(plex, section_id)
+    try:
+        existing = _find_collection(section, collection_title)
+    except Exception as exc:
+        raise PlexCollectionsError(f"Failed to list collections for section {section_id}: {exc}") from exc
+    if existing is None:
+        return {"deleted": False, "title": collection_title}
+    try:
+        existing.delete()
+    except Exception as exc:
+        raise PlexCollectionsError(
+            f"Failed to delete collection {collection_title!r} in section {section_id}: {exc}"
+        ) from exc
+    logger.info(
+        f"Collections: deleted Plex collection {collection_title!r} (section={section_id})",
+        extra={"emoji_type": "info"},
+    )
+    return {"deleted": True, "title": collection_title}
