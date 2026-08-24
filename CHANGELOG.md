@@ -7,6 +7,16 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.18] - 2026-08-24
+
+### Summary
+
+Collections (Beta) expands with unified **TMDB/Trakt** source cards plus **Tautulli** and **\*arr tags**, **Collection Sets** (one config → many Plex shelves), **ownership-safe** Plex sync (summary footer + ratingKeys), **Validate** for pasted list/page URLs, and portable **export/import** of recipes between installs.
+
+### Action required
+
+**Existing Collections users:** After upgrading, the next sync may create a new Placeholdarr-owned Plex collection beside an older unmarked duplicate (ownership no longer matches by title alone). Keep the collection whose summary ends with **Managed by Placeholdarr.** and delete the other. A What's new notice covers this.
+
 ### Added
 
 - **Collection sources**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**.
