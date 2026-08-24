@@ -52,6 +52,9 @@ def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
         "plex_section_ids": section_ids,
         "plex_section_type": row.plex_section_type,
         "collection_title": row.collection_title,
+        "plex_collection_keys": row.plex_collection_keys
+        if isinstance(row.plex_collection_keys, dict)
+        else {},
         "definition": row.definition or {},
         "run_interval_hours": row.run_interval_hours,
         "active_window": window,

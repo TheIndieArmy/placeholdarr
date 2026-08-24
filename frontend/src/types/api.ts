@@ -716,6 +716,8 @@ export interface CollectionRecipe {
   plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   collection_title: string;
+  /** Owned Plex collection ratingKeys per section: { sectionId: { title: ratingKey } }. Read-only. */
+  plex_collection_keys?: Record<string, Record<string, string>>;
   definition: CollectionDefinition;
   /** Null = follow the global COLLECTIONS_SYNC_INTERVAL_HOURS cadence. */
   run_interval_hours: number | null;

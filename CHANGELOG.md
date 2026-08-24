@@ -9,8 +9,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Added
 
-- **Collection sources (Phase 1)**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**. IMDb and Letterboxd are intentionally not included (no supported public API; we won’t scrape).
+- **Collection sources**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**.
 - **Collection Sets**: One config fans out to many Plex collections by **genre**, **decade**, **content rating** (age certification — not critic scores), **\*arr tag**, or **release timing** (Upcoming / released this week|month|year|decade, with a shared release-date basis like recipe filters). Include/exclude value selection, title patterns, live preview, and cleanup of stale child collections this set previously managed.
+- **Collection ownership**: Recipes used to match Plex collections by title only, so a sync could take over (and empty) a hand-made collection with the same name. Synced collections are now marked with a visible summary footer **Managed by Placeholdarr.** (plus internal labels) and tracked by ratingKey, so Placeholdarr only edits collections it owns. Existing summary text is kept; the footer is appended. After upgrade, a recipe may create a new owned copy beside an older unmarked one — keep the footer copy and delete the other.
 
 ## [0.9.17] - 2026-08-18
 

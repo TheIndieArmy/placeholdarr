@@ -55,6 +55,20 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_label="Open Collections",
         cta_path="/collections",
     ),
+    WhatsNewNotice(
+        id="collections-ownership",
+        since_version="0.9.18",
+        title="Action required: clean up collection duplicates",
+        body=(
+            "Placeholdarr Collections no longer take over same-named hand-made Plex collections. "
+            "On sync, Placeholdarr marks the collections it owns by appending "
+            "\"Managed by Placeholdarr.\" to the collection summary (the description shown in Plex). "
+            "If you already had Placeholdarr collections before this upgrade, the next sync may "
+            "create a second copy. Keep the one whose summary shows that text, and delete the other."
+        ),
+        cta_label="Open Collections",
+        cta_path="/collections",
+    ),
 )
 
 
@@ -154,11 +168,16 @@ def pending_notices(*, setup_complete: bool, session=None) -> dict[str, Any]:
 
 
 def catalog_notices(session=None) -> dict[str, Any]:
-    """Full What's new list for the sidebar version chip (not version-gated)."""
+    """Full What's new list for the sidebar version chip (newest first)."""
+    ordered = sorted(
+        NOTICES,
+        key=lambda notice: (parse_semver(notice.since_version), NOTICES.index(notice)),
+        reverse=True,
+    )
     return {
         "app_version": APP_VERSION,
         "last_seen_app_version": get_last_seen_app_version(session=session),
-        "notices": [_notice_payload(notice) for notice in NOTICES],
+        "notices": [_notice_payload(notice) for notice in ordered],
     }
 
 

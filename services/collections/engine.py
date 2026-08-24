@@ -2387,6 +2387,7 @@ def run_collection_set_recipe(
     section_type: str,
     recipe_name: str,
     previous_summary: Optional[dict[str, Any]],
+    plex_collection_keys: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Fan out one Collection Set into N Plex collections and sync each."""
     normalized = validate_definition(definition)
@@ -2397,6 +2398,7 @@ def run_collection_set_recipe(
     min_items = int(set_cfg.get("min_items") or 0)
 
     active_titles_by_section: dict[str, list[str]] = {str(sid): [] for sid in section_ids}
+    keys_map: dict[str, Any] = dict(plex_collection_keys or {})
     collection_rows: list[dict[str, Any]] = []
     synced_added = 0
     synced_removed = 0
@@ -2419,12 +2421,23 @@ def run_collection_set_recipe(
         current_titles: set[str] = set()
         for child in evaluated:
             title = child["title"]
+            value_label = str(child.get("value_label") or child.get("value") or "")
             current_titles.add(title)
             outcome = _evaluate(child["definition"], sid, section_type, resolve=True)
             if outcome["plex_error"]:
                 raise plex_collections.PlexCollectionsError(outcome["plex_error"])
+            known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
             sync_stats = plex_collections.sync_collection(
-                sid, section_type, title, outcome["resolved_items"] or []
+                sid,
+                section_type,
+                title,
+                outcome["resolved_items"] or [],
+                recipe_id=recipe_id,
+                set_value=value_label,
+                known_rating_key=known_key,
+            )
+            keys_map = plex_collections.set_stored_key(
+                keys_map, sid, title, sync_stats.get("rating_key")
             )
             if sid == section_ids[0]:
                 selected_total += int(outcome["selected"] or 0)
@@ -2447,7 +2460,15 @@ def run_collection_set_recipe(
             )
         stale = previous - current_titles
         for stale_title in sorted(stale):
-            plex_collections.delete_collection(sid, section_type, stale_title)
+            known_key = plex_collections.lookup_stored_key(keys_map, sid, stale_title)
+            plex_collections.delete_collection(
+                sid,
+                section_type,
+                stale_title,
+                recipe_id=recipe_id,
+                known_rating_key=known_key,
+            )
+            keys_map = plex_collections.set_stored_key(keys_map, sid, stale_title, None)
             removed_titles.append(stale_title)
         active_titles_by_section[str(sid)] = sorted(current_titles)
 
@@ -2476,6 +2497,7 @@ def run_collection_set_recipe(
             stored["collection_set"] = stored_set
             stored["sources"] = [{"type": "catalog"}]
             recipe.definition = stored
+            recipe.plex_collection_keys = keys_map
             session.commit()
 
     summary = {
@@ -2528,6 +2550,11 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
         previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
+        keys_map: dict[str, Any] = (
+            dict(recipe.plex_collection_keys)
+            if isinstance(recipe.plex_collection_keys, dict)
+            else {}
+        )
 
     summary: dict[str, Any]
     try:
@@ -2541,6 +2568,7 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                 section_type=section_type,
                 recipe_name=recipe_name,
                 previous_summary=previous_summary,
+                plex_collection_keys=keys_map,
             )
         else:
             primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
@@ -2555,8 +2583,17 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
                 outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
                 if outcome["plex_error"]:
                     raise plex_collections.PlexCollectionsError(outcome["plex_error"])
+                known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
                 sync_stats = plex_collections.sync_collection(
-                    sid, section_type, collection_title, outcome["resolved_items"] or []
+                    sid,
+                    section_type,
+                    collection_title,
+                    outcome["resolved_items"] or [],
+                    recipe_id=recipe_id,
+                    known_rating_key=known_key,
+                )
+                keys_map = plex_collections.set_stored_key(
+                    keys_map, sid, collection_title, sync_stats.get("rating_key")
                 )
                 libraries.append(
                     {
@@ -2619,6 +2656,8 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         if recipe is not None:
             recipe.last_run_at = datetime.now(timezone.utc)
             recipe.last_run_summary = summary
+            if summary.get("status") == "ok" and not sets_mod.is_collection_set_definition(definition):
+                recipe.plex_collection_keys = keys_map
             session.commit()
 
     return summary
@@ -2738,6 +2777,11 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
         recipe_name = str(recipe.name)
         definition = dict(recipe.definition or {})
         previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
+        keys_map: dict[str, Any] = (
+            dict(recipe.plex_collection_keys)
+            if isinstance(recipe.plex_collection_keys, dict)
+            else {}
+        )
 
     try:
         libraries: list[dict[str, Any]] = []
@@ -2749,7 +2793,18 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                 titles = sets_mod.previous_managed_titles(set_cfg, previous_summary, sid)
                 section_removed = 0
                 for title in titles:
-                    sync_stats = plex_collections.sync_collection(sid, section_type, title, [])
+                    known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
+                    sync_stats = plex_collections.sync_collection(
+                        sid,
+                        section_type,
+                        title,
+                        [],
+                        recipe_id=recipe_id,
+                        known_rating_key=known_key,
+                    )
+                    keys_map = plex_collections.set_stored_key(
+                        keys_map, sid, title, sync_stats.get("rating_key")
+                    )
                     section_removed += int(sync_stats.get("removed") or 0)
                     last_stats = sync_stats
                 libraries.append({"plex_section_id": sid, "cleared_titles": titles, "removed": section_removed})
@@ -2764,7 +2819,18 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
             }
         else:
             for sid in section_ids:
-                sync_stats = plex_collections.sync_collection(sid, section_type, collection_title, [])
+                known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
+                sync_stats = plex_collections.sync_collection(
+                    sid,
+                    section_type,
+                    collection_title,
+                    [],
+                    recipe_id=recipe_id,
+                    known_rating_key=known_key,
+                )
+                keys_map = plex_collections.set_stored_key(
+                    keys_map, sid, collection_title, sync_stats.get("rating_key")
+                )
                 libraries.append({"plex_section_id": sid, "synced": sync_stats})
                 removed += int(sync_stats.get("removed") or 0)
                 last_stats = sync_stats
@@ -2792,6 +2858,8 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
         if recipe is not None:
             recipe.last_run_at = datetime.now(timezone.utc)
             recipe.last_run_summary = summary
+            if summary.get("status") == "cleared":
+                recipe.plex_collection_keys = keys_map
             session.commit()
     return summary
 
