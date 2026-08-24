@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ThemeMode } from "../brandTypes";
 import {
+  checkCollectionTitleConflicts,
   explainCollectionItem,
   getCollectionBuilderMeta,
   getCollectionTmdbMeta,
@@ -8,6 +9,7 @@ import {
   validateCollectionSource,
   ARR_ADD_BATCH_CAP,
   type CollectionSourceValidation,
+  type CollectionTitleConflict,
   type RecipeWritePayload,
 } from "../api/collections";
 import { ArrAddModal } from "./ArrAddModal";
@@ -1003,7 +1005,8 @@ export function CollectionEditor(props: {
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const accentHex = props.accent.hex;
-  const theme = getCollectionTheme(props.themeMode === "light");
+  const isLight = props.themeMode === "light";
+  const theme = getCollectionTheme(isLight);
 
   const [name, setName] = useState(props.recipe?.name ?? "");
   const [enabled, setEnabled] = useState(props.recipe?.enabled ?? true);
@@ -1020,6 +1023,13 @@ export function CollectionEditor(props: {
       ? props.recipe.definition
       : { sources: [], filters: [], limit: 50, sort: "popularity" },
   );
+  const [nameCheck, setNameCheck] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ok" }
+    | { status: "conflict"; conflicts: CollectionTitleConflict[] }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
   const editorSnapshot = useMemo(
     () =>
       collectionEditorSnapshot({
@@ -1042,6 +1052,10 @@ export function CollectionEditor(props: {
     return () => props.onDirtyChange?.(false);
   }, [props.onDirtyChange]);
 
+  useEffect(() => {
+    setNameCheck({ status: "idle" });
+  }, [collectionTitle, sectionIds]);
+
   const sectionId = sectionIds[0] ?? null;
   const section = useMemo(
     () => props.sections.find((s) => s.id === sectionId) ?? null,
@@ -1049,6 +1063,32 @@ export function CollectionEditor(props: {
   );
   const sectionType: "movie" | "show" = section?.type ?? props.recipe?.plex_section_type ?? "movie";
   const mediaType: "movie" | "tv" = sectionType === "movie" ? "movie" : "tv";
+
+  const runCheckName = async () => {
+    if (!collectionTitle.trim() || !sectionId || sectionIds.length === 0) return;
+    setNameCheck({ status: "loading" });
+    try {
+      const result = await checkCollectionTitleConflicts({
+        plex_section_id: sectionId,
+        plex_section_ids: sectionIds,
+        plex_section_type: sectionType,
+        collection_title: collectionTitle.trim(),
+        definition,
+        recipe_id: props.recipe?.id ?? null,
+      });
+      const blocking = (result.conflicts || []).filter((c) => c.reason !== "ours");
+      if (blocking.length === 0) {
+        setNameCheck({ status: "ok" });
+        return;
+      }
+      setNameCheck({ status: "conflict", conflicts: blocking });
+    } catch (err) {
+      setNameCheck({
+        status: "error",
+        message: err instanceof Error ? err.message : "Could not check that name",
+      });
+    }
+  };
 
   // TMDB metadata (genres / providers / regions) cached per media type + region.
   const [metaCache, setMetaCache] = useState<Record<string, CollectionTmdbMeta>>({});
@@ -2418,16 +2458,92 @@ export function CollectionEditor(props: {
                 })}
               </div>
             </div>
-            <label className={`flex items-center gap-2 ${theme.label}`}>
-              Collection title
-              <input
-                className={theme.field}
-                style={{ width: 220 }}
-                value={collectionTitle}
-                placeholder="e.g. Trending Now"
-                onChange={(e) => setCollectionTitle(e.target.value)}
-              />
-            </label>
+            <div className="flex flex-col gap-1.5 min-w-0">
+              <label className={`flex flex-wrap items-center gap-2 ${theme.label}`}>
+                Collection title
+                <input
+                  className={theme.field}
+                  style={{ width: 220 }}
+                  value={collectionTitle}
+                  placeholder="e.g. Trending Now"
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setCollectionTitle(next);
+                    if (definition.adopt_existing) {
+                      setDefinition((prev) => {
+                        if (!prev.adopt_existing) return prev;
+                        const { adopt_existing: _drop, ...rest } = prev;
+                        return rest;
+                      });
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className={theme.cancelButton}
+                  disabled={!collectionTitle.trim() || sectionIds.length === 0 || nameCheck.status === "loading"}
+                  onClick={() => void runCheckName()}
+                >
+                  {nameCheck.status === "loading" ? "Checking…" : "Check name"}
+                </button>
+              </label>
+              {definition.adopt_existing ? (
+                <p className="text-[13px] text-amber-300/90 max-w-xl">
+                  Will adopt the existing Plex collection(s) with this name. That reconnects a previous Placeholdarr
+                  collection, or takes over a non-Placeholdarr one. Items that do not match this recipe will be removed
+                  on sync.
+                </p>
+              ) : null}
+              {nameCheck.status === "ok" ? (
+                <p className="text-[13px] text-emerald-400">Name is available in the selected libraries.</p>
+              ) : null}
+              {nameCheck.status === "error" ? (
+                <p className="text-[13px] text-red-400">{nameCheck.message}</p>
+              ) : null}
+              {nameCheck.status === "conflict" ? (
+                <div className={`text-[13px] space-y-2 max-w-xl ${theme.muted}`}>
+                  {nameCheck.conflicts.some((c) => c.reason === "other_recipe") ? (
+                    <p className={isLight ? "text-amber-800" : "text-amber-200"}>
+                      Another Placeholdarr recipe already uses this name in a selected library. Change this title, or
+                      rename the other recipe&apos;s collection first.
+                    </p>
+                  ) : (
+                    <p className={isLight ? "text-amber-800" : "text-amber-200"}>
+                      This name is already used in a selected library. Rename, or adopt when you save to reconnect a
+                      previous Placeholdarr collection (or take over a non-Placeholdarr one). Items that do not match
+                      this recipe will be removed on sync.
+                    </p>
+                  )}
+                  <ul className="space-y-1">
+                    {nameCheck.conflicts.map((c) => (
+                      <li key={`${c.section_id}:${c.title}:${c.rating_key || ""}`}>
+                        <span className={isLight ? "text-slate-800 font-semibold" : "text-slate-200 font-semibold"}>
+                          {c.title}
+                        </span>
+                        {" · "}
+                        {c.section_title}
+                        {c.reason === "other_recipe"
+                          ? " (owned by another Placeholdarr recipe)"
+                          : ` (${c.item_count} item${c.item_count === 1 ? "" : "s"})`}
+                      </li>
+                    ))}
+                  </ul>
+                  {nameCheck.conflicts.every((c) => c.reason !== "other_recipe") ? (
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 rounded-md text-[12px] font-headline uppercase tracking-wider text-white"
+                      style={{ backgroundColor: accentHex }}
+                      onClick={() => {
+                        setDefinition((prev) => ({ ...prev, adopt_existing: true }));
+                        setNameCheck({ status: "idle" });
+                      }}
+                    >
+                      Adopt when saving
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Recipe name
               <input

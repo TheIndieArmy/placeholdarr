@@ -653,6 +653,11 @@ export interface CollectionDefinition {
   /** When sort is rating (movies): which Radarr ratings.* key to order by. */
   sort_provider?: CollectionRatingProvider | null;
   pins?: CollectionPins;
+  /**
+   * When true, sync may claim an existing unlabeled Plex collection with the same
+   * title (per library) instead of refusing. Membership then follows the recipe.
+   */
+  adopt_existing?: boolean;
 }
 
 export interface CollectionRunSummary {

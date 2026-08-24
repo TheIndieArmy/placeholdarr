@@ -56,15 +56,17 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/collections",
     ),
     WhatsNewNotice(
-        id="collections-ownership",
+        id="collections-title-adopt",
         since_version="0.9.18",
-        title="Action required: clean up collection duplicates",
+        title="Action required: reconnect Collections",
         body=(
-            "Placeholdarr Collections no longer take over same-named hand-made Plex collections. "
-            "On sync, Placeholdarr marks the collections it owns by appending "
-            "\"Managed by Placeholdarr.\" to the collection summary (the description shown in Plex). "
-            "If you already had Placeholdarr collections before this upgrade, the next sync may "
-            "create a second copy. Keep the one whose summary shows that text, and delete the other."
+            "Action is required. Placeholdarr now tracks Plex collection ownership internally, "
+            "rather than matching by name. Open each affected recipe and save it: you will be prompted "
+            "to adopt the matching collection or rename the recipe. Until you do, scheduled runs for "
+            "that recipe will fail and leave the Plex collection unchanged.\n\n"
+            "Prefer adopt for collections Placeholdarr already created. If you built the collection "
+            "in Plex or another tool, rename instead so Placeholdarr doesn't claim it. Adopting syncs "
+            "the collection to the Placeholdarr recipe, so non-matching items will be removed."
         ),
         cta_label="Open Collections",
         cta_path="/collections",
@@ -140,6 +142,18 @@ def _notice_payload(notice: WhatsNewNotice) -> dict[str, Any]:
     }
 
 
+def _notices_newest_update_first(notices: tuple[WhatsNewNotice, ...] | list[WhatsNewNotice]) -> list[WhatsNewNotice]:
+    """Newest since_version first; within one version, keep NOTICES declaration order."""
+    # Negate semver parts so we can sort ascending on index within a version.
+    return sorted(
+        notices,
+        key=lambda notice: (
+            tuple(-part for part in parse_semver(notice.since_version)),
+            NOTICES.index(notice),
+        ),
+    )
+
+
 def pending_notices(*, setup_complete: bool, session=None) -> dict[str, Any]:
     """Return notices for this install and stamp last_seen for first-run setup."""
     last_seen = get_last_seen_app_version(session=session)
@@ -155,29 +169,26 @@ def pending_notices(*, setup_complete: bool, session=None) -> dict[str, Any]:
         }
 
     effective_last = last_seen if last_seen else "0.0.0"
-    notices = [
-        _notice_payload(notice)
+    matched = [
+        notice
         for notice in NOTICES
         if version_less(effective_last, notice.since_version) and notice.id not in dismissed
     ]
     return {
         "app_version": APP_VERSION,
         "last_seen_app_version": last_seen,
-        "notices": notices,
+        "notices": [_notice_payload(notice) for notice in _notices_newest_update_first(matched)],
     }
 
 
 def catalog_notices(session=None) -> dict[str, Any]:
-    """Full What's new list for the sidebar version chip (newest first)."""
-    ordered = sorted(
-        NOTICES,
-        key=lambda notice: (parse_semver(notice.since_version), NOTICES.index(notice)),
-        reverse=True,
-    )
+    """Full What's new list for the sidebar version chip (newest update first)."""
     return {
         "app_version": APP_VERSION,
         "last_seen_app_version": get_last_seen_app_version(session=session),
-        "notices": [_notice_payload(notice) for notice in ordered],
+        "notices": [
+            _notice_payload(notice) for notice in _notices_newest_update_first(NOTICES)
+        ],
     }
 
 

@@ -22,6 +22,7 @@ from services.collections.engine import (
     preview_definition,
     recipe_section_ids,
     run_recipe,
+    titles_for_conflict_check,
     validate_active_window,
     validate_definition,
     window_is_active,
@@ -476,6 +477,48 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
         "arr_tags": arr_tags,
         "tautulli_configured": list_sources.tautulli_configured(),
     }
+
+
+class TitleConflictsPayload(BaseModel):
+    plex_section_id: int = Field(..., ge=1)
+    plex_section_ids: list[int] | None = None
+    plex_section_type: str = Field(..., pattern="^(movie|show)$")
+    collection_title: str = ""
+    definition: dict[str, Any] = Field(default_factory=dict)
+    recipe_id: int | None = None
+
+
+@router.post("/api/collections/title-conflicts")
+async def title_conflicts(body: TitleConflictsPayload):
+    """Detect same-title Plex collections in any selected library (would create a twin)."""
+    try:
+        section_ids = normalize_section_ids(body.plex_section_id, body.plex_section_ids)
+        titles = titles_for_conflict_check(
+            collection_title=body.collection_title,
+            definition=body.definition or {},
+            section_type=body.plex_section_type,
+        )
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    known_keys = None
+    if body.recipe_id is not None:
+        with session_scope() as session:
+            row = session.query(CollectionRecipe).filter(CollectionRecipe.id == body.recipe_id).first()
+            if row is not None and isinstance(row.plex_collection_keys, dict):
+                known_keys = dict(row.plex_collection_keys)
+
+    try:
+        conflicts = plex_collections.find_title_conflicts(
+            section_ids,
+            body.plex_section_type,
+            titles,
+            recipe_id=body.recipe_id,
+            known_keys=known_keys,
+        )
+    except plex_collections.PlexCollectionsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"conflicts": conflicts, "titles_checked": titles}
 
 
 @router.post("/api/collections/preview")
