@@ -392,6 +392,26 @@ async def preview(body: PreviewPayload):
     return result
 
 
+class ValidateSourcePayload(BaseModel):
+    source_type: str = Field(..., min_length=1)
+    media_type: str = Field(..., pattern="^(movie|show)$")
+    reference: str = ""
+    subtype: str | None = None
+
+
+@router.post("/api/collections/validate-source")
+async def validate_source(body: ValidateSourcePayload):
+    """Resolve a pasted source URL/ref without running a full recipe preview."""
+    from services.collections.source_validate import validate_source_reference
+
+    return validate_source_reference(
+        source_type=body.source_type,
+        media_type=body.media_type,
+        reference=body.reference,
+        subtype=body.subtype,
+    )
+
+
 class ArrAddItem(BaseModel):
     title: str = ""
     year: int | None = None

@@ -5,7 +5,9 @@ import {
   getCollectionBuilderMeta,
   getCollectionTmdbMeta,
   previewCollectionDefinition,
+  validateCollectionSource,
   ARR_ADD_BATCH_CAP,
+  type CollectionSourceValidation,
   type RecipeWritePayload,
 } from "../api/collections";
 import { ArrAddModal } from "./ArrAddModal";
@@ -1083,15 +1085,97 @@ export function CollectionEditor(props: {
   }, [sectionType]);
   const builderMeta = builderMetaCache[sectionType] ?? null;
 
+  type SourceValidationState = {
+    status: "idle" | "loading" | "ok" | "error";
+    result?: CollectionSourceValidation | null;
+  };
+  const [sourceValidation, setSourceValidation] = useState<Record<number, SourceValidationState>>({});
+
   // ----- definition mutation helpers -----
   const updateSource = (index: number, patch: Partial<CollectionSourceBlock>) => {
     setDefinition((prev) => ({
       ...prev,
       sources: prev.sources.map((s, i) => (i === index ? { ...s, ...patch } : s)),
     }));
+    setSourceValidation((prev) => {
+      if (!prev[index]) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
   };
   const removeSource = (index: number) => {
     setDefinition((prev) => ({ ...prev, sources: prev.sources.filter((_, i) => i !== index) }));
+    setSourceValidation((prev) => {
+      const next: Record<number, SourceValidationState> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const idx = Number(key);
+        if (idx < index) next[idx] = value;
+        else if (idx > index) next[idx - 1] = value;
+      }
+      return next;
+    });
+  };
+
+  const runValidateSource = async (index: number, reference: string) => {
+    const block = definition.sources[index];
+    if (!block) return;
+    setSourceValidation((prev) => ({ ...prev, [index]: { status: "loading" } }));
+    try {
+      const result = await validateCollectionSource({
+        source_type: block.type,
+        media_type: sectionType,
+        reference,
+        subtype: block.subtype ?? null,
+      });
+      setSourceValidation((prev) => ({
+        ...prev,
+        [index]: { status: result.ok ? "ok" : "error", result },
+      }));
+      if (result.ok && result.suggested_title && !collectionTitle.trim()) {
+        setCollectionTitle(result.suggested_title);
+      }
+    } catch (err) {
+      setSourceValidation((prev) => ({
+        ...prev,
+        [index]: {
+          status: "error",
+          result: {
+            ok: false,
+            source_type: block.type,
+            error: err instanceof Error ? err.message : "Validation failed",
+          },
+        },
+      }));
+    }
+  };
+
+  const renderSourceValidate = (index: number, reference: string) => {
+    const state = sourceValidation[index] ?? { status: "idle" as const };
+    const canRun = Boolean(reference.trim()) || definition.sources[index]?.type === "stevenlu";
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className={theme.cancelButton}
+            disabled={!canRun || state.status === "loading"}
+            onClick={() => void runValidateSource(index, reference)}
+          >
+            {state.status === "loading" ? "Checking…" : "Validate"}
+          </button>
+          {state.status === "ok" && state.result?.title ? (
+            <span className="text-[13px] text-emerald-400">
+              {state.result.title}
+              {state.result.detail ? <span className="text-slate-500"> · {state.result.detail}</span> : null}
+            </span>
+          ) : null}
+          {state.status === "error" && state.result?.error ? (
+            <span className="text-[13px] text-red-400">{state.result.error}</span>
+          ) : null}
+        </div>
+      </div>
+    );
   };
   // Filters: simple mode is OR-ed groups of AND-ed rules; Advanced mode edits the
   // full and/or tree (depth-capped). Recipes that already nest open in Advanced.
@@ -1375,16 +1459,19 @@ export function CollectionEditor(props: {
         ) : null}
 
         {block.type === "tmdb_list" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            List
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.list_id ?? ""}
-              placeholder="Paste a TMDB list URL or id, e.g. themoviedb.org/list/8136"
-              onChange={(e) => updateSource(index, { list_id: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              List
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.list_id ?? ""}
+                placeholder="Paste a TMDB list URL or id, e.g. themoviedb.org/list/8136"
+                onChange={(e) => updateSource(index, { list_id: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.list_id ?? "")}
+          </>
         ) : null}
 
         {isTmdbPage ? (
@@ -1399,6 +1486,7 @@ export function CollectionEditor(props: {
                 onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
               />
             </label>
+            {renderSourceValidate(index, block.tmdb_ref ?? "")}
             <p className="text-[12px] text-slate-500">
               Supports TMDB list, person, company, keyword, and collection pages. Company and keyword pages can fetch
               in TMDB’s page order.
@@ -1410,49 +1498,55 @@ export function CollectionEditor(props: {
         block.type === "tmdb_company" ||
         block.type === "tmdb_keyword" ||
         block.type === "tmdb_collection" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            {block.type === "tmdb_person"
-              ? "Person"
-              : block.type === "tmdb_company"
-                ? "Company"
-                : block.type === "tmdb_keyword"
-                  ? "Keyword"
-                  : "Collection"}
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.tmdb_ref ?? ""}
-              placeholder={
-                block.type === "tmdb_person"
-                  ? "Paste the TMDB person URL, e.g. themoviedb.org/person/32982-jane-austen"
-                  : block.type === "tmdb_company"
-                    ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
-                    : block.type === "tmdb_keyword"
-                      ? "Paste the TMDB keyword URL. sort_by on the URL is used (default popularity)."
-                      : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
-              }
-              onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              {block.type === "tmdb_person"
+                ? "Person"
+                : block.type === "tmdb_company"
+                  ? "Company"
+                  : block.type === "tmdb_keyword"
+                    ? "Keyword"
+                    : "Collection"}
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.tmdb_ref ?? ""}
+                placeholder={
+                  block.type === "tmdb_person"
+                    ? "Paste the TMDB person URL, e.g. themoviedb.org/person/32982-jane-austen"
+                    : block.type === "tmdb_company"
+                      ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
+                      : block.type === "tmdb_keyword"
+                        ? "Paste the TMDB keyword URL. sort_by on the URL is used (default popularity)."
+                        : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
+                }
+                onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.tmdb_ref ?? "")}
+          </>
         ) : null}
 
         {block.type === "mdblist" || block.type === "trakt_list" || block.type === "anilist" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            List
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.list_ref ?? ""}
-              placeholder={
-                block.type === "mdblist"
-                  ? "Paste a list URL or user/slug, e.g. linaspurinis/top-watched-movies-of-the-week"
-                  : block.type === "anilist"
-                    ? "Paste an AniList URL, e.g. anilist.co/user/NAME/animelist"
-                    : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
-              }
-              onChange={(e) => updateSource(index, { list_ref: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              List
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.list_ref ?? ""}
+                placeholder={
+                  block.type === "mdblist"
+                    ? "Paste a list URL or user/slug, e.g. linaspurinis/top-watched-movies-of-the-week"
+                    : block.type === "anilist"
+                      ? "Paste an AniList URL, e.g. anilist.co/user/NAME/animelist"
+                      : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
+                }
+                onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.list_ref ?? "")}
+          </>
         ) : null}
 
         {block.type === "trakt" ? (
@@ -1489,16 +1583,19 @@ export function CollectionEditor(props: {
               </select>
             </label>
             {block.subtype === "list" ? (
-              <label className={`flex items-center gap-2 ${theme.label}`}>
-                List
-                <input
-                  className={`${theme.field} flex-1`}
-                  style={{ minWidth: 260 }}
-                  value={block.list_ref ?? ""}
-                  placeholder="Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
-                  onChange={(e) => updateSource(index, { list_ref: e.target.value })}
-                />
-              </label>
+              <>
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  List
+                  <input
+                    className={`${theme.field} flex-1`}
+                    style={{ minWidth: 260 }}
+                    value={block.list_ref ?? ""}
+                    placeholder="Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
+                    onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+                  />
+                </label>
+                {renderSourceValidate(index, block.list_ref ?? "")}
+              </>
             ) : (
               <>
                 <label className={`flex items-center gap-2 ${theme.label}`}>
@@ -1679,16 +1776,19 @@ export function CollectionEditor(props: {
         ) : null}
 
         {block.type === "stevenlu" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            JSON URL
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.list_ref ?? ""}
-              placeholder="Leave blank for the default StevenLu popular-movies list"
-              onChange={(e) => updateSource(index, { list_ref: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              JSON URL
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.list_ref ?? ""}
+                placeholder="Leave blank for the default StevenLu popular-movies list"
+                onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.list_ref ?? "")}
+          </>
         ) : null}
 
         {isTmdbDiscover ? (

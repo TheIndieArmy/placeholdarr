@@ -109,3 +109,22 @@ export function addCollectionTitlesToArr(payload: {
 }): Promise<CollectionArrAddResponse> {
   return postJson("/api/collections/arr-add", payload);
 }
+
+export type CollectionSourceValidation = {
+  ok: boolean;
+  source_type: string;
+  kind?: string | null;
+  title?: string | null;
+  detail?: string | null;
+  suggested_title?: string | null;
+  error?: string | null;
+};
+
+export function validateCollectionSource(payload: {
+  source_type: string;
+  media_type: "movie" | "show";
+  reference: string;
+  subtype?: string | null;
+}): Promise<CollectionSourceValidation> {
+  return postJson("/api/collections/validate-source", payload);
+}
