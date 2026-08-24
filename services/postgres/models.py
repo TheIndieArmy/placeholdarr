@@ -302,6 +302,8 @@ class CollectionRecipe(Base):
     # "movie" or "show" — mirrors the Plex section type so the engine knows which catalog to query.
     plex_section_type = Column(String(16), nullable=False)
     collection_title = Column(String(200), nullable=False)
+    # Owned Plex collection ratingKeys: { "<section_id>": { "<collection_title>": "<ratingKey>" } }.
+    plex_collection_keys = Column(JSON, nullable=True)
     # Block-based rule definition: {"sources": [...], "filters": [...], "limit": int|None, "sort": str|None}
     definition = Column(JSON, nullable=False, default=dict)
     # Per-recipe schedule override in hours; null = follow COLLECTIONS_SYNC_INTERVAL_HOURS.

@@ -5,9 +5,15 @@ Lists sections, resolves Plex items per target section by provider GUID
 membership. Targeting is per-section so recipes can point at any Plex
 library (including dedicated placeholder libraries), not just the
 configured movie/TV sections.
+
+Ownership: Placeholdarr only mutates collections that carry a
+``placeholdarr`` label and/or a visible summary starting with
+``Managed by Placeholdarr.`` as a summary footer (and stores their ratingKeys). Unlabeled
+same-title collections are left alone; sync creates a new owned one.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any
@@ -24,6 +30,9 @@ from services.media_servers.plex_lookup import (
 class PlexCollectionsError(Exception):
     """Raised when Plex is unavailable or a collection operation fails."""
 
+
+OWNERSHIP_LABEL = "placeholdarr"
+OWNERSHIP_SUMMARY = "Managed by Placeholdarr."
 
 # Provider-id -> item index per section so one recipe run does a single section listing.
 _index_lock = threading.Lock()
@@ -146,12 +155,186 @@ def membership_mask(
     return present
 
 
-def _find_collection(section, collection_title: str):
+def ownership_labels(recipe_id: int, set_value: str | None = None) -> list[str]:
+    """Labels applied to Placeholdarr-managed Plex collections."""
+    labels = [OWNERSHIP_LABEL, f"placeholdarr-recipe-{int(recipe_id)}"]
+    if set_value:
+        slug = _slug_value(set_value)
+        if slug:
+            labels.append(f"placeholdarr-set-{int(recipe_id)}-{slug}")
+    return labels
+
+
+def _slug_value(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return text[:80]
+
+
+def collection_label_names(collection) -> set[str]:
+    names: set[str] = set()
+    try:
+        for label in collection.labels or []:
+            tag = getattr(label, "tag", None) or getattr(label, "title", None) or str(label)
+            if tag:
+                names.add(str(tag).strip().lower())
+    except Exception:
+        pass
+    return names
+
+
+def collection_summary_text(collection) -> str:
+    return str(getattr(collection, "summary", "") or "").strip()
+
+
+def has_ownership_summary(collection) -> bool:
+    return OWNERSHIP_SUMMARY.lower() in collection_summary_text(collection).lower()
+
+
+def has_ownership_label(collection) -> bool:
+    return OWNERSHIP_LABEL in collection_label_names(collection)
+
+
+def is_owned_collection(collection) -> bool:
+    """True when Placeholdarr marked this collection (label and/or summary)."""
+    return has_ownership_label(collection) or has_ownership_summary(collection)
+
+
+def desired_ownership_summary(existing_summary: str | None = None) -> str:
+    """Ensure the visible Plex summary ends with our ownership footer."""
+    current = str(existing_summary or "").strip()
+    if not current:
+        return OWNERSHIP_SUMMARY
+    if OWNERSHIP_SUMMARY.lower() in current.lower():
+        return current
+    return f"{current}\n\n{OWNERSHIP_SUMMARY}"
+
+
+def ensure_ownership_markers(collection, recipe_id: int, set_value: str | None = None) -> None:
+    """Apply hidden labels (API) and a visible summary line (Plex UI)."""
+    wanted = ownership_labels(recipe_id, set_value)
+    existing = collection_label_names(collection)
+    missing = [label for label in wanted if label.lower() not in existing]
+    if missing:
+        try:
+            collection.addLabel(missing)
+        except Exception as exc:
+            logger.warning(
+                f"Collections: could not apply ownership labels on "
+                f"{getattr(collection, 'title', '')!r}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
+    target_summary = desired_ownership_summary(collection_summary_text(collection))
+    if collection_summary_text(collection) != target_summary:
+        try:
+            collection.editSummary(target_summary)
+        except Exception as exc:
+            logger.warning(
+                f"Collections: could not set ownership summary on "
+                f"{getattr(collection, 'title', '')!r}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+
+    try:
+        collection.reload()
+    except Exception:
+        pass
+
+
+# Back-compat alias used by older call sites / tests.
+ensure_ownership_labels = ensure_ownership_markers
+
+
+def lookup_stored_key(
+    plex_collection_keys: Any,
+    section_id: int,
+    collection_title: str,
+) -> str | None:
+    if not isinstance(plex_collection_keys, dict):
+        return None
+    by_section = plex_collection_keys.get(str(section_id))
+    if not isinstance(by_section, dict):
+        return None
+    key = by_section.get(collection_title)
+    if key is None:
+        # Case-insensitive title fallback.
+        needle = collection_title.strip().lower()
+        for title, rating_key in by_section.items():
+            if str(title).strip().lower() == needle:
+                key = rating_key
+                break
+    text = str(key or "").strip()
+    return text or None
+
+
+def set_stored_key(
+    plex_collection_keys: dict[str, Any] | None,
+    section_id: int,
+    collection_title: str,
+    rating_key: str | None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = dict(plex_collection_keys or {})
+    section_key = str(section_id)
+    by_section = dict(out.get(section_key) or {}) if isinstance(out.get(section_key), dict) else {}
+    if rating_key:
+        by_section[collection_title] = str(rating_key)
+    else:
+        by_section.pop(collection_title, None)
+    if by_section:
+        out[section_key] = by_section
+    else:
+        out.pop(section_key, None)
+    return out
+
+
+def _fetch_collection_by_rating_key(plex, rating_key: str):
+    try:
+        item = plex.fetchItem(int(rating_key))
+    except Exception:
+        try:
+            item = plex.fetchItem(f"/library/metadata/{rating_key}")
+        except Exception:
+            return None
+    # Ensure it is a collection-like object.
+    if item is None:
+        return None
+    type_name = str(getattr(item, "type", "") or "").lower()
+    if type_name and type_name not in ("collection",):
+        # Some plexapi versions expose Collection without type attr; allow objects with items()+title.
+        if not hasattr(item, "items"):
+            return None
+    return item
+
+
+def _find_owned_collection_by_title(section, collection_title: str):
+    """Title match only when the collection already has our ownership marker."""
     needle = collection_title.strip().lower()
     for collection in section.collections():
-        if str(getattr(collection, "title", "")).strip().lower() == needle:
+        if str(getattr(collection, "title", "")).strip().lower() != needle:
+            continue
+        if is_owned_collection(collection):
             return collection
     return None
+
+
+def resolve_owned_collection(
+    plex,
+    section,
+    *,
+    collection_title: str,
+    known_rating_key: str | None = None,
+):
+    """Resolve a Placeholdarr-owned collection; never returns unlabeled same-title."""
+    if known_rating_key:
+        found = _fetch_collection_by_rating_key(plex, known_rating_key)
+        if found is not None:
+            return found
+    try:
+        return _find_owned_collection_by_title(section, collection_title)
+    except Exception as exc:
+        raise PlexCollectionsError(
+            f"Failed to list collections for section {getattr(section, 'key', '?')}: {exc}"
+        ) from exc
 
 
 def _apply_custom_item_order(collection, items: list[Any]) -> None:
@@ -194,44 +377,64 @@ def sync_collection(
     section_type: str,
     collection_title: str,
     items: list[Any],
+    *,
+    recipe_id: int,
+    set_value: str | None = None,
+    known_rating_key: str | None = None,
 ) -> dict[str, Any]:
-    """Create or update a Plex collection so its membership and item order match `items`.
+    """Create or update a Placeholdarr-owned Plex collection.
 
-    Plex defaults collections to release-date sort, which ignores recipe order.
-    After membership is synced, the collection is switched to custom order and
-    items are moved to match `items` (Placeholdarr arrange order).
-
-    Returns counts: {"added": n, "removed": n, "total": n, "created": bool}.
+    Never mutates an unlabeled same-title collection. Returns counts plus
+    ``rating_key`` for persistence on the recipe.
     """
     plex = get_plex_server()
     if not plex:
         raise PlexCollectionsError("Plex is not configured or unreachable")
     section = _get_section(plex, section_id)
 
-    existing = None
-    try:
-        existing = _find_collection(section, collection_title)
-    except Exception as exc:
-        raise PlexCollectionsError(f"Failed to list collections for section {section_id}: {exc}") from exc
+    existing = resolve_owned_collection(
+        plex,
+        section,
+        collection_title=collection_title,
+        known_rating_key=known_rating_key,
+    )
 
     target_keys = {str(getattr(item, "ratingKey", "")) for item in items}
 
     if existing is None:
         if not items:
-            return {"added": 0, "removed": 0, "total": 0, "created": False}
+            return {
+                "added": 0,
+                "removed": 0,
+                "total": 0,
+                "created": False,
+                "rating_key": None,
+                "skipped_unlabeled": False,
+            }
         try:
             created = section.createCollection(collection_title, items=items)
         except Exception as exc:
             raise PlexCollectionsError(
                 f"Failed to create collection {collection_title!r} in section {section_id}: {exc}"
             ) from exc
+        ensure_ownership_markers(created, recipe_id, set_value)
         _apply_custom_item_order(created, items)
+        rating_key = str(getattr(created, "ratingKey", "") or "") or None
         logger.info(
             f"Collections: created Plex collection {collection_title!r} "
-            f"(section={section_id}, items={len(items)})",
+            f"(section={section_id}, items={len(items)}, recipe={recipe_id})",
             extra={"emoji_type": "info"},
         )
-        return {"added": len(items), "removed": 0, "total": len(items), "created": True}
+        return {
+            "added": len(items),
+            "removed": 0,
+            "total": len(items),
+            "created": True,
+            "rating_key": rating_key,
+            "skipped_unlabeled": False,
+        }
+
+    ensure_ownership_markers(existing, recipe_id, set_value)
 
     try:
         current_items = existing.items()
@@ -257,9 +460,11 @@ def sync_collection(
             f"Failed to update collection {collection_title!r} membership: {exc}"
         ) from exc
 
+    rating_key = str(getattr(existing, "ratingKey", "") or "") or None
     logger.info(
         f"Collections: synced Plex collection {collection_title!r} "
-        f"(section={section_id}, added={len(to_add)}, removed={len(to_remove)}, total={len(target_keys)})",
+        f"(section={section_id}, added={len(to_add)}, removed={len(to_remove)}, "
+        f"total={len(target_keys)}, recipe={recipe_id})",
         extra={"emoji_type": "info"},
     )
     return {
@@ -267,4 +472,56 @@ def sync_collection(
         "removed": len(to_remove),
         "total": len(target_keys),
         "created": False,
+        "rating_key": rating_key,
+        "skipped_unlabeled": False,
+    }
+
+
+def delete_collection(
+    section_id: int,
+    section_type: str,
+    collection_title: str,
+    *,
+    recipe_id: int,
+    set_value: str | None = None,
+    known_rating_key: str | None = None,
+) -> dict[str, Any]:
+    """Delete a Placeholdarr-owned Plex collection if it exists.
+
+    Unlabeled same-title collections are left alone.
+    """
+    plex = get_plex_server()
+    if not plex:
+        raise PlexCollectionsError("Plex is not configured or unreachable")
+    section = _get_section(plex, section_id)
+    existing = resolve_owned_collection(
+        plex,
+        section,
+        collection_title=collection_title,
+        known_rating_key=known_rating_key,
+    )
+    if existing is None:
+        return {
+            "deleted": False,
+            "title": collection_title,
+            "rating_key": None,
+            "skipped_unlabeled": True,
+        }
+    # Ensure labels before delete is not required; we already verified ownership.
+    try:
+        existing.delete()
+    except Exception as exc:
+        raise PlexCollectionsError(
+            f"Failed to delete collection {collection_title!r} in section {section_id}: {exc}"
+        ) from exc
+    logger.info(
+        f"Collections: deleted Plex collection {collection_title!r} "
+        f"(section={section_id}, recipe={recipe_id})",
+        extra={"emoji_type": "info"},
+    )
+    return {
+        "deleted": True,
+        "title": collection_title,
+        "rating_key": None,
+        "skipped_unlabeled": False,
     }

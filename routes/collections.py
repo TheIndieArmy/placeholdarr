@@ -52,6 +52,9 @@ def _serialize_recipe(row: CollectionRecipe) -> dict[str, Any]:
         "plex_section_ids": section_ids,
         "plex_section_type": row.plex_section_type,
         "collection_title": row.collection_title,
+        "plex_collection_keys": row.plex_collection_keys
+        if isinstance(row.plex_collection_keys, dict)
+        else {},
         "definition": row.definition or {},
         "run_interval_hours": row.run_interval_hours,
         "active_window": window,
@@ -104,7 +107,112 @@ async def list_recipes():
         "recipes": payload,
         "tmdb_configured": tmdb_client.tmdb_configured(),
         "trakt_configured": list_sources.trakt_configured(),
+        "tautulli_configured": list_sources.tautulli_configured(),
     }
+
+
+class ExportRecipesPayload(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+class ImportRecipesPayload(BaseModel):
+    """Import a previously exported collections bundle.
+
+    ``plex_section_ids`` are applied to every recipe of matching type. If omitted,
+    each recipe uses the first available Plex library of its media type.
+    """
+
+    payload: dict[str, Any] | list[Any]
+    plex_section_ids: list[int] | None = None
+
+
+@router.post("/api/collections/export")
+async def export_recipes(body: ExportRecipesPayload):
+    from services.collections.recipe_portability import build_export_bundle
+
+    ids = [int(x) for x in (body.ids or []) if int(x) >= 1]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one collection to export")
+    with session_scope() as session:
+        rows = (
+            session.query(CollectionRecipe)
+            .filter(CollectionRecipe.id.in_(ids))
+            .order_by(CollectionRecipe.id)
+            .all()
+        )
+        by_id = {r.id: _serialize_recipe(r) for r in rows}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Collection recipe(s) not found: {missing}")
+    ordered = [by_id[i] for i in ids if i in by_id]
+    return build_export_bundle(ordered)
+
+
+@router.post("/api/collections/import")
+async def import_recipes(body: ImportRecipesPayload):
+    from services.collections.recipe_portability import (
+        parse_import_bundle,
+        prepare_import_recipe,
+        resolve_import_sections,
+    )
+
+    try:
+        raw_recipes = parse_import_bundle(body.payload)
+    except RecipeValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        sections = plex_collections.list_plex_sections()
+    except plex_collections.PlexCollectionsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    preferred = [int(x) for x in (body.plex_section_ids or []) if int(x) >= 1]
+    created: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    for raw in raw_recipes:
+        name = str(raw.get("name") or "recipe").strip() or "recipe"
+        try:
+            recipe_type = str(raw.get("plex_section_type") or "").strip().lower()
+            if recipe_type not in ("movie", "show"):
+                raise RecipeValidationError("plex_section_type must be movie or show")
+            section_ids = resolve_import_sections(
+                recipe_type=recipe_type,
+                available=sections,
+                preferred_ids=preferred or None,
+            )
+            prepared = prepare_import_recipe(
+                raw,
+                section_ids=section_ids,
+                section_type=recipe_type,
+            )
+            with session_scope() as session:
+                row = CollectionRecipe(
+                    name=prepared["name"],
+                    enabled=prepared["enabled"],
+                    plex_section_id=prepared["plex_section_id"],
+                    plex_section_ids=prepared["plex_section_ids"],
+                    plex_section_type=prepared["plex_section_type"],
+                    collection_title=prepared["collection_title"],
+                    definition=prepared["definition"],
+                    run_interval_hours=prepared["run_interval_hours"],
+                    active_window=prepared["active_window"],
+                    plex_collection_keys=None,
+                )
+                session.add(row)
+                session.commit()
+                session.refresh(row)
+                created.append(_serialize_recipe(row))
+        except RecipeValidationError as exc:
+            errors.append({"name": name, "error": str(exc)})
+        except Exception as exc:
+            errors.append({"name": name, "error": str(exc)})
+
+    if created:
+        _refresh_collections_schedule()
+    if not created and errors:
+        raise HTTPException(status_code=400, detail=errors[0]["error"])
+    return {"ok": True, "created": created, "errors": errors, "created_count": len(created)}
 
 
 @router.post("/api/collections")
@@ -302,6 +410,11 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "AND radarr_certification IS NOT NULL AND TRIM(radarr_certification) <> '' "
             "ORDER BY cert"
         )
+        year_sql = text(
+            "SELECT DISTINCT year FROM movie "
+            "WHERE is_deleted = false AND year IS NOT NULL AND year >= 1800 AND year <= 2100 "
+            "ORDER BY year"
+        )
     else:
         lang_sql = text(
             "SELECT DISTINCT sonarr_payload_raw->'originalLanguage'->>'name' AS lang "
@@ -320,10 +433,38 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
             "AND sonarr_certification IS NOT NULL AND TRIM(sonarr_certification) <> '' "
             "ORDER BY cert"
         )
+        year_sql = text(
+            "SELECT DISTINCT year FROM series "
+            "WHERE is_deleted = false AND year IS NOT NULL AND year >= 1800 AND year <= 2100 "
+            "ORDER BY year"
+        )
     with session_scope() as session:
         languages = [str(row[0]) for row in session.execute(lang_sql) if row[0]]
         genres = [str(row[0]) for row in session.execute(genre_sql) if row[0]]
         certifications = [str(row[0]).strip() for row in session.execute(cert_sql) if row[0] and str(row[0]).strip()]
+        years = [int(row[0]) for row in session.execute(year_sql) if row[0] is not None]
+
+    from services.collections.collection_sets import decade_label
+
+    decades = sorted({decade_label(y) for y in years}, key=lambda s: int(s.rstrip("s")))
+
+    arr_tags: list[dict[str, Any]] = []
+    for item in instances:
+        key = str(item.get("instance_key") or "")
+        if not key:
+            continue
+        try:
+            for tag in list_sources.fetch_arr_tags(key, arr_type):
+                arr_tags.append(
+                    {
+                        "instance_key": key,
+                        "instance_label": item.get("label") or key,
+                        "tag_id": tag["id"],
+                        "label": tag["label"],
+                    }
+                )
+        except list_sources.ListSourceError:
+            continue
 
     return {
         "instances": instance_options,
@@ -331,6 +472,9 @@ async def builder_meta(media_type: str = Query("movie", pattern="^(movie|show)$"
         "languages": languages,
         "genres": genres,
         "certifications": certifications,
+        "decades": decades,
+        "arr_tags": arr_tags,
+        "tautulli_configured": list_sources.tautulli_configured(),
     }
 
 
@@ -350,6 +494,26 @@ async def preview(body: PreviewPayload):
     except (tmdb_client.TmdbError, list_sources.ListSourceError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return result
+
+
+class ValidateSourcePayload(BaseModel):
+    source_type: str = Field(..., min_length=1)
+    media_type: str = Field(..., pattern="^(movie|show)$")
+    reference: str = ""
+    subtype: str | None = None
+
+
+@router.post("/api/collections/validate-source")
+async def validate_source(body: ValidateSourcePayload):
+    """Resolve a pasted source URL/ref without running a full recipe preview."""
+    from services.collections.source_validate import validate_source_reference
+
+    return validate_source_reference(
+        source_type=body.source_type,
+        media_type=body.media_type,
+        reference=body.reference,
+        subtype=body.subtype,
+    )
 
 
 class ArrAddItem(BaseModel):

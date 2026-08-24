@@ -5,7 +5,9 @@ import {
   getCollectionBuilderMeta,
   getCollectionTmdbMeta,
   previewCollectionDefinition,
+  validateCollectionSource,
   ARR_ADD_BATCH_CAP,
+  type CollectionSourceValidation,
   type RecipeWritePayload,
 } from "../api/collections";
 import { ArrAddModal } from "./ArrAddModal";
@@ -62,9 +64,15 @@ function ratingProviderMax(provider: string | null | undefined): number {
 
 const SOURCE_META: Record<
   CollectionSourceType,
-  { label: string; icon: string; description: string; requires: "tmdb" | "trakt" | null }
+  { label: string; icon: string; description: string; requires: "tmdb" | "trakt" | "tautulli" | null }
 > = {
   catalog: { label: "My Catalog", icon: "inventory_2", description: "Everything Placeholdarr tracks for this library type", requires: null },
+  tmdb: {
+    label: "TMDB",
+    icon: "theaters",
+    description: "Trending, popular, upcoming, discover, or paste a TMDB page URL",
+    requires: "tmdb",
+  },
   tmdb_trending: { label: "TMDB Trending", icon: "trending_up", description: "What's trending on TMDB right now", requires: "tmdb" },
   tmdb_popular: { label: "TMDB Popular", icon: "local_fire_department", description: "All-time popular titles on TMDB", requires: "tmdb" },
   tmdb_upcoming: { label: "TMDB Upcoming / On Air", icon: "event_upcoming", description: "Upcoming movies or currently-airing shows", requires: "tmdb" },
@@ -76,23 +84,47 @@ const SOURCE_META: Record<
   tmdb_keyword: { label: "TMDB Keyword", icon: "sell", description: "Titles tagged with a TMDB keyword — paste the keyword URL", requires: "tmdb" },
   tmdb_collection: { label: "TMDB Collection", icon: "collections_bookmark", description: "A TMDB movie collection (Star Wars, MCU) — paste the collection URL", requires: "tmdb" },
   mdblist: { label: "MDBList", icon: "playlist_add_check", description: "A public MDBList — paste the list URL", requires: null },
+  trakt: {
+    label: "Trakt",
+    icon: "playlist_play",
+    description: "Trakt charts or a public user list (Client ID requires Trakt VIP to create an API app)",
+    requires: "trakt",
+  },
   trakt_list: { label: "Trakt List", icon: "playlist_play", description: "A public Trakt user list — paste the URL or user/slug", requires: "trakt" },
+  trakt_chart: { label: "Trakt Chart", icon: "insights", description: "Trakt trending, popular, watched, played, or collected charts", requires: "trakt" },
   stevenlu: { label: "StevenLu", icon: "star", description: "Popular movies JSON (Radarr's StevenLu list), or a compatible URL", requires: null },
   anilist: { label: "AniList", icon: "animation", description: "A public AniList user anime list — paste the profile/list URL", requires: null },
+  tautulli: { label: "Tautulli", icon: "bar_chart", description: "Most popular or most watched from your Tautulli stats", requires: "tautulli" },
+  arr_tag: { label: "ARR Tag", icon: "sell", description: "Titles in Radarr/Sonarr that carry a specific tag", requires: null },
 };
 
 const VISIBLE_SOURCE_TYPES: CollectionSourceType[] = [
   "catalog",
-  "tmdb_trending",
-  "tmdb_popular",
-  "tmdb_upcoming",
-  "tmdb_discover",
-  "tmdb_url",
+  "tmdb",
   "mdblist",
-  "trakt_list",
+  "trakt",
+  "tautulli",
+  "arr_tag",
   "stevenlu",
   "anilist",
 ];
+
+const TMDB_UNIFIED_SUBTYPE_LABELS: Record<string, string> = {
+  trending: "Trending",
+  popular: "Popular",
+  upcoming: "Upcoming / On Air",
+  discover: "Discover",
+  page: "Page URL",
+};
+
+const TRAKT_UNIFIED_SUBTYPE_LABELS: Record<string, string> = {
+  list: "User list",
+  trending: "Chart · Trending",
+  popular: "Chart · Popular",
+  watched: "Chart · Most watched",
+  played: "Chart · Most played",
+  collected: "Chart · Most collected",
+};
 
 const TMDB_SOURCE_SORT_OPTIONS: { value: NonNullable<CollectionSourceBlock["sort_by"]>; label: string }[] = [
   { value: "popularity.desc", label: "Popularity (highest first)" },
@@ -156,6 +188,8 @@ function arrIncludeConstraintLabels(filters: CollectionFilters | undefined): str
 
 function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
   switch (type) {
+    case "tmdb":
+      return { type, subtype: "trending", window: "week", limit: 50 };
     case "tmdb_trending":
       return { type, window: "week", limit: 50 };
     case "tmdb_discover":
@@ -174,6 +208,14 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
     case "trakt_list":
     case "anilist":
       return { type, list_ref: "", limit: 200 };
+    case "trakt":
+      return { type, subtype: "trending", period: "weekly", limit: 50 };
+    case "trakt_chart":
+      return { type, subtype: "trending", period: "weekly", limit: 50 };
+    case "tautulli":
+      return { type, subtype: "most_popular", days: 30, minimum_plays: 1, limit: 50 };
+    case "arr_tag":
+      return { type, instance_key: "", tag_id: null, limit: 500 };
     case "stevenlu":
       return { type, list_ref: "", limit: 200 };
     case "catalog":
@@ -181,6 +223,46 @@ function defaultSourceBlock(type: CollectionSourceType): CollectionSourceBlock {
     default:
       return { type, limit: 100 };
   }
+}
+
+function applyTmdbSubtype(block: CollectionSourceBlock, subtype: string): CollectionSourceBlock {
+  const next: CollectionSourceBlock = { ...block, subtype };
+  if (subtype === "trending") {
+    return { ...next, window: block.window ?? "week", limit: block.limit ?? 50 };
+  }
+  if (subtype === "popular" || subtype === "upcoming") {
+    return { ...next, limit: block.limit ?? 100 };
+  }
+  if (subtype === "discover") {
+    return {
+      ...next,
+      genre_ids: block.genre_ids ?? [],
+      provider_ids: block.provider_ids ?? [],
+      watch_region: block.watch_region ?? "US",
+      sort_by: block.sort_by ?? "popularity.desc",
+      limit: block.limit ?? 100,
+    };
+  }
+  if (subtype === "page") {
+    return {
+      ...next,
+      tmdb_ref: block.tmdb_ref ?? "",
+      sort_by: block.sort_by ?? "popularity.desc",
+      limit: block.limit ?? 200,
+    };
+  }
+  return next;
+}
+
+function applyTraktSubtype(block: CollectionSourceBlock, subtype: string): CollectionSourceBlock {
+  const next: CollectionSourceBlock = { ...block, subtype };
+  if (subtype === "list") {
+    return { ...next, list_ref: block.list_ref ?? "", limit: block.limit ?? 200 };
+  }
+  if (subtype === "watched" || subtype === "played" || subtype === "collected") {
+    return { ...next, period: block.period ?? "weekly", limit: block.limit ?? 50 };
+  }
+  return { ...next, limit: block.limit ?? 50 };
 }
 
 function collectionEditorSnapshot(parts: {
@@ -906,6 +988,7 @@ export function CollectionEditor(props: {
   sections: PlexSectionOption[];
   tmdbConfigured: boolean;
   traktConfigured: boolean;
+  tautulliConfigured?: boolean;
   /** Shared in-memory library catalog (same data the top-bar search filters). */
   libraryItems: LibraryItem[];
   libraryLoading: boolean;
@@ -1002,15 +1085,97 @@ export function CollectionEditor(props: {
   }, [sectionType]);
   const builderMeta = builderMetaCache[sectionType] ?? null;
 
+  type SourceValidationState = {
+    status: "idle" | "loading" | "ok" | "error";
+    result?: CollectionSourceValidation | null;
+  };
+  const [sourceValidation, setSourceValidation] = useState<Record<number, SourceValidationState>>({});
+
   // ----- definition mutation helpers -----
   const updateSource = (index: number, patch: Partial<CollectionSourceBlock>) => {
     setDefinition((prev) => ({
       ...prev,
       sources: prev.sources.map((s, i) => (i === index ? { ...s, ...patch } : s)),
     }));
+    setSourceValidation((prev) => {
+      if (!prev[index]) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
   };
   const removeSource = (index: number) => {
     setDefinition((prev) => ({ ...prev, sources: prev.sources.filter((_, i) => i !== index) }));
+    setSourceValidation((prev) => {
+      const next: Record<number, SourceValidationState> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const idx = Number(key);
+        if (idx < index) next[idx] = value;
+        else if (idx > index) next[idx - 1] = value;
+      }
+      return next;
+    });
+  };
+
+  const runValidateSource = async (index: number, reference: string) => {
+    const block = definition.sources[index];
+    if (!block) return;
+    setSourceValidation((prev) => ({ ...prev, [index]: { status: "loading" } }));
+    try {
+      const result = await validateCollectionSource({
+        source_type: block.type,
+        media_type: sectionType,
+        reference,
+        subtype: block.subtype ?? null,
+      });
+      setSourceValidation((prev) => ({
+        ...prev,
+        [index]: { status: result.ok ? "ok" : "error", result },
+      }));
+      if (result.ok && result.suggested_title && !collectionTitle.trim()) {
+        setCollectionTitle(result.suggested_title);
+      }
+    } catch (err) {
+      setSourceValidation((prev) => ({
+        ...prev,
+        [index]: {
+          status: "error",
+          result: {
+            ok: false,
+            source_type: block.type,
+            error: err instanceof Error ? err.message : "Validation failed",
+          },
+        },
+      }));
+    }
+  };
+
+  const renderSourceValidate = (index: number, reference: string) => {
+    const state = sourceValidation[index] ?? { status: "idle" as const };
+    const canRun = Boolean(reference.trim()) || definition.sources[index]?.type === "stevenlu";
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className={theme.cancelButton}
+            disabled={!canRun || state.status === "loading"}
+            onClick={() => void runValidateSource(index, reference)}
+          >
+            {state.status === "loading" ? "Checking…" : "Validate"}
+          </button>
+          {state.status === "ok" && state.result?.title ? (
+            <span className="text-[13px] text-emerald-400">
+              {state.result.title}
+              {state.result.detail ? <span className="text-slate-500"> · {state.result.detail}</span> : null}
+            </span>
+          ) : null}
+          {state.status === "error" && state.result?.error ? (
+            <span className="text-[13px] text-red-400">{state.result.error}</span>
+          ) : null}
+        </div>
+      </div>
+    );
   };
   // Filters: simple mode is OR-ed groups of AND-ed rules; Advanced mode edits the
   // full and/or tree (depth-capped). Recipes that already nest open in Advanced.
@@ -1247,11 +1412,39 @@ export function CollectionEditor(props: {
     }
     const region = block.watch_region || "US";
     const regionMeta = metaCache[`${mediaType}:${region}`] ?? baseMeta;
-    const tmdbUrlKind = block.type === "tmdb_url" ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
+    const tmdbSubtype = block.type === "tmdb" ? (block.subtype ?? "trending") : null;
+    const isTmdbTrending = block.type === "tmdb_trending" || tmdbSubtype === "trending";
+    const isTmdbDiscover = block.type === "tmdb_discover" || tmdbSubtype === "discover";
+    const isTmdbPage = block.type === "tmdb_url" || tmdbSubtype === "page";
+    const tmdbUrlKind = isTmdbPage ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
     const tmdbUrlSupportsSourceSort = tmdbUrlKind === "company" || tmdbUrlKind === "keyword";
     return (
       <div className="flex flex-col gap-3">
-        {block.type === "tmdb_trending" ? (
+        {block.type === "tmdb" ? (
+          <label className={`flex items-center gap-2 ${theme.label}`}>
+            Type
+            <select
+              className={theme.selectField}
+              value={tmdbSubtype ?? "trending"}
+              onChange={(e) => {
+                const next = applyTmdbSubtype(block, e.target.value);
+                setDefinition((prev) => {
+                  const sources = [...prev.sources];
+                  sources[index] = next;
+                  return { ...prev, sources };
+                });
+              }}
+            >
+              <option value="trending">Trending</option>
+              <option value="popular">Popular</option>
+              <option value="upcoming">Upcoming / On Air</option>
+              <option value="discover">Discover</option>
+              <option value="page">Page URL</option>
+            </select>
+          </label>
+        ) : null}
+
+        {isTmdbTrending ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             Window
             <select
@@ -1266,19 +1459,22 @@ export function CollectionEditor(props: {
         ) : null}
 
         {block.type === "tmdb_list" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            List
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.list_id ?? ""}
-              placeholder="Paste a TMDB list URL or id, e.g. themoviedb.org/list/8136"
-              onChange={(e) => updateSource(index, { list_id: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              List
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.list_id ?? ""}
+                placeholder="Paste a TMDB list URL or id, e.g. themoviedb.org/list/8136"
+                onChange={(e) => updateSource(index, { list_id: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.list_id ?? "")}
+          </>
         ) : null}
 
-        {block.type === "tmdb_url" ? (
+        {isTmdbPage ? (
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Page URL
@@ -1290,6 +1486,7 @@ export function CollectionEditor(props: {
                 onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
               />
             </label>
+            {renderSourceValidate(index, block.tmdb_ref ?? "")}
             <p className="text-[12px] text-slate-500">
               Supports TMDB list, person, company, keyword, and collection pages. Company and keyword pages can fetch
               in TMDB’s page order.
@@ -1301,65 +1498,300 @@ export function CollectionEditor(props: {
         block.type === "tmdb_company" ||
         block.type === "tmdb_keyword" ||
         block.type === "tmdb_collection" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            {block.type === "tmdb_person"
-              ? "Person"
-              : block.type === "tmdb_company"
-                ? "Company"
-                : block.type === "tmdb_keyword"
-                  ? "Keyword"
-                  : "Collection"}
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.tmdb_ref ?? ""}
-              placeholder={
-                block.type === "tmdb_person"
-                  ? "Paste the TMDB person URL, e.g. themoviedb.org/person/32982-jane-austen"
-                  : block.type === "tmdb_company"
-                    ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
-                    : block.type === "tmdb_keyword"
-                      ? "Paste the TMDB keyword URL. sort_by on the URL is used (default popularity)."
-                      : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
-              }
-              onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              {block.type === "tmdb_person"
+                ? "Person"
+                : block.type === "tmdb_company"
+                  ? "Company"
+                  : block.type === "tmdb_keyword"
+                    ? "Keyword"
+                    : "Collection"}
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.tmdb_ref ?? ""}
+                placeholder={
+                  block.type === "tmdb_person"
+                    ? "Paste the TMDB person URL, e.g. themoviedb.org/person/32982-jane-austen"
+                    : block.type === "tmdb_company"
+                      ? "Paste the TMDB company URL, e.g. themoviedb.org/company/2-lucasfilm-ltd"
+                      : block.type === "tmdb_keyword"
+                        ? "Paste the TMDB keyword URL. sort_by on the URL is used (default popularity)."
+                        : "Paste the TMDB collection URL, e.g. themoviedb.org/collection/10-star-wars-collection"
+                }
+                onChange={(e) => updateSource(index, { tmdb_ref: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.tmdb_ref ?? "")}
+          </>
         ) : null}
 
         {block.type === "mdblist" || block.type === "trakt_list" || block.type === "anilist" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            List
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.list_ref ?? ""}
-              placeholder={
-                block.type === "mdblist"
-                  ? "Paste a list URL or user/slug, e.g. linaspurinis/top-watched-movies-of-the-week"
-                  : block.type === "anilist"
-                    ? "Paste an AniList URL, e.g. anilist.co/user/NAME/animelist"
-                    : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
-              }
-              onChange={(e) => updateSource(index, { list_ref: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              List
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.list_ref ?? ""}
+                placeholder={
+                  block.type === "mdblist"
+                    ? "Paste a list URL or user/slug, e.g. linaspurinis/top-watched-movies-of-the-week"
+                    : block.type === "anilist"
+                      ? "Paste an AniList URL, e.g. anilist.co/user/NAME/animelist"
+                      : "Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
+                }
+                onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.list_ref ?? "")}
+          </>
+        ) : null}
+
+        {block.type === "trakt" ? (
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Type
+              <select
+                className={theme.selectField}
+                value={
+                  block.subtype === "list" ||
+                  block.subtype === "trending" ||
+                  block.subtype === "popular" ||
+                  block.subtype === "watched" ||
+                  block.subtype === "played" ||
+                  block.subtype === "collected"
+                    ? block.subtype === "list"
+                      ? "list"
+                      : "chart"
+                    : "chart"
+                }
+                onChange={(e) => {
+                  const mode = e.target.value;
+                  const nextSubtype = mode === "list" ? "list" : "trending";
+                  const next = applyTraktSubtype(block, nextSubtype);
+                  setDefinition((prev) => {
+                    const sources = [...prev.sources];
+                    sources[index] = next;
+                    return { ...prev, sources };
+                  });
+                }}
+              >
+                <option value="chart">Chart (Trakt rankings)</option>
+                <option value="list">User list</option>
+              </select>
+            </label>
+            {block.subtype === "list" ? (
+              <>
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  List
+                  <input
+                    className={`${theme.field} flex-1`}
+                    style={{ minWidth: 260 }}
+                    value={block.list_ref ?? ""}
+                    placeholder="Paste a list URL or user/slug, e.g. garycrawfordgc/latest-releases"
+                    onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+                  />
+                </label>
+                {renderSourceValidate(index, block.list_ref ?? "")}
+              </>
+            ) : (
+              <>
+                <label className={`flex items-center gap-2 ${theme.label}`}>
+                  Chart
+                  <select
+                    className={theme.selectField}
+                    value={
+                      block.subtype === "trending" ||
+                      block.subtype === "popular" ||
+                      block.subtype === "watched" ||
+                      block.subtype === "played" ||
+                      block.subtype === "collected"
+                        ? block.subtype
+                        : "trending"
+                    }
+                    onChange={(e) => {
+                      const next = applyTraktSubtype(block, e.target.value);
+                      setDefinition((prev) => {
+                        const sources = [...prev.sources];
+                        sources[index] = next;
+                        return { ...prev, sources };
+                      });
+                    }}
+                  >
+                    <option value="trending">Trending</option>
+                    <option value="popular">Popular</option>
+                    <option value="watched">Most watched</option>
+                    <option value="played">Most played</option>
+                    <option value="collected">Most collected</option>
+                  </select>
+                </label>
+                {block.subtype === "watched" ||
+                block.subtype === "played" ||
+                block.subtype === "collected" ? (
+                  <label className={`flex items-center gap-2 ${theme.label}`}>
+                    Period
+                    <select
+                      className={theme.selectField}
+                      value={block.period ?? "weekly"}
+                      onChange={(e) => updateSource(index, { period: e.target.value })}
+                    >
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                      <option value="yearly">Yearly</option>
+                      <option value="all">All time</option>
+                    </select>
+                  </label>
+                ) : null}
+              </>
+            )}
+            <p className="text-[12px] text-slate-500">
+              Charts are Trakt’s site rankings. Lists are a public user playlist. A Trakt Client ID is required; creating
+              an API app currently needs Trakt VIP.
+            </p>
+          </>
+        ) : null}
+
+        {block.type === "trakt_chart" ? (
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Chart
+              <select
+                className={theme.selectField}
+                value={block.subtype ?? "trending"}
+                onChange={(e) => updateSource(index, { subtype: e.target.value })}
+              >
+                <option value="trending">Trending</option>
+                <option value="popular">Popular</option>
+                <option value="watched">Most watched</option>
+                <option value="played">Most played</option>
+                <option value="collected">Most collected</option>
+              </select>
+            </label>
+            {block.subtype === "watched" || block.subtype === "played" || block.subtype === "collected" ? (
+              <label className={`flex items-center gap-2 ${theme.label}`}>
+                Period
+                <select
+                  className={theme.selectField}
+                  value={block.period ?? "weekly"}
+                  onChange={(e) => updateSource(index, { period: e.target.value })}
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="yearly">Yearly</option>
+                  <option value="all">All time</option>
+                </select>
+              </label>
+            ) : null}
+          </>
+        ) : null}
+
+        {block.type === "tautulli" ? (
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Stat
+              <select
+                className={theme.selectField}
+                value={block.subtype ?? "most_popular"}
+                onChange={(e) => updateSource(index, { subtype: e.target.value })}
+              >
+                <option value="most_popular">Most popular (unique users)</option>
+                <option value="most_watched">Most watched (play count)</option>
+              </select>
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Days
+              <input
+                className={theme.field}
+                type="number"
+                min={1}
+                max={365}
+                style={{ width: 88 }}
+                value={block.days ?? 30}
+                onChange={(e) => updateSource(index, { days: Number(e.target.value) || 30 })}
+              />
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Min plays
+              <input
+                className={theme.field}
+                type="number"
+                min={1}
+                style={{ width: 88 }}
+                value={block.minimum_plays ?? 1}
+                onChange={(e) => updateSource(index, { minimum_plays: Number(e.target.value) || 1 })}
+              />
+            </label>
+          </>
+        ) : null}
+
+        {block.type === "arr_tag" ? (
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Instance
+              <select
+                className={theme.selectField}
+                value={block.instance_key ?? ""}
+                onChange={(e) => {
+                  const instance_key = e.target.value;
+                  const firstTag = (builderMeta?.arr_tags || []).find((t) => t.instance_key === instance_key);
+                  updateSource(index, { instance_key, tag_id: firstTag?.tag_id ?? null });
+                }}
+              >
+                <option value="">Select instance…</option>
+                {(builderMeta?.instances || []).map((inst) => (
+                  <option key={inst.instance_key} value={inst.instance_key}>
+                    {inst.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              Tag
+              <select
+                className={theme.selectField}
+                value={block.tag_id ?? ""}
+                disabled={!block.instance_key}
+                onChange={(e) =>
+                  updateSource(index, { tag_id: e.target.value ? Number(e.target.value) : null })
+                }
+              >
+                <option value="">Select tag…</option>
+                {(builderMeta?.arr_tags || [])
+                  .filter((t) => t.instance_key === (block.instance_key || ""))
+                  .map((t) => (
+                    <option key={`${t.instance_key}:${t.tag_id}`} value={t.tag_id}>
+                      {t.label}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            {(builderMeta?.instances || []).length === 0 ? (
+              <p className="text-[12px] text-slate-500">Configure a Radarr/Sonarr instance in Settings first.</p>
+            ) : null}
+          </>
         ) : null}
 
         {block.type === "stevenlu" ? (
-          <label className={`flex items-center gap-2 ${theme.label}`}>
-            JSON URL
-            <input
-              className={`${theme.field} flex-1`}
-              style={{ minWidth: 260 }}
-              value={block.list_ref ?? ""}
-              placeholder="Leave blank for the default StevenLu popular-movies list"
-              onChange={(e) => updateSource(index, { list_ref: e.target.value })}
-            />
-          </label>
+          <>
+            <label className={`flex items-center gap-2 ${theme.label}`}>
+              JSON URL
+              <input
+                className={`${theme.field} flex-1`}
+                style={{ minWidth: 260 }}
+                value={block.list_ref ?? ""}
+                placeholder="Leave blank for the default StevenLu popular-movies list"
+                onChange={(e) => updateSource(index, { list_ref: e.target.value })}
+              />
+            </label>
+            {renderSourceValidate(index, block.list_ref ?? "")}
+          </>
         ) : null}
 
-        {block.type === "tmdb_discover" ? (
+        {isTmdbDiscover ? (
           <>
             <label className={`flex items-center gap-2 ${theme.label}`}>
               Sort from TMDB
@@ -1461,7 +1893,7 @@ export function CollectionEditor(props: {
           </>
         ) : null}
 
-        {block.type === "tmdb_url" && tmdbUrlSupportsSourceSort ? (
+        {isTmdbPage && tmdbUrlSupportsSourceSort ? (
           <label className={`flex items-center gap-2 ${theme.label}`}>
             Sort from TMDB
             <select
@@ -1478,7 +1910,7 @@ export function CollectionEditor(props: {
           </label>
         ) : null}
 
-        {block.type === "tmdb_url" && tmdbUrlKind && !tmdbUrlSupportsSourceSort ? (
+        {isTmdbPage && tmdbUrlKind && !tmdbUrlSupportsSourceSort ? (
           <p className="text-[12px] text-slate-500">
             This TMDB {tmdbUrlKind} page uses its native order. Recipe Arrange still runs after the source is fetched.
           </p>
@@ -2087,21 +2519,33 @@ export function CollectionEditor(props: {
             </p>
           ) : null}
           {definition.sources.map((block, index) => {
-            const legacyUrlKind = block.type === "tmdb_url" ? guessTmdbUrlKind(block.tmdb_ref ?? "") : null;
+            const legacyUrlKind =
+              block.type === "tmdb_url" || (block.type === "tmdb" && block.subtype === "page")
+                ? guessTmdbUrlKind(block.tmdb_ref ?? "")
+                : null;
             const meta = SOURCE_META[block.type] ?? {
               label: block.type,
               icon: "help",
               description: "",
             };
-            const title = block.type === "tmdb_url" && legacyUrlKind ? `TMDB ${legacyUrlKind[0].toUpperCase()}${legacyUrlKind.slice(1)} Page` : meta.label;
+            const title =
+              block.type === "tmdb" && block.subtype
+                ? `TMDB · ${TMDB_UNIFIED_SUBTYPE_LABELS[block.subtype] ?? block.subtype}`
+                : block.type === "trakt" && block.subtype
+                  ? `Trakt · ${TRAKT_UNIFIED_SUBTYPE_LABELS[block.subtype] ?? block.subtype}`
+                  : block.type === "tmdb_url" && legacyUrlKind
+                    ? `TMDB ${legacyUrlKind[0].toUpperCase()}${legacyUrlKind.slice(1)} Page`
+                    : meta.label;
             const subtitle =
-              block.type === "tmdb_url" && legacyUrlKind
-                ? `${meta.description}. ${
-                    legacyUrlKind === "company" || legacyUrlKind === "keyword"
-                      ? "Source sort matches TMDB."
-                      : "Uses TMDB’s native page order."
-                  }`
-                : meta.description;
+              block.type === "tmdb" && block.subtype === "page" && legacyUrlKind
+                ? `Paste a TMDB page URL. Detected: ${legacyUrlKind}.`
+                : block.type === "tmdb_url" && legacyUrlKind
+                  ? `${meta.description}. ${
+                      legacyUrlKind === "company" || legacyUrlKind === "keyword"
+                        ? "Source sort matches TMDB."
+                        : "Uses TMDB’s native page order."
+                    }`
+                  : meta.description;
             return (
             <BlockCard
               key={`${block.type}-${index}`}
@@ -2120,20 +2564,28 @@ export function CollectionEditor(props: {
             options={VISIBLE_SOURCE_TYPES.map((type) => {
               const requires = SOURCE_META[type].requires;
               const movieOnly = type === "stevenlu" || type === "tmdb_collection";
+              const needsArr = type === "arr_tag" && (builderMeta?.instances || []).length === 0;
+              const tautulliOk = props.tautulliConfigured ?? builderMeta?.tautulli_configured ?? false;
               const disabled =
                 (requires === "tmdb" && !props.tmdbConfigured) ||
                 (requires === "trakt" && !props.traktConfigured) ||
-                (movieOnly && sectionType !== "movie");
+                (requires === "tautulli" && !tautulliOk) ||
+                (movieOnly && sectionType !== "movie") ||
+                needsArr;
               return {
                 key: type,
                 label: SOURCE_META[type].label,
                 icon: SOURCE_META[type].icon,
                 description:
                   requires === "trakt" && !props.traktConfigured
-                    ? "Add a Trakt Client ID in Settings to enable"
-                    : movieOnly && sectionType !== "movie"
-                      ? "Movie libraries only"
-                      : SOURCE_META[type].description,
+                    ? "Add a Trakt Client ID in Settings (creating an API app requires Trakt VIP)"
+                    : requires === "tautulli" && !tautulliOk
+                      ? "Add Tautulli URL + API key in Settings to enable"
+                      : movieOnly && sectionType !== "movie"
+                        ? "Movie libraries only"
+                        : needsArr
+                          ? "Configure a Radarr/Sonarr instance in Settings first"
+                          : SOURCE_META[type].description,
                 disabled,
               };
             })}

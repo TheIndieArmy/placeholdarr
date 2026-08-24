@@ -1,7 +1,6 @@
 """Placeholdarr release version.
 
-Keep this in sync with CHANGELOG.md when cutting a release. Unreleased work on
-``collections`` stays at the next patch until tagged.
+Keep this in sync with CHANGELOG.md when cutting a release.
 """
 
-APP_VERSION = "0.9.16"
+APP_VERSION = "0.9.18"

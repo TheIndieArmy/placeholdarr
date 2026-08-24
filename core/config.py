@@ -196,6 +196,9 @@ class Settings(BaseSettings):
     TMDB_API_KEY: Optional[str] = None
     # Trakt API Client ID (public list access only; no OAuth/account linking).
     TRAKT_CLIENT_ID: Optional[str] = None
+    # Optional outbound Tautulli API for Collections "most played" sources.
+    TAUTULLI_URL: Optional[str] = None
+    TAUTULLI_API_KEY: Optional[str] = None
     # How often to run enabled collection recipes. <= 0 disables the scheduled job.
     COLLECTIONS_SYNC_INTERVAL_HOURS: int = 24
 

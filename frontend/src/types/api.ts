@@ -500,6 +500,7 @@ export interface IntegrationTestResponse {
 
 export type CollectionSourceType =
   | "catalog"
+  | "tmdb"
   | "tmdb_trending"
   | "tmdb_popular"
   | "tmdb_upcoming"
@@ -511,28 +512,42 @@ export type CollectionSourceType =
   | "tmdb_keyword"
   | "tmdb_collection"
   | "mdblist"
+  | "trakt"
   | "trakt_list"
+  | "trakt_chart"
   | "stevenlu"
-  | "anilist";
+  | "anilist"
+  | "tautulli"
+  | "arr_tag";
 
 export interface CollectionSourceBlock {
   type: CollectionSourceType;
-  /** tmdb_trending */
+  /** tmdb / tmdb_trending */
   window?: "day" | "week";
-  /** tmdb_discover */
+  /** tmdb discover / tmdb_discover */
   genre_ids?: number[];
   year_from?: number | null;
   year_to?: number | null;
   provider_ids?: number[];
   watch_region?: string;
   min_vote_average?: number | null;
-  /** tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
+  /** tmdb discover|page / tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
   sort_by?: string | null;
   /** tmdb_list / tmdb_person / tmdb_company / tmdb_keyword / tmdb_collection — id or TMDB URL */
   list_id?: string;
   tmdb_ref?: string;
-  /** mdblist / trakt_list / anilist / stevenlu — pasted URL or user/slug */
+  /** mdblist / trakt list / anilist / stevenlu — pasted URL or user/slug */
   list_ref?: string;
+  /** tmdb / trakt / tautulli / legacy trakt_chart subtype */
+  subtype?: string;
+  /** trakt chart period for watched/played/collected */
+  period?: string;
+  /** tautulli */
+  days?: number;
+  minimum_plays?: number;
+  /** arr_tag */
+  instance_key?: string;
+  tag_id?: number | null;
   /** per-source candidate cap */
   limit?: number;
 }
@@ -609,7 +624,28 @@ export interface CollectionPins {
   exclude?: CollectionPinnedItem[];
 }
 
+export interface CollectionSetConfig {
+  category: "genre" | "decade" | "content_rating" | "tag" | "release_timing";
+  /** @deprecated Legacy alias; prefer category. Still accepted when loading older recipes. */
+  dimension?: "genre" | "decade" | "content_rating" | "tag" | "release_timing";
+  selection_mode: "all" | "include" | "exclude";
+  values: string[];
+  title_pattern: string;
+  sort?: CollectionSortOption | null;
+  limit?: number | null;
+  min_items?: number;
+  /** Required when category is tag. */
+  instance_key?: string | null;
+  /** release_timing: which release date to use (theater/digital/physical or TV premiere modes). */
+  release_basis?: string | null;
+  /** Titles previously synced per Plex section id (server-managed). */
+  managed_by_section?: Record<string, string[]>;
+}
+
 export interface CollectionDefinition {
+  /** "collection_set" for one-config → many Plex collections; omit / "recipe" for normal recipes. */
+  mode?: "recipe" | "collection_set";
+  collection_set?: CollectionSetConfig;
   sources: CollectionSourceBlock[];
   filters: CollectionFilters;
   limit?: number | null;
@@ -621,6 +657,7 @@ export interface CollectionDefinition {
 
 export interface CollectionRunSummary {
   status: "ok" | "error" | "cleared" | "skipped" | "dormant";
+  mode?: "collection_set" | string;
   error?: string;
   reason?: string;
   window_cleared?: boolean;
@@ -639,6 +676,20 @@ export interface CollectionRunSummary {
   missing_from_arr_keys?: string[];
   synced?: { added: number; removed: number; total: number; created: boolean };
   libraries?: CollectionLibrarySyncSummary[];
+  collection_set?: {
+    category?: string;
+    dimension?: string;
+    collection_count?: number;
+    collections?: {
+      value: string;
+      title: string;
+      plex_section_id?: number;
+      selected?: number;
+      synced?: { added: number; removed: number; total: number; created: boolean };
+    }[];
+    managed_titles?: Record<string, string[]>;
+    removed_titles?: string[];
+  };
 }
 
 export interface CollectionLibrarySyncSummary {
@@ -665,6 +716,8 @@ export interface CollectionRecipe {
   plex_section_ids?: number[];
   plex_section_type: "movie" | "show";
   collection_title: string;
+  /** Owned Plex collection ratingKeys per section: { sectionId: { title: ratingKey } }. Read-only. */
+  plex_collection_keys?: Record<string, Record<string, string>>;
   definition: CollectionDefinition;
   /** Null = follow the global COLLECTIONS_SYNC_INTERVAL_HOURS cadence. */
   run_interval_hours: number | null;
@@ -681,6 +734,7 @@ export interface CollectionRecipesResponse {
   recipes: CollectionRecipe[];
   tmdb_configured: boolean;
   trakt_configured: boolean;
+  tautulli_configured?: boolean;
 }
 
 export interface PlexSectionOption {
@@ -706,6 +760,11 @@ export interface CollectionBuilderMeta {
   genres: string[];
   /** Distinct Radarr/Sonarr certifications present in the catalog (matches filter evaluation). */
   certifications: string[];
+  /** Decade labels (e.g. 1990s) derived from catalog years. */
+  decades?: string[];
+  /** Tags from configured *arr instances for arr_tag sources. */
+  arr_tags?: { instance_key: string; instance_label: string; tag_id: number; label: string }[];
+  tautulli_configured?: boolean;
 }
 
 export type CollectionExplainStatus = "pass" | "fail" | "skip";
@@ -777,6 +836,18 @@ export interface CollectionMissingFromArrItem {
 }
 
 export interface CollectionPreviewResponse {
+  mode?: "collection_set" | string;
+  set_category?: string;
+  /** @deprecated Prefer set_category. */
+  set_dimension?: string;
+  set_collections?: {
+    value: string;
+    title: string;
+    selected: number;
+    in_target_library?: number | null;
+    by_library?: Record<string, number>;
+  }[];
+  set_collection_count?: number;
   tmdb_candidates: number | null;
   matched_in_catalog: number;
   after_filters: number;

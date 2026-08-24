@@ -18,12 +18,14 @@ from sqlalchemy import func, or_
 
 from core.logger import logger
 from services import list_sources, tmdb_client
+from services.collections import collection_sets as sets_mod
 from services.media_servers import plex_collections
 from services.postgres.db import session_scope
 from services.postgres.models import CollectionRecipe, Episode, Movie, Season, Series
 
 SOURCE_TYPES = (
     "catalog",
+    "tmdb",
     "tmdb_trending",
     "tmdb_popular",
     "tmdb_upcoming",
@@ -35,10 +37,19 @@ SOURCE_TYPES = (
     "tmdb_keyword",
     "tmdb_collection",
     "mdblist",
+    "trakt",
     "trakt_list",
+    "trakt_chart",
     "stevenlu",
     "anilist",
+    "tautulli",
+    "arr_tag",
 )
+TMDB_SOURCE_SUBTYPES = ("trending", "popular", "upcoming", "discover", "page")
+TRAKT_SOURCE_SUBTYPES = ("list", "trending", "popular", "watched", "played", "collected")
+TRAKT_CHART_SUBTYPES = ("trending", "popular", "watched", "played", "collected")
+TRAKT_CHART_PERIODS = ("daily", "weekly", "monthly", "yearly", "all")
+TAUTULLI_SOURCE_SUBTYPES = ("most_popular", "most_watched")
 FILTER_FIELDS = (
     "genre",
     "year",
@@ -173,6 +184,30 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(definition, dict):
         raise RecipeValidationError("definition must be an object")
 
+    if sets_mod.is_collection_set_definition(definition):
+        try:
+            set_cfg = sets_mod.validate_collection_set_block(definition.get("collection_set") or {})
+        except sets_mod.CollectionSetValidationError as exc:
+            raise RecipeValidationError(str(exc)) from exc
+        sort = set_cfg.get("sort") or "title"
+        if sort not in SORT_OPTIONS:
+            raise RecipeValidationError(f"unknown sort option: {sort!r}")
+        limit = set_cfg.get("limit")
+        if limit is not None:
+            limit = min(int(limit), MAX_COLLECTION_ITEMS)
+            set_cfg["limit"] = limit
+        sources = [{"type": "catalog"}]
+        return {
+            "mode": "collection_set",
+            "collection_set": set_cfg,
+            "sources": sources,
+            "filters": [],
+            "limit": limit,
+            "sort": sort,
+            "sort_provider": None,
+            "pins": {"include": [], "exclude": []},
+        }
+
     sources = definition.get("sources") or []
     if not isinstance(sources, list) or not sources:
         raise RecipeValidationError("definition needs at least one source block")
@@ -187,6 +222,12 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
             raise RecipeValidationError("tmdb_list source requires a list id or TMDB list URL")
         if source_type == "tmdb_url" and not str(source.get("tmdb_ref") or "").strip():
             raise RecipeValidationError("tmdb_url source requires a TMDB page URL")
+        if source_type == "tmdb":
+            subtype = str(source.get("subtype") or "trending").strip().lower()
+            if subtype not in TMDB_SOURCE_SUBTYPES:
+                raise RecipeValidationError(f"unknown tmdb subtype: {subtype!r}")
+            if subtype == "page" and not str(source.get("tmdb_ref") or "").strip():
+                raise RecipeValidationError("tmdb page source requires a TMDB page URL")
         if source_type in ("tmdb_person", "tmdb_company", "tmdb_keyword", "tmdb_collection") and not str(
             source.get("tmdb_ref") or ""
         ).strip():
@@ -194,8 +235,39 @@ def validate_definition(definition: dict[str, Any]) -> dict[str, Any]:
         sort_by = source.get("sort_by")
         if sort_by is not None and str(sort_by).strip() and str(sort_by) not in TMDB_SOURCE_SORTS:
             raise RecipeValidationError(f"unknown TMDB source sort: {sort_by!r}")
-        if source_type in ("mdblist", "trakt_list", "anilist") and not str(source.get("list_ref") or "").strip():
+        if source_type in ("mdblist", "trakt_list", "anilist") and not str(
+            source.get("list_ref") or ""
+        ).strip():
             raise RecipeValidationError(f"{source_type} source requires a list URL or user/slug")
+        if source_type == "trakt":
+            subtype = str(source.get("subtype") or "trending").strip().lower()
+            if subtype not in TRAKT_SOURCE_SUBTYPES:
+                raise RecipeValidationError(f"unknown trakt subtype: {subtype!r}")
+            if subtype == "list" and not str(source.get("list_ref") or "").strip():
+                raise RecipeValidationError("trakt list source requires a list URL or user/slug")
+            if subtype in ("watched", "played", "collected"):
+                period = str(source.get("period") or "weekly").strip().lower()
+                if period not in TRAKT_CHART_PERIODS:
+                    raise RecipeValidationError(f"unknown trakt chart period: {period!r}")
+        if source_type == "trakt_chart":
+            subtype = str(source.get("subtype") or "trending").strip().lower()
+            if subtype not in TRAKT_CHART_SUBTYPES:
+                raise RecipeValidationError(f"unknown trakt_chart subtype: {subtype!r}")
+            period = str(source.get("period") or "weekly").strip().lower()
+            if period not in TRAKT_CHART_PERIODS:
+                raise RecipeValidationError(f"unknown trakt_chart period: {period!r}")
+        if source_type == "tautulli":
+            subtype = str(source.get("subtype") or "most_popular").strip().lower()
+            if subtype not in TAUTULLI_SOURCE_SUBTYPES:
+                raise RecipeValidationError(f"unknown tautulli subtype: {subtype!r}")
+        if source_type == "arr_tag":
+            if not str(source.get("instance_key") or "").strip():
+                raise RecipeValidationError("arr_tag source requires an instance_key")
+            try:
+                if int(source.get("tag_id")) < 1:
+                    raise RecipeValidationError("arr_tag source requires a tag_id")
+            except (TypeError, ValueError) as exc:
+                raise RecipeValidationError("arr_tag source requires a numeric tag_id") from exc
         normalized_sources.append(source)
 
     filters = _normalize_filters(definition.get("filters"))
@@ -258,6 +330,43 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
     source_type = source.get("type")
     limit = int(source.get("limit") or DEFAULT_SOURCE_LIMIT)
     source_sort = tmdb_client.normalize_tmdb_sort_by(source.get("sort_by"), media_type)
+    if source_type == "tmdb":
+        subtype = str(source.get("subtype") or "trending").strip().lower()
+        if subtype == "trending":
+            return tmdb_client.fetch_trending(media_type, str(source.get("window") or "week"), limit)
+        if subtype == "popular":
+            return tmdb_client.fetch_popular(media_type, limit)
+        if subtype == "upcoming":
+            return tmdb_client.fetch_upcoming(media_type, limit)
+        if subtype == "discover":
+            return tmdb_client.fetch_discover(
+                media_type,
+                genre_ids=[int(g) for g in (source.get("genre_ids") or [])],
+                year_from=source.get("year_from"),
+                year_to=source.get("year_to"),
+                provider_ids=[int(p) for p in (source.get("provider_ids") or [])],
+                watch_region=source.get("watch_region"),
+                min_vote_average=source.get("min_vote_average"),
+                sort_by=source_sort,
+                limit=limit,
+            )
+        if subtype == "page":
+            tmdb_ref = str(source.get("tmdb_ref") or "")
+            kind = tmdb_client.parse_tmdb_resource_kind(tmdb_ref)
+            if kind == "list":
+                return tmdb_client.fetch_list(tmdb_ref, media_type, limit)
+            if kind == "person":
+                return tmdb_client.fetch_person_credits(tmdb_ref, media_type, limit)
+            if kind == "company":
+                return tmdb_client.fetch_company(tmdb_ref, media_type, limit, source_sort)
+            if kind == "keyword":
+                return tmdb_client.fetch_keyword(tmdb_ref, media_type, limit, source_sort)
+            if kind == "collection":
+                return tmdb_client.fetch_collection(tmdb_ref, media_type, limit)
+            raise tmdb_client.TmdbError(
+                "TMDB page source needs a TMDB list, person, company, keyword, or collection URL"
+            )
+        raise RecipeValidationError(f"unknown tmdb subtype: {subtype!r}")
     if source_type == "tmdb_trending":
         return tmdb_client.fetch_trending(media_type, str(source.get("window") or "week"), limit)
     if source_type == "tmdb_popular":
@@ -302,12 +411,44 @@ def _fetch_source_items(source: dict[str, Any], media_type: str) -> list[dict[st
         return tmdb_client.fetch_collection(str(source.get("tmdb_ref") or ""), media_type, limit)
     if source_type == "mdblist":
         return list_sources.fetch_mdblist(str(source.get("list_ref")), media_type, limit)
+    if source_type == "trakt":
+        subtype = str(source.get("subtype") or "trending").strip().lower()
+        if subtype == "list":
+            return list_sources.fetch_trakt_list(str(source.get("list_ref")), media_type, limit)
+        return list_sources.fetch_trakt_chart(
+            media_type,
+            subtype,
+            period=str(source.get("period") or "weekly"),
+            limit=limit,
+        )
     if source_type == "trakt_list":
         return list_sources.fetch_trakt_list(str(source.get("list_ref")), media_type, limit)
+    if source_type == "trakt_chart":
+        return list_sources.fetch_trakt_chart(
+            media_type,
+            str(source.get("subtype") or "trending"),
+            period=str(source.get("period") or "weekly"),
+            limit=limit,
+        )
     if source_type == "stevenlu":
         return list_sources.fetch_stevenlu(str(source.get("list_ref") or ""), media_type, limit)
     if source_type == "anilist":
         return list_sources.fetch_anilist(str(source.get("list_ref")), media_type, limit)
+    if source_type == "tautulli":
+        return list_sources.fetch_tautulli(
+            media_type,
+            str(source.get("subtype") or "most_popular"),
+            days=int(source.get("days") or 30),
+            minimum_plays=int(source.get("minimum_plays") or 1),
+            limit=limit,
+        )
+    if source_type == "arr_tag":
+        return list_sources.fetch_arr_tag_items(
+            media_type,
+            instance_key=str(source.get("instance_key") or ""),
+            tag_id=int(source.get("tag_id")),
+            limit=limit,
+        )
     return []
 
 
@@ -1702,8 +1843,16 @@ def _evaluate(
         air_dates,
         normalized.get("sort_provider"),
     )
-    limit = normalized["limit"] or MAX_COLLECTION_ITEMS
-    rows, pinned_in = _apply_limit_with_pins(rows, normalized["pins"], section_type, limit)
+    explicit_limit = normalized["limit"]
+    if explicit_limit is None:
+        # Unset limit means no per-collection cap (Collection Sets / open-ended recipes).
+        rows, pinned_in = rows, 0
+        if normalized["pins"].get("include"):
+            include_ids = _pin_id_sets(normalized["pins"]["include"])
+            pinned_in = sum(1 for row in rows if _row_matches_ids(row, section_type, include_ids))
+    else:
+        limit = min(int(explicit_limit), MAX_COLLECTION_ITEMS)
+        rows, pinned_in = _apply_limit_with_pins(rows, normalized["pins"], section_type, limit)
 
     result: dict[str, Any] = {
         "tmdb_candidates": len(candidates) if candidates is not None else None,
@@ -1781,8 +1930,17 @@ def preview_definition(
     extra_section_ids: Any = None,
 ) -> dict[str, Any]:
     """Evaluate a definition without writing to Plex. Returns staged counts + sample items."""
+    normalized = validate_definition(definition)
+    if sets_mod.is_collection_set_definition(normalized):
+        return preview_collection_set_definition(
+            normalized,
+            section_id,
+            section_type,
+            sample_size=sample_size,
+            extra_section_ids=extra_section_ids,
+        )
     section_ids = normalize_section_ids(section_id, extra_section_ids)
-    primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+    primary = _evaluate(normalized, section_ids[0], section_type, resolve=True)
     sample_rows = primary["rows"][:sample_size]
     file_state = primary.get("file_state") or {}
     sample = [_row_summary(row, section_type, file_state) for row in sample_rows]
@@ -1790,7 +1948,7 @@ def preview_definition(
     plex_errors: list[str] = []
     key_groups = _provider_key_groups(sample_rows, section_type)
     for sid in section_ids:
-        outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+        outcome = primary if sid == section_ids[0] else _evaluate(normalized, sid, section_type, resolve=True)
         libraries.append(
             {
                 "plex_section_id": sid,
@@ -2107,6 +2265,279 @@ def explain_definition_item(
     return {"in_collection": bool(in_selection and resolved_ok), "stages": stages}
 
 
+
+
+def preview_collection_set_definition(
+    definition: dict[str, Any],
+    section_id: int,
+    section_type: str,
+    *,
+    sample_size: int = PREVIEW_SAMPLE_SIZE,
+    extra_section_ids: Any = None,
+) -> dict[str, Any]:
+    """Preview a Collection Set across all selected Plex libraries.
+
+    Per child collection we count catalog matches that resolve in each library,
+    plus a deduped unique count (present in ≥1 selected library).
+    """
+    normalized = validate_definition(definition)
+    set_cfg = normalized["collection_set"]
+    set_cfg = sets_mod.validate_collection_set_block(set_cfg, section_type=section_type)
+    section_ids = normalize_section_ids(section_id, extra_section_ids)
+    children = sets_mod.expand_collection_set(set_cfg, section_type)
+    min_items = int(set_cfg.get("min_items") or 0)
+
+    collections: list[dict[str, Any]] = []
+    catalog_total = 0
+    unique_total = 0
+    per_library_totals: dict[int, int] = {sid: 0 for sid in section_ids}
+    plex_error: str | None = None
+    sample: list[dict[str, Any]] = []
+
+    for child in children:
+        # Catalog selection is library-agnostic; membership is checked per section.
+        outcome = _evaluate(child["definition"], section_ids[0], section_type, resolve=False)
+        rows = outcome.get("rows") or []
+        catalog_count = int(outcome["selected"] or 0)
+        key_groups = _provider_key_groups(rows, section_type)
+        present_any = [False] * len(key_groups)
+        by_library: dict[str, int] = {}
+
+        for sid in section_ids:
+            try:
+                mask = plex_collections.membership_mask(sid, section_type, key_groups)
+            except plex_collections.PlexCollectionsError as exc:
+                if not plex_error:
+                    plex_error = str(exc)
+                mask = [False] * len(key_groups)
+            lib_count = sum(1 for hit in mask if hit)
+            by_library[str(sid)] = lib_count
+            per_library_totals[sid] = per_library_totals.get(sid, 0) + lib_count
+            for index, hit in enumerate(mask):
+                if hit:
+                    present_any[index] = True
+
+        unique_count = sum(1 for hit in present_any if hit)
+        if unique_count < min_items:
+            continue
+
+        catalog_total += catalog_count
+        unique_total += unique_count
+        collections.append(
+            {
+                "value": child["value_label"],
+                "title": child["title"],
+                "selected": unique_count,
+                "matched_in_catalog": outcome["matched_in_catalog"],
+                "after_filters": outcome["after_filters"],
+                "in_target_library": unique_count,
+                "by_library": by_library,
+            }
+        )
+        if len(sample) < sample_size and rows:
+            file_state = outcome.get("file_state") or {}
+            for row_index, row in enumerate(rows):
+                if len(sample) >= sample_size:
+                    break
+                if row_index < len(present_any) and not present_any[row_index]:
+                    continue
+                summary = _row_summary(row, section_type, file_state)
+                summary["set_value"] = child["value_label"]
+                summary["set_title"] = child["title"]
+                sample.append(summary)
+
+    libraries_payload = [
+        {
+            "plex_section_id": sid,
+            "in_target_library": per_library_totals.get(sid, 0),
+            "unresolved": None,
+            "plex_error": None,
+        }
+        for sid in section_ids
+    ]
+    return {
+        "mode": "collection_set",
+        "set_category": set_cfg["category"],
+        "set_dimension": set_cfg["category"],  # legacy alias
+        "set_collections": collections,
+        "set_collection_count": len(collections),
+        "tmdb_candidates": None,
+        "matched_in_catalog": catalog_total,
+        "after_filters": catalog_total,
+        "pinned_in": 0,
+        "pinned_out": 0,
+        "selected": unique_total,
+        "in_target_library": unique_total,
+        "unresolved": None,
+        "plex_error": plex_error,
+        "libraries": libraries_payload,
+        "sample": sample,
+        "missing_from_arr": [],
+        "missing_from_arr_count": 0,
+        "missing_from_arr_prefilter_count": 0,
+        "missing_from_arr_filter_gaps": [],
+    }
+
+
+def run_collection_set_recipe(
+    recipe_id: int,
+    *,
+    definition: dict[str, Any],
+    section_ids: list[int],
+    section_type: str,
+    recipe_name: str,
+    previous_summary: Optional[dict[str, Any]],
+    plex_collection_keys: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Fan out one Collection Set into N Plex collections and sync each."""
+    normalized = validate_definition(definition)
+    set_cfg = sets_mod.validate_collection_set_block(
+        normalized["collection_set"], section_type=section_type
+    )
+    children = sets_mod.expand_collection_set(set_cfg, section_type)
+    min_items = int(set_cfg.get("min_items") or 0)
+
+    active_titles_by_section: dict[str, list[str]] = {str(sid): [] for sid in section_ids}
+    keys_map: dict[str, Any] = dict(plex_collection_keys or {})
+    collection_rows: list[dict[str, Any]] = []
+    synced_added = 0
+    synced_removed = 0
+    synced_total = 0
+    created_any = False
+    selected_total = 0
+    in_library_total = 0
+    unresolved_total = 0
+    removed_titles: list[str] = []
+
+    evaluated: list[dict[str, Any]] = []
+    for child in children:
+        base = _evaluate(child["definition"], section_ids[0], section_type, resolve=False)
+        if int(base["selected"] or 0) < min_items:
+            continue
+        evaluated.append(child)
+
+    for sid in section_ids:
+        previous = set(sets_mod.previous_managed_titles(set_cfg, previous_summary, sid))
+        current_titles: set[str] = set()
+        for child in evaluated:
+            title = child["title"]
+            value_label = str(child.get("value_label") or child.get("value") or "")
+            current_titles.add(title)
+            outcome = _evaluate(child["definition"], sid, section_type, resolve=True)
+            if outcome["plex_error"]:
+                raise plex_collections.PlexCollectionsError(outcome["plex_error"])
+            known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
+            sync_stats = plex_collections.sync_collection(
+                sid,
+                section_type,
+                title,
+                outcome["resolved_items"] or [],
+                recipe_id=recipe_id,
+                set_value=value_label,
+                known_rating_key=known_key,
+            )
+            keys_map = plex_collections.set_stored_key(
+                keys_map, sid, title, sync_stats.get("rating_key")
+            )
+            if sid == section_ids[0]:
+                selected_total += int(outcome["selected"] or 0)
+            in_library_total += int(outcome["in_target_library"] or 0)
+            unresolved_total += int(outcome["unresolved"] or 0)
+            synced_added += int(sync_stats.get("added") or 0)
+            synced_removed += int(sync_stats.get("removed") or 0)
+            synced_total += int(sync_stats.get("total") or 0)
+            created_any = created_any or bool(sync_stats.get("created"))
+            collection_rows.append(
+                {
+                    "value": child["value_label"],
+                    "title": title,
+                    "plex_section_id": sid,
+                    "selected": outcome["selected"],
+                    "in_target_library": outcome["in_target_library"],
+                    "unresolved": outcome["unresolved"],
+                    "synced": sync_stats,
+                }
+            )
+        stale = previous - current_titles
+        for stale_title in sorted(stale):
+            known_key = plex_collections.lookup_stored_key(keys_map, sid, stale_title)
+            plex_collections.delete_collection(
+                sid,
+                section_type,
+                stale_title,
+                recipe_id=recipe_id,
+                known_rating_key=known_key,
+            )
+            keys_map = plex_collections.set_stored_key(keys_map, sid, stale_title, None)
+            removed_titles.append(stale_title)
+        active_titles_by_section[str(sid)] = sorted(current_titles)
+
+    with session_scope() as session:
+        recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
+        if recipe is not None:
+            stored = dict(recipe.definition or {})
+            stored_set = dict(stored.get("collection_set") or {})
+            stored_set.pop("dimension", None)
+            stored_set.pop("facet", None)
+            stored_set.update(
+                {
+                    "category": set_cfg["category"],
+                    "selection_mode": set_cfg["selection_mode"],
+                    "values": set_cfg.get("values") or [],
+                    "title_pattern": set_cfg.get("title_pattern"),
+                    "sort": set_cfg.get("sort"),
+                    "limit": set_cfg.get("limit"),
+                    "min_items": set_cfg.get("min_items"),
+                    "instance_key": set_cfg.get("instance_key"),
+                    "release_basis": set_cfg.get("release_basis"),
+                    "managed_by_section": active_titles_by_section,
+                }
+            )
+            stored["mode"] = "collection_set"
+            stored["collection_set"] = stored_set
+            stored["sources"] = [{"type": "catalog"}]
+            recipe.definition = stored
+            recipe.plex_collection_keys = keys_map
+            session.commit()
+
+    summary = {
+        "status": "ok",
+        "mode": "collection_set",
+        "tmdb_candidates": None,
+        "matched_in_catalog": selected_total,
+        "after_filters": selected_total,
+        "pinned_in": 0,
+        "pinned_out": 0,
+        "selected": selected_total,
+        "in_target_library": in_library_total,
+        "unresolved": unresolved_total,
+        "missing_from_arr_count": 0,
+        "missing_from_arr_new": None,
+        "missing_from_arr_keys": [],
+        "synced": {
+            "added": synced_added,
+            "removed": synced_removed,
+            "total": synced_total,
+            "created": created_any,
+        },
+        "collection_set": {
+            "category": set_cfg["category"],
+            "collection_count": len(evaluated),
+            "collections": collection_rows,
+            "managed_titles": active_titles_by_section,
+            "removed_titles": removed_titles,
+        },
+    }
+    logger.info(
+        f"Collections: set {recipe_name!r} synced "
+        f"(category={set_cfg['category']}, collections={len(evaluated)}, "
+        f"libraries={len(section_ids)}, selected={selected_total}, "
+        f"added={synced_added}, removed={synced_removed}, stale_deleted={len(removed_titles)})",
+        extra={"emoji_type": "info"},
+    )
+    return summary
+
+
 def run_recipe(recipe_id: int) -> dict[str, Any]:
     """Execute one recipe end-to-end and persist its run summary."""
     with session_scope() as session:
@@ -2119,70 +2550,95 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
         previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
+        keys_map: dict[str, Any] = (
+            dict(recipe.plex_collection_keys)
+            if isinstance(recipe.plex_collection_keys, dict)
+            else {}
+        )
 
     summary: dict[str, Any]
     try:
         if not section_ids:
             raise RecipeValidationError("recipe has no Plex libraries")
-        primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
-        libraries: list[dict[str, Any]] = []
-        synced_added = 0
-        synced_removed = 0
-        synced_total = 0
-        created_any = False
-        in_library_total = 0
-        unresolved_total = 0
-        for sid in section_ids:
-            outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
-            if outcome["plex_error"]:
-                raise plex_collections.PlexCollectionsError(outcome["plex_error"])
-            sync_stats = plex_collections.sync_collection(
-                sid, section_type, collection_title, outcome["resolved_items"] or []
+        if sets_mod.is_collection_set_definition(definition):
+            summary = run_collection_set_recipe(
+                recipe_id,
+                definition=definition,
+                section_ids=section_ids,
+                section_type=section_type,
+                recipe_name=recipe_name,
+                previous_summary=previous_summary,
+                plex_collection_keys=keys_map,
             )
-            libraries.append(
-                {
-                    "plex_section_id": sid,
-                    "in_target_library": outcome["in_target_library"],
-                    "unresolved": outcome["unresolved"],
-                    "synced": sync_stats,
-                }
+        else:
+            primary = _evaluate(definition, section_ids[0], section_type, resolve=True)
+            libraries: list[dict[str, Any]] = []
+            synced_added = 0
+            synced_removed = 0
+            synced_total = 0
+            created_any = False
+            in_library_total = 0
+            unresolved_total = 0
+            for sid in section_ids:
+                outcome = primary if sid == section_ids[0] else _evaluate(definition, sid, section_type, resolve=True)
+                if outcome["plex_error"]:
+                    raise plex_collections.PlexCollectionsError(outcome["plex_error"])
+                known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
+                sync_stats = plex_collections.sync_collection(
+                    sid,
+                    section_type,
+                    collection_title,
+                    outcome["resolved_items"] or [],
+                    recipe_id=recipe_id,
+                    known_rating_key=known_key,
+                )
+                keys_map = plex_collections.set_stored_key(
+                    keys_map, sid, collection_title, sync_stats.get("rating_key")
+                )
+                libraries.append(
+                    {
+                        "plex_section_id": sid,
+                        "in_target_library": outcome["in_target_library"],
+                        "unresolved": outcome["unresolved"],
+                        "synced": sync_stats,
+                    }
+                )
+                in_library_total += int(outcome["in_target_library"] or 0)
+                unresolved_total += int(outcome["unresolved"] or 0)
+                synced_added += int(sync_stats.get("added") or 0)
+                synced_removed += int(sync_stats.get("removed") or 0)
+                synced_total += int(sync_stats.get("total") or 0)
+                created_any = created_any or bool(sync_stats.get("created"))
+            missing_items = primary.get("missing_from_arr") or []
+            missing_keys = _missing_identity_keys(missing_items)
+            missing_count = int(primary.get("missing_from_arr_count") or 0)
+            summary = {
+                "status": "ok",
+                "tmdb_candidates": primary["tmdb_candidates"],
+                "matched_in_catalog": primary["matched_in_catalog"],
+                "after_filters": primary["after_filters"],
+                "pinned_in": primary["pinned_in"],
+                "pinned_out": primary["pinned_out"],
+                "selected": primary["selected"],
+                "in_target_library": in_library_total,
+                "unresolved": unresolved_total,
+                "missing_from_arr_count": missing_count,
+                "missing_from_arr_new": _new_missing_count(missing_keys, previous_summary),
+                "missing_from_arr_keys": missing_keys,
+                "synced": {
+                    "added": synced_added,
+                    "removed": synced_removed,
+                    "total": synced_total,
+                    "created": created_any,
+                },
+                "libraries": libraries,
+            }
+            logger.info(
+                f"Collections: recipe {recipe_name!r} synced "
+                f"(selected={primary['selected']}, libraries={len(section_ids)}, "
+                f"in_library={in_library_total}, added={synced_added}, removed={synced_removed})",
+                extra={"emoji_type": "info"},
             )
-            in_library_total += int(outcome["in_target_library"] or 0)
-            unresolved_total += int(outcome["unresolved"] or 0)
-            synced_added += int(sync_stats.get("added") or 0)
-            synced_removed += int(sync_stats.get("removed") or 0)
-            synced_total += int(sync_stats.get("total") or 0)
-            created_any = created_any or bool(sync_stats.get("created"))
-        missing_items = primary.get("missing_from_arr") or []
-        missing_keys = _missing_identity_keys(missing_items)
-        missing_count = int(primary.get("missing_from_arr_count") or 0)
-        summary = {
-            "status": "ok",
-            "tmdb_candidates": primary["tmdb_candidates"],
-            "matched_in_catalog": primary["matched_in_catalog"],
-            "after_filters": primary["after_filters"],
-            "pinned_in": primary["pinned_in"],
-            "pinned_out": primary["pinned_out"],
-            "selected": primary["selected"],
-            "in_target_library": in_library_total,
-            "unresolved": unresolved_total,
-            "missing_from_arr_count": missing_count,
-            "missing_from_arr_new": _new_missing_count(missing_keys, previous_summary),
-            "missing_from_arr_keys": missing_keys,
-            "synced": {
-                "added": synced_added,
-                "removed": synced_removed,
-                "total": synced_total,
-                "created": created_any,
-            },
-            "libraries": libraries,
-        }
-        logger.info(
-            f"Collections: recipe {recipe_name!r} synced "
-            f"(selected={primary['selected']}, libraries={len(section_ids)}, "
-            f"in_library={in_library_total}, added={synced_added}, removed={synced_removed})",
-            extra={"emoji_type": "info"},
-        )
     except (
         tmdb_client.TmdbError,
         list_sources.ListSourceError,
@@ -2200,6 +2656,8 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
         if recipe is not None:
             recipe.last_run_at = datetime.now(timezone.utc)
             recipe.last_run_summary = summary
+            if summary.get("status") == "ok" and not sets_mod.is_collection_set_definition(definition):
+                recipe.plex_collection_keys = keys_map
             session.commit()
 
     return summary
@@ -2317,23 +2775,72 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
         section_type = str(recipe.plex_section_type)
         collection_title = str(recipe.collection_title)
         recipe_name = str(recipe.name)
+        definition = dict(recipe.definition or {})
+        previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
+        keys_map: dict[str, Any] = (
+            dict(recipe.plex_collection_keys)
+            if isinstance(recipe.plex_collection_keys, dict)
+            else {}
+        )
 
     try:
         libraries: list[dict[str, Any]] = []
         removed = 0
         last_stats: dict[str, Any] | None = None
-        for sid in section_ids:
-            sync_stats = plex_collections.sync_collection(sid, section_type, collection_title, [])
-            libraries.append({"plex_section_id": sid, "synced": sync_stats})
-            removed += int(sync_stats.get("removed") or 0)
-            last_stats = sync_stats
-        summary = {
-            "status": "cleared",
-            "synced": last_stats
-            or {"added": 0, "removed": removed, "total": 0, "created": False},
-            "libraries": libraries,
-            "window_cleared": True,
-        }
+        if sets_mod.is_collection_set_definition(definition):
+            set_cfg = (definition.get("collection_set") or {}) if isinstance(definition.get("collection_set"), dict) else {}
+            for sid in section_ids:
+                titles = sets_mod.previous_managed_titles(set_cfg, previous_summary, sid)
+                section_removed = 0
+                for title in titles:
+                    known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
+                    sync_stats = plex_collections.sync_collection(
+                        sid,
+                        section_type,
+                        title,
+                        [],
+                        recipe_id=recipe_id,
+                        known_rating_key=known_key,
+                    )
+                    keys_map = plex_collections.set_stored_key(
+                        keys_map, sid, title, sync_stats.get("rating_key")
+                    )
+                    section_removed += int(sync_stats.get("removed") or 0)
+                    last_stats = sync_stats
+                libraries.append({"plex_section_id": sid, "cleared_titles": titles, "removed": section_removed})
+                removed += section_removed
+            summary = {
+                "status": "cleared",
+                "mode": "collection_set",
+                "synced": last_stats
+                or {"added": 0, "removed": removed, "total": 0, "created": False},
+                "libraries": libraries,
+                "window_cleared": True,
+            }
+        else:
+            for sid in section_ids:
+                known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
+                sync_stats = plex_collections.sync_collection(
+                    sid,
+                    section_type,
+                    collection_title,
+                    [],
+                    recipe_id=recipe_id,
+                    known_rating_key=known_key,
+                )
+                keys_map = plex_collections.set_stored_key(
+                    keys_map, sid, collection_title, sync_stats.get("rating_key")
+                )
+                libraries.append({"plex_section_id": sid, "synced": sync_stats})
+                removed += int(sync_stats.get("removed") or 0)
+                last_stats = sync_stats
+            summary = {
+                "status": "cleared",
+                "synced": last_stats
+                or {"added": 0, "removed": removed, "total": 0, "created": False},
+                "libraries": libraries,
+                "window_cleared": True,
+            }
         logger.info(
             f"Collections: recipe {recipe_name!r} left its active window — collection cleared "
             f"(libraries={len(section_ids)}, removed={removed})",
@@ -2351,6 +2858,8 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
         if recipe is not None:
             recipe.last_run_at = datetime.now(timezone.utc)
             recipe.last_run_summary = summary
+            if summary.get("status") == "cleared":
+                recipe.plex_collection_keys = keys_map
             session.commit()
     return summary
 

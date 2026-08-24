@@ -7,6 +7,24 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.18] - 2026-08-24
+
+### Summary
+
+Collections (Beta) expands with unified **TMDB/Trakt** source cards plus **Tautulli** and **\*arr tags**, **Collection Sets** (one config → many Plex shelves), **ownership-safe** Plex sync (summary footer + ratingKeys), **Validate** for pasted list/page URLs, and portable **export/import** of recipes between installs.
+
+### Action required
+
+**Existing Collections users:** After upgrading, the next sync may create a new Placeholdarr-owned Plex collection beside an older unmarked duplicate (ownership no longer matches by title alone). Keep the collection whose summary ends with **Managed by Placeholdarr.** and delete the other. A What's new notice covers this.
+
+### Added
+
+- **Collection sources**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**.
+- **Collection Sets**: One config fans out to many Plex collections by **genre**, **decade**, **content rating** (age certification — not critic scores), **\*arr tag**, or **release timing** (Upcoming / released this week|month|year|decade, with a shared release-date basis like recipe filters). Include/exclude value selection, title patterns, live preview, and cleanup of stale child collections this set previously managed.
+- **Collection ownership**: Recipes used to match Plex collections by title only, so a sync could take over (and empty) a hand-made collection with the same name. Synced collections are now marked with a visible summary footer **Managed by Placeholdarr.** (plus internal labels) and tracked by ratingKey, so Placeholdarr only edits collections it owns. Existing summary text is kept; the footer is appended. After upgrade, a recipe may create a new owned copy beside an older unmarked one — keep the footer copy and delete the other.
+- **Collection source Validate**: URL/list source cards (TMDB Page, MDBList, Trakt list, AniList, StevenLu, legacy TMDB link types) gain a **Validate** button that resolves the pasted link and shows the title/kind or an error before you run preview. If the collection title is still blank, a successful validate can fill it in.
+- **Collection export/import**: Export selected recipes (or Collection Sets) to a portable JSON file, or import a bundle into this install. Runtime fields (ids, last-run stats, Plex ratingKeys) are stripped on export; import rebinds to your Plex libraries and creates new recipes.
+
 ## [0.9.17] - 2026-08-18
 
 ### Summary
