@@ -896,6 +896,44 @@ a { color: inherit; }
   color: #4f7ef7;
 }
 
+/* Sidebar nav: inset pill selected state */
+.brand-theme-scope .nav-item {
+  width: calc(100% - 16px);
+  margin-left: 8px;
+  margin-right: 8px;
+  padding-left: 16px;
+  padding-right: 16px;
+  border-radius: 12px;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.brand-theme-scope .nav-sel-pill {
+  background-color: color-mix(in srgb, var(--brand-accent) 26%, transparent);
+  color: var(--brand-accent-2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-accent) 55%, transparent);
+}
+.brand-theme-scope .nav-sel-pill .material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  color: inherit;
+}
+
+/* Light mode: navy fill, mid-blue hairline, ice type */
+.brand-theme-scope.theme-light .nav-sel-pill {
+  background-color: var(--brand-fg);
+  color: #7dd3fc;
+  box-shadow: inset 0 0 0 1px var(--brand-fg-label);
+}
+.brand-theme-scope.theme-light .nav-sel-pill .material-symbols-outlined {
+  color: #7dd3fc;
+}
+
+.brand-theme-scope.theme-light .nav-item:not(.nav-sel-pill):hover {
+  background-color: color-mix(in srgb, var(--brand-accent) 42%, #ffffff);
+  color: var(--brand-fg);
+}
+
 /* Sidebar footer */
 .studio-sidebar-footer {
   padding: 20px 24px 24px;
