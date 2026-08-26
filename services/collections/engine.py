@@ -2570,6 +2570,10 @@ def run_recipe(recipe_id: int) -> dict[str, Any]:
             if isinstance(recipe.plex_collection_keys, dict)
             else {}
         )
+        active_window = recipe.active_window if isinstance(recipe.active_window, dict) else None
+
+    if not window_is_active(active_window):
+        return _apply_inactive_window(recipe_id)
 
     summary: dict[str, Any]
     try:
@@ -2726,8 +2730,8 @@ def validate_active_window(window: Any) -> Optional[dict[str, Any]]:
             + ", ".join(bad)
         )
     when_inactive = str(window.get("when_inactive") or "keep")
-    if when_inactive not in ("keep", "clear"):
-        raise RecipeValidationError("active_window when_inactive must be 'keep' or 'clear'")
+    if when_inactive not in ("keep", "clear", "delete"):
+        raise RecipeValidationError("active_window when_inactive must be 'keep', 'clear', or 'delete'")
     return {
         "start": f"{start[0]:02d}-{start[1]:02d}",
         "end": f"{end[0]:02d}-{end[1]:02d}",
@@ -2751,6 +2755,66 @@ def window_is_active(window: Optional[dict[str, Any]], when: Optional[datetime] 
     if start <= end:
         return start <= today <= end
     return today >= start or today <= end
+
+
+def _inactive_action(window: Optional[dict[str, Any]]) -> str:
+    action = str((window or {}).get("when_inactive") or "keep")
+    return action if action in ("keep", "clear", "delete") else "keep"
+
+
+def _applied_inactive_action(summary: Optional[dict[str, Any]]) -> Optional[str]:
+    if not isinstance(summary, dict):
+        return None
+    applied = summary.get("when_inactive_applied")
+    if applied in ("keep", "clear", "delete"):
+        return applied
+    if summary.get("window_cleared") or summary.get("status") == "cleared":
+        return "clear"
+    if summary.get("status") == "removed":
+        return "delete"
+    if summary.get("status") == "dormant":
+        return "keep"
+    return None
+
+
+def _persist_inactive_summary(
+    recipe_id: int,
+    summary: dict[str, Any],
+    *,
+    keys_map: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
+        if recipe is not None:
+            recipe.last_run_at = datetime.now(timezone.utc)
+            recipe.last_run_summary = summary
+            if keys_map is not None and summary.get("status") in ("cleared", "removed"):
+                recipe.plex_collection_keys = keys_map
+            session.commit()
+    return summary
+
+
+def _apply_inactive_window(recipe_id: int) -> dict[str, Any]:
+    """Apply keep / clear / delete for a recipe that is outside its seasonal window."""
+    with session_scope() as session:
+        recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
+        if recipe is None:
+            raise RecipeValidationError(f"collection recipe {recipe_id} not found")
+        window = recipe.active_window if isinstance(recipe.active_window, dict) else None
+        recipe_name = str(recipe.name)
+    action = _inactive_action(window)
+    if action == "clear":
+        return _clear_recipe_collection(recipe_id)
+    if action == "delete":
+        return _delete_recipe_collection(recipe_id)
+    logger.info(
+        f"Collections: recipe {recipe_name!r} is outside its active window — keeping collection as-is",
+        extra={"emoji_type": "info"},
+    )
+    return _persist_inactive_summary(
+        recipe_id,
+        {"status": "dormant", "when_inactive_applied": "keep"},
+    )
 
 
 def smallest_enabled_recipe_interval_hours() -> Optional[int]:
@@ -2834,6 +2898,7 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                 or {"added": 0, "removed": removed, "total": 0, "created": False},
                 "libraries": libraries,
                 "window_cleared": True,
+                "when_inactive_applied": "clear",
             }
         else:
             for sid in section_ids:
@@ -2859,6 +2924,7 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
                 or {"added": 0, "removed": removed, "total": 0, "created": False},
                 "libraries": libraries,
                 "window_cleared": True,
+                "when_inactive_applied": "clear",
             }
         logger.info(
             f"Collections: recipe {recipe_name!r} left its active window — collection cleared "
@@ -2883,11 +2949,97 @@ def _clear_recipe_collection(recipe_id: int) -> dict[str, Any]:
     return summary
 
 
+def _delete_recipe_collection(recipe_id: int) -> dict[str, Any]:
+    """Delete Placeholdarr-owned Plex collections for a recipe leaving its window."""
+    with session_scope() as session:
+        recipe = session.query(CollectionRecipe).filter(CollectionRecipe.id == recipe_id).first()
+        if recipe is None:
+            raise RecipeValidationError(f"recipe {recipe_id} not found")
+        section_ids = recipe_section_ids(recipe)
+        section_type = str(recipe.plex_section_type)
+        collection_title = str(recipe.collection_title)
+        recipe_name = str(recipe.name)
+        definition = dict(recipe.definition or {})
+        previous_summary = recipe.last_run_summary if isinstance(recipe.last_run_summary, dict) else None
+        keys_map: dict[str, Any] = (
+            dict(recipe.plex_collection_keys)
+            if isinstance(recipe.plex_collection_keys, dict)
+            else {}
+        )
+
+    try:
+        libraries: list[dict[str, Any]] = []
+        deleted = 0
+        if sets_mod.is_collection_set_definition(definition):
+            set_cfg = (definition.get("collection_set") or {}) if isinstance(definition.get("collection_set"), dict) else {}
+            for sid in section_ids:
+                titles = sets_mod.previous_managed_titles(set_cfg, previous_summary, sid)
+                section_deleted = 0
+                for title in titles:
+                    known_key = plex_collections.lookup_stored_key(keys_map, sid, title)
+                    stats = plex_collections.delete_collection(
+                        sid,
+                        section_type,
+                        title,
+                        recipe_id=recipe_id,
+                        known_rating_key=known_key,
+                    )
+                    keys_map = plex_collections.set_stored_key(keys_map, sid, title, None)
+                    if stats.get("deleted"):
+                        section_deleted += 1
+                libraries.append({"plex_section_id": sid, "deleted_titles": titles, "deleted": section_deleted})
+                deleted += section_deleted
+            summary = {
+                "status": "removed",
+                "mode": "collection_set",
+                "libraries": libraries,
+                "deleted": deleted,
+                "when_inactive_applied": "delete",
+            }
+        else:
+            for sid in section_ids:
+                known_key = plex_collections.lookup_stored_key(keys_map, sid, collection_title)
+                stats = plex_collections.delete_collection(
+                    sid,
+                    section_type,
+                    collection_title,
+                    recipe_id=recipe_id,
+                    known_rating_key=known_key,
+                )
+                keys_map = plex_collections.set_stored_key(keys_map, sid, collection_title, None)
+                libraries.append({"plex_section_id": sid, "deleted": bool(stats.get("deleted"))})
+                if stats.get("deleted"):
+                    deleted += 1
+            summary = {
+                "status": "removed",
+                "libraries": libraries,
+                "deleted": deleted,
+                "when_inactive_applied": "delete",
+            }
+        logger.info(
+            f"Collections: recipe {recipe_name!r} left its active window — collection deleted "
+            f"(libraries={len(section_ids)}, deleted={deleted})",
+            extra={"emoji_type": "info"},
+        )
+    except plex_collections.PlexCollectionsError as exc:
+        summary = {"status": "error", "error": str(exc)}
+        logger.error(
+            f"Collections: failed to delete collection for dormant recipe {recipe_name!r}: {exc}",
+            extra={"emoji_type": "error"},
+        )
+
+    return _persist_inactive_summary(
+        recipe_id,
+        summary,
+        keys_map=keys_map if summary.get("status") == "removed" else None,
+    )
+
+
 def run_all_enabled_recipes(*, force: bool = False, default_interval_hours: int = 24) -> dict[str, Any]:
     """Run enabled recipes that are due and inside their active window.
 
     `force=True` (manual task trigger) ignores due-ness but still respects
-    seasonal windows; dormant recipes are skipped (cleared once if configured).
+    seasonal windows; dormant recipes apply keep/clear/delete once per policy.
     """
     now = datetime.now(timezone.utc)
     with session_scope() as session:
@@ -2918,20 +3070,20 @@ def run_all_enabled_recipes(*, force: bool = False, default_interval_hours: int 
         window = row["active_window"] if isinstance(row["active_window"], dict) else None
 
         if not window_is_active(window, now):
-            if (
-                window
-                and window.get("when_inactive") == "clear"
-                and not (row["last_run_summary"] or {}).get("window_cleared")
-            ):
-                summary = _clear_recipe_collection(recipe_id)
+            action = _inactive_action(window)
+            applied = _applied_inactive_action(
+                row["last_run_summary"] if isinstance(row["last_run_summary"], dict) else None
+            )
+            if action == "keep" or applied == action:
+                results["recipes"][str(recipe_id)] = {"status": "dormant"}
+                results["dormant"] += 1
+            else:
+                summary = _apply_inactive_window(recipe_id)
                 results["recipes"][str(recipe_id)] = summary
                 if summary.get("status") == "error":
                     results["failed"] += 1
                 else:
                     results["dormant"] += 1
-            else:
-                results["recipes"][str(recipe_id)] = {"status": "dormant"}
-                results["dormant"] += 1
             continue
 
         interval = int(row["run_interval_hours"] or default_interval_hours or 24)

@@ -2613,14 +2613,30 @@ export function CollectionEditor(props: {
                     value={activeWindow.when_inactive}
                     onChange={(e) =>
                       setActiveWindow((prev) =>
-                        prev ? { ...prev, when_inactive: e.target.value as "keep" | "clear" } : prev,
+                        prev
+                          ? {
+                              ...prev,
+                              when_inactive:
+                                e.target.value === "delete"
+                                  ? "delete"
+                                  : e.target.value === "clear"
+                                    ? "clear"
+                                    : "keep",
+                            }
+                          : prev,
                       )
                     }
                   >
                     <option value="keep">Keep collection as-is</option>
                     <option value="clear">Empty the collection</option>
+                    <option value="delete">Delete the collection</option>
                   </select>
                 </label>
+                {activeWindow.when_inactive === "delete" ? (
+                  <span className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
+                    Only collections Placeholdarr owns are deleted.
+                  </span>
+                ) : null}
               </>
             ) : null}
           </div>
@@ -2989,7 +3005,12 @@ export function CollectionEditor(props: {
                         splitMonthDay(activeWindow.end).month,
                         splitMonthDay(activeWindow.end).day,
                       ),
-                      when_inactive: activeWindow.when_inactive === "clear" ? "clear" : "keep",
+                      when_inactive:
+                        activeWindow.when_inactive === "delete"
+                          ? "delete"
+                          : activeWindow.when_inactive === "clear"
+                            ? "clear"
+                            : "keep",
                     }
                   : null,
               });

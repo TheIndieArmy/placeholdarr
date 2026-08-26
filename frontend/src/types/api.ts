@@ -661,11 +661,12 @@ export interface CollectionDefinition {
 }
 
 export interface CollectionRunSummary {
-  status: "ok" | "error" | "cleared" | "skipped" | "dormant";
+  status: "ok" | "error" | "cleared" | "removed" | "skipped" | "dormant";
   mode?: "collection_set" | string;
   error?: string;
   reason?: string;
   window_cleared?: boolean;
+  when_inactive_applied?: "keep" | "clear" | "delete";
   pinned_in?: number;
   pinned_out?: number;
   tmdb_candidates?: number | null;
@@ -709,7 +710,7 @@ export interface CollectionActiveWindow {
   /** MM-DD, annually recurring; wrap-around (start > end) spans the new year. */
   start: string;
   end: string;
-  when_inactive: "keep" | "clear";
+  when_inactive: "keep" | "clear" | "delete";
 }
 
 export interface CollectionRecipe {

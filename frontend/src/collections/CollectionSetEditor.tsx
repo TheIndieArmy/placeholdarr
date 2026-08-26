@@ -575,14 +575,25 @@ export function CollectionSetEditor(props: {
                   onChange={(e) =>
                     setActiveWindow({
                       ...activeWindow,
-                      when_inactive: e.target.value === "clear" ? "clear" : "keep",
+                      when_inactive:
+                        e.target.value === "delete"
+                          ? "delete"
+                          : e.target.value === "clear"
+                            ? "clear"
+                            : "keep",
                     })
                   }
                 >
-                  <option value="keep">Keep membership</option>
-                  <option value="clear">Clear membership</option>
+                  <option value="keep">Keep collection as-is</option>
+                  <option value="clear">Empty the collection</option>
+                  <option value="delete">Delete the collection</option>
                 </select>
               </label>
+              {activeWindow.when_inactive === "delete" ? (
+                <span className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
+                  Only collections Placeholdarr owns are deleted.
+                </span>
+              ) : null}
             </>
           ) : null}
         </div>

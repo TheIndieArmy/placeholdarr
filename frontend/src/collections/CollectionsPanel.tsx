@@ -770,6 +770,10 @@ export function CollectionsPanel(props: {
                           </>
                         ) : summary.status === "cleared" ? (
                           <span className={`text-[12px] ${theme.muted}`}>Cleared (out of window)</span>
+                        ) : summary.status === "removed" ? (
+                          <span className={`text-[12px] ${theme.muted}`}>Removed (out of window)</span>
+                        ) : summary.status === "dormant" ? (
+                          <span className={`text-[12px] ${theme.muted}`}>Kept (out of window)</span>
                         ) : (
                           <span className="text-[12px] text-red-400" title={summary.error}>
                             Failed

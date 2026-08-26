@@ -11,19 +11,31 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Summary
 
-Collections **Add to Radarr/Sonarr** no longer hangs on a silent *arr import: chunks of 20, a short wait, then **library poll** until titles appear, with live per-title progress in the modal. Already-in-*arr and reconciled titles still enqueue placeholder ingest. Tags are chips; a failed tag no longer aborts the add. Webhook persist is serialized so import-list floods cannot exhaust the DB pool. MDBList public JSON `id` is treated as TMDB id, and lookups fall back through TMDB/TVDB/IMDb then title search. Missing-list copy says **catalog**. Sidebar selected-tab and hover styling.
+- **Add to Radarr/Sonarr**: Chunks of 20, then **library poll** after a silent *arr import.
+- **Add modal progress**: Live per-title status in the add modal.
+- **Add tags**: Chips (Enter to add, spaces become dashes); a failed tag no longer aborts the add.
+- **Webhook ingest**: Persist is serialized so import-list floods cannot exhaust the DB pool.
+- **Seasonal Run now**: Out-of-window runs follow keep / empty / delete instead of filling the collection.
+- **Seasonal delete**: Dormant recipes can delete Placeholdarr-owned Plex collections (Sets delete managed children).
+- **Missing from catalog**: Preview and recipe list copy (the check is catalog membership).
+- **Sidebar**: Selected-tab and hover styling.
+- **MDBList ids**: Public JSON `id` is treated as TMDB id.
+- **ARR lookup**: Tries TMDB/TVDB/IMDb then a title search.
 
 ### Added
 
 - **Add modal progress**: After submit, the form is replaced by a per-title list that flips **Adding…** to a green **Added** (or an error) as each title is found.
+- **Seasonal window: delete**: When dormant, a recipe can **delete** Placeholdarr-owned Plex collections (in addition to keep as-is or empty). Collection Sets delete the child collections they manage. Unlabeled same-title shelves are left alone.
 
 ### Changed
 
-- **Add to Radarr/Sonarr**: Import chunks of 20. *arr often never returns `movie/import` / `series/import`, so Placeholdarr waits briefly then **polls the library** until titles appear. Already-in-*arr and reconciled titles still enqueue placeholder ingest.
+- **Add to Radarr/Sonarr**: Import chunks of 20. *arr often never returns `movie/import` / `series/import`, so Placeholdarr waits briefly then **polls the library** until titles appear.
+- **Placeholder ingest**: Already-in-*arr and reconciled titles still enqueue placeholder ingest.
 - **Add tags**: Tags are chips (Enter to add, spaces become dashes); a failed tag no longer aborts the add. API accepts `tags: string[]` (legacy `tag` still works).
 - **Webhook ingest**: Persist is serialized (`WEBHOOK_INGEST_CONCURRENCY`, default 1) so import-list `MovieAdded` floods cannot exhaust the DB pool.
 - **Collections missing list**: Preview and recipe list describe titles **missing from catalog**, not “not in Radarr/Sonarr” (the check is catalog membership).
 - **Sidebar**: New selected-tab and hover styling.
+- **Manual Run now (seasonal)**: Out-of-window Run now follows the same keep / empty / delete policy as scheduled sync instead of creating or filling the collection. Last run shows **Kept**, **Cleared**, or **Removed (out of window)**.
 
 ### Fixed
 
