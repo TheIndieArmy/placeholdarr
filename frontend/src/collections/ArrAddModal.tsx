@@ -1,13 +1,74 @@
-import { useEffect, useMemo, useState } from "react";
-import { addCollectionTitlesToArr, getCollectionArrAddOptions } from "../api/collections";
+import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  addCollectionTitlesToArr,
+  arrAddItemKey,
+  getCollectionArrAddOptions,
+  normalizeArrTagLabel,
+} from "../api/collections";
 import { ToggleSwitch } from "../ToggleSwitch";
 import { useCollectionTheme } from "./collectionTheme";
 import type {
   CollectionArrAddItem,
   CollectionArrAddInstanceOptions,
-  CollectionArrAddResponse,
   CollectionMissingFromArrItem,
 } from "../types/api";
+
+function seedTags(defaultTag: string): string[] {
+  const seed = normalizeArrTagLabel(defaultTag || "placeholdarr");
+  return seed ? [seed] : [];
+}
+
+function displayTitle(item: CollectionMissingFromArrItem): string {
+  return item.year ? `${item.title} (${item.year})` : item.title;
+}
+
+type ProgressStatus = "waiting" | "adding" | "ok" | "skipped" | "error";
+
+type ProgressRow = {
+  key: string;
+  title: string;
+  instanceKey: string;
+  instanceLabel: string;
+  status: ProgressStatus;
+  error?: string | null;
+};
+
+function StatusMark(props: { status: ProgressStatus; arrLabel: string; error?: string | null }) {
+  if (props.status === "ok") {
+    return (
+      <span className="inline-flex items-center gap-1 text-emerald-400">
+        <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+          check_circle
+        </span>
+        Added
+      </span>
+    );
+  }
+  if (props.status === "skipped") {
+    return (
+      <span className="inline-flex items-center gap-1 text-emerald-400">
+        <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+          check_circle
+        </span>
+        Already in {props.arrLabel}
+      </span>
+    );
+  }
+  if (props.status === "error") {
+    return (
+      <span className="inline-flex max-w-[16rem] items-start gap-1 text-red-400">
+        <span className="material-symbols-outlined shrink-0" style={{ fontSize: 18 }}>
+          cancel
+        </span>
+        <span className="text-right leading-snug">{props.error || "Error"}</span>
+      </span>
+    );
+  }
+  if (props.status === "adding") {
+    return <span className="text-slate-400">Adding…</span>;
+  }
+  return <span className="text-slate-500">Waiting…</span>;
+}
 
 export function ArrAddModal(props: {
   mediaType: "movie" | "show";
@@ -26,9 +87,22 @@ export function ArrAddModal(props: {
   const [roots, setRoots] = useState<Record<string, string>>({});
   const [monitored, setMonitored] = useState(true);
   const [search, setSearch] = useState(false);
-  const [tag, setTag] = useState(props.defaultTag || "placeholdarr");
+  const [tags, setTags] = useState<string[]>(() => seedTags(props.defaultTag));
+  const [tagDraft, setTagDraft] = useState("");
+  const tagsRef = useRef(tags);
+  const draftRef = useRef(tagDraft);
+  tagsRef.current = tags;
+  draftRef.current = tagDraft;
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<CollectionArrAddResponse | null>(null);
+  const [progressRows, setProgressRows] = useState<ProgressRow[] | null>(null);
+  const [progressSummary, setProgressSummary] = useState<{
+    added: number;
+    skipped: number;
+    errors: number;
+    message: string;
+    warnings: string[];
+    done: boolean;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,12 +140,45 @@ export function ArrAddModal(props: {
     return selectedKeys.every((key) => profiles[key] && roots[key]);
   }, [selectedKeys, profiles, roots, submitting]);
 
+  const normalizedDraft = normalizeArrTagLabel(tagDraft);
+  const draftPreview =
+    tagDraft.trim() && normalizedDraft && normalizedDraft !== tagDraft.trim() ? normalizedDraft : null;
+
+  const commitDraft = () => {
+    const label = normalizeArrTagLabel(draftRef.current);
+    if (!label) {
+      setTagDraft("");
+      draftRef.current = "";
+      return;
+    }
+    setTags((prev) => {
+      const next = prev.some((item) => item.toLowerCase() === label.toLowerCase()) ? prev : [...prev, label];
+      tagsRef.current = next;
+      return next;
+    });
+    setTagDraft("");
+    draftRef.current = "";
+  };
+
+  const onTagKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitDraft();
+      return;
+    }
+    if (event.key === "Backspace" && !tagDraft) {
+      event.preventDefault();
+      setTags((prev) => prev.slice(0, -1));
+    }
+  };
+
   const toggleInstance = (key: string) => {
     setSelectedKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   };
 
   const submit = async () => {
     if (!canSubmit) return;
+    commitDraft();
     setSubmitting(true);
     setError(null);
     const items: CollectionArrAddItem[] = props.items.map((item) => ({
@@ -88,21 +195,100 @@ export function ArrAddModal(props: {
         root_folder_path: roots[key],
       };
     }
+    const extra = normalizeArrTagLabel(draftRef.current);
+    const committedTags = [...tagsRef.current];
+    if (extra && !committedTags.some((item) => item.toLowerCase() === extra.toLowerCase())) {
+      committedTags.push(extra);
+    }
+    const instanceLabels = new Map(instances.map((row) => [row.instance_key, row.label || row.instance_key]));
+    const rows: ProgressRow[] = [];
+    for (const key of selectedKeys) {
+      for (const item of props.items) {
+        rows.push({
+          key: arrAddItemKey(key, item),
+          title: displayTitle(item),
+          instanceKey: key,
+          instanceLabel: instanceLabels.get(key) || key,
+          status: "waiting",
+        });
+      }
+    }
+    setProgressRows(rows);
+    setProgressSummary(null);
+    const patchRow = (itemKey: string, patch: Partial<ProgressRow>) => {
+      setProgressRows((prev) =>
+        (prev || []).map((row) => (row.key === itemKey ? { ...row, ...patch } : row)),
+      );
+    };
     try {
-      const response = await addCollectionTitlesToArr({
-        media_type: props.mediaType,
-        items,
-        instance_keys: selectedKeys,
-        instance_options,
-        monitored,
-        search,
-        tag: tag.trim(),
-      });
-      setResult(response);
+      await addCollectionTitlesToArr(
+        {
+          media_type: props.mediaType,
+          items,
+          instance_keys: selectedKeys,
+          instance_options,
+          monitored,
+          search,
+          tags: committedTags,
+        },
+        (event) => {
+          if (event.type === "ping") return;
+          if (event.type === "warning" && event.message) {
+            setProgressSummary((prev) => ({
+              added: prev?.added ?? 0,
+              skipped: prev?.skipped ?? 0,
+              errors: prev?.errors ?? 0,
+              message: prev?.message ?? "",
+              warnings: [...(prev?.warnings || []), event.message as string],
+              done: prev?.done ?? false,
+            }));
+            return;
+          }
+          if (event.type === "fatal") {
+            setError(event.message || "Add failed");
+            setProgressRows((prev) =>
+              (prev || []).map((row) =>
+                row.status === "waiting" || row.status === "adding"
+                  ? { ...row, status: "error", error: event.message || "Add failed" }
+                  : row,
+              ),
+            );
+            return;
+          }
+          if (event.type === "item" && event.item_key) {
+            const status = (event.status || "adding") as ProgressStatus;
+            patchRow(event.item_key, {
+              status,
+              ...(event.title ? { title: event.title } : {}),
+              error: event.error,
+            });
+            return;
+          }
+          if (event.type === "done") {
+            setProgressSummary((prev) => ({
+              added: event.added ?? 0,
+              skipped: event.skipped ?? 0,
+              errors: event.errors ?? 0,
+              message: event.message || prev?.message || "",
+              warnings: event.warnings || prev?.warnings || [],
+              done: true,
+            }));
+          }
+        },
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Add failed");
+      const message = err instanceof Error ? err.message : "Add failed";
+      setError(message);
+      setProgressRows((prev) =>
+        (prev || []).map((row) =>
+          row.status === "waiting" || row.status === "adding"
+            ? { ...row, status: "error", error: message }
+            : row,
+        ),
+      );
     } finally {
       setSubmitting(false);
+      setProgressSummary((prev) => (prev ? { ...prev, done: true } : prev));
     }
   };
 
@@ -111,7 +297,7 @@ export function ArrAddModal(props: {
       <div
         role="dialog"
         aria-modal="true"
-        className={`w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl border p-4 ${theme.blockCard}`}
+        className={`w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-xl border p-4 ${theme.blockCard}`}
       >
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -129,7 +315,7 @@ export function ArrAddModal(props: {
         {loading ? <p className={`mt-4 ${theme.muted}`}>Loading instance options…</p> : null}
         {error ? <p className="mt-3 text-[13px] text-red-300">{error}</p> : null}
 
-        {!loading && !result ? (
+        {!loading && !progressRows ? (
           <div className="mt-4 flex flex-col gap-4">
             <div>
               <div className={`${theme.sectionLabel} mb-2`}>Instances</div>
@@ -225,10 +411,40 @@ export function ArrAddModal(props: {
                 ariaLabel="Search right away"
               />
             </label>
-            <label className={`flex flex-col gap-1 ${theme.label}`}>
-              Tag
-              <input className={theme.field} value={tag} onChange={(event) => setTag(event.target.value)} />
-            </label>
+            <div className={`flex flex-col gap-1 ${theme.label}`}>
+              Tags
+              <div className={`${theme.field} flex min-h-[2.25rem] flex-wrap items-center gap-1.5`}>
+                {tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 rounded-md border border-current/20 bg-black/10 px-1.5 py-0.5 text-[12px]"
+                  >
+                    {tag}
+                    <button
+                      type="button"
+                      className="leading-none opacity-70 hover:opacity-100"
+                      aria-label={`Remove tag ${tag}`}
+                      onClick={() => setTags((prev) => prev.filter((item) => item !== tag))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                <input
+                  className="min-w-[8rem] flex-1 bg-transparent outline-none"
+                  value={tagDraft}
+                  placeholder={tags.length ? "Add another, then Enter" : "Type a tag and press Enter"}
+                  onChange={(event) => setTagDraft(event.target.value)}
+                  onKeyDown={onTagKeyDown}
+                  onBlur={commitDraft}
+                />
+              </div>
+              {draftPreview ? (
+                <span className={theme.muted}>Saved as {draftPreview} (spaces become dashes)</span>
+              ) : (
+                <span className={theme.muted}>Press Enter to add a tag. Spaces become dashes, like in {arrLabel}.</span>
+              )}
+            </div>
 
             <button
               type="button"
@@ -237,29 +453,48 @@ export function ArrAddModal(props: {
               className="rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] transition-opacity disabled:opacity-40"
               style={{ backgroundColor: props.accentHex }}
             >
-              {submitting ? "Adding…" : `Add to ${arrLabel}`}
+              {`Add to ${arrLabel}`}
             </button>
           </div>
         ) : null}
 
-        {result ? (
-          <div className="mt-4 flex flex-col gap-2">
-            <p className={theme.muted}>{result.message}</p>
-            <p className={theme.label}>
-              Added {result.added}, skipped {result.skipped}, errors {result.errors}
+        {progressRows ? (
+          <div className="mt-4 flex flex-col gap-3">
+            <p className={theme.muted}>
+              {progressSummary?.done
+                ? progressSummary.message
+                : `Adding to ${arrLabel}. Status updates as each title lands in the library.`}
             </p>
-            {result.results.some((row) => row.status === "error") ? (
-              <ul className={`max-h-40 overflow-y-auto text-[12px] ${theme.muted}`}>
-                {result.results
-                  .filter((row) => row.status === "error")
-                  .slice(0, 20)
-                  .map((row, idx) => (
-                    <li key={`${row.title}-${idx}`}>
-                      {row.title}: {row.error}
-                    </li>
-                  ))}
+            <p className={theme.label}>
+              {progressRows.filter((row) => row.status === "ok").length} added
+              {" · "}
+              {progressRows.filter((row) => row.status === "skipped").length} already in {arrLabel}
+              {" · "}
+              {progressRows.filter((row) => row.status === "error").length} errors
+              {!progressSummary?.done
+                ? ` · ${progressRows.filter((row) => row.status === "adding" || row.status === "waiting").length} remaining`
+                : ""}
+            </p>
+            {progressSummary?.warnings.length ? (
+              <ul className={`text-[12px] ${theme.muted}`}>
+                {progressSummary.warnings.map((warning, idx) => (
+                  <li key={`${warning}-${idx}`}>{warning}</li>
+                ))}
               </ul>
             ) : null}
+            <ul className="max-h-[50vh] divide-y divide-white/10 overflow-y-auto">
+              {progressRows.map((row) => (
+                <li key={row.key} className="flex items-start justify-between gap-3 py-2 text-[13px]">
+                  <span className={theme.label}>
+                    {row.title}
+                    {selectedKeys.length > 1 ? (
+                      <span className={`ml-2 ${theme.muted}`}>{row.instanceLabel}</span>
+                    ) : null}
+                  </span>
+                  <StatusMark status={row.status} arrLabel={arrLabel} error={row.error} />
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
       </div>

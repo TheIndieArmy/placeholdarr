@@ -903,5 +903,6 @@ export interface CollectionArrAddResponse {
   skipped: number;
   errors: number;
   results: CollectionArrAddResult[];
+  warnings?: string[];
   message: string;
 }

@@ -419,6 +419,11 @@ class Settings(BaseSettings):
     WORKER_FALLBACK_POLL_SECONDS: int = int(
         os.getenv("WORKER_FALLBACK_POLL_SECONDS", "5").split('#')[0].strip() or "5"
     )
+    # Persist ARR/Tautulli webhooks serially (or with a small bound) so a
+    # MovieAdded flood from import lists cannot open one DB session per POST.
+    WEBHOOK_INGEST_CONCURRENCY: int = int(
+        os.getenv("WEBHOOK_INGEST_CONCURRENCY", "1").split('#')[0].strip() or "1"
+    )
 
     # ----------------------------------------------------------------
     # Database connection pool tuning. Phase 2 of the holistic NOTIFY

@@ -1,9 +1,8 @@
-import { fetchJson, postJson } from "./client";
+import { fetchJson, postJson, postNdjson } from "./client";
 import type {
   CollectionActiveWindow,
   CollectionArrAddItem,
   CollectionArrAddOptionsResponse,
-  CollectionArrAddResponse,
   CollectionBuilderMeta,
   CollectionDefinition,
   CollectionExplainResponse,
@@ -17,6 +16,14 @@ import type {
 
 /** Must match `ARR_ADD_BATCH_CAP` in `routes/collections.py`. */
 export const ARR_ADD_BATCH_CAP = 100;
+
+export function normalizeArrTagLabel(label: string): string {
+  return label
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 export interface RecipeWritePayload {
   name: string;
@@ -118,16 +125,43 @@ export function getCollectionArrAddOptions(mediaType: "movie" | "show"): Promise
   return fetchJson(`/api/collections/arr-add-options?${params.toString()}`);
 }
 
-export function addCollectionTitlesToArr(payload: {
-  media_type: "movie" | "show";
-  items: CollectionArrAddItem[];
-  instance_keys: string[];
-  instance_options: Record<string, { quality_profile_id: number; root_folder_path: string }>;
-  monitored: boolean;
-  search: boolean;
-  tag: string;
-}): Promise<CollectionArrAddResponse> {
-  return postJson("/api/collections/arr-add", payload);
+export function arrAddItemKey(
+  instanceKey: string,
+  item: { title?: string; year?: number | null; tmdb_id?: number | null; tvdb_id?: number | null; imdb_id?: string | null },
+): string {
+  return `${instanceKey}:${item.tmdb_id ?? ""}:${item.tvdb_id ?? ""}:${item.imdb_id ?? ""}:${item.title ?? ""}:${item.year ?? ""}`;
+}
+
+export type ArrAddStreamEvent = {
+  type: string;
+  item_key?: string;
+  title?: string;
+  instance_key?: string;
+  status?: "adding" | "ok" | "skipped" | "error";
+  error?: string | null;
+  message?: string;
+  ok?: boolean;
+  added?: number;
+  skipped?: number;
+  errors?: number;
+  warnings?: string[];
+};
+
+export function addCollectionTitlesToArr(
+  payload: {
+    media_type: "movie" | "show";
+    items: CollectionArrAddItem[];
+    instance_keys: string[];
+    instance_options: Record<string, { quality_profile_id: number; root_folder_path: string }>;
+    monitored: boolean;
+    search: boolean;
+    tags: string[];
+  },
+  onEvent: (event: ArrAddStreamEvent) => void,
+): Promise<void> {
+  return postNdjson("/api/collections/arr-add", payload, (raw) => {
+    onEvent(raw as ArrAddStreamEvent);
+  });
 }
 
 export type CollectionSourceValidation = {
