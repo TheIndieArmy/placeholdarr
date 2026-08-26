@@ -2152,26 +2152,16 @@ export function App() {
           </div>
 
           {/* Nav */}
-          <nav className="flex-1 space-y-1 font-brand-label pt-4 pb-6">
+          <nav className="flex-1 space-y-1.5 font-brand-label pt-4 pb-6">
             {(() => {
-              const navActiveClass =
-                "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200 border-l-4";
+              const navItemBase =
+                "nav-item flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200";
               const navInactiveClass =
-                "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-[16px] uppercase tracking-widest group " +
+                `${navItemBase} group ` +
                 (isStudioGlass
                   ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
                   : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
-              const navActiveStyle: CSSProperties = isStudioGlass
-                ? {
-                    backgroundColor: alphaColor(brandSemantic.accent, 0.22),
-                    color: brandSemantic.fg,
-                    borderLeftColor: brandSemantic.accent,
-                  }
-                : {
-                    backgroundColor: brandSemantic.fg,
-                    color: brandSemantic.accent,
-                    borderLeftColor: brandSemantic.accent,
-                  };
+              const navActiveClass = `${navItemBase} nav-sel-pill`;
               const librarySectionActive = isActive("/library");
               const moviesSubActive =
                 location.pathname === LIBRARY_MOVIES_PATH ||
@@ -2190,7 +2180,7 @@ export function App() {
               return (
                 <>
                   {librarySectionActive ? (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass}>
                       <span className="material-symbols-outlined">movie_filter</span>
                       <span>Library</span>
                     </button>
@@ -2226,7 +2216,7 @@ export function App() {
                   ) : null}
 
                   {isActive("/activity") ? (
-                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass} style={navActiveStyle}>
+                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass}>
                       <span className="material-symbols-outlined">analytics</span>
                       <span>Activity</span>
                     </button>
@@ -2271,7 +2261,7 @@ export function App() {
                     { icon: "settings", label: "Settings", path: "/settings", beta: false },
                   ].map(({ icon, label, path, beta }) =>
                     isActive(path) ? (
-                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass} style={navActiveStyle}>
+                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass}>
                         <span className="material-symbols-outlined">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>

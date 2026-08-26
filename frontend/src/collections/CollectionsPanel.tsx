@@ -759,10 +759,9 @@ export function CollectionsPanel(props: {
                             {(summary.missing_from_arr_count ?? 0) > 0 ? (
                               <span
                                 className={`block text-[12px] ${theme.muted}`}
-                                title={`Source list titles not in ${recipe.plex_section_type === "show" ? "Sonarr" : "Radarr"} (last run). +N are titles that were not in that set last time.`}
+                                title={`Source list titles not in the Placeholdarr catalog (last run). +N are titles that were not in that set last time.`}
                               >
-                                {summary.missing_from_arr_count} not in{" "}
-                                {recipe.plex_section_type === "show" ? "Sonarr" : "Radarr"}
+                                {summary.missing_from_arr_count} not in catalog
                                 {summary.missing_from_arr_new != null && summary.missing_from_arr_new > 0
                                   ? ` · +${summary.missing_from_arr_new} new`
                                   : ""}
@@ -771,6 +770,10 @@ export function CollectionsPanel(props: {
                           </>
                         ) : summary.status === "cleared" ? (
                           <span className={`text-[12px] ${theme.muted}`}>Cleared (out of window)</span>
+                        ) : summary.status === "removed" ? (
+                          <span className={`text-[12px] ${theme.muted}`}>Removed (out of window)</span>
+                        ) : summary.status === "dormant" ? (
+                          <span className={`text-[12px] ${theme.muted}`}>Kept (out of window)</span>
                         ) : (
                           <span className="text-[12px] text-red-400" title={summary.error}>
                             Failed

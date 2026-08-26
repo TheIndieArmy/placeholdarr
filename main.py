@@ -13,7 +13,7 @@ import contextvars  # noqa: F401
 import asyncio.coroutines  # noqa: F401
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from core.logger import logger
 from core.config import settings
 from services.postgres.utils import check_db
@@ -569,7 +569,7 @@ app.add_middleware(
 )
 
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):
+async def webhook(request: Request):
     try:
         from services.auth import get_auth_mode, verify_webhook_api_key
 
@@ -605,7 +605,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         try:
             from services.handlers import (
-                handle_webhook as new_handle,
                 resolve_canonical_webhook_instance,
                 validate_webhook_payload,
             )
@@ -625,7 +624,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             )
             raise HTTPException(status_code=400, detail=reason)
 
-        background_tasks.add_task(new_handle, payload, canonical_instance)
+        from services.webhook_ingest import enqueue_webhook_persist
+
+        enqueue_webhook_persist(payload, canonical_instance)
         return {"status": "accepted"}
     except HTTPException:
         raise

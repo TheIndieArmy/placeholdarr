@@ -308,7 +308,7 @@ class CollectionRecipe(Base):
     definition = Column(JSON, nullable=False, default=dict)
     # Per-recipe schedule override in hours; null = follow COLLECTIONS_SYNC_INTERVAL_HOURS.
     run_interval_hours = Column(Integer, nullable=True)
-    # Annually recurring active window: {"start": "MM-DD", "end": "MM-DD", "when_inactive": "keep"|"clear"}.
+    # Annually recurring active window: {"start": "MM-DD", "end": "MM-DD", "when_inactive": "keep"|"clear"|"delete"}.
     # Wrap-around windows (start > end, e.g. Dec 15 -> Jan 6) are supported. Null = always active.
     active_window = Column(JSON, nullable=True)
     last_run_at = Column(DateTime(timezone=True), nullable=True)

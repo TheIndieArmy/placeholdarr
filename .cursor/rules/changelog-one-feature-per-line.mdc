@@ -1,0 +1,24 @@
+---
+description: Keep changelog, PR, and release notes as one feature per bullet
+globs: CHANGELOG.md
+alwaysApply: true
+---
+
+# One feature per changelog line
+
+Never blend unrelated Collections (or other) features into one paragraph or one bullet. This applies to `CHANGELOG.md`, PR bodies, release notes, and commit messages.
+
+- **Summary** is a bullet list (or short paragraphs), one theme per line. Do not append a new feature onto an existing summary sentence.
+- **Added / Changed / Fixed** bullets: one **Bold lead-in** and one concern. If a sentence needs “and also…”, split it.
+- Do not nest tags, webhook ingest, seasonal windows, lookup fixes, or sidebar styling under Add to Radarr/Sonarr (or any other catch-all).
+- When folding Unreleased into a version, copy bullets as-is. Do not concatenate them.
+
+```markdown
+❌ BAD
+Collections Add to Radarr no longer hangs. Tags are chips. Seasonal Run now follows keep/empty/delete. Sidebar styling.
+
+✅ GOOD
+- **Add to Radarr/Sonarr**: Chunks of 20, then library poll after a silent import.
+- **Add tags**: Chips; a failed tag no longer aborts the add.
+- **Manual Run now (seasonal)**: Out-of-window runs follow keep / empty / delete.
+```

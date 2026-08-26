@@ -2402,7 +2402,7 @@ export function CollectionEditor(props: {
   const previewStages: { label: string; value: number | null | undefined }[] = [
     { label: "List candidates", value: preview?.tmdb_candidates },
     { label: "Matched in catalog", value: preview?.matched_in_catalog },
-    ...(showMissingPane ? [{ label: "Missing from ARR", value: missingCount }] : []),
+    ...(showMissingPane ? [{ label: "Missing from catalog", value: missingCount }] : []),
     { label: "After filters", value: preview?.after_filters },
     ...(preview?.pinned_out ? [{ label: "Pinned out", value: preview.pinned_out }] : []),
     ...(preview?.pinned_in ? [{ label: "Pinned in", value: preview.pinned_in }] : []),
@@ -2613,14 +2613,30 @@ export function CollectionEditor(props: {
                     value={activeWindow.when_inactive}
                     onChange={(e) =>
                       setActiveWindow((prev) =>
-                        prev ? { ...prev, when_inactive: e.target.value as "keep" | "clear" } : prev,
+                        prev
+                          ? {
+                              ...prev,
+                              when_inactive:
+                                e.target.value === "delete"
+                                  ? "delete"
+                                  : e.target.value === "clear"
+                                    ? "clear"
+                                    : "keep",
+                            }
+                          : prev,
                       )
                     }
                   >
                     <option value="keep">Keep collection as-is</option>
                     <option value="clear">Empty the collection</option>
+                    <option value="delete">Delete the collection</option>
                   </select>
                 </label>
+                {activeWindow.when_inactive === "delete" ? (
+                  <span className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
+                    Only collections Placeholdarr owns are deleted.
+                  </span>
+                ) : null}
               </>
             ) : null}
           </div>
@@ -2989,7 +3005,12 @@ export function CollectionEditor(props: {
                         splitMonthDay(activeWindow.end).month,
                         splitMonthDay(activeWindow.end).day,
                       ),
-                      when_inactive: activeWindow.when_inactive === "clear" ? "clear" : "keep",
+                      when_inactive:
+                        activeWindow.when_inactive === "delete"
+                          ? "delete"
+                          : activeWindow.when_inactive === "clear"
+                            ? "clear"
+                            : "keep",
                     }
                   : null,
               });
@@ -3217,7 +3238,7 @@ export function CollectionEditor(props: {
                           }`}
                           style={previewPane === "missing" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
                         >
-                          Missing from ARR ({missingCount})
+                          Missing from catalog ({missingCount})
                         </button>
                       </div>
                     ) : (

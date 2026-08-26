@@ -179,7 +179,8 @@ def fetch_mdblist(reference: str, media_type: str, limit: int = 200) -> list[dic
             continue
         imdb_id = raw.get("imdb_id") or None
         tvdb_id = raw.get("tvdbid") or raw.get("tvdb_id") or None
-        tmdb_id = raw.get("tmdbid") or raw.get("tmdb_id") or None
+        # Public JSON export uses `id` as the TMDB id; `tmdbid` appears on some API payloads.
+        tmdb_id = raw.get("tmdbid") or raw.get("tmdb_id") or raw.get("id") or None
         dedupe_key = str(imdb_id or f"tvdb:{tvdb_id}" or f"tmdb:{tmdb_id}")
         if not (imdb_id or tvdb_id or tmdb_id) or dedupe_key in seen:
             continue

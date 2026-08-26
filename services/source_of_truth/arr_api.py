@@ -1,7 +1,8 @@
+import re
 import threading
 import time
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -18,11 +19,14 @@ _cache = {}
 _DEFAULT_TTL_SECONDS = 120
 # Bulk *arr reads (e.g. GET /api/v3/movie) can exceed 30s on large libraries over user-share I/O.
 ARR_HTTP_TIMEOUT_SECONDS = 120
-# Collections missing-from-ARR add: lookup stays snappy; import can sit while Radarr
-# writes many titles (Kometa/arrapi default is 90s).
+# Collections add: *arr often never finishes POST /movie/import (or /series/import)
+# even for ~10 titles — the add still proceeds server-side. Wait briefly for a body,
+# then poll the library until titles appear (or this deadline).
 ARR_LOOKUP_TIMEOUT_SECONDS = 30
-ARR_ADD_TIMEOUT_SECONDS = 90
-ARR_IMPORT_CHUNK_SIZE = 100
+ARR_ADD_TIMEOUT_SECONDS = 15
+ARR_ADD_RECONCILE_SECONDS = 90
+ARR_ADD_RECONCILE_INTERVAL_SECONDS = 3
+ARR_IMPORT_CHUNK_SIZE = 20
 
 _last_write_error: dict[str, str | bool | int | None] = {}
 
@@ -87,6 +91,7 @@ def _request_json(
     payload: Optional[dict] = None,
     api_key: Optional[str] = None,
     timeout: int = ARR_HTTP_TIMEOUT_SECONDS,
+    isolated: bool = False,
 ):
     safe_url = url
     try:
@@ -99,8 +104,11 @@ def _request_json(
     if api_key:
         headers['X-Api-Key'] = api_key
 
+    # Import POSTs can hang until client timeout. Use a throwaway Session so the
+    # shared pool is free for library polls after we give up waiting for a body.
+    client = requests.Session() if isolated else _session
     try:
-        response = _session.request(
+        response = client.request(
             method=method.upper(),
             url=url,
             params=params,
@@ -130,9 +138,10 @@ def _request_json(
         )
         return None
     except Timeout as e:
-        logger.error(
-            f'ARR write failed method={method.upper()} url={safe_url} error_type={type(e).__name__}',
-            extra={'emoji_type': 'error'},
+        logger.warning(
+            f'ARR write timed out method={method.upper()} url={safe_url} timeout={timeout}s '
+            f'error_type={type(e).__name__}; *arr may still apply the write',
+            extra={'emoji_type': 'warning'},
         )
         _last_write_error.clear()
         _last_write_error.update(
@@ -159,9 +168,20 @@ def _request_json(
         _last_write_error.clear()
         _last_write_error.update({"timed_out": False, "status_code": None, "message": str(e) or type(e).__name__})
         return None
+    finally:
+        if isolated:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
-def fetch_radarr_movies(url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
+def fetch_radarr_movies(
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    bypass_cache: bool = False,
+) -> List[Dict]:
     url = url or _default_radarr_endpoint()[0]
     api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key:
@@ -169,11 +189,12 @@ def fetch_radarr_movies(url: Optional[str] = None, api_key: Optional[str] = None
 
     endpoint = _build_endpoint(url, 'movie')
     cache_key = f'radarr_movies:{endpoint}'
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    data = _get_json(endpoint, {'apikey': api_key}) or []
+    data = _get_json(endpoint, {'apikey': api_key}, timeout=30 if bypass_cache else ARR_HTTP_TIMEOUT_SECONDS) or []
     _cache_set(cache_key, data)
     return data
 
@@ -198,7 +219,12 @@ def fetch_radarr_movie(movie_id: int, url: Optional[str] = None, api_key: Option
     return None
 
 
-def fetch_sonarr_series(url: Optional[str] = None, api_key: Optional[str] = None) -> List[Dict]:
+def fetch_sonarr_series(
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    bypass_cache: bool = False,
+) -> List[Dict]:
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
@@ -206,11 +232,16 @@ def fetch_sonarr_series(url: Optional[str] = None, api_key: Optional[str] = None
 
     endpoint = _build_endpoint(url, 'series')
     cache_key = f'sonarr_series:season_images:{endpoint}'
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    data = _get_json(endpoint, {'apikey': api_key, 'includeSeasonImages': 'true'}) or []
+    data = _get_json(
+        endpoint,
+        {'apikey': api_key, 'includeSeasonImages': 'true'},
+        timeout=30 if bypass_cache else ARR_HTTP_TIMEOUT_SECONDS,
+    ) or []
     _cache_set(cache_key, data)
     return data
 
@@ -599,17 +630,79 @@ def trigger_sonarr_search(
     return result is not None
 
 
-def lookup_movie(*, url: str, api_key: str, tmdb_id: Optional[int] = None, imdb_id: Optional[str] = None) -> Optional[dict]:
+def _coerce_lookup_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _first_lookup_row(result: Any) -> Optional[dict]:
+    if isinstance(result, list):
+        return result[0] if result and isinstance(result[0], dict) else None
+    return result if isinstance(result, dict) else None
+
+
+def _lookup_year(row: dict) -> Optional[int]:
+    try:
+        parsed = int(row.get("year") or 0)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _pick_title_lookup(result: Any, *, title: str, year: Optional[int]) -> Optional[dict]:
+    """Prefer an exact title (and year when known); otherwise the first *arr hit."""
+    rows = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
+    dicts = [row for row in rows if isinstance(row, dict)]
+    if not dicts:
+        return None
+    want = str(title or "").strip().lower()
+    want_year = _coerce_lookup_int(year)
+    exact = [row for row in dicts if str(row.get("title") or "").strip().lower() == want]
+    if want_year:
+        year_exact = [row for row in exact if _lookup_year(row) == want_year]
+        if year_exact:
+            return year_exact[0]
+    if exact:
+        return exact[0]
+    return dicts[0]
+
+
+def _arr_lookup(url: str, api_key: str, resource: str, term: str) -> Any:
+    endpoint = _build_endpoint(url, resource)
+    return _get_json(endpoint, {"apikey": api_key, "term": term}, timeout=ARR_LOOKUP_TIMEOUT_SECONDS)
+
+
+def lookup_movie(
+    *,
+    url: str,
+    api_key: str,
+    tmdb_id: Optional[int] = None,
+    imdb_id: Optional[str] = None,
+    title: Optional[str] = None,
+    year: Optional[int] = None,
+) -> Optional[dict]:
+    """Resolve a movie in Radarr: TMDB id, then IMDb, then title search."""
     if not url or not api_key:
         return None
-    term = f"tmdb:{int(tmdb_id)}" if tmdb_id else (f"imdb:{imdb_id}" if imdb_id else None)
-    if not term:
+    tmdb = _coerce_lookup_int(tmdb_id)
+    imdb = str(imdb_id or "").strip() or None
+    terms: list[str] = []
+    if tmdb:
+        terms.append(f"tmdb:{tmdb}")
+    if imdb:
+        terms.append(f"imdb:{imdb}")
+    for term in terms:
+        hit = _first_lookup_row(_arr_lookup(url, api_key, "movie/lookup", term))
+        if hit:
+            return hit
+    name = str(title or "").strip()
+    if not name:
         return None
-    endpoint = _build_endpoint(url, "movie/lookup")
-    result = _get_json(endpoint, {"apikey": api_key, "term": term}, timeout=ARR_LOOKUP_TIMEOUT_SECONDS)
-    if isinstance(result, list) and result:
-        return result[0] if isinstance(result[0], dict) else None
-    return result if isinstance(result, dict) else None
+    query = f"{name} {int(year)}" if _coerce_lookup_int(year) else name
+    return _pick_title_lookup(_arr_lookup(url, api_key, "movie/lookup", query), title=name, year=year)
 
 
 def lookup_series(
@@ -619,29 +712,46 @@ def lookup_series(
     tvdb_id: Optional[int] = None,
     tmdb_id: Optional[int] = None,
     imdb_id: Optional[str] = None,
+    title: Optional[str] = None,
+    year: Optional[int] = None,
 ) -> Optional[dict]:
+    """Resolve a series in Sonarr: TVDB, then TMDB, then IMDb, then title search."""
     if not url or not api_key:
         return None
     terms: list[str] = []
-    if tvdb_id:
-        terms.append(f"tvdb:{int(tvdb_id)}")
-    if tmdb_id:
-        terms.append(f"tmdb:{int(tmdb_id)}")
-    if imdb_id:
-        terms.append(f"imdb:{imdb_id}")
+    tvdb = _coerce_lookup_int(tvdb_id)
+    tmdb = _coerce_lookup_int(tmdb_id)
+    imdb = str(imdb_id or "").strip() or None
+    if tvdb:
+        terms.append(f"tvdb:{tvdb}")
+    if tmdb:
+        terms.append(f"tmdb:{tmdb}")
+    if imdb:
+        terms.append(f"imdb:{imdb}")
     for term in terms:
-        endpoint = _build_endpoint(url, "series/lookup")
-        result = _get_json(endpoint, {"apikey": api_key, "term": term}, timeout=ARR_LOOKUP_TIMEOUT_SECONDS)
-        if isinstance(result, list) and result and isinstance(result[0], dict):
-            return result[0]
-        if isinstance(result, dict):
-            return result
-    return None
+        hit = _first_lookup_row(_arr_lookup(url, api_key, "series/lookup", term))
+        if hit:
+            return hit
+    name = str(title or "").strip()
+    if not name:
+        return None
+    query = f"{name} {int(year)}" if _coerce_lookup_int(year) else name
+    return _pick_title_lookup(_arr_lookup(url, api_key, "series/lookup", query), title=name, year=year)
+
+
+def normalize_arr_tag_label(label: str) -> str:
+    """Match Radarr/Sonarr tag slugs: trim and collapse whitespace to dashes."""
+    text = str(label or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text
 
 
 def ensure_arr_tag(*, url: str, api_key: str, label: str) -> Optional[int]:
     """Return the id of an existing tag, creating it if needed."""
-    name = str(label or "").strip()
+    name = normalize_arr_tag_label(label)
     if not name or not url or not api_key:
         return None
     endpoint = _build_endpoint(url, "tag")
@@ -743,16 +853,212 @@ def _lookup_identity_key(lookup: dict, *, movie: bool) -> Optional[str]:
     return None
 
 
-def _imported_identity_keys(imported: Any, *, movie: bool) -> set[str]:
-    keys: set[str] = set()
+def _imported_rows_by_identity(imported: Any, *, movie: bool) -> dict[str, dict]:
+    mapping: dict[str, dict] = {}
     rows = imported if isinstance(imported, list) else [imported] if isinstance(imported, dict) else []
     for row in rows:
         if not isinstance(row, dict):
             continue
         key = _lookup_identity_key(row, movie=movie)
         if key:
-            keys.add(key)
-    return keys
+            mapping[key] = row
+    return mapping
+
+
+def _apply_arr_id(lookup: dict, row: dict) -> None:
+    try:
+        arr_id = int(row.get("id") or 0)
+    except (TypeError, ValueError):
+        arr_id = 0
+    if arr_id > 0:
+        lookup["id"] = arr_id
+
+
+def _refresh_lookup(*, url: str, api_key: str, lookup: dict, movie: bool) -> Optional[dict]:
+    if movie:
+        tmdb = lookup.get("tmdbId") or lookup.get("tmdb_id")
+        imdb = lookup.get("imdbId") or lookup.get("imdb_id")
+        tmdb_id = None
+        try:
+            tmdb_id = int(tmdb) if tmdb else None
+        except (TypeError, ValueError):
+            tmdb_id = None
+        return lookup_movie(url=url, api_key=api_key, tmdb_id=tmdb_id, imdb_id=str(imdb) if imdb else None)
+    tvdb = lookup.get("tvdbId") or lookup.get("tvdb_id")
+    tmdb = lookup.get("tmdbId") or lookup.get("tmdb_id")
+    imdb = lookup.get("imdbId") or lookup.get("imdb_id")
+    tvdb_id = None
+    tmdb_id = None
+    try:
+        tvdb_id = int(tvdb) if tvdb else None
+    except (TypeError, ValueError):
+        tvdb_id = None
+    try:
+        tmdb_id = int(tmdb) if tmdb else None
+    except (TypeError, ValueError):
+        tmdb_id = None
+    return lookup_series(
+        url=url,
+        api_key=api_key,
+        tvdb_id=tvdb_id,
+        tmdb_id=tmdb_id,
+        imdb_id=str(imdb) if imdb else None,
+    )
+
+
+ArrAddProgress = Callable[[dict[str, Any]], None]
+ArrAddIndexStatus = Callable[[int, str, Optional[str]], None]
+
+
+def _notify_index_status(
+    on_status: Optional[ArrAddIndexStatus],
+    index: int,
+    status: str,
+    error: Optional[str] = None,
+) -> None:
+    if on_status is None:
+        return
+    try:
+        on_status(index, status, error)
+    except Exception:
+        pass
+
+
+def _arr_add_item_key(item: Any, instance_key: str) -> str:
+    tmdb = getattr(item, "tmdb_id", None)
+    tvdb = getattr(item, "tvdb_id", None)
+    imdb = getattr(item, "imdb_id", None) or ""
+    title = getattr(item, "title", None) or ""
+    year = getattr(item, "year", None) or ""
+    return f"{instance_key}:{tmdb or ''}:{tvdb or ''}:{imdb}:{title}:{year}"
+
+
+def _emit_arr_add_progress(
+    on_progress: Optional[ArrAddProgress],
+    event: dict[str, Any],
+) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(event)
+    except Exception:
+        pass
+
+
+def _library_identity_map(*, url: str, api_key: str, movie: bool) -> dict[str, dict]:
+    if movie:
+        library = fetch_radarr_movies(url, api_key, bypass_cache=True)
+    else:
+        endpoint = _build_endpoint(url, "series")
+        library = _get_json(endpoint, {"apikey": api_key}, timeout=30) or []
+    return _imported_rows_by_identity(library if isinstance(library, list) else [], movie=movie)
+
+
+def _reconcile_unconfirmed_chunk(
+    *,
+    url: str,
+    api_key: str,
+    chunk: list[tuple[int, dict, dict]],
+    results: list[Optional[tuple[dict, str, Optional[str]]]],
+    movie: bool,
+    failure_message: str,
+    on_status: Optional[ArrAddIndexStatus] = None,
+) -> None:
+    """Poll *arr until titles from a hung/empty import actually appear in the library."""
+    pending: list[tuple[int, dict]] = [(index, lookup) for index, lookup, _payload in chunk]
+    if not pending:
+        return
+    arr_name = "Radarr" if movie else "Sonarr"
+    logger.info(
+        f"{arr_name} import body missing; polling library for {len(pending)} title(s) "
+        f"up to {ARR_ADD_RECONCILE_SECONDS}s",
+        extra={"emoji_type": "info"},
+    )
+    deadline = time.monotonic() + ARR_ADD_RECONCILE_SECONDS
+    while pending and time.monotonic() < deadline:
+        by_key = _library_identity_map(url=url, api_key=api_key, movie=movie)
+        still: list[tuple[int, dict]] = []
+        for index, lookup in pending:
+            key = _lookup_identity_key(lookup, movie=movie)
+            row = by_key.get(key) if key else None
+            if row and _existing_arr_id(row):
+                _apply_arr_id(lookup, row)
+                results[index] = (lookup, "ok", None)
+                _notify_index_status(on_status, index, "ok")
+                continue
+            still.append((index, lookup))
+        pending = still
+        if pending:
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(ARR_ADD_RECONCILE_INTERVAL_SECONDS, remaining) if remaining else 0)
+    leftover = list(pending)
+    for index, lookup in leftover:
+        refreshed = _refresh_lookup(url=url, api_key=api_key, lookup=lookup, movie=movie)
+        if refreshed and _existing_arr_id(refreshed):
+            _apply_arr_id(lookup, refreshed)
+            results[index] = (lookup, "ok", None)
+            _notify_index_status(on_status, index, "ok")
+        else:
+            results[index] = (lookup, "error", failure_message)
+            _notify_index_status(on_status, index, "error", failure_message)
+
+
+def _import_body_usable(imported: Any) -> bool:
+    if imported is None:
+        return False
+    if isinstance(imported, list):
+        return bool(imported)
+    if isinstance(imported, dict):
+        return bool(imported)
+    return False
+
+
+def _finish_import_chunk(
+    *,
+    url: str,
+    api_key: str,
+    chunk: list[tuple[int, dict, dict]],
+    imported: Any,
+    results: list[Optional[tuple[dict, str, Optional[str]]]],
+    movie: bool,
+    arr_name: str,
+    on_status: Optional[ArrAddIndexStatus] = None,
+) -> None:
+    if not _import_body_usable(imported):
+        _reconcile_unconfirmed_chunk(
+            url=url,
+            api_key=api_key,
+            chunk=chunk,
+            results=results,
+            movie=movie,
+            failure_message=_arr_write_failure_message(arr_name),
+            on_status=on_status,
+        )
+        return
+    by_key = _imported_rows_by_identity(imported, movie=movie)
+    unconfirmed: list[tuple[int, dict, dict]] = []
+    for index, lookup, payload in chunk:
+        key = _lookup_identity_key(lookup, movie=movie)
+        row = by_key.get(key) if key else None
+        if row and _existing_arr_id(row):
+            _apply_arr_id(lookup, row)
+            results[index] = (lookup, "ok", None)
+            _notify_index_status(on_status, index, "ok")
+        elif key and key in by_key:
+            results[index] = (lookup, "ok", None)
+            _notify_index_status(on_status, index, "ok")
+        else:
+            unconfirmed.append((index, lookup, payload))
+    if unconfirmed:
+        _reconcile_unconfirmed_chunk(
+            url=url,
+            api_key=api_key,
+            chunk=unconfirmed,
+            results=results,
+            movie=movie,
+            failure_message=f"{arr_name} did not confirm this title in the import response",
+            on_status=on_status,
+        )
 
 
 def add_movies_to_radarr(
@@ -765,16 +1071,19 @@ def add_movies_to_radarr(
     monitored: bool,
     search: bool,
     tag_ids: Optional[List[int]] = None,
+    on_status: Optional[ArrAddIndexStatus] = None,
 ) -> list[tuple[dict, str, Optional[str]]]:
     """Bulk-add looked-up movies via POST /movie/import.
 
     Returns one (lookup, status, error) per input lookup, in the same order.
+    Lookups that succeed (including after a timeout reconcile) have ARR ``id`` set.
     """
     results: list[Optional[tuple[dict, str, Optional[str]]]] = [None] * len(lookups)
     pending: list[tuple[int, dict, dict]] = []
     for index, lookup in enumerate(lookups):
         if _existing_arr_id(lookup):
             results[index] = (lookup, "skipped", "Already in this Radarr instance")
+            _notify_index_status(on_status, index, "skipped", "Already in this Radarr instance")
             continue
         payload = _movie_add_payload(
             lookup,
@@ -797,19 +1106,22 @@ def add_movies_to_radarr(
             payload=payloads,
             api_key=api_key,
             timeout=ARR_ADD_TIMEOUT_SECONDS,
+            isolated=True,
         )
-        if imported is None:
-            message = _arr_write_failure_message("Radarr")
-            for _index, lookup, _payload in chunk:
-                results[_index] = (lookup, "error", message)
-            continue
-        accepted = _imported_identity_keys(imported, movie=True)
-        if not accepted:
-            continue
-        for index, lookup, _payload in chunk:
-            key = _lookup_identity_key(lookup, movie=True)
-            if key and key not in accepted:
-                results[index] = (lookup, "error", "Radarr did not confirm this title in the import response")
+        _finish_import_chunk(
+            url=url,
+            api_key=api_key,
+            chunk=chunk,
+            imported=imported,
+            results=results,
+            movie=True,
+            arr_name="Radarr",
+            on_status=on_status,
+        )
+    for i, row in enumerate(results):
+        if row is None:
+            results[i] = (lookups[i], "error", "Radarr import did not return a result")
+            _notify_index_status(on_status, i, "error", "Radarr import did not return a result")
     return [row if row is not None else (lookups[i], "error", "Radarr import did not return a result") for i, row in enumerate(results)]
 
 
@@ -823,6 +1135,7 @@ def add_series_to_sonarr_bulk(
     monitored: bool,
     search: bool,
     tag_ids: Optional[List[int]] = None,
+    on_status: Optional[ArrAddIndexStatus] = None,
 ) -> list[tuple[dict, str, Optional[str]]]:
     """Bulk-add looked-up series via POST /series/import."""
     results: list[Optional[tuple[dict, str, Optional[str]]]] = [None] * len(lookups)
@@ -830,6 +1143,7 @@ def add_series_to_sonarr_bulk(
     for index, lookup in enumerate(lookups):
         if _existing_arr_id(lookup):
             results[index] = (lookup, "skipped", "Already in this Sonarr instance")
+            _notify_index_status(on_status, index, "skipped", "Already in this Sonarr instance")
             continue
         payload = _series_add_payload(
             lookup,
@@ -852,19 +1166,22 @@ def add_series_to_sonarr_bulk(
             payload=payloads,
             api_key=api_key,
             timeout=ARR_ADD_TIMEOUT_SECONDS,
+            isolated=True,
         )
-        if imported is None:
-            message = _arr_write_failure_message("Sonarr")
-            for _index, lookup, _payload in chunk:
-                results[_index] = (lookup, "error", message)
-            continue
-        accepted = _imported_identity_keys(imported, movie=False)
-        if not accepted:
-            continue
-        for index, lookup, _payload in chunk:
-            key = _lookup_identity_key(lookup, movie=False)
-            if key and key not in accepted:
-                results[index] = (lookup, "error", "Sonarr did not confirm this title in the import response")
+        _finish_import_chunk(
+            url=url,
+            api_key=api_key,
+            chunk=chunk,
+            imported=imported,
+            results=results,
+            movie=False,
+            arr_name="Sonarr",
+            on_status=on_status,
+        )
+    for i, row in enumerate(results):
+        if row is None:
+            results[i] = (lookups[i], "error", "Sonarr import did not return a result")
+            _notify_index_status(on_status, i, "error", "Sonarr import did not return a result")
     return [row if row is not None else (lookups[i], "error", "Sonarr import did not return a result") for i, row in enumerate(results)]
 
 
@@ -929,6 +1246,7 @@ def add_missing_titles(
     search: bool,
     tag_ids: Optional[List[int]] = None,
     instance_key: str = "",
+    on_progress: Optional[ArrAddProgress] = None,
 ) -> list[dict[str, Any]]:
     """Lookup each title, then bulk-import into Radarr or Sonarr."""
 
@@ -946,11 +1264,27 @@ def add_missing_titles(
     def row(title: str, status: str, error: Optional[str] = None) -> dict[str, Any]:
         return {"title": title, "instance_key": instance_key, "status": status, "error": error}
 
+    def emit(item: Any, title: str, status: str, error: Optional[str] = None) -> None:
+        _emit_arr_add_progress(
+            on_progress,
+            {
+                "type": "item",
+                "item_key": _arr_add_item_key(item, instance_key),
+                "title": title,
+                "instance_key": instance_key,
+                "status": status,
+                "error": error,
+            },
+        )
+
     results: list[dict[str, Any]] = []
     pending_items: list[Any] = []
     pending_lookups: list[dict] = []
+    ingest_lookups: list[dict] = []
     movie = media_type == "movie"
     for item in items:
+        display = result_title(item)
+        emit(item, display, "adding")
         try:
             if movie:
                 lookup = lookup_movie(
@@ -958,6 +1292,8 @@ def add_missing_titles(
                     api_key=api_key,
                     tmdb_id=getattr(item, "tmdb_id", None),
                     imdb_id=getattr(item, "imdb_id", None),
+                    title=getattr(item, "title", None),
+                    year=getattr(item, "year", None),
                 )
                 missing = "Radarr lookup found nothing"
             else:
@@ -967,17 +1303,27 @@ def add_missing_titles(
                     tvdb_id=getattr(item, "tvdb_id", None),
                     tmdb_id=getattr(item, "tmdb_id", None),
                     imdb_id=getattr(item, "imdb_id", None),
+                    title=getattr(item, "title", None),
+                    year=getattr(item, "year", None),
                 )
                 missing = "Sonarr lookup found nothing"
             if not lookup:
-                results.append(row(result_title(item), "error", missing))
+                results.append(row(display, "error", missing))
+                emit(item, display, "error", missing)
                 continue
             pending_items.append(item)
             pending_lookups.append(lookup)
         except Exception as extra:
-            results.append(row(result_title(item), "error", str(extra)))
+            results.append(row(display, "error", str(extra)))
+            emit(item, display, "error", str(extra))
     if not pending_lookups:
         return results
+
+    def on_status(index: int, status: str, error: Optional[str] = None) -> None:
+        item = pending_items[index]
+        lookup = pending_lookups[index]
+        emit(item, result_title(item, lookup), status, error)
+
     adder = add_movies_to_radarr if movie else add_series_to_sonarr_bulk
     added = adder(
         url=url,
@@ -988,8 +1334,36 @@ def add_missing_titles(
         monitored=monitored,
         search=search,
         tag_ids=tag_ids,
+        on_status=on_status,
     )
     for item, lookup, (_lookup, status, error) in zip(pending_items, pending_lookups, added):
-        results.append(row(result_title(item, lookup), status, error))
+        arr_id = None
+        try:
+            arr_id = int(lookup.get("id") or 0) or None
+        except (TypeError, ValueError):
+            arr_id = None
+        results.append({
+            "title": result_title(item, lookup),
+            "instance_key": instance_key,
+            "status": status,
+            "error": error,
+            "arr_id": arr_id,
+        })
+        if status in {"ok", "skipped"} and arr_id:
+            ingest_lookups.append(lookup)
+    if ingest_lookups and instance_key:
+        try:
+            from services.handlers import enqueue_synthetic_arr_adds
+
+            enqueue_synthetic_arr_adds(
+                instance_key=instance_key,
+                movie=movie,
+                lookups=ingest_lookups,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Failed to enqueue placeholder ingest after ARR add: {exc}",
+                extra={"emoji_type": "warning"},
+            )
     return results
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import queue
 import threading
 import time
 from datetime import datetime, timezone
@@ -9,8 +11,10 @@ from typing import Any
 
 import requests
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from starlette.concurrency import iterate_in_threadpool
 
 from core.config import settings
 from core.logger import logger
@@ -579,7 +583,8 @@ class ArrAddPayload(BaseModel):
     instance_options: dict[str, ArrAddInstanceOptions]
     monitored: bool = True
     search: bool = False
-    tag: str = "placeholdarr"
+    tag: str = ""
+    tags: list[str] = []
 
 
 # Keep in sync with `ARR_ADD_BATCH_CAP` in frontend/src/api/collections.ts
@@ -615,17 +620,81 @@ async def arr_add(body: ArrAddPayload):
     if not keys:
         raise HTTPException(status_code=400, detail="Select at least one ARR instance")
 
+    def ndjson_iter():
+        events: queue.Queue = queue.Queue()
+        sentinel = object()
+
+        def on_progress(event: dict[str, Any]) -> None:
+            events.put(event)
+
+        def run() -> None:
+            try:
+                _run_arr_add(body, keys, on_progress)
+            except Exception as exc:
+                logger.error(f"ARR add stream failed: {exc}", extra={"emoji_type": "error"})
+                events.put({"type": "fatal", "message": str(exc)})
+            finally:
+                events.put(sentinel)
+
+        threading.Thread(target=run, name="collections-arr-add", daemon=True).start()
+        while True:
+            try:
+                event = events.get(timeout=2.0)
+            except queue.Empty:
+                yield json.dumps({"type": "ping"}) + "\n"
+                continue
+            if event is sentinel:
+                break
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        iterate_in_threadpool(ndjson_iter()),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _run_arr_add(body: ArrAddPayload, keys: list[str], on_progress) -> None:
+    from services.source_of_truth import arr_api
+
     arr_type = "radarr" if body.media_type == "movie" else "sonarr"
     results: list[dict[str, Any]] = []
-    tag_label = str(body.tag or "").strip()
+    warnings: list[str] = []
+    tag_labels: list[str] = []
+    seen_tags: set[str] = set()
+    for raw in list(body.tags or []):
+        label = arr_api.normalize_arr_tag_label(str(raw))
+        key = label.lower()
+        if not label or key in seen_tags:
+            continue
+        seen_tags.add(key)
+        tag_labels.append(label)
+    if not tag_labels and str(body.tag or "").strip():
+        label = arr_api.normalize_arr_tag_label(body.tag)
+        if label:
+            tag_labels.append(label)
 
     for key in keys:
         instance = settings.resolve_arr_instance(arr_type, instance_key=key)
         if not instance:
             for item in body.items:
+                title = item.title or "Untitled"
+                on_progress(
+                    {
+                        "type": "item",
+                        "item_key": arr_api._arr_add_item_key(item, key),
+                        "title": title,
+                        "instance_key": key,
+                        "status": "error",
+                        "error": f"Unknown {arr_type} instance {key!r}",
+                    }
+                )
                 results.append(
                     {
-                        "title": item.title,
+                        "title": title,
                         "instance_key": key,
                         "status": "error",
                         "error": f"Unknown {arr_type} instance {key!r}",
@@ -635,9 +704,20 @@ async def arr_add(body: ArrAddPayload):
         opts = body.instance_options.get(key)
         if opts is None:
             for item in body.items:
+                title = item.title or "Untitled"
+                on_progress(
+                    {
+                        "type": "item",
+                        "item_key": arr_api._arr_add_item_key(item, key),
+                        "title": title,
+                        "instance_key": key,
+                        "status": "error",
+                        "error": "Quality profile and root folder are required",
+                    }
+                )
                 results.append(
                     {
-                        "title": item.title,
+                        "title": title,
                         "instance_key": key,
                         "status": "error",
                         "error": "Quality profile and root folder are required",
@@ -647,20 +727,15 @@ async def arr_add(body: ArrAddPayload):
         url = str(instance.get("url") or "")
         api_key = str(instance.get("api_key") or "")
         tag_ids: list[int] = []
-        if tag_label:
-            tag_id = arr_api.ensure_arr_tag(url=url, api_key=api_key, label=tag_label)
+        for label in tag_labels:
+            tag_id = arr_api.ensure_arr_tag(url=url, api_key=api_key, label=label)
             if tag_id is None:
-                for item in body.items:
-                    results.append(
-                        {
-                            "title": item.title,
-                            "instance_key": key,
-                            "status": "error",
-                            "error": f"Could not create or find tag {tag_label!r}",
-                        }
-                    )
+                warning = f"Could not create or find tag {label!r} on {key}"
+                warnings.append(warning)
+                on_progress({"type": "warning", "message": warning})
                 continue
-            tag_ids = [tag_id]
+            if tag_id not in tag_ids:
+                tag_ids.append(tag_id)
         results.extend(
             arr_api.add_missing_titles(
                 media_type=body.media_type,
@@ -673,20 +748,24 @@ async def arr_add(body: ArrAddPayload):
                 search=body.search,
                 tag_ids=tag_ids,
                 instance_key=key,
+                on_progress=on_progress,
             )
         )
 
     ok = sum(1 for row in results if row.get("status") == "ok")
     skipped = sum(1 for row in results if row.get("status") == "skipped")
     errors = sum(1 for row in results if row.get("status") == "error")
-    return {
-        "ok": errors == 0,
-        "added": ok,
-        "skipped": skipped,
-        "errors": errors,
-        "results": results,
-        "message": "Titles are in ARR. Collection membership updates after sync and placeholders — not instantly in Plex.",
-    }
+    on_progress(
+        {
+            "type": "done",
+            "ok": errors == 0,
+            "added": ok,
+            "skipped": skipped,
+            "errors": errors,
+            "warnings": warnings,
+            "message": "Titles are in ARR. Collection membership updates after sync and placeholders — not instantly in Plex.",
+        }
+    )
 
 
 class ExplainPayload(BaseModel):

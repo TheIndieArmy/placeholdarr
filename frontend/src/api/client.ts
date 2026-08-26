@@ -95,3 +95,63 @@ export async function postJson<T>(path: string, body?: unknown): Promise<T> {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
+
+export async function postNdjson(
+  path: string,
+  body: unknown,
+  onEvent: (event: Record<string, unknown>) => void,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: mergeHeaders({
+        method: "POST",
+        headers: {
+          Accept: "application/x-ndjson",
+          "Content-Type": "application/json",
+        },
+      }),
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw humanizeFetchFailure(err);
+  }
+
+  if (response.status === 401) {
+    unauthorizedHandler?.();
+    const message = await parseErrorMessage(response, "authentication required");
+    throw new ApiUnauthorizedError(message);
+  }
+
+  if (!response.ok) {
+    const message = await parseErrorMessage(response, `Request failed: ${response.status}`);
+    throw new Error(message);
+  }
+
+  if (!response.body) {
+    throw new Error("Add progress stream was empty");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: !done });
+    if (done) buffer += decoder.decode();
+    const lines = buffer.split("\n");
+    buffer = done ? "" : (lines.pop() ?? "");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        onEvent(JSON.parse(trimmed) as Record<string, unknown>);
+      } catch {
+        // ignore a partial/corrupt line; the next chunk may complete it
+      }
+    }
+    if (done) break;
+  }
+}
