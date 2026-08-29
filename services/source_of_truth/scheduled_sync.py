@@ -40,6 +40,36 @@ from services.task_run_history import (
     update_task_run_summary,
 )
 
+_PG_DEADLOCK = "40P01"
+
+
+def _is_deadlock_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        pgcode = getattr(getattr(current, "orig", None), "pgcode", None)
+        if str(pgcode or "") == _PG_DEADLOCK:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _run_full_sync_with_deadlock_retry(**kwargs: Any) -> Any:
+    try:
+        return run_full_sync(**kwargs)
+    except Exception as exc:
+        if not _is_deadlock_error(exc):
+            raise
+        logger.warning(
+            "Full sync hit a deadlock; retrying once: %s",
+            exc,
+            extra={"emoji_type": "warning"},
+        )
+        time.sleep(2)
+        return run_full_sync(**kwargs)
+
+
 TaskTrigger = Literal["scheduled", "manual", "startup"]
 
 
@@ -204,7 +234,7 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             arr_type = str(instance.get("arr_type") or "").strip().lower()
             if arr_type not in {"radarr", "sonarr"}:
                 continue
-            key = run_full_sync(
+            key = _run_full_sync_with_deadlock_retry(
                 dry_run=False,
                 batch_size=50,
                 types=("movie",) if arr_type == "radarr" else ("series",),

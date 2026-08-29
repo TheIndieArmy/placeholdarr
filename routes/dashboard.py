@@ -3395,6 +3395,10 @@ def _build_library_payload(
 
     session = get_session()
     try:
+        try:
+            session.execute(text("SET LOCAL lock_timeout = '30s'"))
+        except Exception:
+            pass
         etag = library_etag_for_shelf(session, mt if mt else "all")
         if client_etag and client_etag == etag:
             return etag, None

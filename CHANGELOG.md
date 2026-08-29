@@ -7,6 +7,22 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Summary
+
+- **Series stats vs full sync**: Stats refresh waits until full sync ends, then retries with backoff.
+- **Full sync row locks**: Series sync fetches Sonarr episode payloads first, then commits after each show.
+- **Full sync autoflush**: Season/episode lookups no longer flush a pending series UPDATE.
+- **Full sync deadlock retry**: Scheduled full sync retries once after a Postgres deadlock.
+- **Library shelf lock wait**: Library payload queries abort after 30s instead of holding a pool slot.
+
+### Fixed
+
+- **Series stats vs full sync**: Episode-stats refresh skips while a full sync is running, fails lock waits in 3s, and backs off up to 60s instead of retrying the same row every couple of seconds.
+- **Full sync row locks**: Sonarr full sync fetches episode payloads first, then commits after each series so other queries are not blocked for the whole library pass.
+- **Full sync autoflush**: Series/season/episode lookups use `no_autoflush` so a pending series UPDATE cannot deadlock with another writer.
+- **Full sync deadlock retry**: Scheduled full sync retries the instance once after a Postgres deadlock.
+- **Library shelf lock wait**: `/api/library` sets a 30s lock timeout so a blocked shelf load cannot pin a pool connection for tens of minutes.
+
 ## [0.9.19] - 2026-08-26
 
 ### Summary
