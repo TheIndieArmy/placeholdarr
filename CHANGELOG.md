@@ -9,14 +9,50 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Summary
 
+- **Activity layout**: Placeholders + Tasks (infinite scroll, filters, series batches, Active searches); Operations removed from Activity.
+- **Activity series-add batches**: Burst “Series added” creates collapse into one expandable row.
+- **Activity series create batches**: Same-series Created rows within a few minutes group (sync or SeriesAdd).
+- **Activity series delete title**: Tombstone bulk-delete rows show the series name once (not duplicated).
+- **Activity reason prose**: Long placeholder reasons stay intact instead of snake_case flattening.
+- **Errors page removed**: Mock Diagnostics shell dropped; failed jobs stay on Activity → Tasks, live logs on Logs.
+- **Errors API removed**: Unused `GET /api/errors` dropped with the Diagnostics shell.
 - **Series stats vs full sync**: Stats refresh waits until full sync ends, then retries with backoff.
 - **Full sync row locks**: Series sync fetches Sonarr episode payloads first, then commits after each show.
 - **Full sync autoflush**: Season/episode lookups no longer flush a pending series UPDATE.
 - **Full sync deadlock retry**: Scheduled full sync retries once after a Postgres deadlock.
 - **Library shelf lock wait**: Library payload queries abort after 30s instead of holding a pool slot.
+- **Media Integrations configure**: Connect and Configure open an ARR-style modal (Cancel / Test / Save).
+- **Collection Sources**: TMDB, Trakt, and Tautulli collection APIs move to Settings → Collection Sources.
+- **Media/ARR Test button**: Closing and reopening Configure clears the success check; Save still works when details are already complete.
+
+### Added
+
+- **Activity layout**: Placeholders and Tasks under Activity (filters, day groups, Active searches on Tasks).
+- **Activity scroll**: Placeholders append older history on scroll (cursor `before_time` / `before_id`).
+- **Activity series-add batches**: Consecutive “Series added” episode creates group into one expandable row.
+- **Activity series create batches**: Same-series Created rows within ~5 minutes group regardless of reason (lite/full sync, SeriesAdd, etc.).
+- **Activity Active searches**: Tasks shows Placeholdarr-monitored titles above Scheduled (`GET /api/activity/active-searches`).
+- **Collection Sources**: Settings sidebar page (after ARR Integrations) for TMDB API key, Trakt Client ID, and Tautulli URL / API key used by collection list sources.
+
+### Changed
+
+- **Activity feed APIs**: `/api/activity/placeholders` and `/api/activity/operations` return `{ items, has_more, next_before_time, next_before_id }`.
+- **Activity promoted**: Proposed Placeholders / Tasks replace the old Activity tabs; `/activity/proposed/*` and `/activity/operations` redirect.
+- **Activity series delete title**: Series tombstone bulk-delete rows use a single series title; multi-episode bursts expand like create batches.
+- **Activity reason prose**: Placeholder Created/Deleted reasons that are already sentences are not snake_case-humanized.
+- **Media Integrations configure**: Connect and Configure open a modal with Cancel, Test, and Save instead of expanding a form under the cards.
+
+### Removed
+
+- **Errors page**: Sidebar Diagnostics shell removed; `/errors` redirects to Logs. Failed jobs remain on Activity → Tasks.
+- **Errors API**: Unused `GET /api/errors` removed after the Diagnostics shell was dropped.
 
 ### Fixed
 
+- **Refresh all placeholders contrast**: Accent button uses dark on-accent text instead of white on yellow.
+- **Activity series delete title**: Tombstone bulk-delete no longer shows `Series • Series` when both title fields are the series name.
+- **Activity reason prose**: Long tombstone reasons keep punctuation instead of flattening to spaced words.
+- **Media/ARR Test button**: Closing and reopening Configure clears the success check; Save still works when connection details are already complete.
 - **Series stats vs full sync**: Episode-stats refresh skips while a full sync is running, fails lock waits in 3s, and backs off up to 60s instead of retrying the same row every couple of seconds.
 - **Full sync row locks**: Sonarr full sync fetches episode payloads first, then commits after each series so other queries are not blocked for the whole library pass.
 - **Full sync autoflush**: Series/season/episode lookups use `no_autoflush` so a pending series UPDATE cannot deadlock with another writer.

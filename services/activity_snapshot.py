@@ -38,6 +38,14 @@ def clear_queue_download_snapshot() -> None:
         _snapshot = None
 
 
+def get_queue_download_snapshot() -> dict[str, Any] | None:
+    """Return the raw live snapshot dict, or None when the monitor is idle."""
+    with _snapshot_lock:
+        if not _snapshot:
+            return None
+        return dict(_snapshot)
+
+
 def get_queue_download_activity_row() -> dict[str, Any] | None:
     """Build a single synthetic activity row for /api/activity, or None when idle."""
     with _snapshot_lock:

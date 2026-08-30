@@ -102,7 +102,7 @@ def _fail(source_type: str, error: str) -> dict[str, Any]:
 
 def _validate_tmdb(source_type: str, reference: str, media_type: str) -> dict[str, Any]:
     if not tmdb_client.tmdb_configured():
-        raise tmdb_client.TmdbError("TMDB API key is not configured")
+        raise tmdb_client.TmdbError("TMDB API key is not configured (Settings → Collection Sources)")
     if not reference:
         raise tmdb_client.TmdbError("Paste a TMDB page URL or id")
 
@@ -164,7 +164,7 @@ def _validate_trakt_list(reference: str, media_type: str) -> dict[str, Any]:
     client_id = getattr(settings, "TRAKT_CLIENT_ID", None)
     if not client_id:
         raise list_sources.ListSourceError(
-            "Trakt Client ID is not configured (Settings). Creating a Trakt API app currently requires Trakt VIP."
+            "Trakt Client ID is not configured (Settings → Collection Sources). Creating a Trakt API app currently requires Trakt VIP."
         )
     url = f"https://api.trakt.tv/users/{user}/lists/{slug}"
     resp = list_sources._get_with_retry(

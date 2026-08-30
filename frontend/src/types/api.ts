@@ -1,4 +1,4 @@
-export type DashboardTab = "activity" | "library" | "collections" | "calendar" | "errors" | "logs" | "settings" | "setup";
+export type DashboardTab = "activity" | "library" | "collections" | "calendar" | "logs" | "settings" | "setup";
 
 export type ActivitySubPage = "placeholders" | "tasks" | "operations";
 
@@ -110,26 +110,26 @@ export interface ActivityRow {
 }
 
 export interface PlaceholderActivityRow {
-  id: number;
+  id: number | string;
   type: "placeholder";
   action: "Created" | "Deleted" | "Status";
-  item_type: "movie" | "episode" | "batch";
+  item_type: "movie" | "episode" | "batch" | "series";
   item_title: string;
   series_title?: string | null;
   path: string;
   reason: string;
   status: string;
   time?: string | null;
-  /** Server-side batch of calendar-driven status updates; expands in the UI. */
-  group_kind?: "calendar_status_sync" | string;
+  /** Server-side batch (calendar status sync or series-add creates); expands in the UI. */
+  group_kind?: "calendar_status_sync" | "series_create_batch" | "series_added_create" | "series_bulk_delete" | string;
   children?: PlaceholderActivityChildRow[];
 }
 
 export interface PlaceholderActivityChildRow {
-  id: number;
+  id: number | string;
   type?: "placeholder";
   action?: string;
-  item_type?: "movie" | "episode";
+  item_type?: "movie" | "episode" | "series" | "batch";
   item_title?: string;
   series_title?: string | null;
   path?: string;
@@ -318,13 +318,6 @@ export interface DetailErrorResponse {
 }
 
 export type DetailResponse = MovieDetailResponse | SeriesDetailResponse | DetailErrorResponse;
-
-export interface ErrorRow {
-  source: string;
-  label: string;
-  error: string;
-  time?: string | null;
-}
 
 export interface LogsResponse {
   lines: string[];

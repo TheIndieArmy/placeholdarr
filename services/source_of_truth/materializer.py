@@ -430,6 +430,8 @@ def _mark_placeholder_row_active(
         extra['create_reason'] = str(activity_reason)
         extra['last_action_reason'] = str(activity_reason)
         extra['last_action'] = 'created'
+        # Collection-named Activity batches need a provenance stamp here (e.g. batch_id /
+        # recipe_id) when materialization is driven by Collections Add-to-*arr — deferred.
     if calendar_dummy_variant:
         extra['calendar_dummy_variant'] = calendar_dummy_variant
     row.extra = extra
@@ -538,12 +540,13 @@ def _record_series_bulk_delete_history(
     """Persist one aggregate placeholder-activity row for series tombstone cleanup."""
     if int(removed_placeholders or 0) <= 0:
         return
+    title = str(getattr(series, "title", "") or "Unknown Series").strip() or "Unknown Series"
     reason = (
-        f"Series removed tombstone cleanup - {int(removed_placeholders)} placeholders deleted"
+        f"Series removed: tombstone cleanup, {int(removed_placeholders)} placeholders deleted"
         f" ({int(files_deleted or 0)} files deleted)"
     )
     if activity_reason:
-        reason = f"{reason} - {str(activity_reason)}"
+        reason = f"{reason}. {str(activity_reason).strip()}"
     session.add(
         PlaceholderActivityHistory(
             occurred_at=datetime.now(timezone.utc),
@@ -559,8 +562,8 @@ def _record_series_bulk_delete_history(
             instance_id=getattr(series, "instance_id", None),
             event_type="placeholder_deleted_series_bulk",
             path=str(getattr(series, "placeholder_folder", "") or ""),
-            item_title=str(getattr(series, "title", "") or "Unknown Series"),
-            series_title=str(getattr(series, "title", "") or None),
+            item_title=title,
+            series_title=title,
             reason=reason,
             status_label="Deleted",
             source="series_tombstone_bulk",
