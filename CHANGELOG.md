@@ -16,6 +16,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Activity reason prose**: Long placeholder reasons stay intact instead of snake_case flattening.
 - **Errors page removed**: Mock Diagnostics shell dropped; failed jobs stay on Activity → Tasks, live logs on Logs.
 - **Errors API removed**: Unused `GET /api/errors` dropped with the Diagnostics shell.
+- **Shared placeholder tombstone**: Deleted-instance Placeholder rows clear path; FS scan will not revive them when a sibling still owns the file.
 - **Series stats vs full sync**: Stats refresh waits until full sync ends, then retries with backoff.
 - **Full sync row locks**: Series sync fetches Sonarr episode payloads first, then commits after each show.
 - **Full sync autoflush**: Season/episode lookups no longer flush a pending series UPDATE.
@@ -49,6 +50,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Fixed
 
+- **Shared placeholder tombstone**: Tombstoned Placeholder rows clear `path`; FS scan prefers active siblings and will not revive deleted-instance rows.
 - **Refresh all placeholders contrast**: Accent button uses dark on-accent text instead of white on yellow.
 - **Activity series delete title**: Tombstone bulk-delete no longer shows `Series • Series` when both title fields are the series name.
 - **Activity reason prose**: Long tombstone reasons keep punctuation instead of flattening to spaced words.

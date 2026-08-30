@@ -460,6 +460,9 @@ def _mark_placeholder_rows_deleted(
     for row in rows:
         row.has_placeholder = False
         row.lifecycle_status = "DELETED"
+        # Clear path so FS scan cannot match this tombstoned row to a sibling's on-disk file.
+        # Column is NOT NULL — use empty string rather than SQL NULL.
+        row.path = ""
         row.display_status = None
         row.display_status_projected = None
         row.display_reason = None
@@ -500,6 +503,9 @@ def _mark_placeholder_rows_deleted_for_episodes(
     for row in rows:
         row.has_placeholder = False
         row.lifecycle_status = "DELETED"
+        # Clear path so FS scan cannot match this tombstoned row to a sibling's on-disk file.
+        # Column is NOT NULL — use empty string rather than SQL NULL.
+        row.path = ""
         row.display_status = None
         row.display_status_projected = None
         row.display_reason = None

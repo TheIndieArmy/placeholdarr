@@ -130,11 +130,175 @@ def _disconnect_placeholder_row(row: Placeholder) -> bool:
     return changed
 
 
+def _placeholder_lifecycle_is_deleted(row: Placeholder) -> bool:
+    return str(getattr(row, "lifecycle_status", "") or "").strip().upper() == "DELETED"
+
+
+def _placeholder_linked_entity_is_deleted(session, row: Placeholder) -> bool:
+    """True when the row is tied to a deleted movie/episode/series (or deleted season)."""
+    try:
+        mid = getattr(row, "movie_id", None)
+        if mid is not None:
+            mv = session.query(Movie).filter(Movie.id == int(mid)).first()
+            return bool(mv is None or getattr(mv, "is_deleted", False))
+        eid = getattr(row, "episode_id", None)
+        if eid is not None:
+            ep = session.query(Episode).filter(Episode.id == int(eid)).first()
+            if ep is None or getattr(ep, "is_deleted", False):
+                return True
+            season = session.query(Season).filter(Season.id == ep.season_id).first()
+            if season is None or getattr(season, "is_deleted", False):
+                return True
+            series = session.query(Series).filter(Series.id == season.series_id).first()
+            return bool(series is None or getattr(series, "is_deleted", False))
+        sid = getattr(row, "series_id", None)
+        if sid is not None:
+            series = session.query(Series).filter(Series.id == int(sid)).first()
+            return bool(series is None or getattr(series, "is_deleted", False))
+    except Exception:
+        return False
+    return False
+
+
+def _placeholder_row_eligible_for_fs_refresh(session, row: Placeholder) -> bool:
+    """FS scan must not revive tombstoned rows or rows for deleted ARR entities."""
+    if _placeholder_lifecycle_is_deleted(row):
+        return False
+    if _placeholder_linked_entity_is_deleted(session, row):
+        return False
+    return True
+
+
+def _pick_placeholder_row_for_observed_path(session, path: str) -> Placeholder | None:
+    """Choose which Placeholder row to refresh when a file is found on disk.
+
+    Prefer an active (non-tombstoned, non-deleted-entity) row when multiple rows
+    share a path. Never returns a deleted/tombstoned row — callers should insert
+    a path-only row instead of reactivating those.
+    """
+    if not path:
+        return None
+    with session.no_autoflush:
+        rows = session.query(Placeholder).filter(Placeholder.path == path).all()
+        if not rows:
+            # Also match abspath variants when DB stored a normalized path.
+            try:
+                abs_p = _norm_scan_path(path)
+            except Exception:
+                abs_p = path
+            if abs_p != path:
+                rows = session.query(Placeholder).filter(Placeholder.path == abs_p).all()
+        eligible = [r for r in rows if _placeholder_row_eligible_for_fs_refresh(session, r)]
+        if not eligible:
+            return None
+
+        def _score(r: Placeholder) -> tuple:
+            linked = 1 if (getattr(r, "movie_id", None) or getattr(r, "episode_id", None)) else 0
+            active = 1 if getattr(r, "has_placeholder", False) else 0
+            rid = int(getattr(r, "id", 0) or 0)
+            # Prefer linked + already-active + newest id among eligible rows.
+            return (linked, active, rid)
+
+        return max(eligible, key=_score)
+
+
+def _heal_tombstoned_placeholder_paths(session) -> int:
+    """Clear paths on DELETED lifecycle / deleted-entity rows so FS scan cannot match sibling files."""
+    healed = 0
+    with session.no_autoflush:
+        # Collect ids first, then bulk-update to avoid per-row history hooks / flush storms.
+        ids: set[int] = set()
+
+        for (pid,) in (
+            session.query(Placeholder.id)
+            .filter(
+                Placeholder.path.isnot(None),
+                Placeholder.path != "",
+                Placeholder.lifecycle_status == "DELETED",
+            )
+            .all()
+        ):
+            if pid is not None:
+                ids.add(int(pid))
+
+        deleted_series_ids = [
+            int(r[0]) for r in session.query(Series.id).filter(Series.is_deleted == True).all()  # noqa: E712
+        ]
+        if deleted_series_ids:
+            for (pid,) in (
+                session.query(Placeholder.id)
+                .filter(
+                    Placeholder.series_id.in_(tuple(deleted_series_ids)),
+                    Placeholder.path.isnot(None),
+                    Placeholder.path != "",
+                )
+                .all()
+            ):
+                if pid is not None:
+                    ids.add(int(pid))
+            ep_ids = [
+                int(r[0])
+                for r in (
+                    session.query(Episode.id)
+                    .join(Season, Episode.season_id == Season.id)
+                    .filter(Season.series_id.in_(tuple(deleted_series_ids)))
+                    .all()
+                )
+                if r[0] is not None
+            ]
+            if ep_ids:
+                for (pid,) in (
+                    session.query(Placeholder.id)
+                    .filter(
+                        Placeholder.episode_id.in_(tuple(ep_ids)),
+                        Placeholder.path.isnot(None),
+                        Placeholder.path != "",
+                    )
+                    .all()
+                ):
+                    if pid is not None:
+                        ids.add(int(pid))
+
+        deleted_movie_ids = [
+            int(r[0]) for r in session.query(Movie.id).filter(Movie.is_deleted == True).all()  # noqa: E712
+        ]
+        if deleted_movie_ids:
+            for (pid,) in (
+                session.query(Placeholder.id)
+                .filter(
+                    Placeholder.movie_id.in_(tuple(deleted_movie_ids)),
+                    Placeholder.path.isnot(None),
+                    Placeholder.path != "",
+                )
+                .all()
+            ):
+                if pid is not None:
+                    ids.add(int(pid))
+
+        if not ids:
+            return 0
+
+        healed = (
+            session.query(Placeholder)
+            .filter(Placeholder.id.in_(tuple(ids)))
+            .update(
+                {
+                    Placeholder.path: "",
+                    Placeholder.has_placeholder: False,
+                    Placeholder.lifecycle_status: "DELETED",
+                },
+                synchronize_session=False,
+            )
+        )
+    return int(healed or 0)
+
+
 def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[str, Any]]:
     """Re-stat known placeholder paths + canonical NEEDS paths (no ``os.walk`` full-tree pass).
 
     Global stale marking is skipped here; the hourly scheduled self-heal (full scan) covers drift.
     """
+    healed = _heal_tombstoned_placeholder_paths(session)
     scanned_roots = [os.path.abspath(root) for root in roots if root]
     upserted = 0
     refreshed = 0
@@ -153,11 +317,13 @@ def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[
 
     def _try_canonical_remap(row: Placeholder) -> bool:
         """If linked to Movie/Episode, move row.path to canonical materialized path when that file exists."""
+        if not _placeholder_row_eligible_for_fs_refresh(session, row):
+            return False
         try:
             mid = getattr(row, "movie_id", None)
             if mid:
                 mv = session.query(Movie).filter(Movie.id == int(mid)).first()
-                if mv:
+                if mv and not getattr(mv, "is_deleted", False):
                     cp = _norm_scan_path(movie_placeholder_path(mv))
                     if (
                         looks_like_placeholder_file(cp)
@@ -169,14 +335,19 @@ def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[
             eid = getattr(row, "episode_id", None)
             if eid:
                 ep = session.query(Episode).filter(Episode.id == int(eid)).first()
-                if ep:
+                if ep and not getattr(ep, "is_deleted", False):
                     season = session.query(Season).filter(Season.id == ep.season_id).first()
                     series = (
                         session.query(Series).filter(Series.id == season.series_id).first()
                         if season
                         else None
                     )
-                    if season and series:
+                    if (
+                        season
+                        and series
+                        and not getattr(season, "is_deleted", False)
+                        and not getattr(series, "is_deleted", False)
+                    ):
                         cp = _norm_scan_path(episode_placeholder_path(ep, season, series))
                         if (
                             looks_like_placeholder_file(cp)
@@ -193,6 +364,18 @@ def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[
         return bool(getattr(row, "movie_id", None) or getattr(row, "episode_id", None))
 
     for row in session.query(Placeholder).filter(Placeholder.has_placeholder == True).all():  # noqa: E712
+        if not _placeholder_row_eligible_for_fs_refresh(session, row):
+            # Defensive: clear accidental reactivation of tombstoned / deleted-entity rows.
+            row.has_placeholder = False
+            if hasattr(row, "lifecycle_status") and not _placeholder_lifecycle_is_deleted(row):
+                row.lifecycle_status = "DELETED"
+            if getattr(row, "path", None):
+                row.path = ""
+            if _disconnect_placeholder_row(row):
+                disconnected += 1
+            session.add(row)
+            stale_marked += 1
+            continue
         raw = getattr(row, "path", None)
         if not raw:
             row.has_placeholder = False
@@ -307,6 +490,7 @@ def _incremental_placeholder_scan(session, roots: list[str]) -> tuple[int, dict[
 
     meta: dict[str, Any] = {
         "full_scan": False,
+        "tombstoned_paths_cleared": healed,
         "incremental_refreshed": refreshed,
         "incremental_stale_marked": stale_marked,
         "incremental_disconnected": disconnected,
@@ -336,13 +520,16 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
                 f"roots={len(scanned_roots)} new_rows={meta.get('incremental_new_rows', 0)} "
                 f"refreshed={meta.get('incremental_refreshed', 0)} stale_marked={meta.get('incremental_stale_marked', 0)} "
                 f"needs_canonical_hits={meta.get('incremental_needs_canonical_hits', 0)} "
+                f"tombstoned_paths_cleared={meta.get('tombstoned_paths_cleared', 0)} "
                 f"elapsed_s={elapsed:.1f}",
                 extra={"emoji_type": "success"},
             )
             return upserted, meta
 
+        healed = _heal_tombstoned_placeholder_paths(session)
         logger.info(
-            f"FS scan started roots={len(scanned_roots)} full_scan=True",
+            f"FS scan started roots={len(scanned_roots)} full_scan=True "
+            f"tombstoned_paths_cleared={healed}",
             extra={'emoji_type': 'info'},
         )
         for root in roots:
@@ -361,12 +548,16 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
                     scanned_media_candidates += 1
                     observed_paths.add(path)
 
-                    existing = session.query(Placeholder).filter(Placeholder.path == path).first()
+                    existing = _pick_placeholder_row_for_observed_path(session, path)
                     if existing:
                         existing.has_placeholder = True
+                        if hasattr(existing, "lifecycle_status"):
+                            existing.lifecycle_status = "ACTIVE"
                         existing.last_observed_at = func.now()
                         session.add(existing)
                     else:
+                        # Do not reactivate tombstoned / deleted-entity rows that still
+                        # share this path; open a path-only row for reconcile instead.
                         session.add(
                             Placeholder(
                                 path=path,
@@ -428,6 +619,7 @@ def scan_placeholder_roots(roots: list[str], *, full_scan: bool = True) -> tuple
             "media_candidates": scanned_media_candidates,
             "stale_marked": stale_marked,
             "disconnected": disconnected,
+            "tombstoned_paths_cleared": healed,
         }
         logger.info(
             "FS scan complete: "
