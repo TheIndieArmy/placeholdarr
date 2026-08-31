@@ -7,21 +7,40 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
-### Changed
+## [0.9.21] - 2026-08-31
 
-- **Library sort (Movies)**: **Year (newest/oldest)** matches *arr-style year + title ordering; **Theatrical**, **Digital**, and **Physical** release date sorts.
-- **Library shelf cache**: Refetches when movie rows lack theatrical dates; library list fetches bypass browser HTTP cache (`no-store`) so release-type sort does not stick on title A–Z after API upgrades.
-- **Library detail back**: Grid stays mounted while viewing an item so returning from movie/TV detail is instant instead of rebuilding the full shelf.
+### Summary
+
+- **Library detail (Movies)**: Redesigned detail page with overview-first layout, meta facts, Arr status tiles, cast, franchise collection strip, and full-width technical details.
+- **Library detail (TV)**: Redesigned detail page with episode progress under Seasons & Episodes, enhanced season/episode rows, and Arr status tiles (`files/total` / Downloaded).
+- **Detail API**: Movie and series detail payloads add ratings_display, actors, display_status, paths, episode_stats, season fields, per-instance monitored, and collection_members.
+- **Collection strip**: Franchise members from the library plus TMDB-only titles when a Collection Sources key is set.
+- **Library sort**: Movies gain year and release-type sorts; TV gains premiere and last-aired sorts.
+- **Yellow accent buttons**: Active pills and primary actions on brand yellow use dark on-accent text.
+
+### Added
+
 - **Library detail (Movies)**: Redesigned detail page with overview-first layout, meta facts, Arr status tiles, cast, franchise collection strip, and full-width technical details.
 - **Library detail (TV)**: Redesigned detail page with episode progress under Seasons & Episodes, enhanced season/episode rows, and Arr status tiles (`files/total` / Downloaded).
 - **Detail API**: Movie and series detail payloads add ratings_display, actors, display_status, paths, episode_stats, season fields, per-instance monitored, and collection_members (DB siblings).
 - **Collection strip**: Movie detail shows franchise members from the library plus TMDB-only titles when a Collection Sources key is set (downloaded / placeholder / missing / not in library).
 - **Collection strip links**: Library siblings open their movie detail pages; titles not in the catalog open TMDB.
 - **Detail ratings**: Scores sit in a mini-card row with IMDb / TMDB / RT / Metacritic / Trakt icons; TMDB/Trakt/IMDB values round to one decimal; Rotten Tomatoes label shortens to RT.
-- **Detail Arr tiles (light)**: Placeholdarr / Radarr / Sonarr status cards use light surfaces and dark text like score cards; icon wells stay dark for contrast.
-- **Detail trailer**: Radarr YouTube trailer ids open YouTube instead of a relative library URL.
+- **Library sort (Movies)**: **Year (newest/oldest)** matches *arr-style year + title ordering; **Theatrical**, **Digital**, and **Physical** release date sorts.
 - **Library sort (TV)**: **Premiere** and **Last aired** (episodes on or before today) newest/oldest options.
+
+### Changed
+
+- **Library shelf cache**: Refetches when movie rows lack theatrical dates; library list fetches bypass browser HTTP cache (`no-store`) so release-type sort does not stick on title A–Z after API upgrades.
+- **Library detail back**: Grid stays mounted while viewing an item so returning from movie/TV detail is instant instead of rebuilding the full shelf.
+- **Detail Arr tiles (light)**: Placeholdarr / Radarr / Sonarr status cards use light surfaces and dark text like score cards; icon wells stay dark for contrast.
+- **Detail Arr tile titles**: Instance names reserve two lines so status labels align across the row.
 - **Yellow accent buttons**: Active pills and primary actions on brand yellow use dark slate text (`--brand-fg-on-accent`) across library, settings, collections, modals, and onboarding.
+
+### Fixed
+
+- **Detail trailer**: Radarr YouTube trailer ids open YouTube instead of a relative library URL.
+- **Detail API errors**: FastAPI validation payloads no longer surface as `[object Object]` in the detail banner.
 
 ### Removed
 

@@ -30,7 +30,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="webhook-apikey",
         since_version="0.9.16",
-        title="Action required: update webhook URLs",
+        title="0.9.16 — Action required: update webhook URLs",
         body=(
             "Action is required. Placeholdarr now requires an API key on every webhook URL "
             "so Radarr, Sonarr, Tautulli, Jellyfin, and Emby can still call /webhook after "
@@ -44,7 +44,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="collections-beta",
         since_version="0.9.16",
-        title="Collections (Beta)",
+        title="0.9.16 — Collections (Beta)",
         body=(
             "You can now build Plex collections from saved recipes. Pull titles from TMDB, "
             "MDBList, Trakt, or your Placeholdarr catalog, filter and sort them, then sync "
@@ -58,7 +58,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="collections-title-adopt",
         since_version="0.9.18",
-        title="Action required: reconnect Collections",
+        title="0.9.18 — Action required: reconnect Collections",
         body=(
             "Action is required. Placeholdarr now tracks Plex collection ownership internally, "
             "rather than matching by name. Open each affected recipe and save it: you will be prompted "
@@ -70,6 +70,20 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Collections",
         cta_path="/collections",
+    ),
+    WhatsNewNotice(
+        id="library-detail-0-9-21",
+        since_version="0.9.21",
+        title="0.9.21 — Redesigned library detail",
+        body=(
+            "Movie and TV detail pages are redesigned: overview and meta up front, Arr status tiles, "
+            "score cards with provider icons, cast, and a franchise collection strip for movies "
+            "(including titles not yet in your catalog when a TMDB key is configured). "
+            "Library shelves also gain year / release-type sorts for movies and premiere / last-aired "
+            "sorts for TV. Open any title from Movies or TV to try the new layout."
+        ),
+        cta_label="Open Movies",
+        cta_path="/library",
     ),
 )
 
