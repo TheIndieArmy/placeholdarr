@@ -53,6 +53,43 @@ REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
 SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
     [
         (
+            "AUTH_MODE",
+            {
+                "section": "Security",
+                "label": "Authentication mode",
+                "description": (
+                    "builtin: Placeholdarr username/password (default). "
+                    "forward_auth: trust Remote-User / X-Forwarded-User only from AUTH_TRUSTED_PROXIES. "
+                    "disabled: no login checks (unsafe if the port is reachable)."
+                ),
+                "type": "choice",
+                "options": [
+                    {"value": "builtin", "label": "Builtin — Placeholdarr username/password (default)"},
+                    {
+                        "value": "forward_auth",
+                        "label": "Forward auth — trust Remote-User / X-Forwarded-User from trusted proxies",
+                    },
+                    {"value": "disabled", "label": "Disabled — no login checks (unsafe if the port is reachable)"},
+                ],
+                "required": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "AUTH_TRUSTED_PROXIES",
+            {
+                "section": "Security",
+                "label": "Trusted proxy CIDRs",
+                "description": (
+                    "Comma-separated IPs or CIDRs allowed to assert forward-auth identity headers "
+                    "(e.g. 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16). Required for forward_auth."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
             "ENABLE_PLEX",
             {
                 "section": "Media Integrations",
@@ -176,6 +213,67 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "TMDB_API_KEY",
+            {
+                "section": "Collection Sources",
+                "label": "TMDB API Key",
+                "description": (
+                    "TMDB API key (v3 auth) used by the Collections builder to source trending, popular, upcoming, "
+                    "and discover lists. Get a free key at themoviedb.org. Optional; only needed for TMDB-based collection sources."
+                ),
+                "type": "string",
+                "required": False,
+                "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "TRAKT_CLIENT_ID",
+            {
+                "section": "Collection Sources",
+                "label": "Trakt Client ID",
+                "description": (
+                    "Trakt API Client ID for Collections (public lists and charts). "
+                    "Creating a Trakt API application currently requires Trakt VIP "
+                    "(trakt.tv/oauth/applications). Paste the Client ID here once you have one. "
+                    "Optional; only needed for Trakt collection sources."
+                ),
+                "type": "string",
+                "required": False,
+                "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "TAUTULLI_URL",
+            {
+                "section": "Collection Sources",
+                "label": "Tautulli URL",
+                "description": (
+                    "Base URL for outbound Tautulli API calls used by Collections most-popular / most-watched "
+                    "sources (e.g. http://tautulli:8181). Separate from playback webhooks. Optional."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "TAUTULLI_API_KEY",
+            {
+                "section": "Collection Sources",
+                "label": "Tautulli API Key",
+                "description": (
+                    "Tautulli Settings → Web Interface → API key. Required together with Tautulli URL for "
+                    "Collections Tautulli sources."
+                ),
+                "type": "string",
+                "required": False,
+                "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
             "ARR_INSTANCES_JSON",
             {
                 "section": "ARR Integrations",
@@ -246,6 +344,20 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     "How often to run lite sync: ARR catalog diff, targeted sync for changes, calendar date refresh, "
                     "Coming Soon status updates, and scoped placeholder work. Default 12 hours. Set to 0 to disable. "
                     "Includes calendar maintenance; a separate calendar interval is only used when lite sync is off."
+                ),
+                "type": "int",
+                "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "COLLECTIONS_SYNC_INTERVAL_HOURS",
+            {
+                "section": "Library sync",
+                "label": "Scheduled collections sync interval (hours)",
+                "description": (
+                    "How often to run enabled collection recipes and sync their results into Plex collections. "
+                    "Default 24 hours. Set to 0 to disable the scheduled job (recipes can still be run manually)."
                 ),
                 "type": "int",
                 "min": 0,
@@ -768,6 +880,7 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
     """Normalize instance_id values and carry forward prior instance_key values as webhook aliases.
 
     New rows get deterministic ids (``radarr_primary``, …). Rows that already use UUID-based ids keep them.
+    Blank ``api_key`` values on matched rows are retained from the previous JSON (secret redaction UX).
     """
     try:
         incoming = json.loads(incoming_json)
@@ -789,8 +902,16 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             str(item.get("api_key") or item.get("apikey") or "").strip(),
         )
 
+    def fp_url(item: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(item.get("arr_type") or item.get("type") or "").strip().lower(),
+            _normalize_arr_instance_url(item.get("url")),
+        )
+
     old_by_id: dict[str, dict[str, Any]] = {}
     old_by_fp: dict[tuple[str, str, str], dict[str, Any]] = {}
+    old_by_url: dict[tuple[str, str], dict[str, Any]] = {}
+    old_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for o in previous:
         if not isinstance(o, dict):
             continue
@@ -799,8 +920,13 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
             old_by_id[oid] = o
         try:
             old_by_fp[fp(o)] = o
+            old_by_url[fp_url(o)] = o
         except Exception:
             continue
+        ok = _normalize_instance_key(o.get("instance_key") or o.get("key") or o.get("name") or "")
+        otype = str(o.get("arr_type") or o.get("type") or "").strip().lower()
+        if ok and otype:
+            old_by_key[(otype, ok)] = o
 
     alias_cap = 32
 
@@ -820,6 +946,20 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
                 matched = old_by_fp.get(fp(item))
             except Exception:
                 matched = None
+        if matched is None and new_key:
+            matched = old_by_key.get((arr_type, new_key))
+        if matched is None:
+            try:
+                matched = old_by_url.get(fp_url(item))
+            except Exception:
+                matched = None
+
+        # Retain previous API key when the client sends a blank (redacted) value.
+        incoming_key = str(item.get("api_key") or item.get("apikey") or "").strip()
+        if not incoming_key and matched:
+            prev_key = str(matched.get("api_key") or matched.get("apikey") or "").strip()
+            if prev_key:
+                item["api_key"] = prev_key
 
         aliases: list[str] = []
         raw_aliases = item.get("instance_key_aliases") if isinstance(item.get("instance_key_aliases"), list) else []
@@ -860,8 +1000,39 @@ def _merge_arr_instances_for_stable_webhooks(previous_json: str, incoming_json: 
                 deduped.append(a)
                 seen.add(a)
         item["instance_key_aliases"] = deduped[:alias_cap]
+        # Never persist client-only redaction flags.
+        item.pop("api_key_saved", None)
 
     return json.dumps(incoming)
+
+
+def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
+    """Return redacted ARR_INSTANCES_JSON string and whether any api_key was saved server-side."""
+    text = "" if raw is None else (raw if isinstance(raw, str) else json.dumps(raw))
+    text = str(text or "").strip()
+    if not text:
+        return ("[]", False)
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return (text, False)
+    if not isinstance(payload, list):
+        return (text, False)
+    any_saved = False
+    redacted: list[Any] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            redacted.append(item)
+            continue
+        row = dict(item)
+        key_present = bool(str(row.get("api_key") or row.get("apikey") or "").strip())
+        if key_present:
+            any_saved = True
+        row["api_key"] = ""
+        row.pop("apikey", None)
+        row["api_key_saved"] = key_present
+        redacted.append(row)
+    return (json.dumps(redacted), any_saved)
 
 
 def _validate_value(key: str, raw_value: Any) -> Any:
@@ -895,6 +1066,93 @@ def _validate_value(key: str, raw_value: Any) -> Any:
 
 def _get_row(session, key: str) -> AppConfig | None:
     return session.query(AppConfig).filter(AppConfig.key == key).first()
+
+
+_MEDIA_TEST_CREDENTIAL_KEYS = frozenset({"PLEX_TOKEN", "JELLYFIN_TOKEN", "EMBY_TOKEN"})
+
+
+def _normalize_integration_url(url: str) -> str:
+    text = str(url or "").strip().rstrip("/")
+    return text.lower()
+
+
+def resolve_integration_test_credential(
+    *,
+    service: str,
+    url: str,
+    credential: str,
+    credential_key: str | None = None,
+    instance_id: str | None = None,
+    session=None,
+) -> tuple[str | None, str | None]:
+    """Resolve a connection-test credential, falling back to saved secrets when blank.
+
+    Returns ``(credential, error_message)``. When ``error_message`` is set, the
+    caller should reject the request.
+    """
+    provided = str(credential or "").strip()
+    if provided:
+        return provided, None
+
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        service_key = str(service or "").strip().lower()
+        cred_key = str(credential_key or "").strip()
+        if cred_key:
+            if cred_key not in _MEDIA_TEST_CREDENTIAL_KEYS:
+                return None, "unsupported credential_key"
+            expected = {
+                "PLEX_TOKEN": "plex",
+                "JELLYFIN_TOKEN": "jellyfin",
+                "EMBY_TOKEN": "emby",
+            }.get(cred_key)
+            if expected and service_key != expected:
+                return None, "credential_key does not match service"
+            row = _get_row(session, cred_key)
+            saved = str(row.value or "").strip() if row else ""
+            if saved:
+                return saved, None
+            return None, "credential is required (no saved token)"
+
+        if service_key in {"radarr", "sonarr"}:
+            row = _get_row(session, "ARR_INSTANCES_JSON")
+            raw = str(row.value or "").strip() if row else ""
+            if not raw:
+                return None, "credential is required (no saved ARR instances)"
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                return None, "credential is required (invalid saved ARR instances)"
+            if not isinstance(payload, list):
+                return None, "credential is required (invalid saved ARR instances)"
+            want_id = str(instance_id or "").strip().lower()
+            want_url = _normalize_integration_url(url)
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+                if arr_type != service_key:
+                    continue
+                item_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
+                item_url = _normalize_integration_url(str(item.get("url") or ""))
+                matched = False
+                if want_id and item_id and want_id == item_id:
+                    matched = True
+                elif want_url and item_url and want_url == item_url:
+                    matched = True
+                if not matched:
+                    continue
+                saved = str(item.get("api_key") or item.get("apikey") or "").strip()
+                if saved:
+                    return saved, None
+                return None, "credential is required (no saved API key for this instance)"
+            return None, "credential is required (no matching saved ARR instance)"
+
+        return None, "credential is required"
+    finally:
+        if owns_session:
+            session.close()
 
 
 def _set_runtime_value(key: str, value: Any) -> None:
@@ -1009,6 +1267,10 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             grouped.setdefault(meta["section"], [])
             row = _get_row(session, key)
             effective_value = getattr(settings, key, row.value if row else None)
+            # Settings.ARR_INSTANCES_JSON defaults to "" so getattr never falls back to the DB
+            # row. Prefer a persisted value so a restart cannot look like a disconnect.
+            if key == "ARR_INSTANCES_JSON" and row is not None and not _is_blank(row.value):
+                effective_value = row.value
             if key in {"RADARR_SHARED_PLACEHOLDER_CLEANUP", "SONARR_SHARED_PLACEHOLDER_CLEANUP"}:
                 if _is_blank(effective_value):
                     legacy_row = _get_row(session, "MULTI_INSTANCE_SHARED_PLACEHOLDER_CLEANUP")
@@ -1046,10 +1308,20 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 entry["disabled_when"] = str(meta["disabled_when"])
             if meta.get("nested"):
                 entry["nested"] = True
+            if key == "ARR_INSTANCES_JSON":
+                redacted_value, any_saved = _redact_arr_instances_json_for_payload(effective_value)
+                entry["value"] = redacted_value
+                entry["saved_value"] = None
+                entry["has_saved_value"] = any_saved or bool((row and row.value not in (None, "")))
             grouped[meta["section"]].append(entry)
+
+        from services.auth import ensure_webhook_api_key
+
         return {
             "status": get_onboarding_status(session=session),
             "sections": [{"name": name, "fields": fields} for name, fields in grouped.items()],
+            # Own session: do not commit the settings-read transaction.
+            "webhook_api_key": ensure_webhook_api_key(),
         }
     finally:
         if owns_session:
@@ -1287,6 +1559,21 @@ def save_settings(
                 session.add(setup_row)
 
         session.commit()
+        plex_location_cache_keys = {
+            "ENABLE_PLEX",
+            "PLEX_URL",
+            "PLEX_TOKEN",
+            "PLEX_MOVIE_SECTION_ID",
+            "PLEX_TV_SECTION_ID",
+            "LIBRARY_ROOT",
+        }
+        if plex_location_cache_keys.intersection(saved_keys):
+            try:
+                from services.media_servers.plex import clear_plex_section_location_cache
+
+                clear_plex_section_location_cache()
+            except Exception:
+                pass
         if specials_before is not None and specials_after is not None and specials_before != specials_after:
             try:
                 from services.source_of_truth.lite_reconcile import mark_specials_backfill_pending

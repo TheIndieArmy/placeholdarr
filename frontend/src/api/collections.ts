@@ -1,0 +1,210 @@
+import { fetchJson, postJson, postNdjson } from "./client";
+import type {
+  CollectionActiveWindow,
+  CollectionArrAddItem,
+  CollectionArrAddOptionsResponse,
+  CollectionBuilderMeta,
+  CollectionDefinition,
+  CollectionExplainResponse,
+  CollectionPinnedItem,
+  CollectionPreviewResponse,
+  CollectionRecipe,
+  CollectionRecipesResponse,
+  CollectionTmdbMeta,
+  PlexSectionOption,
+} from "../types/api";
+
+/** Must match `ARR_ADD_BATCH_CAP` in `routes/collections.py`. */
+export const ARR_ADD_BATCH_CAP = 100;
+
+export function normalizeArrTagLabel(label: string): string {
+  return label
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export interface RecipeWritePayload {
+  name: string;
+  enabled: boolean;
+  plex_section_id: number;
+  plex_section_ids?: number[];
+  plex_section_type: "movie" | "show";
+  collection_title: string;
+  definition: CollectionDefinition;
+  run_interval_hours: number | null;
+  active_window: CollectionActiveWindow | null;
+}
+
+export function getCollectionRecipes(): Promise<CollectionRecipesResponse> {
+  return fetchJson<CollectionRecipesResponse>("/api/collections");
+}
+
+export function createCollectionRecipe(payload: RecipeWritePayload): Promise<{ ok: boolean; recipe: CollectionRecipe }> {
+  return postJson("/api/collections", payload);
+}
+
+export async function updateCollectionRecipe(
+  id: number,
+  payload: RecipeWritePayload,
+): Promise<{ ok: boolean; recipe: CollectionRecipe }> {
+  return fetchJson(`/api/collections/${id}`, {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function toggleCollectionRecipe(id: number, enabled: boolean): Promise<{ ok: boolean; recipe: CollectionRecipe }> {
+  return postJson(`/api/collections/${id}/toggle`, { enabled });
+}
+
+export async function deleteCollectionRecipe(id: number): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/collections/${id}`, { method: "DELETE" });
+}
+
+export function runCollectionRecipe(id: number): Promise<{ ok: boolean; recipe_id: number; message: string }> {
+  return postJson(`/api/collections/${id}/run`);
+}
+
+export function previewCollectionDefinition(payload: {
+  plex_section_id: number;
+  plex_section_ids?: number[];
+  plex_section_type: "movie" | "show";
+  definition: CollectionDefinition;
+}): Promise<CollectionPreviewResponse> {
+  return postJson("/api/collections/preview", payload);
+}
+
+export interface CollectionTitleConflict {
+  title: string;
+  section_id: number;
+  section_title: string;
+  rating_key?: string | null;
+  item_count: number;
+  reason: "unlabeled" | "other_recipe" | "ours" | string;
+}
+
+export function checkCollectionTitleConflicts(payload: {
+  plex_section_id: number;
+  plex_section_ids?: number[];
+  plex_section_type: "movie" | "show";
+  collection_title: string;
+  definition: CollectionDefinition;
+  recipe_id?: number | null;
+}): Promise<{ conflicts: CollectionTitleConflict[]; titles_checked: string[] }> {
+  return postJson("/api/collections/title-conflicts", payload);
+}
+
+export function getCollectionPlexSections(): Promise<{ sections: PlexSectionOption[] }> {
+  return fetchJson("/api/collections/plex-sections");
+}
+
+export function getCollectionTmdbMeta(mediaType: "movie" | "tv", region: string): Promise<CollectionTmdbMeta> {
+  const params = new URLSearchParams({ media_type: mediaType, region });
+  return fetchJson(`/api/collections/tmdb-meta?${params.toString()}`);
+}
+
+export function getCollectionBuilderMeta(mediaType: "movie" | "show"): Promise<CollectionBuilderMeta> {
+  const params = new URLSearchParams({ media_type: mediaType });
+  return fetchJson(`/api/collections/builder-meta?${params.toString()}`);
+}
+
+export function explainCollectionItem(payload: {
+  plex_section_id: number;
+  plex_section_type: "movie" | "show";
+  definition: CollectionDefinition;
+  item: CollectionPinnedItem;
+}): Promise<CollectionExplainResponse> {
+  return postJson("/api/collections/explain", payload);
+}
+
+export function getCollectionArrAddOptions(mediaType: "movie" | "show"): Promise<CollectionArrAddOptionsResponse> {
+  const params = new URLSearchParams({ media_type: mediaType });
+  return fetchJson(`/api/collections/arr-add-options?${params.toString()}`);
+}
+
+export function arrAddItemKey(
+  instanceKey: string,
+  item: { title?: string; year?: number | null; tmdb_id?: number | null; tvdb_id?: number | null; imdb_id?: string | null },
+): string {
+  return `${instanceKey}:${item.tmdb_id ?? ""}:${item.tvdb_id ?? ""}:${item.imdb_id ?? ""}:${item.title ?? ""}:${item.year ?? ""}`;
+}
+
+export type ArrAddStreamEvent = {
+  type: string;
+  item_key?: string;
+  title?: string;
+  instance_key?: string;
+  status?: "adding" | "ok" | "skipped" | "error";
+  error?: string | null;
+  message?: string;
+  ok?: boolean;
+  added?: number;
+  skipped?: number;
+  errors?: number;
+  warnings?: string[];
+};
+
+export function addCollectionTitlesToArr(
+  payload: {
+    media_type: "movie" | "show";
+    items: CollectionArrAddItem[];
+    instance_keys: string[];
+    instance_options: Record<string, { quality_profile_id: number; root_folder_path: string }>;
+    monitored: boolean;
+    search: boolean;
+    tags: string[];
+  },
+  onEvent: (event: ArrAddStreamEvent) => void,
+): Promise<void> {
+  return postNdjson("/api/collections/arr-add", payload, (raw) => {
+    onEvent(raw as ArrAddStreamEvent);
+  });
+}
+
+export type CollectionSourceValidation = {
+  ok: boolean;
+  source_type: string;
+  kind?: string | null;
+  title?: string | null;
+  detail?: string | null;
+  suggested_title?: string | null;
+  error?: string | null;
+};
+
+export function validateCollectionSource(payload: {
+  source_type: string;
+  media_type: "movie" | "show";
+  reference: string;
+  subtype?: string | null;
+}): Promise<CollectionSourceValidation> {
+  return postJson("/api/collections/validate-source", payload);
+}
+
+export type CollectionExportBundle = {
+  format: string;
+  version: number;
+  exported_at: string;
+  app_version: string;
+  recipes: Record<string, unknown>[];
+};
+
+export function exportCollectionRecipes(ids: number[]): Promise<CollectionExportBundle> {
+  return postJson("/api/collections/export", { ids });
+}
+
+export type CollectionImportResult = {
+  ok: boolean;
+  created: CollectionRecipe[];
+  errors: { name: string; error: string }[];
+  created_count: number;
+};
+
+export function importCollectionRecipes(payload: {
+  payload: unknown;
+  plex_section_ids?: number[] | null;
+}): Promise<CollectionImportResult> {
+  return postJson("/api/collections/import", payload);
+}

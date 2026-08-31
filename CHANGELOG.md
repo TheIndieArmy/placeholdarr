@@ -7,6 +7,310 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.21] - 2026-08-31
+
+### Summary
+
+- **Library detail (Movies)**: Redesigned detail page with overview-first layout, meta facts, Arr status tiles, cast, franchise collection strip, and full-width technical details.
+- **Library detail (TV)**: Redesigned detail page with episode progress under Seasons & Episodes, enhanced season/episode rows, and Arr status tiles (`files/total` / Downloaded).
+- **Detail API**: Movie and series detail payloads add ratings_display, actors, display_status, paths, episode_stats, season fields, per-instance monitored, and collection_members.
+- **Collection strip**: Franchise members from the library plus TMDB-only titles when a Collection Sources key is set.
+- **Library sort**: Movies gain year and release-type sorts; TV gains premiere and last-aired sorts.
+- **Yellow accent buttons**: Active pills and primary actions on brand yellow use dark on-accent text.
+
+### Added
+
+- **Library detail (Movies)**: Redesigned detail page with overview-first layout, meta facts, Arr status tiles, cast, franchise collection strip, and full-width technical details.
+- **Library detail (TV)**: Redesigned detail page with episode progress under Seasons & Episodes, enhanced season/episode rows, and Arr status tiles (`files/total` / Downloaded).
+- **Detail API**: Movie and series detail payloads add ratings_display, actors, display_status, paths, episode_stats, season fields, per-instance monitored, and collection_members (DB siblings).
+- **Collection strip**: Movie detail shows franchise members from the library plus TMDB-only titles when a Collection Sources key is set (downloaded / placeholder / missing / not in library).
+- **Collection strip links**: Library siblings open their movie detail pages; titles not in the catalog open TMDB.
+- **Detail ratings**: Scores sit in a mini-card row with IMDb / TMDB / RT / Metacritic / Trakt icons; TMDB/Trakt/IMDB values round to one decimal; Rotten Tomatoes label shortens to RT.
+- **Library sort (Movies)**: **Year (newest/oldest)** matches *arr-style year + title ordering; **Theatrical**, **Digital**, and **Physical** release date sorts.
+- **Library sort (TV)**: **Premiere** and **Last aired** (episodes on or before today) newest/oldest options.
+
+### Changed
+
+- **Library shelf cache**: Refetches when movie rows lack theatrical dates; library list fetches bypass browser HTTP cache (`no-store`) so release-type sort does not stick on title A–Z after API upgrades.
+- **Library detail back**: Grid stays mounted while viewing an item so returning from movie/TV detail is instant instead of rebuilding the full shelf.
+- **Detail Arr tiles (light)**: Placeholdarr / Radarr / Sonarr status cards use light surfaces and dark text like score cards; icon wells stay dark for contrast.
+- **Detail Arr tile titles**: Instance names reserve two lines so status labels align across the row.
+- **Yellow accent buttons**: Active pills and primary actions on brand yellow use dark slate text (`--brand-fg-on-accent`) across library, settings, collections, modals, and onboarding.
+- **What's new modal**: Notices group under version headers; Got it stays pinned at the top; informational releases (no action required) no longer block startup.
+
+### Fixed
+
+- **Detail trailer**: Radarr YouTube trailer ids open YouTube instead of a relative library URL.
+- **Detail API errors**: FastAPI validation payloads no longer surface as `[object Object]` in the detail banner.
+
+### Removed
+
+- **Library card style preview page**: `/library/card-styles` and **Compare all styles** removed; style pills on Movies/TV remain.
+
+## [0.9.20] - 2026-08-30
+
+### Summary
+
+- **Playback setup modal**: Media cards open setup steps for Tautulli / Jellyfin / Emby webhooks (Settings and onboarding).
+- **Webhook copy confirmation**: Copy buttons show a checkmark for a couple seconds after a successful copy.
+- **Onboarding Look and feel**: Status / poster overlay fields live only on Look and feel, not again on Behavior.
+- **Activity layout**: Placeholders + Tasks (infinite scroll, filters, series batches, Active searches); Operations removed from Activity.
+- **Activity series-add batches**: Burst “Series added” creates collapse into one expandable row.
+- **Activity series create batches**: Same-series Created rows within a few minutes group (sync or SeriesAdd).
+- **Activity series delete title**: Tombstone bulk-delete rows show the series name once (not duplicated).
+- **Activity reason prose**: Long placeholder reasons stay intact instead of snake_case flattening.
+- **Errors page removed**: Mock Diagnostics shell dropped; failed jobs stay on Activity → Tasks, live logs on Logs.
+- **Errors API removed**: Unused `GET /api/errors` dropped with the Diagnostics shell.
+- **Shared placeholder tombstone**: Deleted-instance Placeholder rows clear path; FS scan will not revive them when a sibling still owns the file.
+- **Series stats vs full sync**: Stats refresh waits until full sync ends, then retries with backoff.
+- **Full sync row locks**: Series sync fetches Sonarr episode payloads first, then commits after each show.
+- **Full sync autoflush**: Season/episode lookups no longer flush a pending series UPDATE.
+- **Full sync deadlock retry**: Scheduled full sync retries once after a Postgres deadlock.
+- **Library shelf lock wait**: Library payload queries abort after 30s instead of holding a pool slot.
+- **Media Integrations configure**: Connect and Configure open an ARR-style modal (Cancel / Test / Save).
+- **Collection Sources**: TMDB, Trakt, and Tautulli collection APIs move to Settings → Collection Sources.
+- **Media/ARR Test button**: Closing and reopening Configure clears the success check; Save still works when details are already complete.
+- **Collection poster titles**: Long titles on collection posters scale down so more of the name stays readable.
+
+### Added
+
+- **Playback setup modal**: Per-player Tautulli / Jellyfin / Emby webhook instructions from media cards.
+- **Webhook copy confirmation**: Copy controls swap to a check icon briefly after copying.
+- **Activity layout**: Placeholders and Tasks under Activity (filters, day groups, Active searches on Tasks).
+- **Activity scroll**: Placeholders append older history on scroll (cursor `before_time` / `before_id`).
+- **Activity series-add batches**: Consecutive “Series added” episode creates group into one expandable row.
+- **Activity series create batches**: Same-series Created rows within ~5 minutes group regardless of reason (lite/full sync, SeriesAdd, etc.).
+- **Activity Active searches**: Tasks shows Placeholdarr-monitored titles above Scheduled (`GET /api/activity/active-searches`).
+- **Collection Sources**: Settings sidebar page (after ARR Integrations) for TMDB API key, Trakt Client ID, and Tautulli URL / API key used by collection list sources.
+
+### Changed
+
+- **Plex media card copy**: Playback needs Tautulli; card action is Playback setup (not Webhook URL).
+- **Onboarding Behavior step**: Look and feel fields (status updates, projection, poster overlay) no longer appear under Behavior.
+- **Activity feed APIs**: `/api/activity/placeholders` and `/api/activity/operations` return `{ items, has_more, next_before_time, next_before_id }`.
+- **Activity promoted**: Proposed Placeholders / Tasks replace the old Activity tabs; `/activity/proposed/*` and `/activity/operations` redirect.
+- **Activity series delete title**: Series tombstone bulk-delete rows use a single series title; multi-episode bursts expand like create batches.
+- **Activity reason prose**: Placeholder Created/Deleted reasons that are already sentences are not snake_case-humanized.
+- **Media Integrations configure**: Connect and Configure open a modal with Cancel, Test, and Save instead of expanding a form under the cards.
+- **Collection poster titles**: Poster title fallback uses dynamic font sizing so longer names fit better.
+
+### Removed
+
+- **Errors page**: Sidebar Diagnostics shell removed; `/errors` redirects to Logs. Failed jobs remain on Activity → Tasks.
+- **Errors API**: Unused `GET /api/errors` removed after the Diagnostics shell was dropped.
+
+### Fixed
+
+- **Shared placeholder tombstone**: Tombstoned Placeholder rows clear `path`; FS scan prefers active siblings and will not revive deleted-instance rows.
+- **Refresh all placeholders contrast**: Accent button uses dark on-accent text instead of white on yellow.
+- **Activity series delete title**: Tombstone bulk-delete no longer shows `Series • Series` when both title fields are the series name.
+- **Activity reason prose**: Long tombstone reasons keep punctuation instead of flattening to spaced words.
+- **Media/ARR Test button**: Closing and reopening Configure clears the success check; Save still works when connection details are already complete.
+- **Series stats vs full sync**: Episode-stats refresh skips while a full sync is running, fails lock waits in 3s, and backs off up to 60s instead of retrying the same row every couple of seconds.
+- **Full sync row locks**: Sonarr full sync fetches episode payloads first, then commits after each series so other queries are not blocked for the whole library pass.
+- **Full sync autoflush**: Series/season/episode lookups use `no_autoflush` so a pending series UPDATE cannot deadlock with another writer.
+- **Full sync deadlock retry**: Scheduled full sync retries the instance once after a Postgres deadlock.
+- **Library shelf lock wait**: `/api/library` sets a 30s lock timeout so a blocked shelf load cannot pin a pool connection for tens of minutes.
+
+## [0.9.19] - 2026-08-26
+
+### Summary
+
+- **Add to Radarr/Sonarr**: Chunks of 20, then **library poll** after a silent *arr import.
+- **Add modal progress**: Live per-title status in the add modal.
+- **Add tags**: Chips (Enter to add, spaces become dashes); a failed tag no longer aborts the add.
+- **Webhook ingest**: Persist is serialized so import-list floods cannot exhaust the DB pool.
+- **Seasonal Run now**: Out-of-window runs follow keep / empty / delete instead of filling the collection.
+- **Seasonal delete**: Dormant recipes can delete Placeholdarr-owned Plex collections (Sets delete managed children).
+- **Missing from catalog**: Preview and recipe list copy (the check is catalog membership).
+- **Sidebar**: Selected-tab and hover styling.
+- **MDBList ids**: Public JSON `id` is treated as TMDB id.
+- **ARR lookup**: Tries TMDB/TVDB/IMDb then a title search.
+
+### Added
+
+- **Add modal progress**: After submit, the form is replaced by a per-title list that flips **Adding…** to a green **Added** (or an error) as each title is found.
+- **Seasonal window: delete**: When dormant, a recipe can **delete** Placeholdarr-owned Plex collections (in addition to keep as-is or empty). Collection Sets delete the child collections they manage. Unlabeled same-title shelves are left alone.
+
+### Changed
+
+- **Add to Radarr/Sonarr**: Import chunks of 20. *arr often never returns `movie/import` / `series/import`, so Placeholdarr waits briefly then **polls the library** until titles appear.
+- **Placeholder ingest**: Already-in-*arr and reconciled titles still enqueue placeholder ingest.
+- **Add tags**: Tags are chips (Enter to add, spaces become dashes); a failed tag no longer aborts the add. API accepts `tags: string[]` (legacy `tag` still works).
+- **Webhook ingest**: Persist is serialized (`WEBHOOK_INGEST_CONCURRENCY`, default 1) so import-list `MovieAdded` floods cannot exhaust the DB pool.
+- **Collections missing list**: Preview and recipe list describe titles **missing from catalog**, not “not in Radarr/Sonarr” (the check is catalog membership).
+- **Sidebar**: New selected-tab and hover styling.
+- **Manual Run now (seasonal)**: Out-of-window Run now follows the same keep / empty / delete policy as scheduled sync instead of creating or filling the collection. Last run shows **Kept**, **Cleared**, or **Removed (out of window)**.
+
+### Fixed
+
+- **MDBList ids**: Public JSON `id` is treated as TMDB id.
+- **ARR lookup**: Radarr/Sonarr lookup tries TMDB/TVDB/IMDb then a title search (so a bad or missing id does not fail a title Radarr can find by name).
+
+## [0.9.18] - 2026-08-24
+
+### Summary
+
+Collections (Beta) expands with unified **TMDB/Trakt** source cards plus **Tautulli** and **\*arr tags**, **Collection Sets** (one config → many Plex shelves), **ownership-safe** Plex sync (summary footer + ratingKeys), **Validate** for pasted list/page URLs, and portable **export/import** of recipes between installs.
+
+### Action required
+
+**Reconnect existing Collections:** Placeholdarr now tracks Plex collection ownership internally, rather than matching by name. Open each affected recipe and **save** it: you will be prompted to **adopt** the matching collection or rename the recipe. Until you do, scheduled runs for that recipe will fail and leave the Plex collection unchanged. Prefer adopt for collections Placeholdarr already created. If you built the collection in Plex or another tool, rename instead so Placeholdarr does not claim it. Adopting syncs the collection to the recipe, so non-matching items will be removed.
+
+### Added
+
+- **Collection sources**: Unified **TMDB** and **Trakt** source cards with cascading subtypes; Tautulli most popular / most watched (optional `TAUTULLI_URL` + `TAUTULLI_API_KEY`); Radarr/Sonarr tag mirrors (`arr_tag`). Trakt Settings copy notes that creating a Trakt API Client ID currently requires **Trakt VIP**.
+- **Collection Sets**: One config fans out to many Plex collections by **genre**, **decade**, **content rating** (age certification — not critic scores), **\*arr tag**, or **release timing** (Upcoming / released this week|month|year|decade, with a shared release-date basis like recipe filters). Include/exclude value selection, title patterns, live preview, and cleanup of stale child collections this set previously managed.
+- **Collection ownership**: Synced collections are tracked behind the scenes (labels, summary footer **Managed by Placeholdarr.**, and ratingKeys). Placeholdarr only edits collections it owns. If a same-named collection already exists in a selected library, save asks you to **rename** or **adopt**. Prefer adopt for collections Placeholdarr already created; rename if the shelf was built in Plex or another tool. Adopting syncs membership to the recipe, so non-matching items may be removed.
+- **Collection source Validate**: URL/list source cards (TMDB Page, MDBList, Trakt list, AniList, StevenLu, legacy TMDB link types) gain a **Validate** button that resolves the pasted link and shows the title/kind or an error before you run preview. If the collection title is still blank, a successful validate can fill it in.
+- **Collection export/import**: Export selected recipes (or Collection Sets) to a portable JSON file, or import a bundle into this install. Runtime fields (ids, last-run stats, Plex ratingKeys) are stripped on export; import rebinds to your Plex libraries and creates new recipes.
+
+### Fixed
+
+- **Tautulli collection source**: Home-stats rows that only expose modern `plex://` (or episode-level agent) guids no longer yield an empty candidate list. Placeholdarr resolves TMDB/IMDb/TVDB ids via Tautulli `get_metadata` and strips a trailing `(Placeholder)` from titles.
+- **Collection same-title twins**: Sync no longer creates a second Plex collection with the same name in a library (which produced 0-item counts and linked deletes). Conflicts require rename or explicit adopt.
+
+## [0.9.17] - 2026-08-18
+
+### Summary
+
+Collections (Beta) gains new source types, a unified **TMDB Page** card, explicit **source-level sort**, a TV-specific **Was airing during** year filter, an **unsaved recipe** guard, improved **Plex path refresh** for Docker, and a better **preview** and **Missing-from-ARR** workflow.
+
+### Added
+
+- **Collection sources**: StevenLu (default popular-movies JSON or a custom URL), AniList public user anime lists (GraphQL, throttled), and TMDB person / company / keyword / collection. Paste a TMDB page URL (or numeric id); no in-app search picker.
+- **TMDB Page source card**: One unified source block replaces the separate TMDB Person / Company / Keyword / Collection cards. Paste any TMDB page URL and the card detects the type. Company and keyword pages get a **Sort from TMDB** dropdown that controls which TMDB Discover order the fetch uses (popularity, rating, release date, title). Legacy recipes using the older separate types still work.
+- **Collection year filter (TV)**: New **Was airing during** mode matches shows whose first–last air years overlap the window (unknown last air = still running). Movies and the default **Premiere year** still use release / first-air year.
+- **Unsaved collection recipe prompt**: Leaving the recipe editor (Back, Cancel, Library, or another dashboard page) shows an in-app confirm modal. Closing the browser tab still uses the browser's native leave prompt (not available in all embedded browsers).
+
+### Changed
+
+- **Collection title sort**: Arrange by Title (A–Z) ignores leading *a* / *an* / *the*, matching Library A–Z.
+- **Plex collection order**: Synced collections use Plex custom sort and item order from the recipe (Plex previously kept default release-date order, which looked random vs preview).
+- **Collection preview**: Catalog sample shows up to 200 selected titles with file vs placeholder outlines. Multi-library recipes mark which Plex libraries each poster is in (filter chips dim the rest). Missing-from-ARR uses the same Arrange sort; **Select first N** matches the recipe max (capped at the add batch).
+- **Missing-from-ARR add**: Lookups stay per title; Radarr/Sonarr adds go through `movie/import` / `series/import` (chunks of 100) with a **90s** timeout. Timeouts say the *arr may still add the title. Result titles include year.
+- **Plex path refresh**: Path-scoped library scans rewrite Placeholdarr folders onto Plex's library locations (cached in memory from `/library/sections`, filled on connection test or first refresh). Docker mounts like `/placeholdarr/movies` no longer get skipped as unknown paths.
+- **TMDB keyword/company sort**: Source fetches now send `sort_by` to TMDB Discover (default `popularity.desc`). Previously this was ignored, so the pool of titles could miss popular items and Arrange by popularity only reordered whatever unsorted pages came back.
+- **TMDB source cards simplified**: The Add Source menu now shows **TMDB Page** instead of 4 separate link-type entries. Existing recipes are unaffected.
+
+## [0.9.16] - 2026-08-14
+
+### Action required
+
+**Webhook URLs must be updated.** `POST /webhook` now requires `?apikey=` unless `AUTH_MODE=disabled`. Existing Radarr, Sonarr, Tautulli, Jellyfin, and Emby notification URLs **without** that query parameter will be rejected.
+
+1. Open Settings → Security (or the in-app **What's new** prompt).
+2. Use **Webhook URLs** to copy each destination (API key is masked until you reveal).
+3. Paste the URL into that service and save.
+4. Regenerating the key invalidates every previous URL until you recopy.
+
+Follows **[#61](https://github.com/TheIndieArmy/placeholdarr/pull/61)**.
+
+### Summary
+
+This release makes **dashboard-authenticated webhooks** work: *arr and playback sources are not browser sessions, so they send a dedicated webhook API key. Setup and Security copy buttons include it; the key is hidden in the UI until you reveal. Existing installs get an **Action required** What's new notice; new setup stamps the current version so upgrade-only prompts are skipped.
+
+Collections (Beta) gains **Missing from ARR** add-to-*arr, **rating filter providers**, **sort by rating**, and **multi-library recipes**. Dashboard HTML is no longer cached so a refresh actually loads this UI.
+
+### Security
+
+- **Webhook API key (breaking):** `POST /webhook` requires `?apikey=` (skipped only when `AUTH_MODE=disabled`). View, copy, and regenerate under Settings → Security. Cookie/CSRF login does not replace this key.
+- **Masked webhook URLs:** Setup modals and the Security **Webhook URLs** modal hide `apikey=` until Reveal; Copy still places the full URL on the clipboard.
+
+### Added
+
+- **Webhook API key**: `AUTH_WEBHOOK_API_KEY` / Settings payload `webhook_api_key`; `GET/POST /api/auth/webhook-key`. Copy URLs in onboarding, ARR, and playback setup append `&apikey=`.
+- **What's new notices**: Tracks `LAST_SEEN_APP_VERSION` and dismissed notice ids. Upgrade messages after a version jump (including skipped releases). Sidebar version chip reopens the catalog. Webhook recopy prompt, then Collections (Beta) intro.
+- **Add missing list titles to Radarr/Sonarr**: Live preview **Missing from ARR** (source candidates not in the Placeholdarr catalog, after filters that can run off the list). Year, TMDB genre/language/date, and TMDB/MDBList scores when present. ARR instance/profile/monitored/quality **include** rules treat missing titles as a miss; **exclude** rules treat them as a match. A notice lists filters that cannot be fully applied (certification, studio, non-TMDB ratings, non-premiere release windows). Multi-select add with monitor, search (default off), tag, quality profile, root folder, and one or more instances. Recipe list shows last-run **N not in Radarr/Sonarr** and **+N new**.
+- **Rating filter sources**: Movie recipes choose Radarr provider (`imdb` default, `tmdb`, `trakt`, `metacritic`, `rottenTomatoes`) with native scales (0–10 or 0–100); TV recipes use Sonarr’s flat Skyhook score. Optional `min_votes`. Legacy movie rules without `provider` keep the previous best-effort fallback.
+- **Sort by rating**: Arrange option `rating` with optional `sort_provider` (movies); missing scores sort last. Independent of the rating filter.
+- **Multi-library recipes**: `plex_section_ids` JSON (Alembic `0024`); editor multi-select (same movie/TV type); preview and last-run show per-library in-library counts. `plex_section_id` remains the first target for compatibility. Same collection title is created/updated in each selected library (membership is per library).
+
+### Changed
+
+- **Rating filter defaults**: New movie rating filters default to **IMDb** on a 0–10 scale; editing a legacy rating rule stamps `provider: imdb` when saved from the UI.
+- **Dashboard HTML is not cached**: SPA `index.html` is served with `Cache-Control: no-store` so a refresh on `/library`, `/collections`, or Settings loads the current UI. After reconnect, an already-open tab reloads if the JS bundle on disk is newer.
+- **Playback webhooks**: Only **Playback Started** is documented and processed. Stop/Resume are not listed in setup.
+- **Webhook URL inventory**: Settings → Security **Webhook URLs** opens a modal listing every connected Radarr/Sonarr/Tautulli/Jellyfin/Emby URL for recopy after key rotation.
+
+### Fixed
+
+- **Seasonal window dates**: Month/day pickers clamp invalid days before save; backend accepts `MM-DD` and `YYYY-MM-DD` and reports which of `start`/`end` failed validation.
+
+## [0.9.15] - 2026-08-13
+
+### Summary
+
+This release adds **Plex Collections automation (Beta)**: saved recipes pull titles from TMDB, MDBList, Trakt, or your Placeholdarr catalog, filter and sort them, then sync membership into a Plex collection on a schedule. A new **Collections** dashboard tab provides a block-based editor with **live preview**, per-title **explain**, manual runs, and integration with Activity → Tasks.
+
+It also closes **[#58](https://github.com/TheIndieArmy/placeholdarr/issues/58)** with **dashboard authentication on by default** (stronger than a bare *arr-style login): Argon2id passwords, signed sessions, CSRF, rate limits, and optional reverse-proxy **forward auth**. ARR instance **API keys are redacted** in settings responses. Media Integrations cards gain an **enable/pause toggle** while keeping **Remove connection**.
+
+Also included: **favicon** assets, a shared **toggle switch** component, and **TMDB attribution** in Settings.
+
+### Security
+
+- **Dashboard auth (default on):** first-run / post-upgrade admin account with Argon2id password hashing, signed session cookies (14-day lifetime), CSRF protection on mutating `/api` calls, and login rate limiting.
+- **Auth modes:** `builtin` (default), `forward_auth` (trust `Remote-User` / `X-Forwarded-User` only from `AUTH_TRUSTED_PROXIES`), and `disabled` (explicit opt-out; documented as unsafe if the port is exposed).
+- **Secret redaction:** `ARR_INSTANCES_JSON` no longer returns plaintext `api_key` values to the browser; blank keys retain the saved server value on save (same UX as other secret fields).
+- **Docs:** README Security section and docker-compose port warning for trusted-network / reverse-proxy deployments.
+- **Fixes [#58](https://github.com/TheIndieArmy/placeholdarr/issues/58):** unauthenticated dashboard/API credential exposure.
+
+### Collections — overview
+
+Collections let you maintain Plex collections from rules instead of hand-picking titles. Each recipe targets a **Plex movie or TV library**, defines where candidate titles come from, which metadata rules they must pass, how results are ordered and capped, and optional **include/exclude pins**. On each run, Placeholdarr matches candidates to catalog rows, resolves Plex `ratingKey`s, and **creates or updates** the collection (add/remove to match the recipe). Only titles **already in that Plex library** are added; unmatched rows are reported as unresolved.
+
+Typical use: a “Trending this week” or “Recently aired” collection in a placeholder library that stays in sync as your catalog and external lists change.
+
+**Collections feature set:**
+
+- **Sources**: TMDB trending (day/week), popular, upcoming, discover (genres, year, providers, ratings), public TMDB lists; public MDBList lists (no API key); public Trakt user lists; full Placeholdarr catalog pool. Multiple sources union and dedupe by id.
+- **Release window**: *Has been released*, *not yet released*, *released in the past*, and *releasing in the next* — with a **based on** date: movies use theatrical / digital / physical release; TV uses series premiere, latest aired episode, or latest season premiere.
+- **Filter logic**: Simple mode — AND within a group, OR between groups. **Advanced filtering** — nested AND/OR groups up to three levels deep; single-group recipes flatten to a top-level AND when switching modes.
+- **Arrange**: Sort by popularity, release date, latest aired, or title; item limit (up to 500); include pins survive the limit, exclude pins always drop.
+- **Pins**: Force-include or force-exclude specific catalog titles via library search (TMDB/TVDB/IMDB ids).
+- **Live preview**: Staged pipeline counts (candidates → catalog match → filters → pins → selected → in library) plus a sample poster grid; debounced as you edit.
+- **Explain**: Per-title debugger with pass/fail/skip at each stage and a recursive filter verdict tree.
+- **Scheduling**: Global `collections_sync` interval (Settings) plus per-recipe override (hourly through weekly). Seasonal **active windows** (`MM-DD` ranges, including wrap-around) with *keep* or *clear collection when inactive*.
+- **Tasks**: `collections_sync` in Activity → Tasks (Run now, history); per-recipe Run now from the list.
+- **Plex required**: When Plex is not configured or unreachable, Collections shows a banner with a Settings shortcut; **New Collection** and **Run now** are disabled. Existing recipes remain listed.
+
+### Added
+
+- **Dashboard authentication**: Admin setup/login UI, `/api/auth/*` routes, session middleware, CSRF + rate limits, Settings → Security (`AUTH_MODE`, trusted proxies, change password, logout).
+- **Collections builder (end-to-end)**: Recipe CRUD API, rule engine, Plex collection sync, TMDB/MDBList/Trakt list clients, `collection_recipe` DB table (Alembic `0022`), and Collections dashboard tab with list view + block editor pipeline (Sources → Filters → Pins → Arrange).
+- **Collections Beta label**: Sidebar nav and Collections page header show a Beta chip while the feature stabilizes.
+- **Collections API**: `GET/POST /api/collections`, `GET/PUT/DELETE /api/collections/{id}`, toggle, manual run, `plex-sections`, `tmdb-meta`, `builder-meta`, `POST /api/collections/preview`, and `POST /api/collections/explain`.
+- **Source blocks**: `tmdb_trending`, `tmdb_popular`, `tmdb_upcoming`, `tmdb_discover`, `tmdb_list`, `mdblist`, `trakt_list`, and `catalog` with per-source limits and multi-source union/dedupe.
+- **Filter blocks**: Genre, year, certification, studio/network, monitored, quality profile, original language, instance, release window, and rating — backed by ARR metadata and catalog fields.
+- **Advanced filter nesting**: Boolean AND/OR filter trees (depth ≤ 3) with simple/advanced editor modes, recursive explain verdict tree, and validation in the engine.
+- **Release window filters**: `has_released`, `not_yet_released`, `within_past`, and `within_next`; movie bases (theatrical, digital, physical); TV bases (series premiere, latest aired episode, latest season premiere) with air-date aggregation for ongoing shows.
+- **Pins**: Include (bypass sources/filters, survive limit) and exclude (always removed) with catalog typeahead from the shared library cache.
+- **Live preview & explain**: Debounced preview rail with pipeline stage counts, sample posters, and per-title stage-by-stage explain popover.
+- **Collections scheduling**: `COLLECTIONS_SYNC_INTERVAL_HOURS` setting; `collections_sync` scheduled task; per-recipe `run_interval_hours` with scheduler tick at the minimum enabled override (`0023` migration).
+- **Seasonal active windows**: Per-recipe `active_window` (`start`/`end` as `MM-DD`, `when_inactive`: keep or clear); dormant badge in UI; clear runs once when leaving the window.
+- **Plex collection sync** (`plex_collections.py`): Section provider index (cached), ratingKey resolution, create-or-diff membership, last-run summary on each recipe.
+- **Settings**: `TMDB_API_KEY`, `TRAKT_CLIENT_ID`, and `COLLECTIONS_SYNC_INTERVAL_HOURS` in the Settings UI; TMDB attribution block under the TMDB API key field.
+- **Collections UI theming**: `collectionTheme.ts` with light/dark tokens; responsive editor layout with preview rail.
+- **Shared `ToggleSwitch`**: Reusable toggle used in Collections and across Settings/other dashboard controls.
+- **Favicon**: `favicon.ico`, 16×16 and 32×32 PNGs, and `apple-touch-icon.png`; served from the dashboard static routes; link tags in `index.html`.
+- **Dependencies**: `argon2-cffi`, `itsdangerous`, and `httpx` for auth sessions and tests.
+
+### Changed
+
+- **Collections editor UX**: Advanced filtering toggle; simple mode stores single AND groups as flat rule lists; converting to advanced flattens redundant OR/AND wrappers so rules sit at top-level AND when appropriate.
+- **Release window defaults**: New movie release-window filters default to **theatrical** release; dropdown order is theatrical → digital → physical.
+- **Dashboard navigation**: New Collections tab; library catalog cache passed through for pin search and explain typeahead.
+- **Task scheduler**: Collections sync job respects per-recipe interval overrides; recipe CRUD/toggle refreshes the collections schedule.
+- **Media Integrations cards**: Enable/pause toggle on connected Plex/Jellyfin/Emby cards (Settings and onboarding) without opening Configure; **Remove connection** still clears card fields and returns to Connect.
+- **Collections without Plex**: Banner + Settings shortcut; New Collection and Run now disabled until Plex libraries are available.
+
+### Fixed
+
+- **Collections preview validation**: Engine accepts movie release-window bases (theatrical, digital, physical) for live preview and saved recipes.
+- **Advanced filter toggle**: Empty or linear filter trees no longer grey out the Advanced filtering switch incorrectly.
+- **Auth mode dropdown**: `AUTH_MODE` options use `{value, label}` objects so the Security settings select is not blank.
+- **Collections nav label**: Beta chip no longer truncates “Collections” in the sidebar.
+
 ## [0.9.14] - 2026-06-09
 
 ### Summary

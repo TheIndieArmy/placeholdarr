@@ -2,7 +2,7 @@
 
 **Placeholdarr** keeps titles visible in Plex\*, Jellyfin, or Emby without requiring everything to stay downloaded. It is AI-developed, maintained by TheIndieArmy, and inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary) and [Chronicle](https://github.com/iwouldratherbeatthebeach/chronicle).
 
-\***Placeholdarr** with **Plex** requires **Tautulli** to function properly.
+\***Placeholdarr** with **Plex** needs **Tautulli** so playback can trigger placeholder search.
 
 ## Overview
 
@@ -18,6 +18,8 @@ Great for large import lists, rolling retention workflows, and "watch-when-neede
 Works with Plex, Jellyfin, Emby, and multiple Radarr/Sonarr instances.
 - **Automate status and release workflows.**  
 Startup sync, calendar workflows, queue tracking, and playback-driven search are built in.
+- **Build Plex collections from recipes (Beta).**  
+Sync catalog or list-driven membership into Plex on a schedule, including Collection Sets that fan out one config into many shelves.
 - **Stay practical for real-world ops.**  
 Hardlink/copy placeholder strategies, cleanup automation, and onboarding-first configuration.
 

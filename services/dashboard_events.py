@@ -37,7 +37,48 @@ def _dashboard_state_events() -> list[dict[str, Any]]:
     except Exception:
         pass
 
+    try:
+        events.append({"type": "task_runs_version", "version": _task_runs_fingerprint()})
+    except Exception:
+        pass
+
     return events
+
+
+def _task_runs_fingerprint() -> str:
+    """Cheap change-detection token for task runs: latest row id/status/update marker.
+
+    Changes whenever a run starts, finishes, or updates its summary, so the
+    frontend knows to re-fetch /api/tasks/* without duplicating payloads here.
+    """
+    from sqlalchemy import func as sa_func
+
+    from services.postgres.db import get_session
+    from services.postgres.models import ScheduledTaskRun
+
+    session = get_session()
+    try:
+        row = (
+            session.query(
+                ScheduledTaskRun.id,
+                ScheduledTaskRun.status,
+                ScheduledTaskRun.ended_at,
+            )
+            .order_by(ScheduledTaskRun.id.desc())
+            .first()
+        )
+        working_count = (
+            session.query(sa_func.count(ScheduledTaskRun.id))
+            .filter(ScheduledTaskRun.status == "working")
+            .scalar()
+            or 0
+        )
+    finally:
+        session.close()
+    if row is None:
+        return "none"
+    ended = row.ended_at.isoformat() if row.ended_at else ""
+    return f"{row.id}:{row.status}:{ended}:w{working_count}"
 
 
 def _state_fingerprint(events: list[dict[str, Any]]) -> str:

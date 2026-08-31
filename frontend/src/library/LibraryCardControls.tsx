@@ -1,3 +1,4 @@
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import type { ThemeMode } from "../brandTypes";
 import type { LibraryCardAccent } from "./LibraryGridCard";
 import {
@@ -9,7 +10,7 @@ import {
   type LibraryViewMode,
 } from "./cardSettings";
 import type { LibrarySortKey } from "./librarySort";
-import { LIBRARY_SORT_OPTIONS, isLibrarySortKey } from "./librarySortSettings";
+import { LIBRARY_MOVIES_SORT_OPTIONS, isLibrarySortKey } from "./librarySortSettings";
 
 export function LibraryCardControls(props: {
   settings: LibraryCardSettings;
@@ -18,11 +19,13 @@ export function LibraryCardControls(props: {
   themeMode: ThemeMode;
   sortKey?: LibrarySortKey;
   onSortChange?: (key: LibrarySortKey) => void;
-  onOpenPreview?: () => void;
+  sortOptions?: { id: LibrarySortKey; label: string }[];
+  sortShelf?: "movies" | "tv";
   compact?: boolean;
 }) {
   const accent = props.accent;
   const isLight = props.themeMode === "light";
+  const sortOptions = props.sortOptions ?? LIBRARY_MOVIES_SORT_OPTIONS;
 
   const setVariant = (variant: LibraryCardVariant) => {
     props.onChange({ ...props.settings, variant });
@@ -85,9 +88,9 @@ export function LibraryCardControls(props: {
               value={props.sortKey}
               onChange={(e) => {
                 const next = e.target.value;
-                if (isLibrarySortKey(next)) props.onSortChange?.(next);
+                if (isLibrarySortKey(next, props.sortShelf)) props.onSortChange?.(next);
               }}
-              className={`rounded-md border px-2 py-1 font-headline text-[12px] uppercase tracking-wider cursor-pointer focus:outline-none focus-visible:ring-2 ${
+              className={`rounded-md border pl-2 pr-8 py-1 font-headline text-[12px] uppercase tracking-wider cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 ${
                 isLight
                   ? "border-slate-200 bg-white text-slate-800"
                   : "border-[#424753]/60 bg-[#141a24] text-slate-200"
@@ -95,7 +98,7 @@ export function LibraryCardControls(props: {
               style={{ ["--tw-ring-color" as string]: accent.hex }}
               aria-label="Sort library"
             >
-              {LIBRARY_SORT_OPTIONS.map((opt) => (
+              {sortOptions.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>
@@ -122,14 +125,12 @@ export function LibraryCardControls(props: {
               onClick={() => setViewMode(mode.id)}
               className={`inline-flex items-center gap-1 px-2.5 py-1 rounded font-headline uppercase tracking-wider text-[12px] transition-colors ${
                 active
-                  ? isLight
-                    ? "text-slate-900 font-semibold"
-                    : "text-white font-semibold"
+                  ? `${FG_ON_ACCENT_TEXT_CLASS} font-semibold`
                   : isLight
                     ? "text-slate-600 hover:text-slate-900"
                     : "text-slate-400 hover:text-slate-200"
               }`}
-              style={active ? { backgroundColor: accent.hex } : undefined}
+              style={active ? accentFilledStyle(accent.hex) : undefined}
               aria-pressed={active}
               title={`${mode.label} view`}
             >
@@ -156,14 +157,12 @@ export function LibraryCardControls(props: {
               onClick={() => setVariant(id)}
               className={`px-3 py-1 rounded-md font-headline uppercase tracking-wider text-[12px] transition-colors ${
                 active
-                  ? isLight
-                    ? "text-slate-900 font-semibold"
-                    : "text-white font-semibold"
+                  ? `${FG_ON_ACCENT_TEXT_CLASS} font-semibold`
                   : isLight
                     ? "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
                     : "text-slate-400 hover:text-slate-200"
               }`}
-              style={active ? { backgroundColor: accent.hex } : undefined}
+              style={active ? accentFilledStyle(accent.hex) : undefined}
               title={LIBRARY_CARD_VARIANT_META[id].description}
             >
               {LIBRARY_CARD_VARIANT_META[id].label}
@@ -172,18 +171,6 @@ export function LibraryCardControls(props: {
             })}
           </div>
         </>
-      ) : null}
-
-      {props.onOpenPreview ? (
-        <button
-          type="button"
-          onClick={props.onOpenPreview}
-          className={`ml-auto text-[12px] font-headline uppercase tracking-wider underline-offset-2 hover:underline ${
-            isLight ? "text-slate-600 hover:text-slate-900" : "text-slate-400 hover:text-slate-200"
-          }`}
-        >
-          Compare all styles →
-        </button>
       ) : null}
     </div>
   );

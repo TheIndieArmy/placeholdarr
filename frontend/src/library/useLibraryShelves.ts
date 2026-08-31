@@ -7,12 +7,16 @@ export const LIBRARY_VERSION_POLL_MS = 60_000;
 
 export type LibraryShelfKey = "movies" | "tv";
 
+/** Bump when library list item shape changes (forces shelf refetch). */
+export const LIBRARY_ITEMS_SCHEMA_VERSION = 4;
+
 export type LibraryShelfCache = {
   items: LibraryItem[];
   total: number;
   version: number | null;
   digest: string;
   loadedAt: number;
+  schemaVersion?: number;
 };
 
 type LibraryVersions = { movies_version: number; series_version: number };
@@ -22,11 +26,42 @@ const SHELF_MEDIA: Record<LibraryShelfKey, "movie" | "series"> = {
   tv: "series",
 };
 
+function movieItemsLackTheaterDates(items: LibraryItem[]): boolean {
+  const movies = items.filter((i) => i.type === "movie");
+  if (movies.length < 10) return false;
+  const withDate = movies.filter((i) => Boolean(i.theater_release_date)).length;
+  return withDate < Math.max(1, Math.floor(movies.length * 0.05));
+}
+
+/** Skip shelf version checks briefly after a successful load (detail back should feel instant). */
+export const LIBRARY_SHELF_WARM_MS = 60_000;
+
+function shelfCacheIsWarm(shelfKey: LibraryShelfKey, cached: LibraryShelfCache | undefined): boolean {
+  if (!cached?.items.length) return false;
+  if (shelfCacheNeedsRefetch(shelfKey, cached)) return false;
+  return Date.now() - cached.loadedAt < LIBRARY_SHELF_WARM_MS;
+}
+
+function shelfCacheNeedsRefetch(shelfKey: LibraryShelfKey, cached: LibraryShelfCache | undefined): boolean {
+  if (!cached?.items.length) return false;
+  if ((cached.schemaVersion ?? 1) < LIBRARY_ITEMS_SCHEMA_VERSION) return true;
+  if (shelfKey === "movies") {
+    const sample = cached.items.find((i) => i.type === "movie");
+    if (sample && !("theater_release_date" in sample)) return true;
+    if (movieItemsLackTheaterDates(cached.items)) return true;
+  }
+  if (shelfKey === "tv") {
+    const sample = cached.items.find((i) => i.type === "series");
+    if (sample && !("premiere_date" in sample)) return true;
+  }
+  return false;
+}
+
 export function digestLibraryItems(items: LibraryItem[]): string {
   return items
     .map(
       (i) =>
-        `${i.id}\t${i.item_id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.created_at ?? ""}\t${i.updated_at ?? ""}`,
+        `${i.id}\t${i.item_id}\t${i.title}\t${i.year}\t${i.type}\t${i.has_file}\t${i.has_placeholder}\t${i.is_future}\t${i.has_missing}\t${i.status ?? ""}\t${i.poster_url ?? ""}\t${i.theater_release_date ?? ""}\t${i.digital_release_date ?? ""}\t${i.physical_release_date ?? ""}\t${i.premiere_date ?? ""}\t${i.last_aired_date ?? ""}\t${i.created_at ?? ""}\t${i.updated_at ?? ""}`,
     )
     .join("\n");
 }
@@ -78,19 +113,24 @@ export function useLibraryShelves(opts: {
       const targetVersion = shelfKey === "movies" ? versions.movies_version : versions.series_version;
       const cached = libraryCacheRef.current[shelfKey];
 
-      if (!force && cached?.version === targetVersion && cached.items.length > 0) {
+      if (!force && cached?.version === targetVersion && cached.items.length > 0 && !shelfCacheNeedsRefetch(shelfKey, cached)) {
         return;
       }
 
       const result = await getLibrary({
         summary,
         mediaType: SHELF_MEDIA[shelfKey],
-        ifNoneMatch: force ? undefined : (cached?.version ?? undefined),
+        ifNoneMatch: force || shelfCacheNeedsRefetch(shelfKey, cached) ? undefined : (cached?.version ?? undefined),
+        bustCache: force,
       });
 
       if (stopped) return;
 
       if (result.notModified) {
+        if (cached && shelfCacheNeedsRefetch(shelfKey, cached) && !force) {
+          await refreshShelf(shelfKey, versions, { summary, force: true, stopped });
+          return;
+        }
         if (cached) {
           applyShelfCache(shelfKey, {
             ...cached,
@@ -103,17 +143,25 @@ export function useLibraryShelves(opts: {
 
       const next = result.payload.items || [];
       const digest = digestLibraryItems(next);
-      if (digest === libraryDigestRef.current[shelfKey] && cached?.version === targetVersion) {
-        return;
-      }
-
-      applyShelfCache(shelfKey, {
+      const pendingEntry: LibraryShelfCache = {
         items: next,
         total: result.payload.total ?? next.length,
         version: typeof result.payload.version === "number" ? result.payload.version : targetVersion,
         digest,
         loadedAt: Date.now(),
-      });
+        schemaVersion: LIBRARY_ITEMS_SCHEMA_VERSION,
+      };
+
+      if (shelfCacheNeedsRefetch(shelfKey, pendingEntry) && !force) {
+        await refreshShelf(shelfKey, versions, { summary, force: true, stopped });
+        return;
+      }
+
+      if (digest === libraryDigestRef.current[shelfKey] && cached?.version === targetVersion) {
+        return;
+      }
+
+      applyShelfCache(shelfKey, pendingEntry);
     },
     [applyShelfCache],
   );
@@ -184,6 +232,9 @@ export function useLibraryShelves(opts: {
 
     void (async () => {
       const cached = libraryCacheRef.current[activeShelf];
+      if (shelfCacheIsWarm(activeShelf, cached)) {
+        return;
+      }
       if (!cached?.items.length) {
         setLibraryLoading(true);
       }

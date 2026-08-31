@@ -40,8 +40,6 @@ export function libraryListStyle(): CSSProperties {
   };
 }
 
-export const LIBRARY_CARD_PREVIEW_PATH = "/library/card-styles";
-
 const STORAGE_KEY = "placeholdarr:library-card-settings";
 
 export type LibraryCardSettings = {

@@ -9,18 +9,14 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type FormEvent,
   type ReactNode,
 } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getMovieDetail,
-  getEntityReconcileStatus,
-  refreshEpisodePlaceholder,
-  refreshMoviePlaceholder,
-  refreshSeriesPlaceholder,
-  type EntityReconcileStartResponse,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
@@ -29,7 +25,10 @@ import {
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
 import { postTaskRun } from "./api/tasks";
-import { fetchJson, postJson } from "./api/client";
+import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
+import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
+import { dismissWhatsNew, getWhatsNew, groupWhatsNewByVersion, type WhatsNewNotice } from "./api/whatsNew";
+import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
 import plexIcon from "./assets/services/plex.svg";
@@ -38,7 +37,10 @@ import sonarrIcon from "./assets/services/sonarr.svg";
 import placeholdarrLogoBlue from "./assets/Placeholdarr_blue.svg";
 import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
+import { ToggleSwitch } from "./ToggleSwitch";
+import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
@@ -49,7 +51,6 @@ import type {
   CalendarDay,
   CalendarResponse,
   DashboardTab,
-  ErrorRow,
   MovieDetailResponse,
   SeriesDetailResponse,
   SeriesSeasonDetail,
@@ -59,20 +60,33 @@ import type {
   SettingsStatus,
   StatsResponse,
 } from "./types/api";
-import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
 import { LibraryPanel } from "./library/LibraryPanel";
-import { LIBRARY_CARD_PREVIEW_PATH } from "./library/cardSettings";
+import {
+  LibraryReconcileProvider,
+  LibraryReconcileSidebarFooter,
+} from "./library/LibraryReconcileContext";
+import { DetailRoutePage } from "./library/detail/DetailRoutePage";
 import { titleSortKey, type LibrarySortKey } from "./library/librarySort";
 import {
   LIBRARY_MOVIES_SORT_KEY,
   LIBRARY_TV_SORT_KEY,
+  librarySortOptionsForShelf,
   readStoredLibrarySort,
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
+import { ConfirmModal } from "./ConfirmModal";
+import { CollectionsPanel } from "./collections/CollectionsPanel";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
+import {
+  ACTIVITY_PROPOSED_PREFIX,
+  ACTIVITY_PROPOSED_TASKS_PATH,
+  isActivityProposedPath,
+} from "./activity/activityProposedPaths";
+import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
+import { TasksPanel } from "./activity/TasksPanel";
+import { useActiveSearches } from "./activity/useActiveSearches";
 import { useCalendarData } from "./calendar/useCalendarData";
-import { useErrorsFeed } from "./errors/useErrorsFeed";
 import { useLogsStream } from "./logs/useLogsStream";
 import { useApiHealthCheck } from "./dashboard/useApiHealthCheck";
 import { useDashboardEvents } from "./dashboard/useDashboardEvents";
@@ -141,6 +155,16 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
   return null;
 }
 
+/** List shelf or infer from detail route so library cache + grid stay warm while viewing an item. */
+function getLibraryShelfKey(pathname: string): "movies" | "tv" | null {
+  const list = getLibraryListShelf(pathname);
+  if (list) return list;
+  const p = pathname.replace(/\/$/, "") || "/";
+  if (p.startsWith("/library/movie/")) return "movies";
+  if (p.startsWith("/library/series/")) return "tv";
+  return null;
+}
+
 function formatDashboardDataAge(msAgo: number): string {
   const s = Math.floor(msAgo / 1000);
   if (s < 12) return "just now";
@@ -163,8 +187,10 @@ function readStoredThemeMode(): ThemeMode {
   return "dark";
 }
 const SETTINGS_SECTION_ORDER = [
+  "Security",
   "Media Integrations",
   "ARR Integrations",
+  "Collection Sources",
   "Paths",
   "Library sync",
   "Calendar",
@@ -173,24 +199,28 @@ const SETTINGS_SECTION_ORDER = [
   "Advanced",
 ];
 const SETTINGS_SECTION_ICONS: Record<string, string> = {
+  Security: "shield_lock",
   "Media Integrations": "hub",
   "ARR Integrations": "dns",
-  "Paths": "folder",
+  "Collection Sources": "playlist_play",
+  Paths: "folder",
   "Library sync": "sync",
-  "Calendar": "calendar_month",
-  "Lookahead": "fast_forward",
+  Calendar: "calendar_month",
+  Lookahead: "fast_forward",
   "Status Updates": "edit_notifications",
-  "Advanced": "tune",
+  Advanced: "tune",
 };
 const SETTINGS_SECTION_SLUGS: Record<string, string> = {
+  Security: "security",
   "Media Integrations": "media-integrations",
   "ARR Integrations": "arr-integrations",
-  "Paths": "paths",
+  "Collection Sources": "collection-sources",
+  Paths: "paths",
   "Library sync": "library-sync",
-  "Calendar": "calendar",
-  "Lookahead": "lookahead",
+  Calendar: "calendar",
+  Lookahead: "lookahead",
   "Status Updates": "status-updates",
-  "Advanced": "advanced",
+  Advanced: "advanced",
 };
 
 const LOOKAHEAD_FILTER_KEYS = [
@@ -308,7 +338,6 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Library sync",
   "Calendar",
   "Lookahead",
-  "Status Updates",
   "Advanced",
 ] as const;
 
@@ -507,6 +536,8 @@ function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
   }
   out.PLACEHOLDER_STATUS_UPDATES = "ALL";
   out.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
+  // Real webhook key from the server so preview URLs match Settings (tokenized ?apikey=).
+  out.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
   return out;
 }
 
@@ -642,6 +673,7 @@ function getBrandSelectionClass(brand: Brand, theme: ThemeMode) {
 export function App() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const contentScrollRef = useRef<HTMLElement | null>(null);
 
   const brand = BRAND;
@@ -650,6 +682,11 @@ export function App() {
   const [logLevel, setLogLevel] = useState<"all" | "debug" | "info" | "warn" | "error" | "critical">("all");
   const [logFilter, setLogFilter] = useState("");
   const [taskRunModal, setTaskRunModal] = useState<null | "full" | "lite">(null);
+  const [whatsNewNotices, setWhatsNewNotices] = useState<WhatsNewNotice[]>([]);
+  const [whatsNewBusy, setWhatsNewBusy] = useState(false);
+  const [appVersionLabel, setAppVersionLabel] = useState("");
+  const whatsNewDismissedRef = useRef(false);
+  const whatsNewCatalogOpenRef = useRef(false);
   const [taskRunPending, setTaskRunPending] = useState(false);
   const [taskRunError, setTaskRunError] = useState<string | null>(null);
 
@@ -662,8 +699,8 @@ export function App() {
     };
   });
   const [libraryShelfSort, setLibraryShelfSort] = useState<{ movies: LibrarySortKey; tv: LibrarySortKey }>(() => ({
-    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY),
-    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY),
+    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY, "movies"),
+    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY, "tv"),
   }));
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
   const [calendarFilters, setCalendarFilters] = useState<CalendarFilters>({
@@ -708,6 +745,10 @@ export function App() {
     setupCompleteRef.current = setupStatus?.setup_complete;
   }, [setupStatus]);
 
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authBootError, setAuthBootError] = useState<string | null>(null);
+  const authReady = Boolean(authStatus?.authenticated);
+
   const [onboardingVisible, setOnboardingVisible] = useState(false);
   const [onboardingStepIndex, setOnboardingStepIndex] = useState(0);
 
@@ -725,6 +766,7 @@ export function App() {
 
   const currentTab = getTabFromPath(location.pathname);
   const libraryListShelf = getLibraryListShelf(location.pathname);
+  const libraryShelfKey = getLibraryShelfKey(location.pathname);
   const currentTabRef = useRef(currentTab);
   currentTabRef.current = currentTab;
 
@@ -751,9 +793,10 @@ export function App() {
   }, []);
 
   const refreshLibraryShelvesRef = useRef<(options?: { force?: boolean }) => Promise<void>>(async () => {});
+  const refreshTasksRef = useRef<() => Promise<void>>(async () => {});
 
   const { eventsConnected } = useDashboardEvents({
-    enabled: true,
+    enabled: authReady,
     onConnected: clearReconnectError,
     onDisconnected: () => {
       /* health fallback hook takes over */
@@ -766,10 +809,15 @@ export function App() {
         void refreshLibraryShelvesRef.current();
       }
     },
+    onTaskRunsVersion: () => {
+      if (currentTabRef.current === "activity") {
+        void refreshTasksRef.current();
+      }
+    },
   });
 
   useApiHealthCheck({
-    enabled: !eventsConnected,
+    enabled: authReady && !eventsConnected,
     onHealthy: clearReconnectError,
     onUnhealthy: markApiUnhealthy,
   });
@@ -780,8 +828,8 @@ export function App() {
     invalidateLibraryShelves,
     refreshLibraryShelves,
   } = useLibraryShelves({
-    listShelf: libraryListShelf,
-    enabled: currentTab === "library" && libraryListShelf !== null,
+    listShelf: libraryShelfKey,
+    enabled: authReady && currentTab === "library" && libraryShelfKey !== null,
     liveVersionSync: eventsConnected,
     onSuccess: () => setLastDashboardSuccessAt(Date.now()),
     onError: (message) => setErrorMessage(message),
@@ -796,43 +844,56 @@ export function App() {
     void refreshLibraryShelves({ force: true });
   }, [invalidateLibraryShelves, refreshLibraryShelves]);
 
+  /** Lazily warm the shelf cache when something other than the Library tab needs it (title search, pins picker). */
+  const libraryCacheEmptyRef = useRef(true);
+  libraryCacheEmptyRef.current = !(libraryCache.movies?.items.length || libraryCache.tv?.items.length);
+  const ensureLibraryLoaded = useCallback(() => {
+    if (libraryCacheEmptyRef.current) {
+      void refreshLibraryShelvesRef.current();
+    }
+  }, []);
+
   const activitySubPage = getActivitySubPage(location.pathname);
+  const activityProposed = isActivityProposedPath(location.pathname);
 
   const {
-    stats,
     scheduledTasks,
     taskHistory,
     refreshTasks,
   } = useActivityTasks({
-    enabled: currentTab === "activity" && activitySubPage === "tasks",
+    enabled: authReady && currentTab === "activity" && activitySubPage === "tasks",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
     onRefreshing: setDashboardRefreshing,
   });
 
-  const { activity, placeholderActivity } = useActivityFeed({
-    subPage: activitySubPage,
-    enabled: currentTab === "activity" && activitySubPage !== "tasks",
+  useEffect(() => {
+    refreshTasksRef.current = async () => {
+      await refreshTasks();
+    };
+  }, [refreshTasks]);
+
+  const { placeholderActivity, hasMore, loadingOlder, loadOlder } = useActivityFeed({
+    subPage: activitySubPage === "operations" ? "placeholders" : activitySubPage,
+    enabled: authReady && currentTab === "activity" && activitySubPage !== "tasks",
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
   });
 
+  const { snapshot: activeSearches } = useActiveSearches({
+    enabled: authReady && currentTab === "activity" && activitySubPage === "tasks",
+  });
+
   const { calendar } = useCalendarData({
-    enabled: currentTab === "calendar",
+    enabled: authReady && currentTab === "calendar",
     month: calendarMonth,
     onMonthResolved: setCalendarMonth,
     onSuccess: markTabDataFresh,
     onError: markTabDataError,
   });
 
-  const { errors } = useErrorsFeed({
-    enabled: currentTab === "errors",
-    onSuccess: markTabDataFresh,
-    onError: markTabDataError,
-  });
-
   const { logs, logFile, logCaptureLevel } = useLogsStream({
-    enabled: currentTab === "logs",
+    enabled: authReady && currentTab === "logs",
     level: logLevel,
     tailLines: LOG_TAIL_LINES,
     onSuccess: markTabDataFresh,
@@ -840,7 +901,7 @@ export function App() {
   });
 
   useSetupStatusPoll({
-    enabled: currentTab !== "setup" || setupStatus?.setup_complete === true,
+    enabled: authReady && (currentTab !== "setup" || setupStatus?.setup_complete === true),
     onStatus: (status) => {
       setSetupStatus(status);
       setOnboardingVisible(!status.setup_complete);
@@ -852,6 +913,7 @@ export function App() {
 
   useStartupReadyPoll({
     enabled:
+      authReady &&
       setupStatus?.setup_complete === true &&
       setupStatus.startup_sync_complete === false &&
       !eventsConnected,
@@ -882,6 +944,27 @@ export function App() {
   const homeRedirectPath =
     setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
+
+  useEffect(() => {
+    if (!authReady || whatsNewDismissedRef.current) return;
+    if (showReconnectPanel) return;
+    if (whatsNewCatalogOpenRef.current) return;
+    let cancelled = false;
+    void getWhatsNew()
+      .then((payload) => {
+        if (!cancelled && !whatsNewDismissedRef.current && !whatsNewCatalogOpenRef.current) {
+          if (payload.app_version) setAppVersionLabel(payload.app_version);
+          setWhatsNewNotices(payload.notices || []);
+        }
+      })
+      .catch(() => {
+        /* Retry when the API is reachable again (eventsConnected / reconnect). */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, setupStatus?.setup_complete, eventsConnected, showReconnectPanel]);
+
   const brandAccent = getBrandAccent(brand, themeMode);
   const brandSemantic = getBrandSemanticTokens(brand, themeMode, brandAccent);
   const brandMeta = BRAND_META;
@@ -899,6 +982,11 @@ export function App() {
     [fieldValues, baselineValues, settingsPayload],
   );
   const combinedSettingsDirty = hasUnsavedChanges || statusMessagesMeta.dirty;
+  const [collectionsDraftDirty, setCollectionsDraftDirty] = useState(false);
+  const [leaveConfirm, setLeaveConfirm] = useState<null | {
+    path: string;
+    kind: "settings" | "recipe";
+  }>(null);
   const hasUnsavedChangesRef = useRef(false);
   useEffect(() => {
     if (!combinedSettingsDirty) return;
@@ -964,16 +1052,15 @@ export function App() {
     }
     return `episode:${selectedCalendarItem.item_id}`;
   }, [selectedCalendarItem]);
+  const allLibraryItems = useMemo(
+    () => [...(libraryCache.movies?.items ?? []), ...(libraryCache.tv?.items ?? [])],
+    [libraryCache],
+  );
   const titleSearchResults = useMemo(() => {
     const query = titleSearch.trim().toLowerCase();
     if (!query) return [];
 
-    const pool = [
-      ...(libraryCache.movies?.items ?? []),
-      ...(libraryCache.tv?.items ?? []),
-    ];
-
-    return [...pool]
+    return [...allLibraryItems]
       .filter((item) => item.title.toLowerCase().includes(query))
       .sort((left, right) => {
         const leftTitle = titleSortKey(left.title);
@@ -984,7 +1071,7 @@ export function App() {
         return leftTitle.localeCompare(rightTitle);
       })
       .slice(0, 8);
-  }, [libraryCache, titleSearch]);
+  }, [allLibraryItems, titleSearch]);
 
   useEffect(() => {
     hasUnsavedChangesRef.current = combinedSettingsDirty;
@@ -1016,16 +1103,17 @@ export function App() {
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!combinedSettingsDirty) return;
+      if (!combinedSettingsDirty && !collectionsDraftDirty) return;
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [combinedSettingsDirty]);
+  }, [combinedSettingsDirty, collectionsDraftDirty]);
 
   /** Setup wizard — load on tab enter and tab focus only (no periodic 5s poll). */
   useEffect(() => {
+    if (!authReady) return;
     if (currentTab !== "setup") return;
 
     let stopped = false;
@@ -1082,10 +1170,11 @@ export function App() {
       stopped = true;
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [currentTab, location.pathname, location.search]);
+  }, [authReady, currentTab, location.pathname, location.search]);
 
   /** Settings: reload on tab focus when there are no unsaved edits (no periodic 5s poll). */
   useEffect(() => {
+    if (!authReady) return;
     if (currentTab !== "settings") return;
 
     let stopped = false;
@@ -1249,6 +1338,7 @@ export function App() {
   }, [onboardingVisible]);
 
   useEffect(() => {
+    if (!authReady) return;
     if (setupStatus?.setup_complete !== false) return;
     if (settingsPayload) return;
     // `/setup` bootstrap uses `loadSettings` from the tab refresh loop — avoid a duplicate first fetch.
@@ -1262,7 +1352,7 @@ export function App() {
     return () => {
       stopped = true;
     };
-  }, [settingsPayload, setupStatus?.setup_complete, location.pathname]);
+  }, [authReady, settingsPayload, setupStatus?.setup_complete, location.pathname]);
 
   useEffect(() => {
     if (loading || !setupStatus) return;
@@ -1297,22 +1387,22 @@ export function App() {
   }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
   const activeShelfCache =
-    libraryListShelf === "movies" ? libraryCache.movies : libraryListShelf === "tv" ? libraryCache.tv : undefined;
+    libraryShelfKey === "movies" ? libraryCache.movies : libraryShelfKey === "tv" ? libraryCache.tv : undefined;
 
   const filteredLibrary = useMemo(() => {
-    if (!libraryListShelf) return [];
+    if (!libraryShelfKey) return [];
     const shelfItems = activeShelfCache?.items ?? [];
-    const shelfFilter = libraryListShelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
+    const shelfFilter = libraryShelfKey === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
     return shelfItems
       .filter((item) => {
-        if (libraryListShelf === "movies" && item.type !== "movie") return false;
-        if (libraryListShelf === "tv" && item.type !== "series") return false;
+        if (libraryShelfKey === "movies" && item.type !== "movie") return false;
+        if (libraryShelfKey === "tv" && item.type !== "series") return false;
         if (shelfFilter === "placeholders") return item.has_placeholder;
         if (shelfFilter === "future") return item.is_future;
         if (shelfFilter === "missing") return item.has_missing;
         return true;
       });
-  }, [activeShelfCache?.items, libraryListShelf, libraryShelfFilters]);
+  }, [activeShelfCache?.items, libraryShelfKey, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
     const filter = logFilter.trim().toLowerCase();
@@ -1361,6 +1451,7 @@ export function App() {
         nextValues[field.key] = field.value;
       });
     });
+    nextValues.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
 
     setFieldValues(nextValues);
     setBaselineValues(nextValues);
@@ -1429,15 +1520,29 @@ export function App() {
     setSettingsFeedbackKind("success");
   }
 
-  function tryNavigate(path: string) {
+  function tryNavigate(path: string): boolean {
     const stayingWithinSettings = currentTab === "settings" && path.startsWith("/settings");
-    if (!combinedSettingsDirty || currentTab !== "settings" || stayingWithinSettings) {
-      navigate(path);
-      return;
+    if (combinedSettingsDirty && currentTab === "settings" && !stayingWithinSettings) {
+      setLeaveConfirm({ path, kind: "settings" });
+      return false;
     }
-    const shouldLeave = window.confirm("You have unsaved settings changes. Leave this section without saving?");
-    if (shouldLeave) {
-      navigate(path);
+    const stayingOnCollections = currentTab === "collections" && path.startsWith("/collections");
+    if (collectionsDraftDirty && currentTab === "collections" && !stayingOnCollections) {
+      setLeaveConfirm({ path, kind: "recipe" });
+      return false;
+    }
+    navigate(path);
+    return true;
+  }
+
+  async function openWhatsNewCatalog() {
+    whatsNewCatalogOpenRef.current = true;
+    try {
+      const payload = await getWhatsNew({ catalog: true });
+      if (payload.app_version) setAppVersionLabel(payload.app_version);
+      setWhatsNewNotices(payload.notices || []);
+    } catch {
+      whatsNewCatalogOpenRef.current = false;
     }
   }
 
@@ -1463,7 +1568,7 @@ export function App() {
       sessionStorage.setItem("libraryScrollTop", String(currentScrollTop));
       sessionStorage.setItem("libraryScrollRestorePending", "1");
     }
-    navigate(`/library/${item.type}/${item.item_id}`);
+    if (!tryNavigate(`/library/${item.type}/${item.item_id}`)) return;
     setTitleSearchOpen(false);
   }
 
@@ -1522,6 +1627,10 @@ export function App() {
   }, [location.pathname]);
 
   function renderTabBody() {
+    const isLibraryDetailRoute =
+      location.pathname.startsWith("/library/") &&
+      (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
+
     // Settings has its own loading UI (`SettingsPanel` when payload is null). Do not gate it on the global
     // bootstrap flag — otherwise cold loads on `/settings/...` or slow first refresh can show an empty main area.
     if ((loading || (libraryLoading && currentTab === "library" && libraryListShelf)) && currentTab !== "settings") {
@@ -1536,43 +1645,97 @@ export function App() {
       );
     }
 
-    if (location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"))) {
-      return <DetailRoutePage brand={brand} themeMode={themeMode} scrollContainerRef={contentScrollRef} />;
+    if (currentTab === "library") {
+      const shelf = libraryShelfKey;
+      if (shelf === "movies" || shelf === "tv") {
+        const libraryPanel = (
+          <LibraryPanel
+            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
+            items={filteredLibrary}
+            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
+            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
+            onFilterChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
+            sortOptions={librarySortOptionsForShelf(shelf === "tv" ? "tv" : "movies")}
+            onSortChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+          />
+        );
+        return (
+          <>
+            <div hidden={isLibraryDetailRoute} aria-hidden={isLibraryDetailRoute}>
+              {libraryPanel}
+            </div>
+            {isLibraryDetailRoute ? (
+              <DetailRoutePage
+                brand={brand}
+                themeMode={themeMode}
+                accent={{ hex: brandAccent.hex, icon: brandAccent.icon, label: brandAccent.label }}
+                scrollContainerRef={contentScrollRef}
+              />
+            ) : null}
+          </>
+        );
+      }
+      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
-
-    const openLibraryWithFilter = (filter: LibraryFilter) => {
-      if (filter === "movie") {
-        setLibraryShelfFilters((prev) => ({ ...prev, movies: "all" }));
-        navigate(LIBRARY_MOVIES_PATH);
-        return;
-      }
-      if (filter === "series") {
-        setLibraryShelfFilters((prev) => ({ ...prev, tv: "all" }));
-        navigate(LIBRARY_TV_PATH);
-        return;
-      }
-      if (filter === "all" || filter === "placeholders" || filter === "future" || filter === "missing") {
-        setLibraryShelfFilters((prev) => ({ ...prev, movies: filter }));
-        navigate(LIBRARY_MOVIES_PATH);
-      }
-    };
 
     if (currentTab === "activity") {
       if (location.pathname === "/activity" || location.pathname === "/activity/") {
         return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
       }
+      if (activityProposed) {
+        const proposedTasks =
+          location.pathname === ACTIVITY_PROPOSED_TASKS_PATH ||
+          location.pathname.startsWith(`${ACTIVITY_PROPOSED_TASKS_PATH}/`) ||
+          location.pathname.includes("/operations");
+        return <Navigate to={proposedTasks ? ACTIVITY_TASKS_PATH : ACTIVITY_PLACEHOLDERS_PATH} replace />;
+      }
+      if (
+        location.pathname === ACTIVITY_OPERATIONS_PATH ||
+        location.pathname.startsWith(`${ACTIVITY_OPERATIONS_PATH}/`)
+      ) {
+        return <Navigate to={ACTIVITY_TASKS_PATH} replace />;
+      }
+
+      const activityChrome = {
+        brand,
+        themeMode,
+        accent: brandAccent,
+      };
+
       if (activitySubPage === "tasks") {
         return (
           <TasksPanel
+            {...activityChrome}
             scheduled={scheduledTasks}
             history={taskHistory}
-            stats={stats}
-            brand={brand}
-            themeMode={themeMode}
-            onOpenLibraryFilter={openLibraryWithFilter}
+            activeSearches={activeSearches}
             onRequestRun={(kind) => {
               setTaskRunError(null);
               setTaskRunModal(kind);
+            }}
+            onRunCollections={async () => {
+              setTaskRunError(null);
+              try {
+                await postTaskRun("collections_sync");
+              } catch (e) {
+                setTaskRunError(e instanceof Error ? e.message : "Failed to start collections sync");
+              }
             }}
             onRequestRefresh={async (kind) => {
               setTaskRunError(null);
@@ -1596,68 +1759,30 @@ export function App() {
           />
         );
       }
-      if (activitySubPage === "operations") {
-        return (
-          <ActivityPanel
-            mode="operations"
-            rows={activity}
-            brand={brand}
-            themeMode={themeMode}
-          />
-        );
-      }
       return (
-        <ActivityPanel
-          mode="placeholders"
-          placeholderRows={placeholderActivity}
-          brand={brand}
-          themeMode={themeMode}
+        <PlaceholdersPanel
+          {...activityChrome}
+          rows={placeholderActivity}
+          hasMore={hasMore}
+          loadingOlder={loadingOlder}
+          onLoadOlder={loadOlder}
         />
       );
     }
 
-    if (currentTab === "library") {
-      if (location.pathname === LIBRARY_CARD_PREVIEW_PATH) {
-        return (
-          <LibraryCardStylePreview
-            items={filteredLibrary}
-            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
-            themeMode={themeMode}
-            onBack={() => navigate(LIBRARY_MOVIES_PATH)}
-          />
-        );
-      }
-      const shelf = libraryListShelf;
-      if (shelf === "movies" || shelf === "tv") {
-        return (
-          <LibraryPanel
-            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
-            items={filteredLibrary}
-            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
-            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
-            onFilterChange={(value) => {
-              if (shelf === "tv") {
-                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
-              } else {
-                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
-              }
-            }}
-            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
-            onSortChange={(value) => {
-              if (shelf === "tv") {
-                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
-              } else {
-                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
-              }
-            }}
-            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-            onOpenCardStylePreview={() => navigate(LIBRARY_CARD_PREVIEW_PATH)}
-            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
-            themeMode={themeMode}
-          />
-        );
-      }
-      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
+    if (currentTab === "collections") {
+      return (
+        <CollectionsPanel
+          accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+          themeMode={themeMode}
+          libraryItems={allLibraryItems}
+          libraryLoading={libraryLoading}
+          onEnsureLibrary={ensureLibraryLoaded}
+          onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
+          onOpenCollectionSources={() => tryNavigate("/settings/collection-sources")}
+          onDraftDirty={setCollectionsDraftDirty}
+        />
+      );
     }
 
     if (currentTab === "calendar") {
@@ -1690,7 +1815,9 @@ export function App() {
       );
     }
 
-    if (currentTab === "errors") return <ErrorsPanel rows={errors} brand={brand} themeMode={themeMode} />;
+    if (location.pathname === "/errors" || location.pathname.startsWith("/errors/")) {
+      return <Navigate to="/logs" replace />;
+    }
 
     if (currentTab === "logs") {
       return (
@@ -1724,7 +1851,21 @@ export function App() {
           feedbackKind={settingsFeedbackKind}
           brand={brand}
           themeMode={themeMode}
+          authStatus={authStatus}
+          onLogout={async () => {
+            const status = await logoutAuth();
+            setAuthStatus(status);
+          }}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+          onPartialPersist={async (partial) => {
+            const result = await saveSettings(partial, true);
+            if (!result.ok) {
+              const first = Object.entries(result.errors || {})[0];
+              throw new Error(first ? `${first[0]}: ${first[1]}` : "Unable to save playback notifier");
+            }
+            setFieldValues((prev) => ({ ...prev, ...partial }));
+            setBaselineValues((prev) => ({ ...prev, ...partial }));
+          }}
           onStatusMessagesMetaChange={handleStatusMessagesMetaChange}
           registerStatusMessagesSaveFlow={registerStatusMessagesSaveFlow}
           onSave={async () => {
@@ -1831,7 +1972,12 @@ export function App() {
           onTestConnection={async ({ service, urlKey, credentialKey }) => {
             const url = String(fieldValues[urlKey] || "").trim();
             const credential = String(fieldValues[credentialKey] || "").trim();
-            return testIntegrationConnection({ service, url, credential });
+            return testIntegrationConnection({
+              service,
+              url,
+              credential,
+              credential_key: credentialKey,
+            });
           }}
         />
       );
@@ -1852,6 +1998,74 @@ export function App() {
       /* ignore */
     }
   }, [themeMode]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAuthStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              authenticated: false,
+              username: null,
+            }
+          : prev,
+      );
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await getAuthStatus();
+        if (!cancelled) {
+          setAuthStatus(status);
+          setAuthBootError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setAuthBootError(err instanceof Error ? err.message : "Unable to load authentication status.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const authShellClass = `brand-theme-scope theme-${themeMode} layout-${brand}-${themeMode} min-h-screen flex items-center justify-center font-brand-body text-[16px] font-headline tracking-wide ${themeMode === "light" ? "text-slate-700" : "text-slate-300"}`;
+
+  if (authStatus == null) {
+    return (
+      <SetupBootShell
+        setupShellClass={authShellClass}
+        surfaceStyle={setupLoadingShellStyle}
+        brand={brand}
+        accentHex={brandAccent.hex}
+        appLabel={brandMeta.label}
+        errorMessage={authBootError || errorMessage}
+        statusMessage={authBootError ? "Authentication unavailable" : "Checking authentication…"}
+      />
+    );
+  }
+
+  if (!authStatus.authenticated) {
+    return (
+      <AuthGate
+        status={authStatus}
+        shellClass={authShellClass}
+        surfaceStyle={setupLoadingShellStyle}
+        accentHex={brandAccent.hex}
+        appLabel={brandMeta.label}
+        onAuthenticated={(status) => {
+          setAuthStatus(status);
+          setAuthBootError(null);
+          setErrorMessage(null);
+        }}
+      />
+    );
+  }
 
   const setupRouteActive = location.pathname === "/setup" || location.pathname.startsWith("/setup/");
   if (setupRouteActive) {
@@ -1892,7 +2106,12 @@ export function App() {
             : async ({ service, urlKey, credentialKey }) => {
                 const url = String(fieldValues[urlKey] || "").trim();
                 const credential = String(fieldValues[credentialKey] || "").trim();
-                return testIntegrationConnection({ service, url, credential });
+                return testIntegrationConnection({
+                  service,
+                  url,
+                  credential,
+                  credential_key: credentialKey,
+                });
               }
         }
         onExitPreview={onboardingPreviewRoute ? () => navigate(HOME_PATH, { replace: true }) : undefined}
@@ -1972,26 +2191,16 @@ export function App() {
           </div>
 
           {/* Nav */}
-          <nav className="flex-1 space-y-1 font-brand-label pt-4 pb-6">
+          <nav className="flex-1 space-y-1.5 font-brand-label pt-4 pb-6">
             {(() => {
-              const navActiveClass =
-                "flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200 border-l-4";
+              const navItemBase =
+                "nav-item flex items-center w-full px-6 py-3 gap-4 font-brand-label text-[16px] uppercase tracking-widest transition-all duration-200";
               const navInactiveClass =
-                "flex items-center w-full px-6 py-3 gap-4 transition-all duration-200 font-brand-label text-[16px] uppercase tracking-widest group " +
+                `${navItemBase} group ` +
                 (isStudioGlass
                   ? "text-slate-400 hover:text-slate-100 hover:bg-[color:var(--brand-nav-hover)]"
                   : "text-slate-600 hover:text-slate-900 hover:bg-[color:var(--brand-nav-hover)]");
-              const navActiveStyle: CSSProperties = isStudioGlass
-                ? {
-                    backgroundColor: alphaColor(brandSemantic.accent, 0.22),
-                    color: brandSemantic.fg,
-                    borderLeftColor: brandSemantic.accent,
-                  }
-                : {
-                    backgroundColor: brandSemantic.fg,
-                    color: brandSemantic.accent,
-                    borderLeftColor: brandSemantic.accent,
-                  };
+              const navActiveClass = `${navItemBase} nav-sel-pill`;
               const librarySectionActive = isActive("/library");
               const moviesSubActive =
                 location.pathname === LIBRARY_MOVIES_PATH ||
@@ -2010,7 +2219,7 @@ export function App() {
               return (
                 <>
                   {librarySectionActive ? (
-                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass} style={navActiveStyle}>
+                    <button type="button" onClick={() => tryNavigate(LIBRARY_MOVIES_PATH)} className={navActiveClass}>
                       <span className="material-symbols-outlined">movie_filter</span>
                       <span>Library</span>
                     </button>
@@ -2046,7 +2255,7 @@ export function App() {
                   ) : null}
 
                   {isActive("/activity") ? (
-                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass} style={navActiveStyle}>
+                    <button type="button" onClick={() => tryNavigate(ACTIVITY_DEFAULT_PATH)} className={navActiveClass}>
                       <span className="material-symbols-outlined">analytics</span>
                       <span>Activity</span>
                     </button>
@@ -2062,7 +2271,6 @@ export function App() {
                         [
                           { label: "Placeholders", path: ACTIVITY_PLACEHOLDERS_PATH, icon: "history" },
                           { label: "Tasks", path: ACTIVITY_TASKS_PATH, icon: "schedule" },
-                          { label: "Operations", path: ACTIVITY_OPERATIONS_PATH, icon: "bolt" },
                         ] as const
                       ).map(({ label, path, icon }) => {
                         const isSubActive = location.pathname === path || location.pathname.startsWith(`${path}/`);
@@ -2084,20 +2292,34 @@ export function App() {
                   ) : null}
 
                   {[
-                    { icon: "calendar_month", label: "Calendar", path: "/calendar" },
-                    { icon: "error", label: "Errors", path: "/errors" },
-                    { icon: "terminal", label: "Logs", path: "/logs" },
-                    { icon: "settings", label: "Settings", path: "/settings" },
-                  ].map(({ icon, label, path }) =>
+                    { icon: "video_library", label: "Collections", path: "/collections", beta: true },
+                    { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
+                    { icon: "terminal", label: "Logs", path: "/logs", beta: false },
+                    { icon: "settings", label: "Settings", path: "/settings", beta: false },
+                  ].map(({ icon, label, path, beta }) =>
                     isActive(path) ? (
-                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass} style={navActiveStyle}>
+                      <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass}>
                         <span className="material-symbols-outlined">{icon}</span>
-                        <span>{label}</span>
+                        <span className="flex items-center gap-1.5">
+                          <span>{label}</span>
+                          {beta ? (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+                              Beta
+                            </span>
+                          ) : null}
+                        </span>
                       </button>
                     ) : (
                       <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navInactiveClass}>
                         <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
-                        <span>{label}</span>
+                        <span className="flex items-center gap-1.5">
+                          <span>{label}</span>
+                          {beta ? (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
+                              Beta
+                            </span>
+                          ) : null}
+                        </span>
                       </button>
                     ),
                   )}
@@ -2135,7 +2357,21 @@ export function App() {
             ) : null}
           </nav>
 
-          <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
+          <div className="mt-auto w-full shrink-0">
+            <button
+              type="button"
+              onClick={() => void openWhatsNewCatalog()}
+              title="What's new"
+              className={`mx-4 mb-3 flex w-[calc(100%-2rem)] items-center justify-center rounded-full border px-3 py-1.5 font-headline text-[12px] uppercase tracking-widest transition-colors ${
+                isStudioGlass
+                  ? "border-[#424753]/55 bg-[#1e2430]/80 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+                  : "border-[#c5d0de] bg-white/80 text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              v{appVersionLabel || "…"}
+            </button>
+            <LibraryReconcileSidebarFooter isStudioGlass={isStudioGlass} />
+          </div>
         </aside>
 
         {/* Main area */}
@@ -2160,7 +2396,10 @@ export function App() {
                     setTitleSearchIndex(0);
                     setTitleSearchOpen(true);
                   }}
-                  onFocus={() => setTitleSearchOpen(true)}
+                  onFocus={() => {
+                    setTitleSearchOpen(true);
+                    ensureLibraryLoaded();
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
@@ -2379,6 +2618,28 @@ export function App() {
           <Route path="*" element={null} />
         </Routes>
 
+        {leaveConfirm ? (
+          <ConfirmModal
+            title={leaveConfirm.kind === "recipe" ? "Leave without saving?" : "Unsaved settings"}
+            message={
+              leaveConfirm.kind === "recipe"
+                ? "You have an unsaved collection recipe. If you leave now, this draft will be lost."
+                : "You have unsaved settings changes. Leave this section without saving?"
+            }
+            confirmLabel="Leave"
+            cancelLabel="Stay"
+            accentHex={brandAccent.hex}
+            themeMode={themeMode}
+            onCancel={() => setLeaveConfirm(null)}
+            onConfirm={() => {
+              const path = leaveConfirm.path;
+              setLeaveConfirm(null);
+              if (leaveConfirm.kind === "recipe") setCollectionsDraftDirty(false);
+              navigate(path);
+            }}
+          />
+        ) : null}
+
         <TaskRunConfirmModals
           modal={taskRunModal}
           pending={taskRunPending}
@@ -2447,917 +2708,68 @@ export function App() {
             themeMode={themeMode}
           />
         ) : null}
+
+        {whatsNewNotices.length > 0 ? (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+            <div className="w-full max-w-lg max-h-[min(90vh,720px)] flex flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl">
+              <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[#424753]/40 bg-[#171c22] px-6 py-4">
+                <p className="text-[13px] font-headline uppercase tracking-widest text-slate-400">What&apos;s new</p>
+                <button
+                  type="button"
+                  disabled={whatsNewBusy}
+                  className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(brandAccent.hex)}
+                  onClick={() => {
+                    const ids = whatsNewNotices.map((n) => n.id);
+                    void (async () => {
+                      setWhatsNewBusy(true);
+                      try {
+                        const next = await dismissWhatsNew(ids);
+                        whatsNewDismissedRef.current = (next.notices || []).length === 0;
+                        whatsNewCatalogOpenRef.current = false;
+                        setWhatsNewNotices(next.notices || []);
+                      } catch {
+                        /* Keep the dialog so they can retry. */
+                      } finally {
+                        setWhatsNewBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  Got it
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 space-y-6">
+                {groupWhatsNewByVersion(whatsNewNotices).map((group) => (
+                  <section key={group.version} className="space-y-4">
+                    <h2 className="text-[13px] font-headline uppercase tracking-widest text-slate-400 border-b border-[#424753]/35 pb-2">
+                      {group.version}
+                    </h2>
+                    <div className="space-y-5">
+                      {group.notices.map((notice) => (
+                        <div key={notice.id} className="space-y-2">
+                          <h3 className="text-[20px] font-headline font-bold text-white">{notice.title}</h3>
+                          <p className="text-[16px] text-slate-300 leading-relaxed whitespace-pre-wrap">{notice.body}</p>
+                          {notice.cta_path && notice.cta_label ? (
+                            <button
+                              type="button"
+                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
+                              onClick={() => tryNavigate(notice.cta_path as string)}
+                            >
+                              {notice.cta_label}
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </LibraryReconcileProvider>
-  );
-}
-
-function StatCard(props: { title: string; value: number | undefined; sub: string; accent?: BrandAccent; themeMode?: ThemeMode; onClick?: () => void }) {
-  const accent = props.accent ?? { label: "Placeholdarr", hex: "#FBBF24", text: "#E2E8F0", icon: "#CBD5E1", hoverHex: "#d97706" };
-  const isLight = props.themeMode === "light";
-  const [hover, setHover] = useState(false);
-  const yellow = accent.hex;
-  const cyan = accent.icon;
-  /** Light mode: one branded slate rail + frame (matches title color), not mixed yellow/cyan borders. */
-  const lightFrame = accent.text;
-  const baseStyle: React.CSSProperties = isLight
-    ? {
-        borderLeft: `6px solid ${lightFrame}`,
-        borderTop: `2px solid ${lightFrame}`,
-        borderBottom: `2px solid ${lightFrame}`,
-        borderRight: `1px solid ${lightFrame}`,
-        background: undefined,
-        paddingLeft: 12,
-        transition: "transform 0.18s ease, box-shadow 0.18s ease",
-        cursor: props.onClick ? "pointer" : undefined,
-      }
-    : {
-        borderLeft: `6px solid ${yellow}`,
-        borderTop: `2px solid ${yellow}`,
-        borderBottom: `2px solid ${yellow}`,
-        borderRight: `1px solid ${yellow}`,
-        background: undefined,
-        paddingLeft: 12,
-        transition: "transform 0.18s ease, box-shadow 0.18s ease",
-        cursor: props.onClick ? "pointer" : undefined,
-      };
-
-  const hoverStyle: React.CSSProperties = hover
-    ? isLight
-      ? {
-          transform: "translateY(-6px)",
-          boxShadow: `0 14px 36px ${alphaColor(lightFrame, 0.16)}, 0 6px 20px ${alphaColor(lightFrame, 0.1)}`,
-        }
-      : { transform: "translateY(-6px)", boxShadow: `0 12px 36px ${alphaColor(yellow, 0.22)}` }
-    : {};
-
-  return (
-    <article
-      className="stat-card"
-      style={{ ...baseStyle, ...hoverStyle }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onClick={props.onClick}
-    >
-      <div className="stat-head">
-        <div className="stat-value" style={{ color: yellow }}>{props.value ?? "--"}</div>
-        <div className="stat-title" style={{ color: accent.text }}>{props.title}</div>
-      </div>
-      <div className="stat-sub" style={{ color: isLight ? alphaColor(cyan, 0.88) : alphaColor(yellow, 0.8) }}>{props.sub}</div>
-    </article>
-  );
-}
-
-function ActivityPanel(props: {
-  mode: "operations" | "placeholders";
-  rows?: ActivityRow[];
-  placeholderRows?: any[];
-  brand: Brand;
-  themeMode: ThemeMode;
-}) {
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const semantic = getBrandSemanticTokens(props.brand, props.themeMode, accent);
-  const isLight = props.themeMode === "light";
-  const rows = props.rows || [];
-  const panelShellStyle: React.CSSProperties | undefined = isLight
-    ? {
-        borderColor: semantic.glassBorder,
-        boxShadow: `0 14px 44px ${alphaColor(semantic.accentIce, 0.1)}`,
-      }
-    : undefined;
-  const placeholderRows = props.placeholderRows || [];
-  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
-  const [placeholderHistoryExpanded, setPlaceholderHistoryExpanded] = useState<Record<string, boolean>>({});
-
-  const rowKey = (row: ActivityRow, idx: number) => `${row.type}-${String((row as any).id ?? row.time ?? idx)}`;
-
-  useEffect(() => {
-    if (props.mode !== "operations") return;
-    setExpandedRows((prev) => {
-      const next = { ...prev };
-      rows.forEach((row, idx) => {
-        const jt = String((row as any).job_type || "");
-        if (jt !== "full_sync_progress" && jt !== "queue_monitor_batch") {
-          return;
-        }
-        const key = rowKey(row, idx);
-        if (next[key] !== undefined) {
-          return;
-        }
-        const status = String(row.status || "").toLowerCase();
-        const isFinal = status === "done" || status === "success" || status === "failed";
-        next[key] = !isFinal;
-      });
-      return next;
-    });
-  }, [props.mode, rows]);
-
-  const failedCount = rows.filter(r => r.status === "FAILED").length;
-  const hasFailures = failedCount > 0;
-  const createdCount = placeholderRows.filter(r => r.action === "Created").length;
-  const deletedCount = placeholderRows.filter(r => r.action === "Deleted").length;
-
-  return (
-    <div>
-      {props.mode === "operations" ? (
-      <div className="flex items-center gap-2 mb-4">
-        <div className={`w-2 h-2 rounded-full ${hasFailures ? "bg-red-500" : "bg-green-500"}`} />
-        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
-          {hasFailures
-            ? `${failedCount} Issue${failedCount === 1 ? "" : "s"}`
-            : "System Online"}
-        </span>
-      </div>
-      ) : (
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-2 h-2 rounded-full bg-green-500" />
-        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">
-          {`${createdCount} Created • ${deletedCount} Deleted`}
-        </span>
-      </div>
-      )}
-
-      {props.mode === "operations" && hasFailures && (
-        <div className="mb-6 p-4 rounded-lg border border-red-600/40 bg-red-900/20">
-          <div className="flex items-start gap-3">
-            <span className="material-symbols-outlined text-red-400 flex-shrink-0" style={{ fontSize: 20 }}>error</span>
-            <div>
-              <div className="font-headline text-[16px] font-bold text-red-300">Recent Failures Detected</div>
-              <div className="text-[14px] text-red-200/80 mt-1">Check the list below or view logs for details.</div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {props.mode === "operations" && (
-        <div
-          className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6"
-          style={panelShellStyle}
-        >
-          <div className="flex justify-between items-start px-4 py-3 border-b border-[#424753]/30">
-            <div>
-              <h2 className="text-[20px] font-bold text-white font-headline">Recent Operations</h2>
-              <p className="text-[13px] text-slate-400 mt-0.5">{rows.length} recent operations</p>
-            </div>
-          </div>
-          {!rows.length ? (
-            <div className="p-10 text-center text-slate-500 text-[16px]">No recent activity.</div>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-              <table className="min-w-[480px] w-full table-fixed">
-                <colgroup>
-                  <col className="w-[88px] sm:w-[104px]" />
-                  <col />
-                  <col className="w-[100px] sm:w-[112px]" />
-                </colgroup>
-                <thead>
-                  <tr className="border-b border-[#424753]/20">
-                    {["When", "Operation", "Status"].map(h => (
-                      <th
-                        key={h}
-                        className={`px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#424753]/15">
-                  {rows.map((row, idx) => {
-                    const displayName = (row as any).display_name || row.event_type || row.job_type || "--";
-                    const detailLine = (row as any).details || "";
-                    const status = String(row.status || "").toLowerCase();
-                    const statusColor = status === "done" || status === "success" ? "text-green-400" : status === "failed" ? "text-red-400" : "text-slate-400";
-                    const dotColor = status === "done" || status === "success" ? "bg-green-500" : status === "failed" ? "bg-red-500" : "bg-slate-500";
-                    const errorMessage = row.error ? ` — ${row.error}` : "";
-                    const key = rowKey(row, idx);
-                    const jobType = String((row as any).job_type || "");
-                    const hasSectionProgress = Array.isArray((row as any).progress?.sections);
-                    const queueItems: Array<any> =
-                      jobType === "queue_monitor_batch" && Array.isArray((row as any).progress?.queue_items)
-                        ? ((row as any).progress.queue_items as Array<any>)
-                        : [];
-                    const groupedEvents: Array<any> = Array.isArray((row as any).progress?.grouped_events)
-                      ? ((row as any).progress.grouped_events as Array<any>)
-                      : [];
-                    const hasQueueBatchDetails = jobType === "queue_monitor_batch";
-                    const hasGroupedEventDetails = groupedEvents.length > 0;
-                    const hasExpandable = hasSectionProgress || hasQueueBatchDetails || hasGroupedEventDetails;
-                    const isExpanded = !!expandedRows[key];
-                    const progressSections = hasSectionProgress ? ((row as any).progress.sections as Array<any>) : [];
-
-                    const toggleProgress = () => {
-                      setExpandedRows((prev) => ({ ...prev, [key]: !prev[key] }));
-                    };
-
-                    const statusTokenClass = (token: string) => {
-                      const normalized = String(token || "").toLowerCase();
-                      if (normalized === "done") return "text-green-300 bg-green-700/20 border-green-500/30";
-                      if (normalized === "failed") return "text-red-300 bg-red-700/20 border-red-500/30";
-                      if (normalized === "working") return "text-sky-300 bg-sky-700/20 border-sky-500/30";
-                      if (normalized === "skipped") return "text-amber-300 bg-amber-700/20 border-amber-500/30";
-                      return "text-slate-300 bg-slate-700/20 border-slate-500/30";
-                    };
-
-                    return (
-                      <tr key={key} className="hover:bg-[#1e2430]/40 transition-colors">
-                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap align-top">{timeAgo(row.time || null)}</td>
-                        <td className="px-3 py-2 text-[14px] text-slate-300 min-w-0 align-top">
-                          <span className="font-medium line-clamp-2">{displayName}</span>
-                          {detailLine && <div className="ui-field-description-compact mt-0.5 line-clamp-2">{detailLine}</div>}
-                          {errorMessage && <span className="text-[13px] text-red-300/70">{errorMessage}</span>}
-                          {hasExpandable && (
-                            <div className="mt-2">
-                              <button
-                                type="button"
-                                onClick={toggleProgress}
-                                className="inline-flex items-center gap-1 rounded border border-[#4a5568]/60 px-1.5 py-0.5 text-[11px] uppercase tracking-wider text-slate-300 hover:bg-[#2a3342]"
-                              >
-                                <span className="material-symbols-outlined" style={{ fontSize: 13 }}>{isExpanded ? "expand_less" : "expand_more"}</span>
-                                {isExpanded ? "Hide details" : "Show details"}
-                              </button>
-                              {isExpanded && hasSectionProgress && (
-                                <div className="mt-2 mx-auto w-full max-w-[1100px] grid gap-2 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
-                                  {progressSections.map((section: any, sidx: number) => {
-                                    const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
-                                    const sectionStatus = String(section?.status || "pending").toLowerCase();
-                                    const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped";
-                                    return (
-                                      <div key={`${key}-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-2">
-                                        <div className="mb-1 flex items-center justify-between">
-                                          <span className="text-[12px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
-                                          <span className={`rounded border px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider ${statusTokenClass(String(section?.status || "pending"))}`}>
-                                            {String(section?.status || "pending")}
-                                          </span>
-                                        </div>
-                                        <div className="space-y-0.5 text-[13px] text-slate-400">
-                                          {showMetrics ? (
-                                            metrics.map((metric: any, midx: number) => {
-                                              const metricLabel = String(metric?.label || "Metric");
-                                              const metricTooltip =
-                                                (typeof metric?.tooltip === "string" && metric.tooltip.trim())
-                                                  ? String(metric.tooltip)
-                                                  : (metricLabel.toLowerCase() === "air date unknown"
-                                                      ? "If Sonarr has no date for an episode, Placeholdarr checks later episodes. If all later dated episodes are still in the future, this episode is treated as not yet aired."
-                                                      : "");
-                                              return (
-                                              <div key={`${key}-section-${sidx}-metric-${midx}`} className="flex justify-between gap-2">
-                                                <span className="inline-flex items-center gap-1">
-                                                  <span>{metricLabel}</span>
-                                                  {metricTooltip ? (
-                                                    <span className="relative inline-flex items-center group">
-                                                      <button
-                                                        type="button"
-                                                        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300/90 bg-slate-600/40 text-[12px] font-bold leading-none text-white hover:bg-slate-500/60 focus:outline-none focus:ring-1 focus:ring-slate-200/70"
-                                                        aria-label={`Info: ${metricLabel}`}
-                                                      >
-                                                        ?
-                                                      </button>
-                                                      <span
-                                                        role="tooltip"
-                                                        className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 hidden w-72 -translate-x-1/2 rounded border border-slate-500/70 bg-[#0f172a] px-2 py-1.5 text-[12px] leading-snug text-slate-100 shadow-lg group-hover:block group-focus-within:block"
-                                                      >
-                                                        {metricTooltip}
-                                                      </span>
-                                                    </span>
-                                                  ) : null}
-                                                </span>
-                                                <span className="text-slate-200">{String(metric?.value ?? "--")}</span>
-                                              </div>
-                                            )})
-                                          ) : (
-                                            <div className="text-sky-300/80">
-                                              {sectionStatus === "working" ? "Running..." : "Waiting to start..."}
-                                            </div>
-                                          )}
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                              {isExpanded && hasQueueBatchDetails && (
-                                <div className="mt-2 space-y-2">
-                                  {queueItems.length === 0 ? (
-                                    <div className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[13px] text-slate-400">
-                                      No per-title rows in this batch yet (Arr queue may be empty while search runs).
-                                    </div>
-                                  ) : (
-                                    queueItems.map((it: any, qix: number) => (
-                                      <div
-                                        key={`${key}-q-${qix}`}
-                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[13px]"
-                                      >
-                                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                                          <span className="font-medium text-slate-200">
-                                            {String(it?.title || "—")}
-                                            {it?.subtitle ? (
-                                              <span className="text-slate-500 font-normal"> · {String(it.subtitle)}</span>
-                                            ) : null}
-                                          </span>
-                                          {it?.instance ? (
-                                            <span className="text-[11px] font-headline uppercase tracking-wider text-slate-500">{String(it.instance)}</span>
-                                          ) : null}
-                                        </div>
-                                        <div className="text-slate-400 mt-0.5">{String(it?.line || "—")}</div>
-                                      </div>
-                                    ))
-                                  )}
-                                </div>
-                              )}
-                              {isExpanded && hasGroupedEventDetails && (
-                                <div className="mt-2 space-y-2">
-                                  {groupedEvents.map((ev: any, gix: number) => {
-                                    const evStatus = String(ev?.status || "").toLowerCase();
-                                    const evStatusColor =
-                                      evStatus === "done" || evStatus === "success"
-                                        ? "text-green-400"
-                                        : evStatus === "failed"
-                                          ? "text-red-400"
-                                          : "text-slate-400";
-                                    return (
-                                      <div
-                                        key={`${key}-ge-${gix}`}
-                                        className="rounded border border-[#4a5568]/40 bg-[#1b2431] px-3 py-2 text-[13px]"
-                                      >
-                                        <div className="flex flex-wrap items-center justify-between gap-2">
-                                          <span className="font-medium text-slate-200">{String(ev?.display_name || "Event")}</span>
-                                          <span className={`text-[12px] font-headline uppercase tracking-wider ${evStatusColor}`}>
-                                            {evStatus || "done"}
-                                          </span>
-                                        </div>
-                                        <div className="mt-0.5 text-slate-400">
-                                          {ev?.details ? String(ev.details) : "—"}
-                                          {ev?.source ? ` • ${String(ev.source)}` : ""}
-                                        </div>
-                                        {ev?.error ? (
-                                          <div className="mt-0.5 text-red-300/70">{String(ev.error)}</div>
-                                        ) : null}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 align-top">
-                          <div className="flex items-center gap-1.5 justify-end sm:justify-start">
-                            <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                            <span className={`text-[12px] font-medium font-headline uppercase tracking-wider ${statusColor}`}>
-                              {status === "done" || status === "success" ? "Complete" : status === "failed" ? "Failed" : "Running"}
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              </div>
-              <div className="px-4 py-2 border-t border-[#424753]/20 text-[12px] text-slate-500 font-headline uppercase tracking-widest">
-                Showing {rows.length} items
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {props.mode === "placeholders" && (
-        <div
-          className={`rounded-xl overflow-hidden mb-6 border ${isLight ? "border-slate-200/90" : "border-[#424753]/40 bg-[#171c22]"}`}
-          style={{
-            ...(isLight ? { backgroundColor: semantic.surfacePanel } : {}),
-            ...panelShellStyle,
-          }}
-        >
-          <div
-            className={`flex justify-between items-start px-5 py-4 border-b ${isLight ? "border-slate-200/80" : "border-[#424753]/30"}`}
-          >
-            <div>
-              <h2 className={`text-[22px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>Placeholder History</h2>
-              <p className={`text-[14px] mt-0.5 ${isLight ? "text-slate-500" : "text-slate-400"}`}>{placeholderRows.length} recent placeholder changes</p>
-            </div>
-          </div>
-          {!placeholderRows.length ? (
-            <div className={`p-10 text-center text-[16px] ${isLight ? "text-slate-500" : "text-slate-500"}`}>No placeholder history yet.</div>
-          ) : (
-            <>
-              <div className="overflow-hidden">
-              <table className="w-full table-fixed">
-                <colgroup>
-                  <col className="w-[78px] sm:w-[96px]" />
-                  <col />
-                  <col className="w-[78px] sm:w-[92px]" />
-                  <col className="w-[96px] sm:w-[132px]" />
-                </colgroup>
-                <thead>
-                  <tr className={`border-b ${isLight ? "border-slate-200/90" : "border-[#424753]/20"}`}>
-                    {["When", "Content", "Action", "Reason"].map(h => (
-                      <th
-                        key={h}
-                        className={`px-2 sm:px-3 py-3 text-left text-[12px] font-headline uppercase tracking-widest font-normal ${isLight ? "text-sky-800" : "text-slate-500"}`}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className={isLight ? "divide-y divide-slate-200/80" : "divide-y divide-[#424753]/15"}>
-                  {placeholderRows.map((row, idx) => {
-                    const actionColor =
-                      row.action === "Created"
-                        ? "text-green-400"
-                        : row.action === "Deleted"
-                          ? "text-orange-400"
-                          : "text-sky-300";
-                    const actionBg =
-                      row.action === "Created"
-                        ? "bg-green-500/20"
-                        : row.action === "Deleted"
-                          ? "bg-orange-500/20"
-                          : "bg-sky-500/20";
-                    const actionColorLight =
-                      row.action === "Created"
-                        ? "text-green-800"
-                        : row.action === "Deleted"
-                          ? "text-orange-900"
-                          : "text-sky-900";
-                    const actionBgLight =
-                      row.action === "Created"
-                        ? "bg-green-100"
-                        : row.action === "Deleted"
-                          ? "bg-orange-100"
-                          : "bg-sky-100";
-                    const contentDisplay = row.series_title
-                      ? `${row.series_title} • ${row.item_title}`
-                      : row.item_title;
-                    const children = Array.isArray(row.children) ? row.children : [];
-                    const isBatch = children.length > 0;
-                    const batchKey = `ph-batch-${row.id}-${idx}`;
-                    const batchOpen = !!placeholderHistoryExpanded[batchKey];
-
-                    return (
-                      <Fragment key={`placeholder-${row.id}-${idx}`}>
-                        <tr
-                          className={`transition-colors ${isBatch ? "cursor-pointer" : ""} ${isLight ? "hover:bg-slate-50/90" : "hover:bg-[#1e2430]/40"}`}
-                          onClick={
-                            isBatch
-                              ? () =>
-                                  setPlaceholderHistoryExpanded((prev) => ({
-                                    ...prev,
-                                    [batchKey]: !prev[batchKey],
-                                  }))
-                              : undefined
-                          }
-                        >
-                          <td
-                            className={`px-2 sm:px-3 py-4 text-[14px] sm:text-[16px] whitespace-nowrap truncate ${isLight ? "text-slate-500" : "text-slate-400"}`}
-                            title={timeAgo(row.time || null)}
-                          >
-                            {timeAgo(row.time || null)}
-                          </td>
-                          <td className={`px-2 sm:px-3 py-4 text-[14px] sm:text-[16px] min-w-0 ${isLight ? "text-slate-800" : "text-slate-300"}`}>
-                            <div className="flex items-start gap-1.5 min-w-0">
-                              {isBatch ? (
-                                <span
-                                  className={`material-symbols-outlined flex-none transition-transform mt-0.5 ${isLight ? "text-slate-500" : "text-slate-500"}`}
-                                  style={{ fontSize: 18, transform: batchOpen ? "rotate(90deg)" : "rotate(0deg)" }}
-                                  aria-hidden
-                                >
-                                  chevron_right
-                                </span>
-                              ) : null}
-                              <div className="min-w-0 flex-1">
-                                <span className="font-medium block truncate" title={contentDisplay}>
-                                  {contentDisplay}
-                                </span>
-                                {row.path ? (
-                                  <div
-                                    className={`text-[12px] mt-0.5 truncate hidden lg:block ${isLight ? "text-slate-500" : "text-slate-500"}`}
-                                    title={row.path}
-                                  >
-                                    {row.path}
-                                  </div>
-                                ) : null}
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-2 sm:px-3 py-4">
-                            <span
-                              className={`inline-flex items-center px-2 py-1 rounded text-[12px] sm:text-[14px] font-medium font-headline uppercase tracking-wider whitespace-nowrap ${
-                                isLight ? `${actionColorLight} ${actionBgLight}` : `${actionColor} ${actionBg}`
-                              }`}
-                            >
-                              {row.action}
-                            </span>
-                          </td>
-                          <td
-                            className={`px-2 sm:px-3 py-4 text-[14px] sm:text-[16px] truncate ${isLight ? "text-slate-600" : "text-slate-400"}`}
-                            title={row.reason || undefined}
-                          >
-                            {row.reason}
-                          </td>
-                        </tr>
-                        {isBatch && batchOpen ? (
-                          <tr
-                            key={`${batchKey}-detail`}
-                            onClick={(e) => e.stopPropagation()}
-                            style={{ backgroundColor: isLight ? semantic.surfaceMuted : "#12161c" }}
-                          >
-                            <td
-                              colSpan={4}
-                              className={`p-0 border-t align-top ${isLight ? "border-slate-200/90" : "border-[#424753]/25"}`}
-                            >
-                              <div className="px-3 sm:px-4 py-3.5 pl-9 sm:pl-11 space-y-4">
-                                {children.map((child: any, cidx: number) => {
-                                  const childContent = child.series_title
-                                    ? `${child.series_title} • ${child.item_title || ""}`
-                                    : child.item_title || "";
-                                  const statusLabel = String(child.status || "").trim() || "Unknown";
-                                  const railColor = isLight ? alphaColor(semantic.accent2, 0.55) : alphaColor(semantic.accentIce, 0.4);
-                                  return (
-                                    <div
-                                      key={`${batchKey}-c-${child.id}-${cidx}`}
-                                      className="min-w-0 border-l-2 pl-3.5"
-                                      style={{ borderLeftColor: railColor }}
-                                      title={child.reason ? String(child.reason) : undefined}
-                                    >
-                                      <div className="flex items-start justify-between gap-3 min-w-0">
-                                        <div
-                                          className={`text-[14px] sm:text-[16px] font-medium truncate min-w-0 flex-1 ${isLight ? "text-slate-900" : "text-slate-100"}`}
-                                          title={childContent}
-                                        >
-                                          {childContent}
-                                        </div>
-                                        <div className="flex-none flex flex-col items-end gap-1 text-right shrink-0 max-w-[min(12.5rem,46%)] sm:max-w-[14rem]">
-                                          <span
-                                            className="text-[11px] font-headline uppercase tracking-wider leading-tight"
-                                            style={{ color: semantic.fgMuted }}
-                                          >
-                                            Status updated to
-                                          </span>
-                                          <span
-                                            className="text-[13px] sm:text-[14px] font-headline font-semibold uppercase tracking-wide px-2.5 py-1 rounded-md border"
-                                            style={{
-                                              color: isLight ? semantic.fgOnAccent : semantic.accent,
-                                              backgroundColor: isLight
-                                                ? alphaColor(semantic.accent, 0.2)
-                                                : alphaColor(semantic.accent, 0.14),
-                                              borderColor: isLight
-                                                ? alphaColor(semantic.accent, 0.42)
-                                                : alphaColor(semantic.accent, 0.28),
-                                            }}
-                                          >
-                                            {statusLabel}
-                                          </span>
-                                        </div>
-                                      </div>
-                                      {child.path ? (
-                                        <div
-                                          className={`text-[12px] mt-1.5 truncate font-mono ${isLight ? "text-slate-500" : "text-slate-500"}`}
-                                          title={child.path}
-                                        >
-                                          {child.path}
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </td>
-                          </tr>
-                        ) : null}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-              </div>
-              <div
-                className={`px-5 py-3 border-t text-[12px] font-headline uppercase tracking-widest ${isLight ? "border-slate-200/90 text-slate-500" : "border-[#424753]/20 text-slate-500"}`}
-              >
-                Showing {placeholderRows.length} items
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-    </div>
-  );
-}
-
-function taskProgressStatusTokenClass(token: string): string {
-  const normalized = String(token || "").toLowerCase();
-  if (normalized === "done") return "text-green-300 bg-green-700/20 border-green-500/30";
-  if (normalized === "failed") return "text-red-300 bg-red-700/20 border-red-500/30";
-  if (normalized === "working") return "text-sky-300 bg-sky-700/20 border-sky-500/30";
-  if (normalized === "skipped") return "text-amber-300 bg-amber-700/20 border-amber-500/30";
-  return "text-slate-300 bg-slate-700/20 border-slate-500/30";
-}
-
-function taskRunProgressSections(progress: ActivityRow["progress"] | undefined): Array<any> {
-  if (!progress) return [];
-  const inner = (progress as any).progress;
-  if (inner && Array.isArray(inner.sections)) return inner.sections;
-  if (Array.isArray((progress as any).sections)) return (progress as any).sections;
-  return [];
-}
-
-function TaskSyncProgressSections(props: { progress: ActivityRow["progress"] }) {
-  const sections = taskRunProgressSections(props.progress);
-  if (!sections.length) return null;
-  return (
-    <div className="mt-2 mx-auto w-full max-w-[1100px] space-y-2">
-      {sections.map((section: any, sidx: number) => {
-        const metrics = Array.isArray(section?.metrics) ? section.metrics : [];
-        const sectionStatus = String(section?.status || "pending").toLowerCase();
-        const showMetrics = sectionStatus === "done" || sectionStatus === "failed" || sectionStatus === "skipped" || sectionStatus === "working";
-        const phaseDur = section?.duration_seconds;
-        const timing =
-          section?.started_at || section?.ended_at || phaseDur != null
-            ? `${section?.started_at ? new Date(section.started_at).toLocaleTimeString() : "--"} → ${section?.ended_at ? new Date(section.ended_at).toLocaleTimeString() : sectionStatus === "working" ? "…" : "--"}${phaseDur != null ? ` (${formatTaskDuration(Number(phaseDur))})` : ""}`
-            : null;
-        return (
-          <div key={`task-section-${sidx}`} className="rounded border border-[#4a5568]/40 bg-[#1b2431] p-3">
-            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[12px] font-headline uppercase tracking-wider text-slate-300">{String(section?.name || "Step")}</span>
-              <span className={`rounded border px-1.5 py-0.5 text-[11px] font-headline uppercase tracking-wider ${taskProgressStatusTokenClass(sectionStatus)}`}>
-                {String(section?.status || "pending")}
-              </span>
-            </div>
-            {timing ? <p className="text-[11px] text-slate-500 font-mono mb-2">{timing}</p> : null}
-            <div className="space-y-0.5 text-[13px] text-slate-400">
-              {showMetrics && metrics.length > 0 ? (
-                metrics.map((metric: any, midx: number) => (
-                  <div key={`task-metric-${sidx}-${midx}`} className="flex justify-between gap-2">
-                    <span>{String(metric?.label || "Metric")}</span>
-                    <span className="text-slate-200 text-right">{String(metric?.value ?? "--")}</span>
-                  </div>
-                ))
-              ) : sectionStatus === "working" ? (
-                <div className="text-sky-300/80">Running...</div>
-              ) : sectionStatus === "pending" ? (
-                <div className="text-slate-500">Waiting to start...</div>
-              ) : null}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function formatTaskDuration(seconds: number | null | undefined): string {
-  if (seconds == null || !Number.isFinite(seconds)) return "--";
-  const s = Math.max(0, Math.floor(seconds));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  return `${m}:${String(sec).padStart(2, "0")}`;
-}
-
-function formatTaskTrigger(trigger: string | null | undefined): string {
-  const normalized = String(trigger || "").trim().toLowerCase();
-  if (normalized === "settings_change") return "Settings Change";
-  if (!normalized) return "--";
-  return normalized.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
-}
-
-function TasksPanel(props: {
-  scheduled: ScheduledTaskRow[];
-  history: TaskRunRow[];
-  stats: StatsResponse | null;
-  brand: Brand;
-  themeMode: ThemeMode;
-  onOpenLibraryFilter?: (f: LibraryFilter) => void;
-  onRequestRun: (kind: "full" | "lite") => void;
-  onRequestRefresh: (kind: "metadata" | "art" | "both") => Promise<void> | void;
-}) {
-  const s = props.stats;
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const [historyExpanded, setHistoryExpanded] = useState<Record<string, boolean>>({});
-
-  useEffect(() => {
-    setHistoryExpanded((prev) => {
-      const next = { ...prev };
-      for (const run of props.history) {
-        const key = `task-run-${run.id}`;
-        const hasProgress = taskRunProgressSections(run.progress).length > 0;
-        if (!hasProgress) continue;
-        if (String(run.status).toUpperCase() === "WORKING" && next[key] === undefined) {
-          next[key] = true;
-        }
-      }
-      return next;
-    });
-  }, [props.history]);
-
-  const statusClass = (status: string | null | undefined) => {
-    const t = String(status || "").toUpperCase();
-    if (t === "DONE") return "text-green-400";
-    if (t === "FAILED") return "text-red-400";
-    if (t === "SKIPPED") return "text-amber-400";
-    if (t === "WORKING") return "text-sky-400";
-    return "text-slate-400";
-  };
-
-  return (
-    <div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
-        <StatCard
-          accent={accent}
-          themeMode={props.themeMode}
-          title="Movies"
-          value={s?.movies.total}
-          sub={`Downloaded ${s?.movies.downloaded ?? "--"} • Placeholders ${s?.movies.placeholders ?? "--"}`}
-          onClick={() => props.onOpenLibraryFilter?.("movie")}
-        />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Series" value={s?.series.total} sub="Tracked series" onClick={() => props.onOpenLibraryFilter?.("series")} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Episodes" value={s?.episodes.total} sub={`Downloaded ${s?.episodes.downloaded ?? "--"} • Placeholders ${s?.episodes.placeholders ?? "--"}`} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Placeholders" value={s?.placeholders_on_disk} sub="On disk" onClick={() => props.onOpenLibraryFilter?.("placeholders")} />
-        <StatCard accent={accent} themeMode={props.themeMode} title="Jobs" value={s?.jobs.pending} sub={`Done ${s?.jobs.done ?? "--"} • Failed ${s?.jobs.failed ?? "--"}`} />
-      </div>
-
-      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
-        <div className="px-4 py-3 border-b border-[#424753]/30">
-          <h2 className="text-[20px] font-bold text-white font-headline">Scheduled</h2>
-          <p className="text-[13px] text-slate-400 mt-0.5">Recurring library maintenance</p>
-        </div>
-        <div className="px-4 py-3 border-b border-[#424753]/20 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => props.onRequestRefresh("metadata")}
-            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
-          >
-            Refresh metadata
-          </button>
-          <button
-            type="button"
-            onClick={() => props.onRequestRefresh("art")}
-            className="px-3 py-1.5 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a]"
-          >
-            Refresh art
-          </button>
-          <button
-            type="button"
-            onClick={() => props.onRequestRefresh("both")}
-            className="px-3 py-1.5 rounded-lg text-[12px] uppercase tracking-wider text-white"
-            style={{ backgroundColor: accent.hex }}
-          >
-            Refresh all placeholders
-          </button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-[640px] w-full">
-            <thead>
-              <tr className="border-b border-[#424753]/20">
-                {["Name", "Interval", "Last execution", "Last duration", "Next execution", ""].map((h) => (
-                  <th key={h} className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#424753]/15">
-              {props.scheduled.map((task) => (
-                <tr key={task.task_key} className="hover:bg-[#1e2430]/40">
-                  <td className="px-3 py-3 text-[15px] text-slate-200 font-medium">
-                    {task.label}
-                    {task.task_key === "lite_sync" ? (
-                      <p className="text-[12px] text-slate-500 font-normal mt-0.5 max-w-md">
-                        Catalog diff plus calendar date refresh and Coming Soon status updates.
-                      </p>
-                    ) : null}
-                  </td>
-                  <td className="px-3 py-3 text-[14px] text-slate-400">{task.interval_label}</td>
-                  <td className="px-3 py-3 text-[14px] text-slate-400 whitespace-nowrap">
-                    {task.last_run ? timeAgo(task.last_run) : "--"}
-                    {task.last_status ? (
-                      <span className={`ml-2 text-[11px] uppercase ${statusClass(task.last_status)}`}>{task.last_status}</span>
-                    ) : null}
-                  </td>
-                  <td className="px-3 py-3 text-[14px] text-slate-400 font-mono">{formatTaskDuration(task.last_duration_seconds)}</td>
-                  <td className="px-3 py-3 text-[14px] text-slate-400 whitespace-nowrap">
-                    {task.running ? <span className="text-sky-400">Running now</span> : task.next_run ? timeUntil(task.next_run) : task.enabled ? "--" : "Disabled"}
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    <button
-                      type="button"
-                      disabled={!task.enabled || task.running}
-                      onClick={() => props.onRequestRun(task.task_key === "full_sync" ? "full" : "lite")}
-                      className="inline-flex items-center justify-center w-9 h-9 rounded-lg border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a] disabled:opacity-40 disabled:cursor-not-allowed"
-                      title="Run now"
-                    >
-                      <span className="material-symbols-outlined" style={{ fontSize: 18 }}>refresh</span>
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-6">
-        <div className="px-4 py-3 border-b border-[#424753]/30">
-          <h2 className="text-[20px] font-bold text-white font-headline">Queue</h2>
-          <p className="text-[13px] text-slate-400 mt-0.5">
-            Recent task runs (scheduled, manual, and startup). Expand a row for phase details. Manual runs reset the next scheduled time.
-          </p>
-        </div>
-        {!props.history.length ? (
-          <div className="p-10 text-center text-slate-500">No task history yet.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-[640px] w-full">
-              <thead>
-                <tr className="border-b border-[#424753]/20">
-                  {["Name", "Trigger", "Started", "Ended", "Duration", "Status"].map((h) => (
-                    <th key={h} className="px-3 py-2 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#424753]/15">
-                {props.history.map((run) => {
-                  const rowKey = `task-run-${run.id}`;
-                  const hasProgress = taskRunProgressSections(run.progress).length > 0;
-                  const isExpanded = !!historyExpanded[rowKey];
-                  const wallDur = run.wall_clock_duration_seconds;
-                  const showWallDur = wallDur != null && wallDur > (run.duration_seconds ?? 0) + 30;
-                  return (
-                    <Fragment key={run.id}>
-                      <tr className="hover:bg-[#1e2430]/40">
-                        <td className="px-3 py-2 text-[14px] text-slate-200">
-                          <div className="flex items-start gap-2">
-                            {hasProgress ? (
-                              <button
-                                type="button"
-                                onClick={() => setHistoryExpanded((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))}
-                                className="mt-0.5 text-slate-400 hover:text-slate-200"
-                                aria-label={isExpanded ? "Collapse details" : "Expand details"}
-                              >
-                                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
-                                  {isExpanded ? "expand_less" : "expand_more"}
-                                </span>
-                              </button>
-                            ) : (
-                              <span className="w-4" />
-                            )}
-                            <span>{run.task_label}</span>
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400">{formatTaskTrigger(run.trigger)}</td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{timeAgo(run.started_at)}</td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400 whitespace-nowrap">{run.ended_at ? timeAgo(run.ended_at) : "--"}</td>
-                        <td className="px-3 py-2 text-[14px] text-slate-400 font-mono">
-                          {String(run.status).toUpperCase() === "WORKING" && run.started_at
-                            ? formatTaskDuration(
-                                Math.max(0, (Date.now() - new Date(run.started_at).getTime()) / 1000),
-                              )
-                            : formatTaskDuration(showWallDur ? wallDur : run.duration_seconds)}
-                          {showWallDur && String(run.status).toUpperCase() !== "WORKING" ? (
-                            <span className="block text-[11px] text-slate-500 font-sans" title="Older run: sync and art were tracked separately">
-                              (includes art)
-                            </span>
-                          ) : null}
-                        </td>
-                        <td className="px-3 py-2">
-                          <span className={`text-[12px] font-headline uppercase tracking-wider ${statusClass(run.status)}`}>
-                            {run.status}
-                          </span>
-                          {run.details ? (
-                            <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">{run.details}</p>
-                          ) : null}
-                          {run.skip_reason ? (
-                            <p className="text-[11px] text-slate-500 mt-0.5">{run.skip_reason}</p>
-                          ) : null}
-                          {run.error_message ? (
-                            <p className="text-[11px] text-red-300/80 mt-0.5">{run.error_message}</p>
-                          ) : null}
-                        </td>
-                      </tr>
-                      {hasProgress && isExpanded ? (
-                        <tr className="bg-[#1a2028]/60">
-                          <td colSpan={6} className="px-4 py-3">
-                            <TaskSyncProgressSections progress={run.progress} />
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -3418,8 +2830,8 @@ function TaskRunConfirmModals(props: {
               type="button"
               disabled={props.pending}
               onClick={props.onConfirmFull}
-              className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
+              className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+              style={accentFilledStyle(accent.hex)}
             >
               {props.pending ? "Starting…" : "Run full sync"}
             </button>
@@ -3437,768 +2849,13 @@ function TaskRunConfirmModals(props: {
                 type="button"
                 disabled={props.pending}
                 onClick={props.onConfirmLite}
-                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                style={{ backgroundColor: accent.hex }}
+                className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                style={accentFilledStyle(accent.hex)}
               >
                 {props.pending ? "Starting…" : "Run lite sync"}
               </button>
             </>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-type LibraryReconcileSidebarStatus = {
-  message: string | null;
-  kind: "info" | "success" | "error";
-  busy: boolean;
-};
-
-type LibraryReconcileContextValue = {
-  status: LibraryReconcileSidebarStatus;
-  runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
-};
-
-const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
-
-function useLibraryReconcile(): LibraryReconcileContextValue {
-  const ctx = useContext(LibraryReconcileContext);
-  if (!ctx) {
-    throw new Error("useLibraryReconcile must be used within LibraryReconcileProvider");
-  }
-  return ctx;
-}
-
-function LibraryReconcileProvider(props: { children: ReactNode }) {
-  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>({
-    message: null,
-    kind: "info",
-    busy: false,
-  });
-  const [pollingJobId, setPollingJobId] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (status.kind !== "success" || !status.message) return;
-    const clearTimer = window.setTimeout(() => {
-      setStatus({ message: null, kind: "info", busy: false });
-    }, 3000);
-    return () => window.clearTimeout(clearTimer);
-  }, [status.kind, status.message]);
-
-  useEffect(() => {
-    if (pollingJobId == null) return;
-
-    let stopped = false;
-
-    const poll = async () => {
-      try {
-        const jobStatus = await getEntityReconcileStatus(pollingJobId);
-        if (stopped) return;
-
-        if (jobStatus.status === "failed") {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "error",
-            message: jobStatus.error_message || "Refresh failed",
-          });
-          return;
-        }
-
-        if (jobStatus.status === "done") {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "success",
-            message: "Refresh complete",
-          });
-          return;
-        }
-
-        setStatus({
-          busy: true,
-          kind: "info",
-          message: jobStatus.step_label || "Working…",
-        });
-      } catch (e) {
-        if (!stopped) {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "error",
-            message: e instanceof Error ? e.message : "Could not load refresh status",
-          });
-        }
-      }
-    };
-
-    poll();
-    const interval = window.setInterval(poll, 1500);
-    return () => {
-      stopped = true;
-      window.clearInterval(interval);
-    };
-  }, [pollingJobId]);
-
-  const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
-    setPollingJobId(null);
-    setStatus({ busy: true, kind: "info", message: "Refresh queued…" });
-    try {
-      const out = await startReconcile();
-      if (!out.ok || out.job_id == null) {
-        throw new Error(out.message || "Failed to start refresh");
-      }
-      setStatus({
-        busy: true,
-        kind: "info",
-        message: out.step_label || "Refresh queued…",
-      });
-      setPollingJobId(out.job_id);
-    } catch (e) {
-      setStatus({
-        busy: false,
-        kind: "error",
-        message: e instanceof Error ? e.message : "Failed to start refresh",
-      });
-    }
-  }, []);
-
-  const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
-
-  return (
-    <LibraryReconcileContext.Provider value={value}>
-      {props.children}
-    </LibraryReconcileContext.Provider>
-  );
-}
-
-function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
-  const ctx = useContext(LibraryReconcileContext);
-  const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
-  if (!message && !busy) return null;
-
-  const textClass =
-    kind === "error"
-      ? "text-red-400"
-      : kind === "success"
-        ? "text-emerald-400"
-        : props.isStudioGlass
-          ? "text-slate-400"
-          : "text-slate-600";
-
-  return (
-    <div
-      className={`mt-auto w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
-      aria-live="polite"
-    >
-      <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
-        {busy ? (
-          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
-            progress_activity
-          </span>
-        ) : kind === "success" ? (
-          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
-            check_circle
-          </span>
-        ) : kind === "error" ? (
-          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
-            error
-          </span>
-        ) : null}
-        <span className="line-clamp-3">{message || "Working…"}</span>
-      </div>
-    </div>
-  );
-}
-
-function LibraryReconcileControl(props: {
-  label: string;
-  startReconcile: () => Promise<EntityReconcileStartResponse>;
-  buttonClassName?: string;
-}) {
-  const { status, runReconcile } = useLibraryReconcile();
-
-  return (
-    <button
-      type="button"
-      disabled={status.busy}
-      onClick={() => {
-        void runReconcile(props.startReconcile);
-      }}
-      className={
-        props.buttonClassName
-          ?? "px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
-      }
-    >
-      {props.label}
-    </button>
-  );
-}
-
-function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollContainerRef: React.RefObject<HTMLElement | null> }) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
-  const [payload, setPayload] = useState<MovieDetailResponse | SeriesDetailResponse | null>(null);
-  const [openSeasons, setOpenSeasons] = useState<number[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const pathParts = location.pathname.split("/");
-  const entityType = pathParts[2] || "";
-  const itemId = pathParts[3] || "";
-
-  useEffect(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const container = props.scrollContainerRef.current;
-        if (container) container.scrollTop = 0;
-        window.scrollTo(0, 0);
-        document.documentElement.scrollTop = 0;
-        document.body.scrollTop = 0;
-      });
-    });
-  }, [entityType, itemId, props.scrollContainerRef]);
-
-  useEffect(() => {
-    if (loading) return;
-    const container = props.scrollContainerRef.current;
-    if (container) container.scrollTop = 0;
-    window.scrollTo(0, 0);
-  }, [loading, props.scrollContainerRef]);
-
-  useEffect(() => {
-    let stopped = false;
-    async function load() {
-      if (!entityType || !itemId) return;
-      setLoading(true);
-      setError(null);
-      try {
-        if (entityType === "movie") {
-          const result = await getMovieDetail(Number(itemId));
-          if (result.ok && !stopped) {
-            setPayload(result);
-          } else if (!stopped && !result.ok) {
-            setError((result as { message?: string }).message || "Movie not found");
-          } else if (!stopped) {
-            setError("Movie not found");
-          }
-        } else if (entityType === "series") {
-          const result = await getSeriesDetail(Number(itemId));
-          if (result.ok && result.type === "series" && !stopped) {
-            setPayload(result);
-            setOpenSeasons([]);
-          } else if (!stopped && !result.ok) {
-            setError((result as { message?: string }).message || "Series not found");
-          } else if (!stopped) {
-            setError("Series not found");
-          }
-        } else if (!stopped) {
-          setError("Unsupported detail type");
-        }
-      } catch (err) {
-        if (!stopped) setError(err instanceof Error ? err.message : "Failed to load detail");
-      } finally {
-        if (!stopped) setLoading(false);
-      }
-    }
-    load();
-    return () => { stopped = true; };
-  }, [entityType, itemId]);
-
-  return (
-    <div className={`min-h-screen ${isLight ? "bg-[#eef3f8]" : "bg-[#0f1419]"}`}>
-      <div className={`px-6 py-4 border-b flex items-center gap-3 ${isLight ? "border-[#d7e2f0]" : "border-[#424753]/30"}`}>
-        <button type="button" onClick={() => {
-          sessionStorage.setItem("libraryScrollRestorePending", "1");
-          navigate(-1);
-        }}
-          className={`flex items-center gap-1.5 text-[14px] font-headline uppercase tracking-wider transition-colors ${isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"}`}>
-          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_back</span>
-          Library
-        </button>
-        <span className={isLight ? "text-slate-400" : "text-slate-600"}>/</span>
-        <span className={`text-[14px] font-headline uppercase tracking-wider ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-          {loading ? "Loading..." : payload?.title || "Detail"}
-        </span>
-      </div>
-      {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <div className="flex items-center gap-3 text-slate-400">
-            <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className="text-[16px] font-headline uppercase tracking-widest">Loading detail...</span>
-          </div>
-        </div>
-      ) : null}
-      {error ? (
-        <div
-          className={`mx-6 mt-4 rounded-xl border p-4 text-[16px] ${
-            isLight ? "border-red-200 bg-red-50 text-red-800" : "border-red-500/30 bg-red-600/15 text-red-300"
-          }`}
-        >
-          {error}
-        </div>
-      ) : null}
-      {!loading && !error && payload?.type === "movie" ? <MovieDetail payload={payload} brand={props.brand} themeMode={props.themeMode} /> : null}
-      {!loading && !error && payload?.type === "series" ? (
-        <SeriesDetail
-          payload={payload}
-          brand={props.brand}
-          themeMode={props.themeMode}
-          openSeasons={openSeasons}
-          onToggleSeason={(seasonId) => setOpenSeasons((prev) => (prev.includes(seasonId) ? prev.filter((id) => id !== seasonId) : [...prev, seasonId]))}
-        />
-      ) : null}
-      {!loading && !error && payload?.type === "movie" ? (
-        <div className="px-6 md:px-10 pb-6">
-          <LibraryReconcileControl
-            label="Refresh placeholder"
-            startReconcile={() => refreshMoviePlaceholder(payload.id)}
-          />
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/** Logo well for movie file-state strip — matches onboarding ARR integration icon boxes (`#1e2430` + ring). */
-const MOVIE_FILE_STATE_RADARR_LOGO_WELL: CSSProperties = {
-  backgroundColor: "#1e2430",
-  border: "2px solid rgba(250, 204, 21, 0.78)",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-};
-
-const MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL: CSSProperties = {
-  backgroundColor: "#1e2430",
-  border: "2px solid rgba(251, 191, 36, 0.78)",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-};
-
-/** Sonarr icon well — matches onboarding ``ONBOARDING_ARR_VISUAL.sonarr`` ring. */
-const SERIES_FILE_STATE_SONARR_LOGO_WELL: CSSProperties = {
-  backgroundColor: "#1e2430",
-  border: "2px solid rgba(56, 189, 248, 0.8)",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-};
-
-function seriesFileStateSonarrFileTotal(present: boolean, episodeFiles: number): string {
-  if (!present) return "-";
-  return String(Math.max(0, Math.floor(Number.isFinite(episodeFiles) ? episodeFiles : 0)));
-}
-
-function movieFileStateRadarrStatus(row: { present: boolean; has_file_known: boolean; has_file: boolean }): string {
-  if (!row.present) return "-";
-  if (!row.has_file_known) return "-";
-  return row.has_file ? "Yes" : "No";
-}
-
-/**
- * Onboarding-style integration tiles: fixed navy icon wells, **Placeholdarr** first (placeholder on disk),
- * then each Radarr instance (name under logo, whole tile links to Radarr). Outer frame follows light/dark.
- */
-function MovieFileStateSection(props: {
-  links: ArrInstanceOpenLink[] | undefined;
-  arrLink?: string | null;
-  hasFile: boolean;
-  hasPlaceholder: boolean;
-  instanceLabel?: string | null;
-  isLight: boolean;
-  brand: Brand;
-  accentHex: string;
-  radarrIconSrc: string;
-}) {
-  const instanceLabel = String(props.instanceLabel || "Radarr").trim() || "Radarr";
-  const rawMovieLinks = props.links;
-  const linkRows: {
-    label: string;
-    url: string;
-    present: boolean;
-    has_file: boolean;
-    has_file_known: boolean;
-    has_placeholder: boolean;
-  }[] = Array.isArray(rawMovieLinks) && rawMovieLinks.length
-    ? rawMovieLinks.map((l) => ({
-        label: l.label,
-        url: l.url,
-        present: l.present !== false,
-        has_file: l.has_file === true,
-        has_file_known: typeof l.has_file === "boolean",
-        has_placeholder: Boolean(l.has_placeholder),
-      }))
-    : rawMovieLinks == null
-      ? (() => {
-          const u = String(props.arrLink || "").trim();
-          if (!u) return [];
-          return [
-            {
-              label: instanceLabel,
-              url: u,
-              present: true,
-              has_file: props.hasFile,
-              has_file_known: true,
-              has_placeholder: props.hasPlaceholder,
-            },
-          ];
-        })()
-      : [];
-
-  const placeholderOnDisk =
-    Boolean(props.hasPlaceholder) || linkRows.some((r) => r.has_placeholder);
-  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
-
-  return (
-    <div
-      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
-        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
-      }`}
-    >
-      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
-        <div
-          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-          role="group"
-          aria-label="Placeholder dummy on disk"
-        >
-          <div
-            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
-            aria-hidden
-          >
-            <BrandLogo
-              brand={props.brand}
-              accentHex={props.accentHex}
-              variant="yellow"
-              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
-            />
-          </div>
-          <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{brandLabel}</div>
-          <div className="movie-file-state-tile-status text-[20px] font-bold font-headline tabular-nums leading-none">
-            {placeholderOnDisk ? "Yes" : "No"}
-          </div>
-        </div>
-        {linkRows.map((row, idx) => {
-          const status = movieFileStateRadarrStatus(row);
-          return (
-            <a
-              key={`${row.url}-${idx}`}
-              href={row.url}
-              target="_blank"
-              rel="noreferrer"
-              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-            >
-              <div
-                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-                style={MOVIE_FILE_STATE_RADARR_LOGO_WELL}
-                aria-hidden
-              >
-                <img src={props.radarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
-              </div>
-              <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{row.label}</div>
-              <div className="movie-file-state-tile-status text-[20px] font-bold font-headline tabular-nums leading-none">{status}</div>
-            </a>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Same integration strip as movie detail: **Placeholdarr** first, then each **Sonarr** instance.
- * **Placeholdarr** shows total **placeholder** episode count; each Sonarr tile shows **downloaded episode file**
- * count, or ``-`` when ``present: false``. Uses ``arr_instance_links`` whenever the API sends a non-empty array
- * (do not fall back to ``arr_link`` when the array is empty — that would hide padded multi-instance rows).
- */
-function SeriesFileStateSection(props: {
-  seasons: SeriesSeasonDetail[];
-  links: ArrInstanceOpenLink[] | undefined;
-  arrLink?: string | null;
-  instanceLabel?: string | null;
-  isLight: boolean;
-  brand: Brand;
-  accentHex: string;
-  sonarrIconSrc: string;
-}) {
-  const instanceLabel = String(props.instanceLabel || "Sonarr").trim() || "Sonarr";
-  const rawLinks = props.links;
-  const linkRows: { label: string; url: string; present: boolean; episode_files: number }[] = Array.isArray(rawLinks) && rawLinks.length
-    ? rawLinks.map((l) => ({
-        label: l.label,
-        url: l.url,
-        present: l.present !== false,
-        episode_files: typeof l.episode_files === "number" ? l.episode_files : 0,
-      }))
-    : rawLinks == null
-      ? (() => {
-          const u = String(props.arrLink || "").trim();
-          if (!u) return [];
-          const files = (props.seasons || []).reduce((a, s) => a + Number(s.episode_files || 0), 0);
-          return [{ label: instanceLabel, url: u, present: true, episode_files: files }];
-        })()
-      : [];
-
-  const aggPlaceholders = useMemo(
-    () => (props.seasons || []).reduce((a, s) => a + Number(s.episode_placeholders || 0), 0),
-    [props.seasons],
-  );
-
-  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
-  const phTotalStr = String(Math.max(0, Math.floor(aggPlaceholders)));
-
-  return (
-    <div
-      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
-        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
-      }`}
-    >
-      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
-        <div
-          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-          role="group"
-          aria-label="Episodes with placeholder files"
-        >
-          <div
-            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
-            aria-hidden
-          >
-            <BrandLogo
-              brand={props.brand}
-              accentHex={props.accentHex}
-              variant="yellow"
-              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
-            />
-          </div>
-          <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{brandLabel}</div>
-          <div className="movie-file-state-tile-status text-[26px] font-black font-headline tabular-nums leading-none">{phTotalStr}</div>
-          <div className="movie-file-state-tile-caption mt-0.5 text-[12px] font-headline font-medium uppercase tracking-wider">Episodes</div>
-        </div>
-        {linkRows.map((row, idx) => {
-          const totalStr = seriesFileStateSonarrFileTotal(row.present, row.episode_files);
-          return (
-            <a
-              key={`${row.label}-${row.url}-${idx}`}
-              href={row.url}
-              target="_blank"
-              rel="noreferrer"
-              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-            >
-              <div
-                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-                style={SERIES_FILE_STATE_SONARR_LOGO_WELL}
-                aria-hidden
-              >
-                <img src={props.sonarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
-              </div>
-              <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{row.label}</div>
-              <div className="movie-file-state-tile-status text-[26px] font-black font-headline tabular-nums leading-none">{totalStr}</div>
-              <div className="movie-file-state-tile-caption mt-0.5 text-[12px] font-headline font-medium uppercase tracking-wider">Episodes</div>
-            </a>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeMode: ThemeMode }) {
-  const payload = props.payload;
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
-  const heroArtUrl = payload.backdrop_url || payload.poster_url;
-  return (
-    <div>
-      {/* Hero banner */}
-      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] overflow-hidden"
-        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.90)" : "rgba(8,12,18,0.78)"} 18%, ${isLight ? "rgba(238,243,248,0.52)" : "rgba(8,12,18,0.45)"} 42%, ${isLight ? "rgba(238,243,248,0.10)" : "rgba(8,12,18,0.08)"}), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
-        <div
-          className="absolute inset-0"
-          style={{
-            background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
-          }}
-        />
-      </div>
-
-      <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
-          <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
-            {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
-            {payload.year ? (
-              <div className="text-[22px] font-semibold tabular-nums md:text-[26px]" style={{ color: accent.icon }}>
-                {payload.year}
-              </div>
-            ) : null}
-            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-          </div>
-        </div>
-
-        {payload.overview && <p className={`text-[20px] leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
-
-        <MovieFileStateSection
-          links={payload.arr_instance_links}
-          arrLink={payload.arr_link}
-          hasFile={payload.has_file}
-          hasPlaceholder={payload.has_placeholder}
-          instanceLabel={payload.instance_label}
-          isLight={isLight}
-          brand={props.brand}
-          accentHex={accent.hex}
-          radarrIconSrc={radarrIcon}
-        />
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {[
-            { label: "Quality", value: payload.radarr_quality },
-            { label: "Theatrical", value: payload.theater_release_date },
-            { label: "Digital", value: payload.digital_release_date },
-            { label: "Physical", value: payload.physical_release_date },
-          ].filter(m => m.value).map(m => (
-            <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-              <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className={`text-[18px] font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
-            </div>
-          ))}
-        </div>
-
-      </div>
-    </div>
-  );
-}
-
-function SeriesDetail(props: {
-  payload: SeriesDetailResponse;
-  brand: Brand;
-  themeMode: ThemeMode;
-  openSeasons: number[];
-  onToggleSeason: (seasonId: number) => void;
-}) {
-  const payload = props.payload;
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
-  const heroArtUrl = payload.backdrop_url || payload.poster_url;
-  const seasonsDesc = useMemo(
-    () => [...(payload.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
-    [payload.seasons],
-  );
-  return (
-    <div>
-      {/* Hero banner — light mode uses the same soft scrim treatment as movie detail */}
-      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] overflow-hidden"
-        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.90)" : "rgba(8,12,18,0.78)"} 18%, ${isLight ? "rgba(238,243,248,0.52)" : "rgba(8,12,18,0.45)"} 42%, ${isLight ? "rgba(238,243,248,0.10)" : "rgba(8,12,18,0.08)"}), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
-        <div
-          className="absolute inset-0"
-          style={{
-            background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
-          }}
-        />
-      </div>
-
-      <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
-          <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
-            {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
-            {payload.year ? (
-              <div className="text-[22px] font-semibold tabular-nums md:text-[26px]" style={{ color: accent.icon }}>
-                {payload.year}
-              </div>
-            ) : null}
-            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-          </div>
-        </div>
-
-        {payload.overview && <p className={`text-[20px] leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
-
-        <SeriesFileStateSection
-          seasons={payload.seasons || []}
-          links={payload.arr_instance_links}
-          arrLink={payload.arr_link}
-          instanceLabel={payload.instance_label}
-          isLight={isLight}
-          brand={props.brand}
-          accentHex={accent.hex}
-          sonarrIconSrc={sonarrIcon}
-        />
-        <div className="mb-6">
-          <LibraryReconcileControl
-            label="Refresh series placeholders"
-            startReconcile={() => refreshSeriesPlaceholder(payload.id)}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
-          {[
-            { label: "First Aired", value: payload.first_aired },
-            { label: "Network", value: payload.network },
-          ]
-            .filter((m) => m.value != null && String(m.value).length > 0)
-            .map((m) => (
-              <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-                <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-                <div className={`text-[18px] font-semibold tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
-              </div>
-            ))}
-        </div>
-
-        <div className="mb-4">
-          <h3 className="text-[14px] font-headline uppercase tracking-widest text-slate-500 mb-3">Seasons &amp; Episodes</h3>
-        </div>
-        <div className="space-y-2">
-          {seasonsDesc.map(season => {
-            const open = props.openSeasons.includes(season.id);
-            return (
-              <div key={season.id} className={`border rounded-xl overflow-hidden ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-                <button type="button" onClick={() => props.onToggleSeason(season.id)}
-                  className={`w-full flex items-center justify-between px-5 py-4 text-left transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-[#1e2430]/50"}`}>
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-slate-500 transition-transform" style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>chevron_right</span>
-                    <span className={`text-[16px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
-                      {season.season_number === 0 ? "Specials" : `Season ${season.season_number}`}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-[14px] font-headline uppercase tracking-wider">
-                    <span className="text-slate-500">{season.episode_total} episodes</span>
-                    <span className="px-2 py-0.5 rounded bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder {season.episode_placeholders}</span>
-                    <span className="px-2 py-0.5 rounded bg-green-600/20 border border-green-500/30 text-green-300">Downloaded {season.episode_files}</span>
-                  </div>
-                </button>
-                {open && (
-                  <div className={`border-t divide-y ${isLight ? "border-slate-200 divide-slate-200" : "border-[#424753]/30 divide-[#424753]/15"}`}>
-                    {season.episodes.map(ep => (
-                      <div key={ep.id} className={`flex items-start gap-4 px-5 py-3 transition-colors ${isLight ? "hover:bg-slate-50" : "hover:bg-[#1e2430]/30"}`}>
-                        <span className="flex-none w-10 text-[14px] text-slate-500 font-mono pt-0.5">E{String(ep.episode_number).padStart(2, "0")}</span>
-                        <div className="flex-1 min-w-0">
-                          <div className={`text-[16px] font-medium ${isLight ? "text-slate-900" : "text-white"}`}>{ep.title || `Episode ${ep.episode_number}`}</div>
-                          <div className="ui-field-description-compact mt-0.5">{ep.air_date || "No air date"}</div>
-                        </div>
-                        <div className="flex-none">
-                          {ep.has_placeholder
-                            ? <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder</span>
-                            : ep.has_file
-                              ? <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
-                              : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
-                          }
-                        </div>
-                        <LibraryReconcileControl
-                          label="Refresh"
-                          startReconcile={() => refreshEpisodePlaceholder(ep.id)}
-                          buttonClassName="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>
@@ -4677,8 +3334,8 @@ function CalendarPanel(props: {
                   <button
                     type="button"
                     onClick={() => { closeOverlay(); props.onOpenSpotlightDetail(props.selectedItem!); }}
-                    className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-white transition-colors"
-                    style={{ backgroundColor: accent.hex }}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} transition-colors`}
+                    style={accentFilledStyle(accent.hex)}
                   >
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                     Full Detail
@@ -4728,8 +3385,8 @@ function CalendarDayCell(props: {
       {/* Day number */}
       <div className="flex items-center justify-between mb-1">
         <span className={`text-[14px] font-bold font-headline leading-none ${
-          day.is_today ? "w-5 h-5 flex items-center justify-center rounded-full text-white text-[12px]" : "text-slate-400"
-        }`} style={day.is_today ? { backgroundColor: accent.hex } : undefined}>
+          day.is_today ? `w-5 h-5 flex items-center justify-center rounded-full ${FG_ON_ACCENT_TEXT_CLASS} text-[12px]` : "text-slate-400"
+        }`} style={day.is_today ? accentFilledStyle(accent.hex) : undefined}>
           {day.day_number}
         </span>
       </div>
@@ -4773,142 +3430,6 @@ function CalendarDayCell(props: {
         {day.item_count > visibleItems.length ? (
           <div className="px-1 text-[12px] text-slate-500">+{day.item_count - visibleItems.length} hidden by filters</div>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-function ErrorsPanel(props: { rows: ErrorRow[]; brand: Brand; themeMode: ThemeMode }) {
-  const severityColor: Record<string, string> = {
-    critical:  "bg-red-600 text-white",
-    error:     "bg-red-500 text-white",
-    io_err:    "bg-orange-600 text-white",
-    timeout:   "bg-yellow-600 text-white",
-    warning:   "bg-purple-600 text-white",
-    warn:      "bg-purple-600 text-white",
-  };
-  const accent = getBrandAccent(props.brand, props.themeMode);
-
-  return (
-    <div>
-      {/* Status bar */}
-      <div className="flex items-center gap-2 mb-1">
-        <div className="w-2 h-2 rounded-full bg-green-500" />
-        <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">System Online</span>
-      </div>
-
-      {/* Title row */}
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-[32px] font-black text-white tracking-tight font-headline">Diagnostics</h1>
-        <div className="flex bg-[#1e2430] rounded-lg border border-[#424753]/40 p-0.5">
-          <button type="button" className="px-4 py-1.5 rounded-md bg-[#252e3a] text-white text-[14px] font-headline uppercase tracking-wider">Errors</button>
-          <button type="button" className="px-4 py-1.5 text-slate-400 hover:text-slate-200 text-[14px] font-headline uppercase tracking-wider transition-colors">Logs</button>
-        </div>
-      </div>
-
-      {/* Filter bar */}
-      <div className="flex gap-3 mb-4 flex-wrap">
-        <div className="flex-1 min-w-48 relative">
-          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>filter_list</span>
-          <input className={`w-full bg-[#1e2430] border border-[#424753]/40 rounded-lg pl-9 pr-3 py-2 text-[16px] text-slate-300 placeholder-slate-500 outline-none ${getBrandFocusClass(props.brand, props.themeMode)}`}
-            placeholder="Filter by source or message keyword..." />
-        </div>
-        <div className="relative">
-          <select className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-[16px] text-slate-300 outline-none">
-            <option>All Severities</option>
-            <option>Critical</option>
-            <option>Warning</option>
-          </select>
-          <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>expand_more</span>
-        </div>
-        <div className="relative">
-          <select className="appearance-none bg-[#1e2430] border border-[#424753]/40 rounded-lg px-3 py-2 pr-8 text-[16px] text-slate-300 outline-none">
-            <option>Last 60 Minutes</option>
-            <option>Last 24 Hours</option>
-            <option>Last 7 Days</option>
-          </select>
-          <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" style={{ fontSize: 16 }}>history</span>
-        </div>
-      </div>
-
-      {/* Error table */}
-      <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden mb-4">
-        {!props.rows.length ? (
-          <div className="p-10 text-center text-slate-500 text-[16px]">No errors found.</div>
-        ) : (
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-[#424753]/30">
-                {["Timestamp", "Source", "Label", "Message", "Action"].map(h => (
-                  <th key={h} className="px-5 py-3 text-left text-[12px] font-headline uppercase tracking-widest text-slate-500 font-normal">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#424753]/15">
-              {props.rows.map((row, idx) => {
-                const labelKey = (row.label || "").toLowerCase().replace(/\s+/g, "_");
-                const badgeClass = severityColor[labelKey] || "bg-slate-600 text-white";
-                return (
-                  <tr key={`${row.source}-${idx}`} className="hover:bg-[#1e2430]/40 transition-colors">
-                    <td className="px-5 py-4 text-[16px] text-slate-400 font-mono whitespace-nowrap">{row.time || "--"}</td>
-                    <td className="px-5 py-4 text-[16px] text-slate-300">{row.source}</td>
-                    <td className="px-5 py-4">
-                      <span className={`px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase tracking-wider ${badgeClass}`}>{row.label}</span>
-                    </td>
-                    <td className="px-5 py-4 text-[16px] text-slate-400 max-w-xs truncate" title={row.error}>{row.error}</td>
-                    <td className="px-5 py-4">
-                      <button type="button" className="text-[12px] font-headline uppercase tracking-widest text-slate-400 hover:text-slate-200 transition-colors">Details</button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* Live log stream */}
-      <div className="bg-[#0a0e14] rounded-xl border border-[#424753]/40 p-4 mb-6">
-        <div className="flex justify-between items-center mb-3">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-red-500" />
-            <span className="text-[12px] font-headline uppercase tracking-widest text-slate-400">Live Log Stream</span>
-          </div>
-          <span className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Status: Monitoring</span>
-        </div>
-        <div className="font-mono text-[14px] space-y-1.5 text-slate-400 max-h-32 overflow-y-auto">
-          <div><span style={{ color: accent.icon }}>[INFO]</span> System polling active</div>
-          <div><span className="text-green-400">[SUCCESS]</span> Handshake established. Protocol V4.</div>
-          <div><span style={{ color: accent.icon }}>[INFO]</span> Checking database consistency...</div>
-          {props.rows.slice(0, 3).map((row, i) => (
-            <div key={i}><span className="text-red-400">[ERROR]</span> {row.source}: {row.error}</div>
-          ))}
-        </div>
-      </div>
-
-      {/* Footer stat cards */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
-          <div className="flex justify-between items-start">
-            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-3">Errors (24h)</div>
-            <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 18 }}>trending_up</span>
-          </div>
-          <div className="text-[32px] font-black text-white font-headline">{props.rows.length}</div>
-        </div>
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
-          <div className="flex justify-between items-start">
-            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-3">Health Score</div>
-            <span className="material-symbols-outlined" style={{ fontSize: 18, color: accent.icon }}>verified_user</span>
-          </div>
-          <div className="text-[32px] font-black text-white font-headline">{props.rows.length === 0 ? "100%" : `${Math.max(0, 100 - props.rows.length * 2).toFixed(1)}%`}</div>
-        </div>
-        <div className="bg-[#171c22] rounded-xl border border-[#424753]/40 p-5">
-          <div className="flex justify-between items-start">
-            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-400 mb-3">Log Volume</div>
-            <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 18 }}>bar_chart</span>
-          </div>
-          <div className="text-[32px] font-black text-white font-headline">{props.rows.length} entries</div>
-        </div>
       </div>
     </div>
   );
@@ -5033,6 +3554,7 @@ type ArrInstanceDraft = {
   instance_key_aliases?: string[];
   url: string;
   api_key: string;
+  api_key_saved?: boolean;
   role: "primary" | "secondary" | "additional";
   priority: number;
   is_4k: boolean;
@@ -5080,11 +3602,35 @@ function resolveWebhookDisplayOrigin(values: FieldValueMap): string {
   return typeof window !== "undefined" ? window.location.origin : "";
 }
 
-function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string) {
+/** /webhook requires ?apikey= — populated from settings payload webhook_api_key. */
+function resolveWebhookApiKey(values: FieldValueMap): string {
+  return String(values.WEBHOOK_API_KEY ?? "").trim();
+}
+
+function appendWebhookApiKey(url: string, apiKey: string): string {
+  if (!url || !apiKey) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}apikey=${encodeURIComponent(apiKey)}`;
+}
+
+function maskWebhookApiKeyInUrl(url: string): string {
+  return url.replace(/([?&]apikey=)([^&]*)/i, (_match, prefix: string, value: string) => {
+    let decoded = value;
+    try {
+      decoded = decodeURIComponent(value);
+    } catch {
+      decoded = value;
+    }
+    const bullets = "•".repeat(Math.min(40, Math.max(8, decoded.length || 8)));
+    return `${prefix}${bullets}`;
+  });
+}
+
+function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instance_key: string, apiKey: string) {
   const id = String(instance_id || "").trim().toLowerCase();
   const key = normalizeInstanceKey(String(instance_key || ""));
-  const byId = id ? `${origin}/webhook?instance_id=${encodeURIComponent(id)}` : "";
-  const byKey = `${origin}/webhook?instance=${encodeURIComponent(key)}`;
+  const byId = id ? appendWebhookApiKey(`${origin}/webhook?instance_id=${encodeURIComponent(id)}`, apiKey) : "";
+  const byKey = appendWebhookApiKey(`${origin}/webhook?instance=${encodeURIComponent(key)}`, apiKey);
   const uuidLike = id.length > 0 && arrInstanceIdEmbedsUuid(id);
   const primary = id ? byId : byKey;
   return { primary, byId: id ? byId : "", byKey, uuidLike };
@@ -5107,18 +3653,61 @@ function deriveIs4kFromRole(role: string) {
   return role !== "primary";
 }
 
-function getPlexLibraryIdNote(fieldKey: string) {
-  const shared =
-    "For best request clarity and fewer scanner/trash cleanup issues, keep placeholders in separate Plex libraries from real media. Required when Plex is enabled.";
-  const nfoAgents =
-    "In Plex, edit that library’s metadata/agents so local NFO files are used (often Local Media Assets or “prefer local metadata”—labels vary by Plex version); Placeholdarr relies on sidecar .nfo files.";
+function getPlexLibraryIdPathHint(fieldKey: string): string | null {
   if (fieldKey === "PLEX_MOVIE_SECTION_ID") {
-    return `Use the Plex library ID for the placeholder movie library that points at your derived \`movies\` path. ${shared} ${nfoAgents}`;
+    return "ID of the placeholder Movies library that points at your derived movies path.";
   }
   if (fieldKey === "PLEX_TV_SECTION_ID") {
-    return `Use the Plex library ID for the placeholder TV library that points at your derived \`tv\` path. ${shared} ${nfoAgents}`;
+    return "ID of the placeholder TV library that points at your derived tv path.";
   }
   return null;
+}
+
+/** Folder / library advice for Plex setup (no em dashes; kept short for in-card / in-modal disclosure). */
+function getPlexLibraryTips(fieldKey: string = "setup"): string[] {
+  const pathHint = getPlexLibraryIdPathHint(fieldKey);
+  const tips: string[] = [];
+  if (pathHint) {
+    tips.push(pathHint);
+  } else {
+    tips.push(
+      "Before connecting, create separate placeholder Movies and TV libraries in Plex that point at your derived movies and tv paths, then enter those library IDs in Configure.",
+    );
+  }
+  tips.push(
+    "Keep placeholders in separate Plex libraries from real media for clearer requests and fewer scanner or trash cleanup issues.",
+  );
+  tips.push(
+    "In each placeholder library's metadata agents, enable local NFO / Local Media Assets (wording varies by Plex version) so Placeholdarr sidecar .nfo files show in the UI.",
+  );
+  return tips;
+}
+
+function PlexLibraryTipsDisclosure(props: { fieldKey?: string; className?: string; defaultOpen?: boolean }) {
+  const tips = getPlexLibraryTips(props.fieldKey ?? "setup");
+  const [open, setOpen] = useState(Boolean(props.defaultOpen));
+  return (
+    <div className={props.className ?? "mb-1.5"}>
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-[12px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="material-symbols-outlined" style={{ fontSize: 16 }} aria-hidden>
+          {open ? "expand_less" : "expand_more"}
+        </span>
+        Library tips
+      </button>
+      {open ? (
+        <ul className="mt-1.5 max-w-full list-disc space-y-1.5 break-words pl-5 text-left text-[13px] leading-snug text-slate-400">
+          {tips.map((tip) => (
+            <li key={tip}>{tip}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
 }
 
 function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] {
@@ -5154,6 +3743,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
               instance_key_aliases,
               url: String(obj.url || ""),
               api_key: String(obj.api_key || obj.apikey || ""),
+              api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
               role,
               priority: Number.isFinite(Number(obj.priority)) ? Number(obj.priority) : rank,
               is_4k: deriveIs4kFromRole(role),
@@ -5204,7 +3794,15 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
       }
       return out;
     })
-    .filter((row) => row.instance_key && row.url && row.api_key);
+    .filter((row) => {
+      const keyOk = Boolean(row.instance_key && row.url);
+      if (!keyOk) return false;
+      const apiKey = String(row.api_key || "").trim();
+      if (apiKey) return true;
+      // Blank key allowed when the server already has a saved key for this slot.
+      const draft = instances.find((d) => String(d.instance_id || "").toLowerCase() === String(row.instance_id || "").toLowerCase());
+      return Boolean(draft?.api_key_saved);
+    });
   return JSON.stringify(clean);
 }
 
@@ -5246,7 +3844,10 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
   const instances = parseArrInstancesFromValues(values);
   const first = instances.find((row) => row.arr_type === arrType);
   if (!first) return false;
-  return String(first.url || "").trim().length > 0 && String(first.api_key || "").trim().length > 0;
+  return (
+    String(first.url || "").trim().length > 0 &&
+    (String(first.api_key || "").trim().length > 0 || Boolean(first.api_key_saved))
+  );
 }
 
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
@@ -5542,6 +4143,7 @@ function ArrInstancesEditor(props: {
       instance_key: instanceKey,
       url: "",
       api_key: "",
+      api_key_saved: false,
       role,
       priority: slotIndex,
       is_4k: deriveIs4kFromRole(role),
@@ -5619,11 +4221,20 @@ function ArrInstancesEditor(props: {
 
   async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: 0 | 1) {
     setTestState((prev) => ({ ...prev, [item.id]: { ok: true, message: "Testing..." } }));
-    const result = await testIntegrationConnection({
-      service: item.arr_type,
-      url: String(item.url || ""),
-      credential: String(item.api_key || ""),
-    });
+    let result: { ok: boolean; message: string };
+    try {
+      result = await testIntegrationConnection({
+        service: item.arr_type,
+        url: String(item.url || ""),
+        credential: String(item.api_key || ""),
+        instance_id: String(item.instance_id || item.id || ""),
+      });
+    } catch (err) {
+      result = {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
     setTestState((prev) => ({ ...prev, [item.id]: result }));
     if (slotIndex === 0 && primaryEnabled[arrType]) {
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: Boolean(result.ok) }));
@@ -5648,18 +4259,27 @@ function ArrInstancesEditor(props: {
   function openSlotPanel(next: { arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean }) {
     setSlotPanelTestPassed(false);
     setSlotFooterTestBusy(false);
+    const item = slotFor(next.arrType, next.slotIndex);
+    setTestState((prev) => {
+      if (!prev[item.id]) return prev;
+      const nextState = { ...prev };
+      delete nextState[item.id];
+      return nextState;
+    });
     setSlotPanel({ ...next, isNew: Boolean(next.isNew) });
   }
 
   function instanceWebhookUrls(instance_id: string, instance_key: string) {
     const origin = resolveWebhookDisplayOrigin(props.values);
-    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key);
+    return buildArrInstanceWebhookUrls(origin, instance_id, instance_key, resolveWebhookApiKey(props.values));
   }
 
   function onSlotPanelSaveClick() {
     if (!slotPanel) return;
     const snap = slotFor(slotPanel.arrType, slotPanel.slotIndex);
-    const credsOk = Boolean(String(snap.url || "").trim() && String(snap.api_key || "").trim());
+    const credsOk = Boolean(
+      String(snap.url || "").trim() && (String(snap.api_key || "").trim() || snap.api_key_saved),
+    );
     const rawSnap = slotPanelSnapshotRef.current;
     let prevNorm = "";
     if (rawSnap != null) {
@@ -5795,16 +4415,14 @@ function ArrInstancesEditor(props: {
             {opts?.showToggle ? (
               <label className={`flex items-center gap-2 select-none shrink-0 ${opts.toggleDisabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
                 <span className="text-[13px] text-slate-300">Enabled</span>
-                <div
-                  className={`w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${isEnabled ? "" : "bg-[#252e3a]"}`}
-                  style={isEnabled ? { backgroundColor: props.accent.hex } : undefined}
-                  onClick={() => {
-                    if (opts.toggleDisabled) return;
-                    opts.onToggle?.(!isEnabled);
-                  }}
-                >
-                  <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${isEnabled ? "translate-x-4" : "translate-x-0"}`} />
-                </div>
+                <ToggleSwitch
+                  checked={isEnabled}
+                  onChange={(v) => opts.onToggle?.(v)}
+                  accentHex={props.accent.hex}
+                  disabled={opts.toggleDisabled}
+                  ariaLabel="Enabled"
+                  size="sm"
+                />
               </label>
             ) : null}
           </div>
@@ -5828,7 +4446,7 @@ function ArrInstancesEditor(props: {
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
             value={item.api_key}
             onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
-            placeholder="API key"
+            placeholder={item.api_key_saved ? "Saved value retained unless overwritten" : "API key"}
             type="password"
             disabled={isDisabled}
           />
@@ -5952,10 +4570,7 @@ function ArrInstancesEditor(props: {
                 <li>Go to Settings → Webhooks → Add (+)</li>
                 <li>
                   <span className="text-slate-200">Webhook URL</span>
-                  <div className="mt-1 flex items-start gap-2 pl-0">
-                    <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                    <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${serviceLabel} webhook URL`} className="mt-0.5 shrink-0" />
-                  </div>
+                  <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${serviceLabel} webhook URL`} />
                 </li>
                 <li>Enable these events (required):</li>
               </ol>
@@ -5971,8 +4586,8 @@ function ArrInstancesEditor(props: {
               <div className="flex justify-end pt-2">
                 <button
                   type="button"
-                  className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-                  style={{ backgroundColor: props.accent.hex }}
+                  className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                  style={accentFilledStyle(props.accent.hex)}
                   onClick={() => setWebhookSetupDialog(null)}
                 >
                   Done
@@ -6166,10 +4781,12 @@ function ArrInstancesEditor(props: {
             const serviceLabel = arrType === "radarr" ? "Radarr" : "Sonarr";
             const slotCommitLabel = isNew ? `Add ${serviceLabel}` : `Save ${serviceLabel}`;
             const detailsComplete =
-              String(item.url || "").trim().length > 0 && String(item.api_key || "").trim().length > 0;
+              String(item.url || "").trim().length > 0 &&
+              (String(item.api_key || "").trim().length > 0 || Boolean(item.api_key_saved));
             const dupBlocks = Boolean(slotPanelDupPeer);
             const testDisabled = !detailsComplete || dupBlocks || slotFooterTestBusy;
-            const saveDisabled = !slotPanelTestPassed || dupBlocks || slotFooterTestBusy;
+            const retainedKeyOk = Boolean(!isNew && item.api_key_saved && detailsComplete);
+            const saveDisabled = (!(slotPanelTestPassed || retainedKeyOk)) || dupBlocks || slotFooterTestBusy;
             return (
               <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6">
                 <button
@@ -6230,7 +4847,7 @@ function ArrInstancesEditor(props: {
                         className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.api_key}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { api_key: e.target.value })}
-                        placeholder="API key"
+                        placeholder={item.api_key_saved ? "Saved value retained unless overwritten" : "API key"}
                         type="password"
                       />
                     </div>
@@ -6266,9 +4883,14 @@ function ArrInstancesEditor(props: {
                       onClick={() => {
                         void (async () => {
                           setSlotFooterTestBusy(true);
-                          const r = await runTest(item, arrType, slotIndex);
-                          setSlotPanelTestPassed(Boolean(r?.ok));
-                          setSlotFooterTestBusy(false);
+                          try {
+                            const r = await runTest(item, arrType, slotIndex);
+                            setSlotPanelTestPassed(Boolean(r?.ok));
+                          } catch {
+                            setSlotPanelTestPassed(false);
+                          } finally {
+                            setSlotFooterTestBusy(false);
+                          }
                         })();
                       }}
                       className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
@@ -6371,13 +4993,12 @@ function LibraryPathsForm(props: {
     const v = Boolean(props.values[field.key]);
     return (
       <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-        <div
-          className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${v ? "" : "bg-[#252e3a]"}`}
-          style={v ? { backgroundColor: props.accent.hex } : undefined}
-          onClick={() => props.onValueChange(field.key, !v)}
-        >
-          <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${v ? "translate-x-5" : "translate-x-0"}`} />
-        </div>
+        <ToggleSwitch
+          checked={v}
+          onChange={() => props.onValueChange(field.key, !v)}
+          accentHex={props.accent.hex}
+          ariaLabel={field.label}
+        />
         <span className={compact ? "text-[14px] text-slate-400" : "text-[16px] text-slate-300"}>{v ? "Enabled" : "Disabled"}</span>
       </label>
     );
@@ -6428,10 +5049,10 @@ function LibraryPathsForm(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
+            {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
             {field.description && !isPlexSectionIdField(field.key) ? (
               <p className="ui-field-description mt-1">{field.description}</p>
             ) : null}
-            {getPlexLibraryIdNote(field.key) ? <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
           </div>
         </div>
         {field.type === "bool" ? (
@@ -6606,7 +5227,7 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
   return (
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
-        Lookahead keeps your storage usage low by only monitoring and searching for episodes in Sonarr as you progress
+        Lookahead keeps your storage usage minimized by only monitoring and searching for episodes in Sonarr as you progress
         watching a series.
       </p>
       <p className="ui-field-description mt-3 text-slate-300 leading-relaxed">
@@ -6792,6 +5413,278 @@ function ComingSoonCountdownDescription(props: { spacing: "settings" | "wizard" 
   );
 }
 
+function SecurityAccountControls(props: {
+  authStatus: AuthStatus | null;
+  accentHex: string;
+  onLogout: () => Promise<void>;
+  webhookApiKey: string;
+  onWebhookApiKeyChange: (key: string) => void;
+  values: FieldValueMap;
+}) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const mode = props.authStatus?.mode || "builtin";
+  const username = props.authStatus?.username;
+
+  const [webhookKey, setWebhookKey] = useState(props.webhookApiKey);
+  useEffect(() => setWebhookKey(props.webhookApiKey), [props.webhookApiKey]);
+  const [webhookKeyRevealed, setWebhookKeyRevealed] = useState(false);
+  const [webhookUrlsRevealed, setWebhookUrlsRevealed] = useState(false);
+  const [webhookUrlsModalOpen, setWebhookUrlsModalOpen] = useState(false);
+  const [webhookRegenConfirming, setWebhookRegenConfirming] = useState(false);
+  const [webhookRegenBusy, setWebhookRegenBusy] = useState(false);
+  const [webhookRegenMessage, setWebhookRegenMessage] = useState<string | null>(null);
+  const [webhookRegenError, setWebhookRegenError] = useState<string | null>(null);
+
+  async function onRegenerateWebhookKey() {
+    setWebhookRegenBusy(true);
+    setWebhookRegenError(null);
+    setWebhookRegenMessage(null);
+    try {
+      const result = await regenerateWebhookApiKey();
+      setWebhookKey(result.webhook_api_key);
+      props.onWebhookApiKeyChange(result.webhook_api_key);
+      setWebhookKeyRevealed(true);
+      setWebhookUrlsRevealed(true);
+      setWebhookUrlsModalOpen(true);
+      setWebhookRegenConfirming(false);
+      setWebhookRegenMessage(
+        "Webhook key regenerated. Update the URL in every Radarr/Sonarr/Tautulli/Jellyfin/Emby webhook.",
+      );
+    } catch (err) {
+      setWebhookRegenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWebhookRegenBusy(false);
+    }
+  }
+
+  async function onChangePassword(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setMessage(null);
+    if (newPassword !== confirmPassword) {
+      setError("New passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setMessage("Password updated.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const webhookDestinations = collectWebhookDestinations(props.values);
+
+  return (
+    <div className="px-6 py-5 space-y-5">
+      <div>
+        <p className="text-[13px] font-semibold text-slate-400 mb-1">Signed in</p>
+        <p className="text-[16px] text-white font-headline">
+          {mode === "disabled"
+            ? "Authentication disabled"
+            : mode === "forward_auth"
+              ? username
+                ? `Proxy user: ${username}`
+                : "Forward-auth mode"
+              : username
+                ? `Admin: ${username}`
+                : "Admin account"}
+        </p>
+      </div>
+      {mode !== "disabled" ? (
+        <div className="space-y-3 max-w-xl">
+          <p className="text-[13px] font-semibold text-slate-400 mb-1">Webhook API key</p>
+          <p className="text-[14px] text-slate-400 leading-relaxed">
+            Required as <span className="font-mono text-slate-300">?apikey=</span> on every Radarr/Sonarr/Tautulli/Jellyfin/Emby
+            webhook URL — those services are not browser sessions and cannot log in. Setup screens include it automatically and
+            hide it until you reveal.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 break-all rounded-lg border border-[#424753]/40 bg-[#0b111b] px-3 py-2 font-mono text-[13px] text-slate-300">
+              {webhookKeyRevealed ? webhookKey || "(none yet)" : "•".repeat(Math.min(40, webhookKey.length || 40))}
+            </code>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookKeyRevealed((v) => !v)}
+            >
+              {webhookKeyRevealed ? "Hide" : "Reveal"}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!webhookRegenConfirming ? (
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                onClick={() => setWebhookRegenConfirming(true)}
+              >
+                Regenerate
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+              onClick={() => setWebhookUrlsModalOpen(true)}
+            >
+              Webhook URLs
+            </button>
+          </div>
+          {webhookRegenConfirming ? (
+            <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3">
+              <p className="text-[14px] text-amber-200 leading-relaxed">
+                This immediately invalidates the current key. Every already-configured Radarr/Sonarr/Tautulli/Jellyfin/Emby
+                webhook will start failing until you re-paste the updated URL from Webhook URLs into each of them.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={webhookRegenBusy}
+                  className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(props.accentHex)}
+                  onClick={() => void onRegenerateWebhookKey()}
+                >
+                  {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
+                </button>
+                <button
+                  type="button"
+                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                  onClick={() => setWebhookRegenConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {webhookRegenError ? <p className="text-[14px] text-red-400">{webhookRegenError}</p> : null}
+          {webhookRegenMessage ? <p className="text-[14px] text-emerald-400">{webhookRegenMessage}</p> : null}
+        </div>
+      ) : null}
+      {mode === "builtin" ? (
+        <form onSubmit={(e) => void onChangePassword(e)} className="space-y-3 max-w-md">
+          <p className="text-[14px] text-slate-400">Change password</p>
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="Current password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            required
+            disabled={busy}
+          />
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="New password (min 8 characters)"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            required
+            minLength={8}
+            disabled={busy}
+          />
+          <input
+            type="password"
+            className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
+            placeholder="Confirm new password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            required
+            minLength={8}
+            disabled={busy}
+          />
+          {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
+          {message ? <p className="text-[14px] text-emerald-400">{message}</p> : null}
+          <button
+            type="submit"
+            disabled={busy}
+            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+            style={accentFilledStyle(props.accentHex)}
+          >
+            {busy ? "Updating…" : "Update password"}
+          </button>
+        </form>
+      ) : null}
+      {mode === "builtin" ? (
+        <div>
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+            onClick={() => void props.onLogout()}
+          >
+            Log out
+          </button>
+        </div>
+      ) : null}
+      {mode === "disabled" ? (
+        <p className="text-[14px] text-amber-300">
+          Authentication is disabled. Anyone who can reach this port has full access. Prefer builtin or forward_auth unless the
+          instance is on a private network with no published port.
+        </p>
+      ) : null}
+      {webhookUrlsModalOpen ? (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
+          <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h3 className="text-[20px] font-headline font-bold text-white">Webhook URLs</h3>
+              {webhookDestinations.length ? (
+                <button
+                  type="button"
+                  className="px-3 py-1.5 rounded-lg text-[13px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80"
+                  onClick={() => setWebhookUrlsRevealed((v) => !v)}
+                >
+                  {webhookUrlsRevealed ? "Hide URLs" : "Reveal URLs"}
+                </button>
+              ) : null}
+            </div>
+            <p className="text-[16px] text-slate-300">
+              Copy into each connected service after you rotate the key. The API key stays hidden until you reveal.
+            </p>
+            {webhookDestinations.length ? (
+              <ul className="space-y-3">
+                {webhookDestinations.map((dest) => (
+                  <li key={dest.id} className="space-y-1">
+                    <div className="text-[13px] font-medium text-slate-300">{dest.label}</div>
+                    <MaskedWebhookUrlField
+                      url={dest.url}
+                      ariaLabel={`Copy ${dest.label} webhook URL`}
+                      revealed={webhookUrlsRevealed}
+                      showRevealButton={false}
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[14px] text-slate-500">
+                Connect Radarr, Sonarr, or a playback source to see copyable webhook URLs here.
+              </p>
+            )}
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accentHex)}
+                onClick={() => setWebhookUrlsModalOpen(false)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** Keep sentences in sync with `STARTUP_SYNC_MODE` description in `services/app_config.py`. */
 function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
@@ -6839,22 +5732,33 @@ function SettingsPanel(props: {
   feedbackKind: "" | "success" | "error";
   brand: Brand;
   themeMode: ThemeMode;
+  authStatus: AuthStatus | null;
+  onLogout: () => Promise<void>;
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
+  onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
-  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
-    serviceId: "tautulli" | "jellyfin" | "emby";
-    instanceParam: string;
-  } | null>(null);
+  const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
+  const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<MediaCardId | null>(null);
+  const mediaPanelOpenedViaAddRef = useRef(false);
+  const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
+  const mediaPanelCancelRef = useRef<() => void>(() => {});
   const { handleValueChange: handleSettingsValueChange, effectiveSnapshot: lookaheadEffectiveSnapshot } =
     usePlaybackLookaheadFieldControls(props.values, props.onValueChange);
   const accent = getBrandAccent(props.brand, props.themeMode);
+
+  useEffect(() => {
+    if (props.activeSection !== "Media Integrations") {
+      mediaPanelCancelRef.current();
+    }
+  }, [props.activeSection]);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
   const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
@@ -6921,16 +5825,85 @@ function SettingsPanel(props: {
     virtualActive ?? settingsApiSections.find((s) => s.name === props.activeSection) ?? settingsApiSections[0];
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
 
-  async function runTest(field: SettingsField) {
+  async function runTest(field: SettingsField): Promise<{ ok: boolean; message: string } | undefined> {
     const target = URL_TEST_TARGET[field.key];
     if (!target) return;
     setTestResults((prev) => ({ ...prev, [field.key]: { ok: true, message: "Testing..." } }));
-    const result = await props.onTestConnection({
-      service: target.service,
-      urlKey: field.key,
-      credentialKey: target.credentialKey,
-    });
-    setTestResults((prev) => ({ ...prev, [field.key]: result }));
+    try {
+      const result = await props.onTestConnection({
+        service: target.service,
+        urlKey: field.key,
+        credentialKey: target.credentialKey,
+      });
+      setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      return result;
+    } catch (err) {
+      const result = {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+      setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      return result;
+    }
+  }
+
+  function handleMediaPanelFieldChange(key: string, value: unknown) {
+    setMediaPanelTestPassed(false);
+    if (mediaPanel) {
+      const c = ONBOARDING_MEDIA_CARDS.find((x) => x.id === mediaPanel);
+      const conn = c ? mediaCardConnectionKeys(c) : null;
+      if (conn && (key === conn.urlKey || key === conn.credentialKey)) {
+        setTestResults((prev) => {
+          const next = { ...prev };
+          delete next[conn.urlKey];
+          return next;
+        });
+      }
+    }
+    props.onValueChange(key, value);
+  }
+
+  function handleMediaPanelCancel() {
+    if (!mediaPanel) {
+      setMediaPanel(null);
+      return;
+    }
+    const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
+    if (!card) {
+      setMediaPanel(null);
+      return;
+    }
+    if (mediaPanelOpenedViaAddRef.current) {
+      props.onValueChange(card.enabledKey, false);
+      for (const k of card.keys) {
+        props.onValueChange(k, "");
+      }
+    } else {
+      const snap = mediaPanelSnapshotRef.current;
+      for (const [k, v] of Object.entries(snap)) {
+        props.onValueChange(k, v);
+      }
+    }
+    setMediaPanelTestPassed(false);
+    setMediaFooterTestBusy(false);
+    setMediaPanel(null);
+  }
+  mediaPanelCancelRef.current = handleMediaPanelCancel;
+
+  function commitMediaPanel() {
+    const panelId = mediaPanel;
+    const card = panelId ? ONBOARDING_MEDIA_CARDS.find((c) => c.id === panelId) : undefined;
+    const conn = card ? mediaCardConnectionKeys(card) : null;
+    const cfg = panelId ? mediaCardPlaybackWebhookConfig(panelId) : null;
+    const prevUrl = conn ? String(mediaPanelSnapshotRef.current[conn.urlKey] ?? "").trim() : "";
+    const newUrl = conn ? String(props.values[conn.urlKey] ?? "").trim() : "";
+    const urlChanged = normalizeArrInstanceUrlForDedupe(prevUrl) !== normalizeArrInstanceUrlForDedupe(newUrl);
+    setMediaPanel(null);
+    setMediaPanelTestPassed(false);
+    setMediaFooterTestBusy(false);
+    if (cfg && panelId && urlChanged) {
+      setPlaybackWebhookDialog(panelId);
+    }
   }
 
   function renderStandardField(field: SettingsField) {
@@ -6960,6 +5933,7 @@ function SettingsPanel(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
+            {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
             {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
               (field.key === "STARTUP_SYNC_MODE" ? (
                 <StartupSyncModeDescription spacing="settings" />
@@ -6972,9 +5946,6 @@ function SettingsPanel(props: {
               ) : field.description && !isPlexSectionIdField(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
-            {getPlexLibraryIdNote(field.key) ? (
-              <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p>
-            ) : null}
             {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
               <p className="ui-field-description ui-field-description-accent3 mt-2 leading-relaxed">
                 If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
@@ -6985,15 +5956,13 @@ function SettingsPanel(props: {
 
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-            <div
-              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
-              style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => {
-                if (!interactionLocked) handleSettingsValueChange(field.key, !Boolean(value));
-              }}
-            >
-              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
-            </div>
+            <ToggleSwitch
+              checked={Boolean(value)}
+              onChange={(v) => handleSettingsValueChange(field.key, v)}
+              accentHex={accent.hex}
+              disabled={interactionLocked}
+              ariaLabel={field.label}
+            />
             <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(value) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
@@ -7033,6 +6002,10 @@ function SettingsPanel(props: {
 
         {field.key === "PLACEHOLDER_POSTER_OVERLAY_MODE" ? (
           <PosterOverlayExamples selectedMode={String(value ?? "off")} />
+        ) : null}
+
+        {field.key === "TMDB_API_KEY" ? (
+          <TmdbAttribution api posters mutedClass="text-slate-500" className="mt-4 max-w-xl" />
         ) : null}
 
         {testTarget ? (
@@ -7102,8 +6075,8 @@ function SettingsPanel(props: {
               onClick={() => props.onSave()}
               disabled={!props.hasUnsavedChanges || props.messagesSaveBlocked}
               title={props.messagesSaveBlocked ? "Fix status message template errors before saving" : undefined}
-              className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ backgroundColor: accent.hex }}
+              className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+              style={accentFilledStyle(accent.hex)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               Save Settings
@@ -7120,6 +6093,16 @@ function SettingsPanel(props: {
               <h2 className="text-[18px] font-bold text-white font-headline">{active.name}</h2>
             </div>
             <div className="divide-y divide-[#424753]/20">
+              {active.name === "Security" ? (
+                <SecurityAccountControls
+                  authStatus={props.authStatus}
+                  accentHex={accent.hex}
+                  onLogout={props.onLogout}
+                  webhookApiKey={resolveWebhookApiKey(props.values)}
+                  onWebhookApiKeyChange={(key) => props.onValueChange("WEBHOOK_API_KEY", key)}
+                  values={props.values}
+                />
+              ) : null}
               {active.name === "Paths" ? (
                 <LibraryPathsForm
                   fields={active.fields}
@@ -7140,6 +6123,7 @@ function SettingsPanel(props: {
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                         {ONBOARDING_MEDIA_CARDS.map((card) => {
                           const enabled = Boolean(props.values[card.enabledKey]);
+                          const hasConnection = mediaCardHasStoredConnection(card, props.values);
                           const availableFields = card.keys.map((key) => fieldByKey.get(key)).filter(Boolean) as SettingsField[];
                           const urlField = availableFields.find((f) => URL_TEST_TARGET[f.key]);
                           const urlTest = urlField ? testResults[urlField.key] : undefined;
@@ -7149,7 +6133,10 @@ function SettingsPanel(props: {
                           const tvLib = card.id === "plex" ? String(props.values.PLEX_TV_SECTION_ID ?? "").trim() : "";
                           const mediaDetailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
                           return (
-                            <div key={card.id} className={`group relative flex min-h-[250px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200`}>
+                            <div
+                              key={card.id}
+                              className={`group relative flex min-h-[250px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
+                            >
                               <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
                                 {card.id === "plex" ? (
                                   <div className="flex max-w-full items-center justify-center gap-2 px-2 sm:px-3">
@@ -7168,11 +6155,20 @@ function SettingsPanel(props: {
                                 )}
                               </div>
                               <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
-                              {!enabled ? (
+                              {card.id === "plex" ? (
+                                <PlexLibraryTipsDisclosure
+                                  className="mt-3 w-full"
+                                  defaultOpen={!hasConnection}
+                                />
+                              ) : null}
+                              {!hasConnection ? (
                                 <button
                                   type="button"
                                   onClick={() => {
+                                    mediaPanelOpenedViaAddRef.current = true;
+                                    mediaPanelSnapshotRef.current = snapshotMediaCardValues(card, props.values);
                                     props.onValueChange(card.enabledKey, true);
+                                    setMediaPanelTestPassed(false);
                                     setMediaPanel(card.id);
                                   }}
                                   className="mt-6 w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[16px] font-semibold tracking-wide text-white/95 transition hover:border-white/35 hover:bg-white/[0.09]"
@@ -7181,6 +6177,18 @@ function SettingsPanel(props: {
                                 </button>
                               ) : (
                                 <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
+                                  <label className="mb-3 flex items-center justify-between gap-3 select-none">
+                                    <span className="text-[14px] font-semibold text-slate-300">
+                                      {enabled ? "Enabled" : "Paused"}
+                                    </span>
+                                    <ToggleSwitch
+                                      checked={enabled}
+                                      onChange={(v) => props.onValueChange(card.enabledKey, v)}
+                                      accentHex={accent.hex}
+                                      size="sm"
+                                      ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
+                                    />
+                                  </label>
                                   {card.id === "plex" && "note" in card && card.note ? <p className="ui-field-description-compact mb-2">{card.note}</p> : null}
                                   <dl className="space-y-1.5 rounded-xl border border-white/[0.06] bg-black/20 p-3 text-[13px] leading-snug">
                                     <div className="flex min-w-0 gap-2">
@@ -7201,12 +6209,33 @@ function SettingsPanel(props: {
                                     ) : null}
                                   </dl>
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
-                                    {urlTest && !urlTest.ok ? <p className="text-red-400">{urlTest.message}</p> : !mediaDetailsComplete ? <p className="ui-field-description">Add URL and credentials in Configure.</p> : null}
+                                    {!enabled ? (
+                                      <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                                    ) : urlTest && !urlTest.ok ? (
+                                      <p className="text-red-400">{urlTest.message}</p>
+                                    ) : !mediaDetailsComplete ? (
+                                      <p className="ui-field-description">Add URL and credentials in Configure.</p>
+                                    ) : null}
                                   </div>
                                   <div className="mt-auto flex flex-col gap-2 pt-4">
                                     <button
                                       type="button"
-                                      onClick={() => setMediaPanel(card.id)}
+                                      onClick={() => {
+                                        mediaPanelOpenedViaAddRef.current = false;
+                                        mediaPanelSnapshotRef.current = snapshotMediaCardValues(card, props.values);
+                                        const uk = mediaCardConnectionKeys(card)?.urlKey;
+                                        if (uk) {
+                                          setTestResults((prev) => {
+                                            if (!prev[uk]) return prev;
+                                            const next = { ...prev };
+                                            delete next[uk];
+                                            return next;
+                                          });
+                                        }
+                                        setMediaPanelTestPassed(false);
+                                        setMediaFooterTestBusy(false);
+                                        setMediaPanel(card.id);
+                                      }}
                                       className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
                                     >
                                       Configure
@@ -7214,22 +6243,19 @@ function SettingsPanel(props: {
                                     {mediaCardPlaybackWebhookConfig(card.id) ? (
                                       <button
                                         type="button"
-                                        onClick={() => {
-                                          const cfg = mediaCardPlaybackWebhookConfig(card.id);
-                                          if (!cfg) return;
-                                          const instanceParam =
-                                            String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
-                                          setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
-                                        }}
+                                        onClick={() => setPlaybackWebhookDialog(card.id)}
                                         className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                                       >
-                                        Webhook URL
+                                        Playback setup
                                       </button>
                                     ) : null}
+                                    <p className="text-center text-[12px] text-slate-500">
+                                      Playback: {mediaCardPlaybackSourceLabel(card.id)}
+                                    </p>
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        props.onValueChange(card.enabledKey, false);
+                                        clearMediaCardConnection(card, props.onValueChange);
                                         setMediaPanel((p) => (p === card.id ? null : p));
                                       }}
                                       className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
@@ -7243,21 +6269,15 @@ function SettingsPanel(props: {
                           );
                         })}
                       </div>
-                      {mediaPanel ? (() => {
-                        const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
-                        if (!card) return null;
-                        const panelFields = card.keys.map((key) => fieldByKey.get(key)).filter(Boolean) as SettingsField[];
-                        return (
-                          <div className={`${UI_SECTION_FRAME_CLASS} overflow-hidden divide-y divide-[#424753]/20`}>
-                            <div className="px-6 py-4 border-b border-[#424753]/30">
-                              <h3 className="text-[18px] font-bold text-white font-headline">{card.title} Configuration</h3>
-                            </div>
-                            {panelFields.map((field) => renderStandardField(field))}
-                          </div>
-                        );
-                      })() : null}
                       {(() => {
-                        const remaining = active.fields.filter((field) => !ONBOARDING_MEDIA_CARDS.some((card) => [card.enabledKey, ...card.keys].includes(field.key)));
+                        const remaining = active.fields.filter(
+                          (field) =>
+                            !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
+                            !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                            !ONBOARDING_MEDIA_CARDS.some((card) =>
+                              [card.enabledKey, ...card.keys].includes(field.key),
+                            ),
+                        );
                         return remaining.length ? renderOnboardingStyleSectionRows(remaining) : null;
                       })()}
                     </div>
@@ -7434,13 +6454,13 @@ function SettingsPanel(props: {
                             </div>
                           </div>
                           <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                            <div
-                              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
-                              style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
-                              onClick={() => canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
-                            >
-                              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
-                            </div>
+                            <ToggleSwitch
+                              checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
+                              onChange={(v) => props.onValueChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
+                              accentHex={accent.hex}
+                              disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
+                              ariaLabel="Playback fallback search"
+                            />
                             <span className="text-[16px] text-slate-300">
                               {fallbackUnnecessaryBecauseAllBoth
                                 ? "Not needed"
@@ -7521,6 +6541,15 @@ function SettingsPanel(props: {
                 </>
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
+              ) : active.name === "Collection Sources" ? (
+                renderOnboardingStyleSectionRows(active.fields, {
+                  intro: (
+                    <p className="ui-field-description">
+                      Optional API credentials for Collections list sources (TMDB, Trakt, Tautulli stats). Separate from
+                      media player connections and playback webhooks.
+                    </p>
+                  ),
+                })
               ) : (
                 renderOnboardingStyleSectionRows(active.fields)
               )}
@@ -7529,12 +6558,41 @@ function SettingsPanel(props: {
         </div>
       </div>
     </div>
+    {mediaPanel && props.activeSection === "Media Integrations" ? (() => {
+      const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
+      if (!card || !Boolean(props.values[card.enabledKey])) return null;
+      const panelFields = card.keys
+        .map((key) => allSettingsFieldsByKey.get(key))
+        .filter(Boolean) as SettingsField[];
+      return (
+        <MediaServerConfigModal
+          card={card}
+          fields={panelFields}
+          values={props.values}
+          accent={accent}
+          focusClass={getBrandFocusClass(props.brand, props.themeMode)}
+          isNew={mediaPanelOpenedViaAddRef.current}
+          testResults={testResults}
+          testBusy={mediaFooterTestBusy}
+          testPassed={mediaPanelTestPassed}
+          fieldsByKey={allSettingsFieldsByKey}
+          onFieldChange={handleMediaPanelFieldChange}
+          onCancel={handleMediaPanelCancel}
+          onTest={runTest}
+          onSave={commitMediaPanel}
+          onTestBusyChange={setMediaFooterTestBusy}
+          onTestPassedChange={setMediaPanelTestPassed}
+        />
+      );
+    })() : null}
     {playbackWebhookDialog ? (
       <PlaybackWebhookSetupModal
-        dialog={playbackWebhookDialog}
+        cardId={playbackWebhookDialog}
+        values={props.values}
         onClose={() => setPlaybackWebhookDialog(null)}
         accent={accent}
         displayOrigin={resolveWebhookDisplayOrigin(props.values)}
+        webhookApiKey={resolveWebhookApiKey(props.values)}
       />
     ) : null}
     </>
@@ -8012,7 +7070,10 @@ function StatusMessagesPanel(props: {
       }
       const resp = await fetch("/api/messages/templates", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(getCsrfToken() ? { "X-CSRF-Token": getCsrfToken() as string } : {}),
+        },
         credentials: "same-origin",
         body: JSON.stringify({
           separator,
@@ -8105,7 +7166,10 @@ function StatusMessagesPanel(props: {
     try {
       const resp = await fetch("/api/messages/templates/reset", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(getCsrfToken() ? { "X-CSRF-Token": getCsrfToken() as string } : {}),
+        },
         credentials: "same-origin",
         body: JSON.stringify({ all: true }),
       });
@@ -8550,8 +7614,8 @@ function NfoBackfillApplyScopeModal(props: {
               type="button"
               onClick={() => props.onConfirm(scope)}
               disabled={props.saving}
-              className="flex items-center gap-2 px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
+              className={`flex items-center gap-2 px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50`}
+              style={accentFilledStyle(accent.hex)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               {props.saving ? "Saving…" : "Save"}
@@ -8775,8 +7839,8 @@ function StatusMessagesTokenModal(props: {
             <button
               type="button"
               onClick={commitAndClose}
-              className="px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg"
-              style={{ backgroundColor: accent.hex }}
+              className={`px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg`}
+              style={accentFilledStyle(accent.hex)}
             >
               Done
             </button>
@@ -8792,7 +7856,7 @@ const ONBOARDING_MEDIA_CARDS = [
     id: "plex" as const,
     title: "Plex",
     enabledKey: "ENABLE_PLEX",
-    note: "Tautulli is required for Plex playback webhooks and playback-aware routing. For each placeholder Plex library, enable local / NFO metadata agents so Placeholdarr sidecar NFO files show up in the UI.",
+    note: "Playback needs Tautulli so Placeholdarr hears when someone hits play.",
     keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
   },
   {
@@ -8901,16 +7965,70 @@ const JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE = `{
 }`;
 
 type PlaybackWebhookServiceId = "tautulli" | "jellyfin" | "emby";
+type MediaCardId = (typeof ONBOARDING_MEDIA_CARDS)[number]["id"];
 
-function mediaCardPlaybackWebhookConfig(cardId: (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]): {
+function mediaCardPlaybackWebhookConfig(cardId: MediaCardId): {
   serviceId: PlaybackWebhookServiceId;
   instanceKeyField: string;
   defaultKey: string;
 } | null {
-  if (cardId === "plex") return { serviceId: "tautulli", instanceKeyField: "TAUTULLI_INSTANCE_KEY", defaultKey: "tautulli" };
-  if (cardId === "jellyfin") return { serviceId: "jellyfin", instanceKeyField: "JELLYFIN_INSTANCE_KEY", defaultKey: "jellyfin" };
-  if (cardId === "emby") return { serviceId: "emby", instanceKeyField: "EMBY_INSTANCE_KEY", defaultKey: "emby" };
+  if (cardId === "plex") {
+    return {
+      serviceId: "tautulli",
+      instanceKeyField: "TAUTULLI_INSTANCE_KEY",
+      defaultKey: "tautulli",
+    };
+  }
+  if (cardId === "jellyfin") {
+    return {
+      serviceId: "jellyfin",
+      instanceKeyField: "JELLYFIN_INSTANCE_KEY",
+      defaultKey: "jellyfin",
+    };
+  }
+  if (cardId === "emby") {
+    return {
+      serviceId: "emby",
+      instanceKeyField: "EMBY_INSTANCE_KEY",
+      defaultKey: "emby",
+    };
+  }
   return null;
+}
+
+function mediaCardPlaybackSourceLabel(cardId: MediaCardId): string {
+  if (cardId === "plex") return "Tautulli";
+  if (cardId === "jellyfin") return "Jellyfin webhook";
+  return "Emby webhook";
+}
+
+function collectWebhookDestinations(values: FieldValueMap): { id: string; label: string; url: string }[] {
+  const origin = resolveWebhookDisplayOrigin(values);
+  const apiKey = resolveWebhookApiKey(values);
+  const rows: { id: string; label: string; url: string }[] = [];
+  for (const inst of parseArrInstancesFromValues(values)) {
+    if (!String(inst.url || "").trim()) continue;
+    const urls = buildArrInstanceWebhookUrls(origin, inst.instance_id, inst.instance_key, apiKey);
+    const typeLabel = inst.arr_type === "sonarr" ? "Sonarr" : "Radarr";
+    rows.push({
+      id: `arr-${inst.instance_id || inst.id}`,
+      label: `${typeLabel} · ${inst.label || inst.instance_key}`,
+      url: urls.primary,
+    });
+  }
+  for (const card of ONBOARDING_MEDIA_CARDS) {
+    const cfg = mediaCardPlaybackWebhookConfig(card.id);
+    if (!cfg || !mediaCardHasStoredConnection(card, values)) continue;
+    if (!Boolean(values[card.enabledKey])) continue;
+    const instanceParam = String(values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+    const name = cfg.serviceId === "tautulli" ? "Tautulli (Plex)" : cfg.serviceId === "jellyfin" ? "Jellyfin" : "Emby";
+    rows.push({
+      id: `pb-${cfg.serviceId}`,
+      label: name,
+      url: appendWebhookApiKey(`${origin}/webhook?instance=${encodeURIComponent(instanceParam)}`, apiKey),
+    });
+  }
+  return rows;
 }
 
 /** Plex × Tautulli on the media step card: smaller wells + `h-8` marks so the row fits the panel with side padding. */
@@ -8929,12 +8047,20 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
   const variant = props.variant ?? "inline";
   const iconSize = variant === "header" ? 16 : 14;
   const [copyHint, setCopyHint] = useState<"idle" | "ok" | "err">("idle");
+  const resetTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current != null) window.clearTimeout(resetTimerRef.current);
+    };
+  }, []);
   const title =
     copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed — select URL text or use HTTPS" : "Copy to clipboard";
+  const icon = copyHint === "ok" ? "check" : copyHint === "err" ? "error" : "content_copy";
+  const ariaLabel = copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed" : props.ariaLabel;
   return (
     <button
       type="button"
-      aria-label={props.ariaLabel}
+      aria-label={ariaLabel}
       title={title}
       onClick={(e) => {
         e.preventDefault();
@@ -8942,117 +8068,171 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
         void (async () => {
           const ok = await copyTextToClipboard(props.text);
           setCopyHint(ok ? "ok" : "err");
-          window.setTimeout(() => setCopyHint("idle"), 2200);
+          if (resetTimerRef.current != null) window.clearTimeout(resetTimerRef.current);
+          resetTimerRef.current = window.setTimeout(() => setCopyHint("idle"), 2000);
         })();
       }}
-      className={`inline-flex shrink-0 items-center justify-center rounded border border-[#424753]/50 bg-[#252e3a]/80 text-slate-300 transition hover:border-[#424753]/80 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${
-        variant === "header" ? "h-7 w-7" : "h-6 w-6"
-      } ${props.className ?? ""}`}
+      className={`inline-flex shrink-0 items-center justify-center rounded border bg-[#252e3a]/80 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${
+        copyHint === "ok"
+          ? "border-emerald-500/60 text-emerald-400"
+          : copyHint === "err"
+            ? "border-rose-500/60 text-rose-400"
+            : "border-[#424753]/50 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+      } ${variant === "header" ? "h-7 w-7" : "h-6 w-6"} ${props.className ?? ""}`}
     >
       <span className="material-symbols-outlined" style={{ fontSize: iconSize }} aria-hidden>
-        content_copy
+        {icon}
       </span>
     </button>
   );
 }
 
+function MaskedWebhookUrlField(props: {
+  url: string;
+  ariaLabel: string;
+  revealed?: boolean;
+  onRevealedChange?: (next: boolean) => void;
+  showRevealButton?: boolean;
+}) {
+  const [localRevealed, setLocalRevealed] = useState(false);
+  const controlled = props.revealed !== undefined;
+  const revealed = controlled ? Boolean(props.revealed) : localRevealed;
+  const hasKey = /[?&]apikey=/i.test(props.url);
+  const display = hasKey && !revealed ? maskWebhookApiKeyInUrl(props.url) : props.url;
+  const showReveal = (props.showRevealButton ?? true) && hasKey;
+
+  function setRevealed(next: boolean) {
+    props.onRevealedChange?.(next);
+    if (!controlled) setLocalRevealed(next);
+  }
+
+  return (
+    <div className="mt-1 flex items-start gap-2 pl-0">
+      <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">
+        {display}
+      </span>
+      <WebhookStepCopyButton text={props.url} ariaLabel={props.ariaLabel} className="mt-0.5 shrink-0" />
+      {showReveal ? (
+        <button
+          type="button"
+          className="mt-0.5 inline-flex h-6 shrink-0 items-center justify-center rounded border border-[#424753]/50 bg-[#252e3a]/80 px-2 text-[11px] font-headline uppercase tracking-wider text-slate-300 transition hover:border-[#424753]/80 hover:text-white"
+          onClick={() => setRevealed(!revealed)}
+        >
+          {revealed ? "Hide" : "Show"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function PlaybackWebhookSetupModal(props: {
-  dialog: { serviceId: PlaybackWebhookServiceId; instanceParam: string };
+  cardId: MediaCardId;
+  values: FieldValueMap;
   onClose: () => void;
   accent: { hex: string };
   displayOrigin: string;
+  webhookApiKey: string;
 }) {
-  const pb = props.dialog;
-  const webhookUrl = `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`;
-  const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
-  const name = svcMeta?.name ?? pb.serviceId;
+  const cfg = mediaCardPlaybackWebhookConfig(props.cardId);
+  const cardTitle = ONBOARDING_MEDIA_CARDS.find((c) => c.id === props.cardId)?.title ?? props.cardId;
+  const [apiKey, setApiKey] = useState(() => String(props.webhookApiKey || "").trim());
+
+  useEffect(() => {
+    const fromProps = String(props.webhookApiKey || "").trim();
+    if (fromProps) {
+      setApiKey(fromProps);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await getWebhookApiKey();
+        const key = String(res.webhook_api_key || "").trim();
+        if (!cancelled && key) setApiKey(key);
+      } catch {
+        /* leave URL without apikey; Security page can show the real key */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.webhookApiKey]);
+
+  if (!cfg) return null;
+
+  const nativeServiceId = cfg.serviceId;
+  const nativeInstanceParam = String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+  const nativeWebhookUrl = appendWebhookApiKey(
+    `${props.displayOrigin}/webhook?instance=${encodeURIComponent(nativeInstanceParam)}`,
+    apiKey,
+  );
+  const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === nativeServiceId);
+  const nativeName = svcMeta?.name ?? nativeServiceId;
+
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
       <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-        <h3 className="text-[20px] font-headline font-bold text-white">Configure webhooks in {name}</h3>
+        <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
         <p className="text-[16px] text-slate-300">
-          {pb.serviceId === "tautulli"
-            ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
-            : `${name} can send playback events to Placeholdarr using this URL.`}
+          Point {mediaCardPlaybackSourceLabel(props.cardId)} at Placeholdarr so placeholder search starts when someone hits play.
         </p>
-        <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
-          {pb.serviceId === "tautulli" ? (
-            <>
-              <li>Open Tautulli and go to Settings → Notification Agents.</li>
-              <li>Create a new Webhook notification agent.</li>
-              <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
-              <li>
-                <span className="text-slate-200">Webhook URL</span>
-                <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                </div>
-              </li>
-              <li>Paste the JSON payload template below, then save.</li>
-            </>
-          ) : pb.serviceId === "jellyfin" ? (
-            <>
-              <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
-              <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
-              <li>Set Events to include Playback Start and Content Type to application/json.</li>
-              <li>
-                <span className="text-slate-200">Webhook URL</span>
-                <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                </div>
-              </li>
-              <li>Paste the JSON payload template below, then save the webhook.</li>
-            </>
-          ) : (
-            <>
-              <li>In Emby, go to Settings → Notifications.</li>
-              <li>Add or edit a webhook notification.</li>
-              <li>
-                <span className="text-slate-200">Webhook URL</span>
-                <div className="mt-1 flex items-start gap-2 pl-0">
-                  <span className="min-w-0 flex-1 break-all font-mono text-[14px] leading-snug text-slate-300">{webhookUrl}</span>
-                  <WebhookStepCopyButton text={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} className="mt-0.5 shrink-0" />
-                </div>
-              </li>
-              <li>Enable the playback events you want Placeholdarr to process, then save.</li>
-            </>
-          )}
-        </ol>
-        {svcMeta && svcMeta.triggers.length ? (
-          <div>
-            <div className="text-[14px] font-semibold text-slate-400 mb-1.5">Suggested events</div>
-            <div className="ml-1 space-y-1">
-              {svcMeta.triggers.map((t) => (
-                <div key={t.event} className="text-[14px] text-slate-300">
-                  {t.displayName}
-                </div>
-              ))}
-            </div>
-            <p className="mt-2 text-[13px] text-slate-500">Playback webhooks are optional; enable the events you care about.</p>
-          </div>
-        ) : null}
-        {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
+
+        {nativeServiceId === "tautulli" ? (
+          <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+            <li>Open Tautulli and go to Settings → Notification Agents.</li>
+            <li>Create a new Webhook notification agent.</li>
+            <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+            <li>
+              <span className="text-slate-200">Webhook URL</span>
+              <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
+            </li>
+            <li>Paste the JSON payload template below, then save.</li>
+          </ol>
+        ) : nativeServiceId === "jellyfin" ? (
+          <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+            <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
+            <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
+            <li>Set Events to include Playback Start and Content Type to application/json.</li>
+            <li>
+              <span className="text-slate-200">Webhook URL</span>
+              <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
+            </li>
+            <li>Paste the JSON payload template below, then save the webhook.</li>
+          </ol>
+        ) : (
+          <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+            <li>In Emby, go to Settings → Notifications.</li>
+            <li>Add or edit a webhook notification.</li>
+            <li>
+              <span className="text-slate-200">Webhook URL</span>
+              <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
+            </li>
+            <li>Enable Playback Start, then save.</li>
+          </ol>
+        )}
+
+        {nativeServiceId === "tautulli" || nativeServiceId === "jellyfin" ? (
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <div className="text-[12px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
               <WebhookStepCopyButton
-                text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
-                ariaLabel={`Copy ${name} JSON payload template`}
+                text={nativeServiceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
+                ariaLabel={`Copy ${nativeName} JSON payload template`}
                 variant="header"
               />
             </div>
             <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[13px] font-mono leading-relaxed text-slate-300">
-              <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
+              <code>{nativeServiceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
             </pre>
           </div>
         ) : null}
+
         <div className="flex justify-end pt-2">
           <button
             type="button"
-            className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-            style={{ backgroundColor: props.accent.hex }}
-            onClick={props.onClose}
+            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+            style={accentFilledStyle(props.accent.hex)}
+            onClick={() => props.onClose()}
           >
             Done
           </button>
@@ -9074,6 +8254,216 @@ function mediaCardConnectionDetailsComplete(
   if (cred.length > 0) return true;
   const credField = fieldsByKey?.get(keys.credentialKey);
   return Boolean(credField?.secret && credField.has_saved_value);
+}
+
+/** True when the card should show the connected shell (toggle / configure), not the empty Connect CTA. */
+function mediaCardHasStoredConnection(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  values: FieldValueMap,
+): boolean {
+  if (Boolean(values[card.enabledKey])) return true;
+  for (const key of card.keys) {
+    if (String(values[key] ?? "").trim().length > 0) return true;
+  }
+  return false;
+}
+
+function clearMediaCardConnection(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  onValueChange: (key: string, value: unknown) => void,
+) {
+  onValueChange(card.enabledKey, false);
+  for (const key of card.keys) {
+    onValueChange(key, "");
+  }
+}
+
+function snapshotMediaCardValues(
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number],
+  values: FieldValueMap,
+): Record<string, unknown> {
+  const snap: Record<string, unknown> = {};
+  for (const k of card.keys) snap[k] = values[k];
+  return snap;
+}
+
+function MediaServerConfigModal(props: {
+  card: (typeof ONBOARDING_MEDIA_CARDS)[number];
+  fields: SettingsField[];
+  values: FieldValueMap;
+  accent: BrandAccent;
+  focusClass: string;
+  isNew: boolean;
+  testResults: Record<string, { ok: boolean; message: string }>;
+  testBusy: boolean;
+  testPassed: boolean;
+  fieldsByKey?: Map<string, SettingsField>;
+  onFieldChange: (key: string, value: unknown) => void;
+  onCancel: () => void;
+  onTest: (field: SettingsField) => Promise<{ ok: boolean; message: string } | null | undefined>;
+  onSave: () => void;
+  onTestBusyChange: (busy: boolean) => void;
+  onTestPassedChange: (passed: boolean) => void;
+  overlayClassName?: string;
+  overlayStyle?: CSSProperties;
+}) {
+  const { card } = props;
+  const availableFields = props.fields.filter(
+    (field) => !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) && !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key),
+  );
+  const urlFieldForFooter = availableFields.find((f) => URL_TEST_TARGET[f.key]);
+  const detailsComplete = mediaCardConnectionDetailsComplete(card, props.values, props.fieldsByKey);
+  const commitLabel = props.isNew ? `Add ${card.title}` : `Save ${card.title}`;
+  const retainedOk = !props.isNew && detailsComplete;
+  const urlConnTest = urlFieldForFooter ? props.testResults[urlFieldForFooter.key] : undefined;
+  const urlTestFailed =
+    Boolean(urlConnTest && !props.testBusy && urlConnTest.message !== "Testing..." && !urlConnTest.ok);
+  const urlTestSucceeded =
+    Boolean(urlConnTest && !props.testBusy && urlConnTest.message !== "Testing..." && urlConnTest.ok);
+  return (
+    <div
+      className={`fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6 ${props.overlayClassName ?? ""}`}
+      style={props.overlayStyle}
+    >
+      <button
+        type="button"
+        aria-label="Close panel"
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        onClick={props.onCancel}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${card.title} server`}
+        className="relative z-10 my-auto flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/50 bg-[#171c22] shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
+          <div>
+            <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Media server</div>
+            <h2 className="text-[20px] font-headline font-bold text-white mt-0.5" style={{ color: props.accent.text }}>
+              {card.title}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={props.onCancel}
+            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-[#252e3a]/80"
+            aria-label="Close"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 22 }}>close</span>
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+          {availableFields.map((field) => {
+            const value = props.values[field.key];
+            const plexSection = isPlexSectionIdField(field.key);
+            return (
+              <div key={field.key}>
+                <label className="mb-1 block text-[14px] font-semibold text-slate-300">{field.label}</label>
+                {plexSection ? <PlexLibraryTipsDisclosure fieldKey={field.key} /> : null}
+                {!plexSection && field.description ? (
+                  <p className="mb-1.5 text-[13px] text-slate-500">{field.description}</p>
+                ) : null}
+                {field.type === "bool" ? (
+                  <label className="flex w-fit cursor-pointer select-none items-center gap-3">
+                    <ToggleSwitch
+                      checked={Boolean(value)}
+                      onChange={(v) => props.onFieldChange(field.key, v)}
+                      accentHex={props.accent.hex}
+                      ariaLabel={field.label}
+                    />
+                    <span className="text-[14px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
+                  </label>
+                ) : (
+                  <input
+                    className={`w-full rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${props.focusClass}`}
+                    type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+                    value={String(value ?? "")}
+                    placeholder={
+                      field.secret && field.has_saved_value
+                        ? "Saved value retained unless overwritten"
+                        : `Enter ${field.label.toLowerCase()}...`
+                    }
+                    onChange={(e) => props.onFieldChange(field.key, e.target.value)}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
+          <div className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-[14px] text-red-400" aria-live="polite">
+            {urlTestFailed && urlConnTest ? (
+              <>
+                <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>error</span>
+                <span className="line-clamp-2 leading-snug">{urlConnTest.message}</span>
+              </>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-stretch justify-between gap-2 px-4 pb-4 pt-1">
+            <button
+              type="button"
+              onClick={props.onCancel}
+              className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={!detailsComplete || !urlFieldForFooter || props.testBusy}
+              title={urlTestSucceeded && urlConnTest ? urlConnTest.message : "Run connection test"}
+              onClick={() => {
+                if (!urlFieldForFooter) return;
+                void (async () => {
+                  props.onTestBusyChange(true);
+                  try {
+                    const result = await props.onTest(urlFieldForFooter);
+                    props.onTestPassedChange(Boolean(result?.ok));
+                  } catch {
+                    props.onTestPassedChange(false);
+                  } finally {
+                    props.onTestBusyChange(false);
+                  }
+                })();
+              }}
+              className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
+                urlTestSucceeded
+                  ? "border-emerald-500/70 bg-emerald-600/15 text-emerald-300 hover:border-emerald-400/90 hover:bg-emerald-600/25"
+                  : "border-amber-400/80 bg-amber-500 text-slate-900 hover:bg-amber-400 disabled:hover:bg-amber-500"
+              }`}
+            >
+              {props.testBusy ? (
+                <>
+                  <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 18 }}>
+                    progress_activity
+                  </span>
+                  <span>Testing…</span>
+                </>
+              ) : urlTestSucceeded ? (
+                <span className="material-symbols-outlined shrink-0" style={{ fontSize: 22 }}>
+                  check_circle
+                </span>
+              ) : (
+                <>
+                  <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>wifi</span>
+                  <span>Test</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              disabled={!(props.testPassed || retainedOk) || props.testBusy}
+              onClick={props.onSave}
+              aria-label={commitLabel}
+              className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {commitLabel}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -9326,10 +8716,7 @@ function OnboardingWizard(props: {
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
   const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
-  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
-    serviceId: PlaybackWebhookServiceId;
-    instanceParam: string;
-  } | null>(null);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
@@ -9379,13 +8766,22 @@ function OnboardingWizard(props: {
     const target = URL_TEST_TARGET[field.key];
     if (!target) return null;
     setTestResults((prev) => ({ ...prev, [field.key]: { ok: true, message: "Testing..." } }));
-    const result = await props.onTestConnection({
-      service: target.service,
-      urlKey: field.key,
-      credentialKey: target.credentialKey,
-    });
-    setTestResults((prev) => ({ ...prev, [field.key]: result }));
-    return result;
+    try {
+      const result = await props.onTestConnection({
+        service: target.service,
+        urlKey: field.key,
+        credentialKey: target.credentialKey,
+      });
+      setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      return result;
+    } catch (err) {
+      const result = {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+      setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      return result;
+    }
   }
 
   function handleMediaPanelFieldChange(key: string, value: unknown) {
@@ -9500,15 +8896,13 @@ function OnboardingWizard(props: {
         ) : null}
         {field.type === "bool" ? (
           <label className={`flex items-center gap-3 select-none w-fit ${interactionLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-            <div
-              className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(displayValue) ? "" : "bg-[#252e3a]"} ${interactionLocked ? "opacity-70" : ""}`}
-              style={Boolean(displayValue) ? { backgroundColor: accent.hex } : undefined}
-              onClick={() => {
-                if (!interactionLocked) handleWizardValueChange(field.key, !Boolean(displayValue));
-              }}
-            >
-              <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(displayValue) ? "translate-x-5" : "translate-x-0"}`} />
-            </div>
+            <ToggleSwitch
+              checked={Boolean(displayValue)}
+              onChange={(v) => handleWizardValueChange(field.key, v)}
+              accentHex={accent.hex}
+              disabled={interactionLocked}
+              ariaLabel={field.label}
+            />
             <span className={`text-[16px] ${interactionLocked ? "text-slate-500" : "text-slate-300"}`}>{Boolean(displayValue) ? "Enabled" : "Disabled"}</span>
           </label>
         ) : field.type === "choice" && field.options?.length ? (
@@ -9595,8 +8989,8 @@ function OnboardingWizard(props: {
               return (
                 <div key={s.key} className="flex items-center flex-1 last:flex-none">
                   <div className={`flex flex-col items-center gap-1 min-w-max ${active ? "" : done ? "text-green-400" : "text-slate-600"}`} style={active ? { color: accent.icon } : undefined}>
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? "text-white" : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
-                      style={active ? { backgroundColor: accent.hex, borderColor: accent.hex } : undefined}>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? FG_ON_ACCENT_TEXT_CLASS : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
+                      style={active ? { ...accentFilledStyle(accent.hex), borderColor: accent.hex } : undefined}>
                       {done ? <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check</span> : i + 1}
                     </div>
                     <span className="text-[12px] font-headline uppercase tracking-wider">{s.name}</span>
@@ -9629,6 +9023,7 @@ function OnboardingWizard(props: {
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   {ONBOARDING_MEDIA_CARDS.map((card) => {
                     const enabled = Boolean(props.values[card.enabledKey]);
+                    const hasConnection = mediaCardHasStoredConnection(card, props.values);
                     const availableFields = card.keys
                       .map((key) => fieldByKey.get(key))
                       .filter(Boolean) as SettingsField[];
@@ -9643,7 +9038,7 @@ function OnboardingWizard(props: {
                     return (
                       <div
                         key={card.id}
-                        className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200`}
+                        className={`group relative flex min-h-[260px] flex-col ${UI_INTEGRATION_CARD_SURFACE_CLASS} p-6 duration-200 ${hasConnection && !enabled ? "opacity-75" : ""}`}
                       >
                         <div className="flex h-[5.25rem] w-full shrink-0 items-center justify-center" aria-hidden>
                           {card.id === "plex" ? (
@@ -9674,18 +9069,20 @@ function OnboardingWizard(props: {
                           )}
                         </div>
                         <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                        {card.id === "plex" ? (
+                          <PlexLibraryTipsDisclosure
+                            className="mt-3 w-full"
+                            defaultOpen={!hasConnection}
+                          />
+                        ) : null}
 
-                        {!enabled ? (
+                        {!hasConnection ? (
                           <button
                             type="button"
                             aria-label={`Connect ${card.title}`}
                             onClick={() => {
                               mediaPanelOpenedViaAddRef.current = true;
-                              const snap: Record<string, unknown> = {};
-                              for (const k of card.keys) {
-                                snap[k] = props.values[k];
-                              }
-                              mediaPanelSnapshotRef.current = snap;
+                              mediaPanelSnapshotRef.current = snapshotMediaCardValues(card, props.values);
                               props.onChange(card.enabledKey, true);
                               setMediaPanelTestPassed(false);
                               setMediaPanel(card.id);
@@ -9696,6 +9093,18 @@ function OnboardingWizard(props: {
                           </button>
                         ) : (
                           <div className="mt-5 flex min-h-0 flex-1 flex-col text-left">
+                            <label className="mb-3 flex items-center justify-between gap-3 select-none">
+                              <span className="text-[14px] font-semibold text-slate-300">
+                                {enabled ? "Enabled" : "Paused"}
+                              </span>
+                              <ToggleSwitch
+                                checked={enabled}
+                                onChange={(v) => props.onChange(card.enabledKey, v)}
+                                accentHex={accent.hex}
+                                size="sm"
+                                ariaLabel={`${card.title} ${enabled ? "enabled" : "paused"}`}
+                              />
+                            </label>
                             {card.id === "plex" && "note" in card && card.note ? (
                               <p className="ui-field-description-compact mb-2">{card.note}</p>
                             ) : null}
@@ -9724,7 +9133,9 @@ function OnboardingWizard(props: {
                               ) : null}
                             </dl>
                             <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
-                              {urlTest && !urlTest.ok ? (
+                              {!enabled ? (
+                                <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                              ) : urlTest && !urlTest.ok ? (
                                 <p className="text-red-400">{urlTest.message}</p>
                               ) : !mediaDetailsComplete ? (
                                 <p className="ui-field-description">Add URL and credentials in Configure.</p>
@@ -9735,14 +9146,18 @@ function OnboardingWizard(props: {
                                 type="button"
                                 onClick={() => {
                                   mediaPanelOpenedViaAddRef.current = false;
-                                  const snap: Record<string, unknown> = {};
-                                  for (const k of card.keys) {
-                                    snap[k] = props.values[k];
-                                  }
-                                  mediaPanelSnapshotRef.current = snap;
+                                  mediaPanelSnapshotRef.current = snapshotMediaCardValues(card, props.values);
                                   const uk = mediaCardConnectionKeys(card)?.urlKey;
-                                  const ready = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
-                                  setMediaPanelTestPassed(Boolean(ready && uk && testResults[uk]?.ok));
+                                  if (uk) {
+                                    setTestResults((prev) => {
+                                      if (!prev[uk]) return prev;
+                                      const next = { ...prev };
+                                      delete next[uk];
+                                      return next;
+                                    });
+                                  }
+                                  setMediaPanelTestPassed(false);
+                                  setMediaFooterTestBusy(false);
                                   setMediaPanel(card.id);
                                 }}
                                 className="w-full rounded-xl border border-white/20 bg-white/[0.04] py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-100 transition hover:border-white/30 hover:bg-white/[0.08]"
@@ -9752,22 +9167,19 @@ function OnboardingWizard(props: {
                               {mediaCardPlaybackWebhookConfig(card.id) ? (
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    const cfg = mediaCardPlaybackWebhookConfig(card.id);
-                                    if (!cfg) return;
-                                    const instanceParam =
-                                      String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
-                                    setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
-                                  }}
+                                  onClick={() => setPlaybackWebhookDialog(card.id)}
                                   className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                                 >
-                                  Webhook URL
+                                  Playback setup
                                 </button>
                               ) : null}
+                              <p className="text-center text-[12px] text-slate-500">
+                                Playback: {mediaCardPlaybackSourceLabel(card.id)}
+                              </p>
                               <button
                                 type="button"
                                 onClick={() => {
-                                  props.onChange(card.enabledKey, false);
+                                  clearMediaCardConnection(card, props.onChange);
                                   setMediaPanel((p) => (p === card.id ? null : p));
                                 }}
                                 className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
@@ -9920,13 +9332,13 @@ function OnboardingWizard(props: {
                       </div>
                     </div>
                     <label className="flex cursor-pointer select-none items-center justify-center gap-3">
-                      <div
-                        className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth ? (Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "" : "bg-[#252e3a]") : "bg-[#1a1f27] opacity-60 cursor-not-allowed"}`}
-                        style={canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? { backgroundColor: accent.hex } : undefined}
-                        onClick={() => canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", !Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH))}
-                      >
-                        <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${canUseAnySecondaryBehavior && !fallbackUnnecessaryBecauseAllBoth && Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH) ? "translate-x-5" : "translate-x-0"}`} />
-                      </div>
+                      <ToggleSwitch
+                        checked={Boolean(props.values.ENABLE_PLAYBACK_FALLBACK_SEARCH)}
+                        onChange={(v) => props.onChange("ENABLE_PLAYBACK_FALLBACK_SEARCH", v)}
+                        accentHex={accent.hex}
+                        disabled={!canUseAnySecondaryBehavior || fallbackUnnecessaryBecauseAllBoth}
+                        ariaLabel="Playback fallback search"
+                      />
                       <span className="text-[16px] text-slate-300">
                         {fallbackUnnecessaryBecauseAllBoth
                           ? "Not needed"
@@ -10008,11 +9420,6 @@ function OnboardingWizard(props: {
                         <LookaheadSectionIntro variant="onboarding" embedded />
                         <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
                       </div>
-                    ) : sectionName === "Status Updates" ? (
-                      <div className={surfaceClass}>
-                        <StatusUpdatesSectionIntro variant="onboarding" embedded />
-                        <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
-                      </div>
                     ) : (
                       <div className={surfaceClass}>{fieldsBlock}</div>
                     )}
@@ -10079,8 +9486,8 @@ function OnboardingWizard(props: {
                     setStepError(err instanceof Error ? err.message : String(err));
                   }
                 }}
-                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ backgroundColor: accent.hex }}
+                className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed`}
+                style={accentFilledStyle(accent.hex)}
                 >
                 {previewMode
                   ? "Next"
@@ -10121,197 +9528,65 @@ function OnboardingWizard(props: {
       </div>
       {step.key === "media" && mediaPanel ? (() => {
         const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaPanel);
-        if (!card) return null;
+        if (!card || !Boolean(props.values[card.enabledKey])) return null;
         const fieldByKey = new Map(fields.map((f) => [f.key, f]));
-        const focus = getBrandFocusClass(props.brand, wizardUiTheme);
-        const availableFields = card.keys
-          .map((key) => fieldByKey.get(key))
-          .filter(Boolean) as SettingsField[];
-        if (!Boolean(props.values[card.enabledKey])) {
-          return null;
-        }
-        const urlFieldForFooter = availableFields.find((f) => URL_TEST_TARGET[f.key]);
-        const detailsComplete = mediaCardConnectionDetailsComplete(card, props.values, allSettingsFieldsByKey);
-        const addMediaLabel = `Add ${card.title}`;
-        const urlConnTest = urlFieldForFooter ? testResults[urlFieldForFooter.key] : undefined;
-        const urlTestFailed =
-          Boolean(urlConnTest && !mediaFooterTestBusy && urlConnTest.message !== "Testing..." && !urlConnTest.ok);
-        const urlTestSucceeded =
-          Boolean(urlConnTest && !mediaFooterTestBusy && urlConnTest.message !== "Testing..." && urlConnTest.ok);
+        const panelFields = card.keys.map((key) => fieldByKey.get(key)).filter(Boolean) as SettingsField[];
         return (
-          <div
-            className={`fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto p-4 sm:p-6 brand-theme-scope theme-dark layout-${props.brand}-dark`}
-            style={semanticTokensToCssVars(wizardSemantic) as CSSProperties}
-          >
-            <button
-              type="button"
-              aria-label="Close panel"
-              className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-              onClick={handleMediaPanelCancel}
-            />
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label={`${card.title} server`}
-              className="relative z-10 my-auto flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/50 bg-[#171c22] shadow-2xl"
-            >
-              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[#424753]/40 shrink-0">
-                <div>
-                  <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Media server</div>
-                  <h2 className="text-[20px] font-headline font-bold text-white mt-0.5" style={{ color: accent.text }}>
-                    {card.title}
-                  </h2>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleMediaPanelCancel}
-                  className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-[#252e3a]/80"
-                  aria-label="Close"
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: 22 }}>close</span>
-                </button>
-              </div>
-              <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
-                {availableFields.map((field) => {
-                  if (HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key)) return null;
-                  const value = props.values[field.key];
-                  return (
-                    <div key={field.key}>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">{field.label}</label>
-                      {getPlexLibraryIdNote(field.key) ? <p className="text-[13px] text-slate-500 mb-1.5">{getPlexLibraryIdNote(field.key)}</p> : null}
-                      {field.type === "bool" ? (
-                        <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
-                          <div
-                            className={`w-10 h-5 rounded-full transition-colors flex items-center px-0.5 ${Boolean(value) ? "" : "bg-[#252e3a]"}`}
-                            style={Boolean(value) ? { backgroundColor: accent.hex } : undefined}
-                            onClick={() => handleMediaPanelFieldChange(field.key, !Boolean(value))}
-                          >
-                            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${Boolean(value) ? "translate-x-5" : "translate-x-0"}`} />
-                          </div>
-                          <span className="text-[14px] text-slate-300">{Boolean(value) ? "Enabled" : "Disabled"}</span>
-                        </label>
-                      ) : (
-                        <div className="flex gap-2">
-                          <input
-                            className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
-                            type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
-                            value={String(value ?? "")}
-                            placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
-                            onChange={(e) => handleMediaPanelFieldChange(field.key, e.target.value)}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="shrink-0 border-t border-[#424753]/40 bg-[#141a24]">
-                <div
-                  className="flex min-h-[2.75rem] items-center gap-2 px-4 pt-3 text-[14px] text-red-400"
-                  aria-live="polite"
-                >
-                  {urlTestFailed && urlConnTest ? (
-                    <>
-                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>error</span>
-                      <span className="line-clamp-2 leading-snug">{urlConnTest.message}</span>
-                    </>
-                  ) : null}
-                </div>
-                <div className="flex flex-wrap items-stretch justify-between gap-2 px-4 pb-4 pt-1">
-                <button
-                  type="button"
-                  onClick={handleMediaPanelCancel}
-                  className="min-w-[5.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/55 text-slate-300 hover:bg-[#252e3a]/80 hover:border-[#424753]/80 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={!detailsComplete || !urlFieldForFooter || mediaFooterTestBusy}
-                  title={
-                    urlTestSucceeded && urlConnTest
-                      ? urlConnTest.message
-                      : "Run connection test"
-                  }
-                  onClick={() => {
-                    if (!urlFieldForFooter) return;
-                    void (async () => {
-                      setMediaFooterTestBusy(true);
-                      const result = await runTest(urlFieldForFooter);
-                      setMediaFooterTestBusy(false);
-                      setMediaPanelTestPassed(Boolean(result?.ok));
-                    })();
-                  }}
-                  className={`flex h-11 w-[9rem] shrink-0 basis-[9rem] items-center justify-center gap-1.5 rounded-lg px-2 text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-40 ${
-                    urlTestSucceeded
-                      ? "border-emerald-500/70 bg-emerald-600/15 text-emerald-300 hover:border-emerald-400/90 hover:bg-emerald-600/25"
-                      : "border-amber-400/80 bg-amber-500 text-slate-900 hover:bg-amber-400 disabled:hover:bg-amber-500"
-                  }`}
-                >
-                  {mediaFooterTestBusy ? (
-                    <>
-                      <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 18 }}>
-                        progress_activity
-                      </span>
-                      <span>Testing…</span>
-                    </>
-                  ) : urlTestSucceeded ? (
-                    <span className="material-symbols-outlined shrink-0" style={{ fontSize: 22 }}>
-                      check_circle
-                    </span>
-                  ) : (
-                    <>
-                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>wifi</span>
-                      <span>Test</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  disabled={!mediaPanelTestPassed || mediaFooterTestBusy}
-                  onClick={() => {
-                    const panelId = mediaPanel;
-                    const card = panelId ? ONBOARDING_MEDIA_CARDS.find((c) => c.id === panelId) : undefined;
-                    const conn = card ? mediaCardConnectionKeys(card) : null;
-                    const cfg = panelId ? mediaCardPlaybackWebhookConfig(panelId) : null;
-                    const instanceParam = cfg
-                      ? String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey
-                      : "";
-                    const prevUrl = conn ? String(mediaPanelSnapshotRef.current[conn.urlKey] ?? "").trim() : "";
-                    const newUrl = conn ? String(props.values[conn.urlKey] ?? "").trim() : "";
-                    const urlChanged =
-                      normalizeArrInstanceUrlForDedupe(prevUrl) !== normalizeArrInstanceUrlForDedupe(newUrl);
-                    setMediaPanel(null);
-                    setMediaPanelTestPassed(false);
-                    if (cfg && urlChanged) {
-                      setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
-                    }
-                  }}
-                  aria-label={addMediaLabel}
-                  className="btn-brand-tertiary min-w-[6.5rem] flex-1 sm:flex-none px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider font-semibold border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {addMediaLabel}
-                </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <MediaServerConfigModal
+            card={card}
+            fields={panelFields}
+            values={props.values}
+            accent={accent}
+            focusClass={getBrandFocusClass(props.brand, wizardUiTheme)}
+            isNew={mediaPanelOpenedViaAddRef.current}
+            testResults={testResults}
+            testBusy={mediaFooterTestBusy}
+            testPassed={mediaPanelTestPassed}
+            fieldsByKey={allSettingsFieldsByKey}
+            onFieldChange={handleMediaPanelFieldChange}
+            onCancel={handleMediaPanelCancel}
+            onTest={runTest}
+            onSave={() => {
+              const panelId = mediaPanel;
+              const connected = panelId ? ONBOARDING_MEDIA_CARDS.find((c) => c.id === panelId) : undefined;
+              const conn = connected ? mediaCardConnectionKeys(connected) : null;
+              const cfg = panelId ? mediaCardPlaybackWebhookConfig(panelId) : null;
+              const prevUrl = conn ? String(mediaPanelSnapshotRef.current[conn.urlKey] ?? "").trim() : "";
+              const newUrl = conn ? String(props.values[conn.urlKey] ?? "").trim() : "";
+              const urlChanged =
+                normalizeArrInstanceUrlForDedupe(prevUrl) !== normalizeArrInstanceUrlForDedupe(newUrl);
+              setMediaPanel(null);
+              setMediaPanelTestPassed(false);
+              if (cfg && panelId && urlChanged) {
+                setPlaybackWebhookDialog(panelId);
+              }
+            }}
+            onTestBusyChange={setMediaFooterTestBusy}
+            onTestPassedChange={setMediaPanelTestPassed}
+            overlayClassName={`brand-theme-scope theme-dark layout-${props.brand}-dark`}
+            overlayStyle={semanticTokensToCssVars(wizardSemantic) as CSSProperties}
+          />
         );
       })() : null}
       {playbackWebhookDialog ? (
         <PlaybackWebhookSetupModal
-          dialog={playbackWebhookDialog}
+          cardId={playbackWebhookDialog}
+          values={props.values}
           onClose={() => setPlaybackWebhookDialog(null)}
           accent={accent}
           displayOrigin={resolveWebhookDisplayOrigin(props.values)}
+          webhookApiKey={resolveWebhookApiKey(props.values)}
         />
       ) : null}
     </>
   );
 }
 function getActivitySubPage(pathname: string): ActivitySubPage {
-  if (pathname === ACTIVITY_TASKS_PATH || pathname.startsWith(`${ACTIVITY_TASKS_PATH}/`)) return "tasks";
-  if (pathname === ACTIVITY_OPERATIONS_PATH || pathname.startsWith(`${ACTIVITY_OPERATIONS_PATH}/`)) return "operations";
+  const p = pathname.replace(/\/$/, "") || "/";
+  const proposed = isActivityProposedPath(p);
+  const rest = proposed ? p.slice(ACTIVITY_PROPOSED_PREFIX.length) || "/" : p.slice("/activity".length) || "/";
+  if (rest === "/tasks" || rest.startsWith("/tasks/")) return "tasks";
+  if (rest === "/operations" || rest.startsWith("/operations/")) return "operations";
   return "placeholders";
 }
 
@@ -10319,9 +9594,9 @@ function getTabFromPath(pathname: string): DashboardTab {
   if (pathname === "/setup" || pathname.startsWith("/setup/")) return "setup";
   if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/activity")) return "activity";
+  if (pathname.startsWith("/collections")) return "collections";
   if (pathname.startsWith("/calendar")) return "calendar";
-  if (pathname.startsWith("/errors")) return "errors";
-  if (pathname.startsWith("/logs")) return "logs";
+  if (pathname.startsWith("/errors") || pathname.startsWith("/logs")) return "logs";
   if (pathname.startsWith("/settings")) return "settings";
   return "library";
 }
@@ -10528,11 +9803,12 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   if (stepKey === "look_and_feel") {
     return [...LOOK_AND_FEEL_FIELD_KEYS];
   }
+  const lookAndFeelKeys = new Set<string>(LOOK_AND_FEEL_FIELD_KEYS);
   return [
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
-    ...statusUpdates,
-    ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
+    ...statusUpdates.filter((k) => !lookAndFeelKeys.has(k)),
+    ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k) && !lookAndFeelKeys.has(k)),
   ];
 }

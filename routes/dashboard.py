@@ -1,4 +1,4 @@
-"""Dashboard routes: lightweight UI showing stats, activity, errors, and live logs."""
+"""Dashboard routes: lightweight UI showing stats, activity, and live logs."""
 
 import ast
 import asyncio
@@ -20,9 +20,15 @@ from sqlalchemy.orm import joinedload
 
 from core.config import parse_configured_arr_instances_json, settings
 from core.logger import logger
-from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
+from services.app_config import (
+    get_onboarding_status,
+    get_settings_payload,
+    reset_onboarding,
+    resolve_integration_test_credential,
+    save_settings,
+)
 from services.activity_markers import EVENT_CALENDAR_DATE_REFRESH, EVENT_STARTUP_SOURCE_OF_TRUTH
-from services.activity_snapshot import get_queue_download_activity_row
+from services.activity_snapshot import get_queue_download_activity_row, get_queue_download_snapshot
 from services.dashboard_stats_snapshot_hooks import build_dashboard_stats_payload
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
@@ -42,8 +48,9 @@ from services.postgres.models import (
 from services.library_catalog_version import get_library_versions, library_etag_for_shelf
 from services.library_poster_paths import library_poster_cache_token, load_library_poster_path
 from services.library_future_semantics import movie_row_is_future_outside_lookahead
-from services.series_episode_stats import series_episode_counts_map, series_stats_dict_from_row
+from services.series_episode_stats import series_episode_counts_map, series_last_aired_map, series_stats_dict_from_row
 from services.source_of_truth.status_intent import StatusSource
+from services.source_of_truth.sync_runner import _extract_date
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
 router = APIRouter()
@@ -455,12 +462,74 @@ def _iso(value) -> str | None:
     except AttributeError:
         return str(value)
 
+
+def _movie_radarr_payload(movie: Movie) -> dict[str, Any]:
+    raw = getattr(movie, "radarr_payload_raw", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _library_movie_release_dates(movie: Movie) -> dict[str, str | None]:
+    """List-view release columns: DB fields first, then Radarr payload fallbacks."""
+    payload = _movie_radarr_payload(movie)
+    theater = (
+        getattr(movie, "theater_release_date", None)
+        or getattr(movie, "radarr_premiered", None)
+        or _extract_date(payload.get("inCinemas"))
+    )
+    digital = getattr(movie, "digital_release_date", None) or _extract_date(payload.get("digitalRelease"))
+    physical = getattr(movie, "physical_release_date", None) or _extract_date(payload.get("physicalRelease"))
+    return {
+        "theater_release_date": _iso(theater),
+        "digital_release_date": _iso(digital),
+        "physical_release_date": _iso(physical),
+    }
+
+
+def _latest_release_iso(values: list[str | None]) -> str | None:
+    best_date: date | None = None
+    best_iso: str | None = None
+    for raw in values:
+        if not raw:
+            continue
+        parsed = _extract_date(raw)
+        if parsed is None:
+            continue
+        if best_date is None or parsed > best_date:
+            best_date = parsed
+            best_iso = _iso(parsed)
+    return best_iso
+
+
+def _merge_movie_release_dates(merged: dict[str, Any], rows: list[dict]) -> None:
+    for field in ("theater_release_date", "digital_release_date", "physical_release_date"):
+        merged[field] = _latest_release_iso([r.get(field) for r in rows])
+
+
 # ---------------------------------------------------------------------------
 # HTML page
 # ---------------------------------------------------------------------------
 
+_HTML_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 def _dashboard_dist_index_path() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "index.html")
+
+
+def frontend_build_id() -> str:
+    """Vite hashed bundle path from dist/index.html, e.g. ``/assets/index-abc123.js``."""
+    index_path = _dashboard_dist_index_path()
+    try:
+        with open(index_path, encoding="utf-8") as handle:
+            html = handle.read()
+    except OSError:
+        return ""
+    match = re.search(r"/assets/index-[^\"']+\.js", html)
+    return match.group(0) if match else ""
 
 
 def _dashboard_not_built_response() -> PlainTextResponse:
@@ -478,17 +547,17 @@ def _serve_dashboard_index(inject_setup_preview: bool = False) -> FileResponse |
     if not os.path.isfile(index_path):
         return _dashboard_not_built_response()
     if not inject_setup_preview:
-        return FileResponse(index_path, media_type="text/html")
+        return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     try:
         with open(index_path, encoding="utf-8") as handle:
             html = handle.read()
     except OSError:
-        return FileResponse(index_path, media_type="text/html")
+        return FileResponse(index_path, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
     if "<head>" in html:
         html = html.replace("<head>", "<head>" + _SETUP_PREVIEW_SNIPPET, 1)
     else:
         html = _SETUP_PREVIEW_SNIPPET + html
-    return HTMLResponse(content=html, media_type="text/html")
+    return HTMLResponse(content=html, media_type="text/html", headers=_HTML_NO_STORE_HEADERS)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -522,9 +591,19 @@ async def dashboard_calendar_page():
     return _serve_dashboard_index()
 
 
-@router.get("/errors", response_class=HTMLResponse)
-async def dashboard_errors_page():
+@router.get("/collections", response_class=HTMLResponse)
+async def dashboard_collections_page():
     return _serve_dashboard_index()
+
+
+@router.get("/collections/{path:path}", response_class=HTMLResponse)
+async def dashboard_collections_nested(path: str):
+    return _serve_dashboard_index()
+
+
+@router.get("/errors")
+async def dashboard_errors_page():
+    return RedirectResponse(url="/logs", status_code=307)
 
 
 @router.get("/logs", response_class=HTMLResponse)
@@ -590,6 +669,44 @@ _OVERLAY_EXAMPLE_MEDIA_TYPES = {
     ".json": "application/json",
 }
 
+_FAVICON_FILES = {
+    "favicon.ico": "image/x-icon",
+    "favicon-16x16.png": "image/png",
+    "favicon-32x32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+}
+
+
+def _dashboard_dist_root_file(filename: str, media_types: dict[str, str]) -> FileResponse | JSONResponse:
+    """Serve a single file from frontend/dist (Vite public/ copies)."""
+    if filename not in media_types:
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
+    dist_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    file_path = os.path.join(dist_dir, filename)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
+    return FileResponse(file_path, media_type=media_types[filename])
+
+
+@router.get("/favicon.ico")
+async def dashboard_favicon_ico():
+    return _dashboard_dist_root_file("favicon.ico", _FAVICON_FILES)
+
+
+@router.get("/favicon-16x16.png")
+async def dashboard_favicon_16():
+    return _dashboard_dist_root_file("favicon-16x16.png", _FAVICON_FILES)
+
+
+@router.get("/favicon-32x32.png")
+async def dashboard_favicon_32():
+    return _dashboard_dist_root_file("favicon-32x32.png", _FAVICON_FILES)
+
+
+@router.get("/apple-touch-icon.png")
+async def dashboard_apple_touch_icon():
+    return _dashboard_dist_root_file("apple-touch-icon.png", _FAVICON_FILES)
+
 
 @router.get("/overlay-examples/{asset_path:path}")
 async def dashboard_overlay_examples(asset_path: str):
@@ -615,7 +732,15 @@ async def dashboard_overlay_examples(asset_path: str):
 @router.get("/api/health")
 async def api_health():
     """Liveness probe: no database access. Use from the browser host to verify TCP/process."""
-    return JSONResponse({"ok": True})
+    from core.version import APP_VERSION
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "app_version": APP_VERSION,
+            "frontend_build": frontend_build_id(),
+        }
+    )
 
 
 @router.get("/api/ready")
@@ -1040,10 +1165,17 @@ def _humanize_activity_reason(reason: str | None) -> str:
         "event materialization": "Event processing",
         "materialization run": "Materialization",
     }
-    text = str(reason or "").strip().lower()
-    if not text:
+    raw = str(reason or "").strip()
+    if not raw:
         return "Unknown"
-    return mapping.get(text, _humanize_snake_case(text))
+    text = raw.lower()
+    if text in mapping:
+        return mapping[text]
+    # Prose reasons (tombstone summaries, etc.) must stay intact — snake_case humanize
+    # turns hyphens into spaces and flattens the sentence.
+    if " " in raw or any(ch in raw for ch in "()-:/"):
+        return raw
+    return _humanize_snake_case(text)
 
 
 def _infer_reason_from_recent_events(
@@ -2300,18 +2432,56 @@ def _merge_regrouped_event_rows_from_flat(flat_event_rows: list[dict[str, Any]])
     return rest + grouped_out
 
 
-def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
-    """Return merged activity rows from system_activity_history + live queue/sync rows (empty table = fresh install)."""
+def _activity_feed_from_history(
+    session,
+    *,
+    limit: int,
+    before_time: datetime | None = None,
+    before_id: int | None = None,
+) -> tuple[list[dict[str, Any]], bool, str | None, int | None]:
+    """Return merged activity rows from system_activity_history + live queue/sync rows.
+
+    Returns ``(rows, has_more, next_before_time, next_before_id)``. Empty table = fresh install.
+    """
+    fetch_n = max(limit * 8, limit)
     try:
+        q = session.query(SystemActivityHistory)
+        if before_time is not None:
+            if before_id is not None:
+                q = q.filter(
+                    or_(
+                        SystemActivityHistory.occurred_at < before_time,
+                        and_(
+                            SystemActivityHistory.occurred_at == before_time,
+                            SystemActivityHistory.id < before_id,
+                        ),
+                    )
+                )
+            else:
+                q = q.filter(SystemActivityHistory.occurred_at < before_time)
+        elif before_id is not None:
+            q = q.filter(SystemActivityHistory.id < before_id)
+
         hist = (
-            session.query(SystemActivityHistory)
-            .order_by(SystemActivityHistory.occurred_at.desc())
-            .limit(max(limit * 8, limit))
+            q.order_by(
+                SystemActivityHistory.occurred_at.desc(),
+                SystemActivityHistory.id.desc(),
+            )
+            .limit(fetch_n + 1)
             .all()
         )
     except Exception as exc:
         logger.warning("system_activity_history read failed: %s", exc, extra={"emoji_type": "warning"})
         hist = []
+
+    has_more_hist = len(hist) > fetch_n
+    hist = hist[:fetch_n]
+    oldest_hist_time: str | None = None
+    oldest_hist_id: int | None = None
+    if hist:
+        oldest = hist[-1]
+        oldest_hist_time = oldest.occurred_at.isoformat() if oldest.occurred_at else None
+        oldest_hist_id = int(oldest.id) if oldest.id is not None else None
 
     flat: list[dict[str, Any]] = []
     for h in hist:
@@ -2328,13 +2498,15 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
     merged_events = _merge_regrouped_event_rows_from_flat(raw_events)
     combined = merged_events + raw_jobs
 
-    queue_activity_row = get_queue_download_activity_row()
+    # Live queue row only on the newest page (no before cursor).
+    if before_time is None and before_id is None:
+        queue_activity_row = get_queue_download_activity_row()
+        extra = [r for r in (queue_activity_row,) if r]
+        combined = combined + extra
+
     # Calendar sync appears only via ``system_activity_history`` snapshots from
     # ``EVENT_CALENDAR_DATE_REFRESH`` EventLog rows (``_activity_marker_row_for_calendar_event``).
     # Do not append a second synthetic row from log parsing — it duplicated the same run.
-    extra = [r for r in (queue_activity_row,) if r]
-
-    combined = combined + extra
 
     # ``startup_sync_progress`` persists multiple phase snapshots for the same run id.
     # Keep only the latest snapshot per startup sync row id so the activity list
@@ -2386,26 +2558,29 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
     unique.sort(key=lambda x: x.get("time") or "", reverse=True)
 
     top = unique[:limit]
-    top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
-    grouped_candidates = [
-        row
-        for row in unique
-        if (
-            str(row.get("job_type") or "").startswith("sync_placeholder_")
-            or str(row.get("display_name") or "").startswith("Series Added:")
-        )
-    ]
-    missing_grouped = [
-        row
-        for row in grouped_candidates
-        if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
-    ]
-    if missing_grouped and top:
-        inject = missing_grouped[: min(3, len(top))]
-        top = top[: max(0, len(top) - len(inject))] + inject
-        top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
+    if before_time is None and before_id is None:
+        top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
+        grouped_candidates = [
+            row
+            for row in unique
+            if (
+                str(row.get("job_type") or "").startswith("sync_placeholder_")
+                or str(row.get("display_name") or "").startswith("Series Added:")
+            )
+        ]
+        missing_grouped = [
+            row
+            for row in grouped_candidates
+            if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
+        ]
+        if missing_grouped and top:
+            inject = missing_grouped[: min(3, len(top))]
+            top = top[: max(0, len(top) - len(inject))] + inject
+            top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
 
-    return top[:limit]
+    page = top[:limit]
+    has_more = has_more_hist or len(unique) > limit
+    return page, bool(has_more and oldest_hist_time is not None), oldest_hist_time, oldest_hist_id
 
 
 _OPERATIONS_EXCLUDED_JOB_TYPES = frozenset(
@@ -2420,51 +2595,111 @@ _OPERATIONS_EXCLUDED_JOB_TYPES = frozenset(
 )
 
 
-def _activity_operations_feed(session, *, limit: int) -> list[dict[str, Any]]:
+def _activity_operations_feed(
+    session,
+    *,
+    limit: int,
+    before_time: datetime | None = None,
+    before_id: int | None = None,
+) -> dict[str, Any]:
     """Live/event feed: exclude scheduled maintenance progress and sync job rows."""
-    rows = _activity_feed_from_history(session, limit=max(limit * 2, limit))
+    rows, has_more, next_time, next_id = _activity_feed_from_history(
+        session,
+        limit=max(limit * 2, limit),
+        before_time=before_time,
+        before_id=before_id,
+    )
     out: list[dict[str, Any]] = []
     for row in rows:
         jt = str(row.get("job_type") or "").strip().lower()
         if jt in _OPERATIONS_EXCLUDED_JOB_TYPES:
             continue
         out.append(row)
-    return out[:limit]
+    page = out[:limit]
+    return {
+        "items": page,
+        "has_more": bool(has_more and len(page) > 0),
+        "next_before_time": next_time if has_more else None,
+        "next_before_id": next_id if has_more else None,
+    }
+
+
+@router.get("/api/activity/active-searches")
+async def activity_active_searches():
+    """Titles Placeholdarr is monitoring after a playback/search (not the full ARR queue)."""
+    snap = get_queue_download_snapshot()
+    if not snap:
+        return {
+            "active": False,
+            "items": [],
+            "details": "No titles being monitored",
+            "started_at": None,
+            "updated_at": None,
+        }
+    items = snap.get("items") if isinstance(snap.get("items"), list) else []
+    n = len(items)
+    if n == 0:
+        details = (
+            "Monitoring Radarr/Sonarr — queue is empty; indexer search may still be running "
+            "or nothing matched yet"
+        )
+    else:
+        details = f"{n} title(s) — monitoring search, queue, and import until the real file is in the library"
+    return {
+        "active": True,
+        "items": items,
+        "details": details,
+        "started_at": snap.get("started_at"),
+        "updated_at": snap.get("updated_at"),
+    }
 
 
 @router.get("/api/activity/operations")
-async def activity_operations(limit: int = Query(50, ge=1, le=200)):
+async def activity_operations(
+    limit: int = Query(50, ge=1, le=200),
+    before_time: Optional[str] = Query(None),
+    before_id: Optional[int] = Query(None, ge=1),
+):
     """Return live operations feed (webhooks, imports, queue monitor — not scheduled sync runs)."""
     session = get_session()
     try:
-        return _activity_operations_feed(session, limit=limit)
+        bt = _parse_activity_dt(before_time) if before_time else None
+        return _activity_operations_feed(session, limit=limit, before_time=bt, before_id=before_id)
     finally:
         session.close()
 
 
 @router.get("/api/activity")
-async def activity(limit: int = Query(50, ge=1, le=200)):
+async def activity(
+    limit: int = Query(50, ge=1, le=200),
+    before_time: Optional[str] = Query(None),
+    before_id: Optional[int] = Query(None, ge=1),
+):
     """Alias for operations feed (backward compatibility)."""
     session = get_session()
     try:
-        return _activity_operations_feed(session, limit=limit)
+        bt = _parse_activity_dt(before_time) if before_time else None
+        return _activity_operations_feed(session, limit=limit, before_time=bt, before_id=before_id)
     finally:
         session.close()
 
 
-def _resolve_history_item_titles(session, h: PlaceholderActivityHistory) -> tuple[str, str | None]:
-    """Fill item_title / series_title from history row or FK joins (hooks often leave titles empty)."""
+def _resolve_history_item_titles(
+    session, h: PlaceholderActivityHistory
+) -> tuple[str, str | None, int | None]:
+    """Fill item_title / series_title / series_id from history row or FK joins (hooks often leave titles empty)."""
     stored_title = (h.item_title or "").strip()
+    stored_series_id = int(h.series_id) if h.series_id is not None else None
     if stored_title:
-        return stored_title, h.series_title
+        return stored_title, h.series_title, stored_series_id
     item_type = str(h.item_type or "episode").strip().lower()
     if item_type == "movie":
         movie = session.query(Movie).filter(Movie.id == h.movie_id).first() if h.movie_id else None
-        return (movie.title if movie else "Unknown Movie"), None
+        return (movie.title if movie else "Unknown Movie"), None, None
     if item_type == "series":
         series = session.query(Series).filter(Series.id == h.series_id).first() if h.series_id else None
         title = series.title if series and getattr(series, "title", None) else "Unknown Series"
-        return title, title
+        return title, title, stored_series_id or (int(series.id) if series else None)
     episode = (
         session.query(Episode)
         .options(joinedload(Episode.season).joinedload(Season.series))
@@ -2490,11 +2725,14 @@ def _resolve_history_item_titles(session, h: PlaceholderActivityHistory) -> tupl
     else:
         item_title = "Unknown Episode"
     series_title = series.title if series else None
-    return item_title, series_title
+    resolved_series_id = stored_series_id
+    if resolved_series_id is None and series is not None and getattr(series, "id", None) is not None:
+        resolved_series_id = int(series.id)
+    return item_title, series_title, resolved_series_id
 
 
 def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> dict[str, Any]:
-    item_title, series_title = _resolve_history_item_titles(session, h)
+    item_title, series_title, resolved_series_id = _resolve_history_item_titles(session, h)
     action = str(h.action or "").strip()
     action_cap = action if action in ("Created", "Deleted", "Status") else ("Status" if not action else action.title())
     path_val = str(h.path or "") if h.path is not None else ""
@@ -2540,12 +2778,201 @@ def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> d
         "time": occurred,
     }
     extra_snapshot = h.extra_snapshot if isinstance(h.extra_snapshot, dict) else {}
+    if resolved_series_id is not None:
+        out["_series_id"] = int(resolved_series_id)
+    out["_history_id"] = int(h.id) if h.id is not None else None
     if action_cap == "Deleted":
         out["_bulk_series_delete"] = bool(extra_snapshot.get("bulk_series_delete"))
         out["_bulk_delete_series_id"] = extra_snapshot.get("bulk_delete_series_id")
         out["_bulk_delete_series_title"] = str(extra_snapshot.get("bulk_delete_series_title") or "").strip() or None
     if action_cap == "Status":
         out["_status_source"] = status_src
+    return out
+
+
+def _is_series_create_row(row: dict) -> bool:
+    """Episode (or series) Created row with a resolvable series id — any reason (sync, SeriesAdd, etc.)."""
+    if str(row.get("action") or "").strip() != "Created":
+        return False
+    if row.get("_series_id") is None:
+        return False
+    item_type = str(row.get("item_type") or "").strip().lower()
+    return item_type in {"episode", "series", "batch"} or item_type == ""
+
+
+def _series_create_batch_labels(cluster: list[dict], series_title: str) -> tuple[str, str]:
+    """Pick parent title (series name only) and reason from the dominant create reason."""
+    reasons = [str(c.get("reason") or "").strip() for c in cluster if str(c.get("reason") or "").strip()]
+    dominant = ""
+    if reasons:
+        counts: dict[str, int] = {}
+        for r in reasons:
+            counts[r] = counts.get(r, 0) + 1
+        dominant = max(counts.items(), key=lambda kv: kv[1])[0]
+    n = len(cluster)
+    title = str(series_title or "Series").strip() or "Series"
+    if dominant.lower() == "series added":
+        reason = f"{n} episode placeholders after Sonarr SeriesAdd for {title}."
+    elif dominant:
+        reason = f"{n} episode placeholders for {title} ({dominant})."
+    else:
+        reason = f"{n} episode placeholders created for {title}."
+    return title, reason
+
+
+def _group_series_placeholder_creates(rows: list[dict], *, max_gap_sec: int = 300) -> list[dict]:
+    """Collapse bursty per-episode Created rows for the same series into an expandable parent.
+
+    Clusters by series_id + time gap only (any create reason: SeriesAdd, lite/full sync, etc.).
+    Collection-named batches still need a create-time provenance stamp (deferred).
+    """
+    if not rows:
+        return rows
+    out: list[dict] = []
+    i = 0
+    parent_seq = 0
+    while i < len(rows):
+        row = rows[i]
+        if not _is_series_create_row(row):
+            out.append(row)
+            i += 1
+            continue
+
+        series_id = row.get("_series_id")
+        series_title = row.get("series_title") or row.get("item_title") or "Series"
+        cluster: list[dict] = [row]
+        j = i + 1
+        while j < len(rows):
+            nxt = rows[j]
+            if not _is_series_create_row(nxt):
+                break
+            if nxt.get("_series_id") != series_id:
+                break
+            t_last = _parse_activity_dt(cluster[-1].get("time"))
+            t_nxt = _parse_activity_dt(nxt.get("time"))
+            if t_last is None or t_nxt is None:
+                break
+            delta = (t_last - t_nxt).total_seconds()
+            if delta >= 0 and delta <= max_gap_sec:
+                cluster.append(nxt)
+                j += 1
+            else:
+                break
+
+        if len(cluster) < 2:
+            solo = dict(cluster[0])
+            solo.pop("_series_id", None)
+            solo.pop("_history_id", None)
+            out.append(solo)
+            i += 1
+            continue
+
+        parent_seq += 1
+        newest = cluster[0]
+        child_rows: list[dict] = []
+        for c in cluster:
+            child_rows.append(
+                {
+                    "id": c["id"],
+                    "type": "placeholder",
+                    "action": c.get("action"),
+                    "item_type": c.get("item_type"),
+                    "item_title": c.get("item_title"),
+                    "series_title": c.get("series_title"),
+                    "path": c.get("path") or "",
+                    "reason": c.get("reason"),
+                    "status": c.get("status"),
+                    "time": c.get("time"),
+                }
+            )
+        item_title, reason = _series_create_batch_labels(cluster, str(series_title or "Series"))
+        parent_id = -(910_000_000 + parent_seq)
+        out.append(
+            {
+                "id": parent_id,
+                "type": "placeholder",
+                "group_kind": "series_create_batch",
+                "action": "Created",
+                "item_type": "batch",
+                "item_title": item_title,
+                "series_title": str(series_title or ""),
+                "path": "",
+                "reason": reason,
+                "status": "Created",
+                "time": newest.get("time"),
+                "children": child_rows,
+                "_history_id": newest.get("_history_id"),
+                "_cursor_time": cluster[-1].get("time"),
+                "_cursor_id": cluster[-1].get("_history_id") or cluster[-1].get("id"),
+            }
+        )
+        i = j
+    return out
+
+
+def _strip_placeholder_activity_internal_keys(row: dict) -> dict:
+    cleaned = dict(row)
+    for key in (
+        "_status_source",
+        "_series_id",
+        "_history_id",
+        "_bulk_series_delete",
+        "_bulk_delete_series_id",
+        "_bulk_delete_series_title",
+        "_cursor_time",
+        "_cursor_id",
+    ):
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _oldest_placeholder_cursor(items: list[dict]) -> tuple[str | None, int | None]:
+    """Return (time, history_id) for the oldest leaf in a page of grouped rows."""
+    best_time: str | None = None
+    best_id: int | None = None
+    best_dt: datetime | None = None
+
+    def consider(time_s: Any, hist_id: Any) -> None:
+        nonlocal best_time, best_id, best_dt
+        dt = _parse_activity_dt(str(time_s) if time_s else None)
+        if dt is None:
+            return
+        try:
+            hid = int(hist_id) if hist_id is not None else None
+        except (TypeError, ValueError):
+            hid = None
+        if best_dt is None or dt < best_dt or (dt == best_dt and hid is not None and (best_id is None or hid < best_id)):
+            best_dt = dt
+            best_time = str(time_s) if time_s else None
+            best_id = hid
+
+    for row in items:
+        children = row.get("children")
+        if isinstance(children, list) and children:
+            if row.get("_cursor_time") is not None:
+                consider(row.get("_cursor_time"), row.get("_cursor_id"))
+            for child in children:
+                if isinstance(child, dict):
+                    consider(child.get("time"), child.get("id"))
+            continue
+        consider(row.get("time"), row.get("_history_id") or row.get("id"))
+    return best_time, best_id
+
+
+def _mark_series_bulk_delete_row(row: dict, *, series_title: str | None = None) -> dict:
+    """Normalize series tombstone delete rows for UI (series name once, group_kind)."""
+    out = dict(row)
+    title = (
+        str(series_title or "").strip()
+        or str(out.get("_bulk_delete_series_title") or "").strip()
+        or str(out.get("series_title") or "").strip()
+        or str(out.get("item_title") or "").strip()
+        or "Series"
+    )
+    out["group_kind"] = "series_bulk_delete"
+    out["item_type"] = "series"
+    out["item_title"] = title
+    out["series_title"] = title
     return out
 
 
@@ -2582,106 +3009,118 @@ def _group_series_tombstone_placeholder_deletes(rows: list[dict], *, max_gap_sec
             j += 1
 
         if len(group) <= 1:
-            out.append(row)
+            # Aggregate history row from materializer (count already in reason), or a lone episode delete.
+            out.append(_mark_series_bulk_delete_row(row, series_title=str(series_title or "") or None))
             i += 1
             continue
 
-        lead = dict(group[0])
+        lead = _mark_series_bulk_delete_row(group[0], series_title=str(series_title or "") or None)
         removed_n = len(group)
         lead["id"] = f"series-bulk-delete-{series_id}-{lead.get('time')}"
-        lead["item_type"] = "series"
-        lead["item_title"] = str(series_title or "Series")
-        lead["series_title"] = str(series_title or "")
-        lead["reason"] = f"Series removed tombstone cleanup - {removed_n} placeholders deleted"
+        lead["reason"] = f"Series removed: tombstone cleanup, {removed_n} placeholders deleted"
         lead["path"] = ""
+        lead["children"] = [
+            {
+                "id": c["id"],
+                "type": "placeholder",
+                "action": c.get("action"),
+                "item_type": c.get("item_type"),
+                "item_title": c.get("item_title"),
+                "series_title": c.get("series_title"),
+                "path": c.get("path") or "",
+                "reason": c.get("reason"),
+                "status": c.get("status"),
+                "time": c.get("time"),
+            }
+            for c in group
+        ]
         out.append(lead)
         i = j
     return out
 
 
-@router.get("/api/activity/placeholders")
-async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
-    """Return placeholder timeline from append-only history (fast read; hooks populate the table)."""
-    session = get_session()
-    try:
-        rows = (
-            session.query(PlaceholderActivityHistory)
-            .order_by(PlaceholderActivityHistory.occurred_at.desc())
-            .limit(max(limit * 4, limit))
-            .all()
+def _placeholder_activity_page(
+    session,
+    *,
+    limit: int,
+    before_time: datetime | None = None,
+    before_id: int | None = None,
+) -> dict[str, Any]:
+    """Paged placeholder timeline with server-side batch grouping."""
+    q = session.query(PlaceholderActivityHistory)
+    if before_time is not None:
+        if before_id is not None:
+            q = q.filter(
+                or_(
+                    PlaceholderActivityHistory.occurred_at < before_time,
+                    and_(
+                        PlaceholderActivityHistory.occurred_at == before_time,
+                        PlaceholderActivityHistory.id < before_id,
+                    ),
+                )
+            )
+        else:
+            q = q.filter(PlaceholderActivityHistory.occurred_at < before_time)
+    elif before_id is not None:
+        q = q.filter(PlaceholderActivityHistory.id < before_id)
+
+    fetch_n = max(limit * 4, limit)
+    rows = (
+        q.order_by(
+            PlaceholderActivityHistory.occurred_at.desc(),
+            PlaceholderActivityHistory.id.desc(),
         )
-        activity_list = [_activity_dict_from_history_row(session, h) for h in rows]
-        deduped = []
-        seen = set()
-        for row in sorted(activity_list, key=lambda x: x.get("time") or "", reverse=True):
-            key = (row.get("id"), row.get("action"), row.get("time"))
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(row)
-        grouped = _group_calendar_placeholder_status_rows(deduped)
-        grouped = _group_series_tombstone_placeholder_deletes(grouped)
-        return grouped[:limit]
-    finally:
-        session.close()
+        .limit(fetch_n + 1)
+        .all()
+    )
+    has_more_raw = len(rows) > fetch_n
+    rows = rows[:fetch_n]
+
+    activity_list = [_activity_dict_from_history_row(session, h) for h in rows]
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for row in sorted(activity_list, key=lambda x: (x.get("time") or "", x.get("id") or 0), reverse=True):
+        key = (row.get("id"), row.get("action"), row.get("time"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    grouped = _group_calendar_placeholder_status_rows(deduped)
+    grouped = _group_series_tombstone_placeholder_deletes(grouped)
+    grouped = _group_series_placeholder_creates(grouped)
+
+    page = grouped[:limit]
+    next_time, next_id = _oldest_placeholder_cursor(page)
+    has_more = len(grouped) > limit or has_more_raw
+    items = [_strip_placeholder_activity_internal_keys(r) for r in page]
+    return {
+        "items": items,
+        "has_more": bool(has_more and next_time is not None),
+        "next_before_time": next_time,
+        "next_before_id": next_id,
+    }
 
 
-@router.get("/api/errors")
-async def errors(limit: int = Query(50, ge=1, le=200)):
-    """Return recent errors from jobs, events, and observation trails."""
+@router.get("/api/activity/placeholders")
+async def activity_placeholders(
+    limit: int = Query(50, ge=1, le=200),
+    before_time: Optional[str] = Query(None, description="ISO timestamp cursor (exclusive upper bound)"),
+    before_id: Optional[int] = Query(None, ge=1, description="History id tie-break with before_time"),
+):
+    """Return placeholder timeline from append-only history (fast read; hooks populate the table).
+
+    Response is a page envelope: ``{ items, has_more, next_before_time, next_before_id }``.
+    """
     session = get_session()
     try:
-        items = []
-
-        # Failed jobs
-        failed_jobs = session.query(
-            Job.id, Job.job_type, Job.error_message, Job.updated_at
-        ).filter(Job.status == "FAILED").order_by(Job.updated_at.desc()).limit(limit).all()
-        for j in failed_jobs:
-            items.append({
-                "source": "job",
-                "id": j.id,
-                "label": j.job_type,
-                "error": j.error_message,
-                "time": j.updated_at.isoformat() if j.updated_at else None,
-            })
-
-        # Failed events
-        failed_events = session.query(
-            EventLog.id, EventLog.event_type, EventLog.error_message, EventLog.updated_at
-        ).filter(EventLog.status == "FAILED").order_by(EventLog.updated_at.desc()).limit(limit).all()
-        for e in failed_events:
-            items.append({
-                "source": "event",
-                "id": e.id,
-                "label": e.event_type,
-                "error": e.error_message,
-                "time": e.updated_at.isoformat() if e.updated_at else None,
-            })
-
-        # Observation trail errors removed as system is deprecated.
-        pass
-
-        # Placeholder lookup failures
-        ph_errors = session.query(
-            Placeholder.id,
-            Placeholder.path,
-            Placeholder.media_lookup_error,
-            Placeholder.updated_at,
-        ).filter(
-            Placeholder.media_lookup_error.isnot(None)
-        ).order_by(Placeholder.updated_at.desc()).limit(limit).all()
-        for p in ph_errors:
-            items.append({
-                "source": "placeholder",
-                "id": p.id,
-                "label": os.path.basename(p.path) if p.path else f"placeholder #{p.id}",
-                "error": p.media_lookup_error,
-                "time": p.updated_at.isoformat() if p.updated_at else None,
-            })
-
-        items.sort(key=lambda x: x.get("time") or "", reverse=True)
-        return items[:limit]
+        bt = _parse_activity_dt(before_time) if before_time else None
+        return _placeholder_activity_page(
+            session,
+            limit=limit,
+            before_time=bt,
+            before_id=before_id,
+        )
     finally:
         session.close()
 
@@ -2760,6 +3199,7 @@ def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
             "missing": 1 if merged["has_missing"] else 0,
         }
         merged["instance_label"] = None
+        _merge_movie_release_dates(merged, [r for _, r in group])
         _apply_earliest_added_to_merged_row(merged, [r for _, r in group], id_prefix="movie")
         out.append(merged)
     return out
@@ -2923,6 +3363,7 @@ def _movie_arr_instance_links_from_db(session, anchor: Movie) -> list[dict[str, 
                 "movie_id": m.id,
                 "has_file": bool(m.has_file),
                 "has_placeholder": bool(m.has_placeholder),
+                "monitored": bool(getattr(m, "radarr_monitored", False)),
                 "_instance_key": ikey,
                 "_instance_id": iid,
             }
@@ -2964,6 +3405,7 @@ def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
                     "present": False,
                     "has_file": False,
                     "has_placeholder": False,
+                    "monitored": False,
                 }
             )
     return _append_local_rows_missing_from_slot_merge(merged, raw, "movie_id")
@@ -3018,6 +3460,7 @@ def _series_arr_instance_links_from_db(session, anchor: Series) -> list[dict[str
                 "episode_files": int(st["episode_files"]),
                 "episode_placeholders": int(st["episode_placeholders"]),
                 "episode_total": int(st["episode_total"]),
+                "monitored": bool(getattr(s, "sonarr_monitored", False)),
                 "_instance_key": ikey,
                 "_instance_id": iid,
             }
@@ -3060,6 +3503,7 @@ def _series_arr_instance_links(session, anchor: Series) -> list[dict[str, Any]]:
                     "episode_files": 0,
                     "episode_placeholders": 0,
                     "episode_total": 0,
+                    "monitored": False,
                 }
             )
     return _append_local_rows_missing_from_slot_merge(merged, raw, "series_id")
@@ -3320,6 +3764,10 @@ def _build_library_payload(
 
     session = get_session()
     try:
+        try:
+            session.execute(text("SET LOCAL lock_timeout = '30s'"))
+        except Exception:
+            pass
         etag = library_etag_for_shelf(session, mt if mt else "all")
         if client_etag and client_etag == etag:
             return etag, None
@@ -3356,6 +3804,9 @@ def _build_library_payload(
                 "type": "movie",
                 "title": movie.title,
                 "year": movie.year,
+                "tmdb_id": int(movie.tmdbid or 0) or None,
+                "tvdb_id": None,
+                "imdb_id": movie.imdbid,
                 "poster_url": _resolve_library_poster_url(
                     "movie",
                     int(movie.id),
@@ -3376,6 +3827,7 @@ def _build_library_payload(
                 "has_placeholder": bool(movie.has_placeholder),
                 "is_future": movie_is_future,
                 "has_missing": movie_has_missing,
+                **_library_movie_release_dates(movie),
                 "created_at": _iso(getattr(movie, "created_at", None)),
                 "updated_at": _iso(getattr(movie, "updated_at", None)),
                 "overview": movie.radarr_overview,
@@ -3402,8 +3854,10 @@ def _build_library_payload(
                 .all()
             )
             series_episode_counts = series_episode_counts_map(session, series_rows)
+            series_last_aired = series_last_aired_map(session, [int(s.id) for s in series_rows])
         else:
             series_rows = []
+            series_last_aired = {}
         for series in series_rows:
             instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
             counts = series_episode_counts.get(
@@ -3436,6 +3890,9 @@ def _build_library_payload(
                 "type": "series",
                 "title": series.title,
                 "year": series.year,
+                "tmdb_id": int(getattr(series, "sonarr_tmdbid", 0) or 0) or None,
+                "tvdb_id": int(series.tvdbid or 0) or None,
+                "imdb_id": series.imdbid,
                 "network": getattr(series, "sonarr_network", None),
                 "poster_url": _resolve_library_poster_url(
                     "series",
@@ -3457,6 +3914,8 @@ def _build_library_payload(
                 "has_placeholder": counts["episode_placeholders"] > 0,
                 "is_future": series_is_future,
                 "has_missing": series_has_missing,
+                "premiere_date": _iso(series.sonarr_first_aired),
+                "last_aired_date": _iso(series_last_aired.get(int(series.id))),
                 "created_at": _iso(getattr(series, "created_at", None)),
                 "updated_at": _iso(getattr(series, "updated_at", None)),
                 "overview": series.sonarr_series_overview,
@@ -3553,10 +4012,284 @@ async def library(
         summary,
         media_type,
     )
+    library_cache_headers = {
+        "Cache-Control": "no-store",
+        "ETag": f'"{etag}"',
+    }
     if payload is None:
-        return Response(status_code=304)
-    response.headers["ETag"] = f'"{etag}"'
+        return Response(status_code=304, headers=library_cache_headers)
+    response.headers["Cache-Control"] = library_cache_headers["Cache-Control"]
+    response.headers["ETag"] = library_cache_headers["ETag"]
     return payload
+
+
+def _youtube_trailer_url(raw: Any) -> str | None:
+    """Radarr stores youTubeTrailerId as a bare id; expose a watch URL for the UI."""
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    if value.lower().startswith("http://") or value.lower().startswith("https://"):
+        return value
+    if re.fullmatch(r"[\w-]{6,20}", value):
+        return f"https://www.youtube.com/watch?v={value}"
+    return None
+
+
+def _format_rating_display_value(source: str, value: str | None) -> str:
+    """Round 0–10 style scores (TMDB/Trakt/IMDB) to one decimal; leave % scores alone."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    key = str(source or "").strip().lower()
+    if key not in ("tmdb", "themoviedb", "trakt", "imdb"):
+        return raw
+    try:
+        num = float(raw)
+    except (TypeError, ValueError):
+        return raw
+    return f"{round(num, 1):.1f}"
+
+
+def _ratings_display(ratings: Any) -> list[dict[str, Any]]:
+    """Normalize ARR ratings JSON into UI-friendly entries."""
+    from services.placeholders import _ratings_entries
+
+    out: list[dict[str, Any]] = []
+    for name, value, votes, is_default in _ratings_entries(ratings):
+        source = "tmdb" if name in ("tmdb", "themoviedb") else name
+        out.append(
+            {
+                "source": source,
+                "value": _format_rating_display_value(source, value),
+                "votes": votes,
+                "is_default": bool(is_default),
+            }
+        )
+    return out
+
+
+def _people_display(raw: Any, *, cap: int) -> list[dict[str, Any]]:
+    people: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return people
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            role = str(item.get("character") or item.get("role") or "").strip() or None
+        else:
+            name = str(item or "").strip()
+            role = None
+        if not name:
+            continue
+        people.append({"name": name, "role": role})
+        if len(people) >= cap:
+            break
+    return people
+
+
+def _collection_fields(collection: Any) -> tuple[str | None, int | None]:
+    if not isinstance(collection, dict):
+        return (None, None)
+    title = str(collection.get("title") or collection.get("name") or "").strip() or None
+    tmdb_raw = collection.get("tmdbId") or collection.get("tmdb_id") or collection.get("id")
+    try:
+        tmdb_id = int(tmdb_raw) if tmdb_raw is not None and str(tmdb_raw).strip() else None
+    except (TypeError, ValueError):
+        tmdb_id = None
+    if tmdb_id is not None and tmdb_id <= 0:
+        tmdb_id = None
+    return (title, tmdb_id)
+
+
+def _movie_collection_status(movie: Movie) -> str:
+    if bool(getattr(movie, "has_file", False)):
+        return "downloaded"
+    if bool(getattr(movie, "has_placeholder", False)):
+        return "placeholder"
+    return "missing"
+
+
+def _tmdb_poster_url(poster_path: Any) -> str | None:
+    path = str(poster_path or "").strip()
+    if not path:
+        return None
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"https://image.tmdb.org/t/p/w185{path}"
+
+
+def _pick_collection_library_row(prev: Movie | None, candidate: Movie, anchor: Movie) -> Movie:
+    if prev is None:
+        return candidate
+    if int(candidate.id) == int(anchor.id):
+        return candidate
+    if int(prev.id) == int(anchor.id):
+        return prev
+    if bool(candidate.has_file) and not bool(prev.has_file):
+        return candidate
+    return prev
+
+
+def _movie_collection_members(session, anchor: Movie) -> tuple[list[dict[str, Any]], int]:
+    title, collection_tmdb_id = _collection_fields(getattr(anchor, "radarr_collection", None))
+    if not title and not collection_tmdb_id:
+        return ([], 0)
+
+    tmdb_parts: list[dict[str, Any]] = []
+    if collection_tmdb_id is not None:
+        try:
+            from services import tmdb_client
+
+            if tmdb_client.tmdb_configured():
+                tmdb_parts = tmdb_client.fetch_collection(str(collection_tmdb_id), "movie")
+        except Exception:
+            tmdb_parts = []
+
+    part_tmdb_ids = [int(p["tmdb_id"]) for p in tmdb_parts if p.get("tmdb_id") is not None]
+    needle = (title or "").strip().lower()
+    siblings: list[Movie] = []
+
+    if part_tmdb_ids:
+        siblings.extend(
+            session.query(Movie)
+            .filter(Movie.is_deleted == False, Movie.tmdbid.in_(part_tmdb_ids))
+            .all()
+        )
+    else:
+        for m in (
+            session.query(Movie)
+            .filter(Movie.is_deleted == False)
+            .order_by(Movie.year.asc(), Movie.title.asc())
+            .all()
+        ):
+            mt, mid = _collection_fields(getattr(m, "radarr_collection", None))
+            if collection_tmdb_id is not None and mid == collection_tmdb_id:
+                siblings.append(m)
+            elif collection_tmdb_id is None and mt and mt.strip().lower() == needle:
+                siblings.append(m)
+
+    by_tmdb: dict[int, Movie] = {}
+    by_id_only: dict[int, Movie] = {}
+    for m in siblings:
+        if m.tmdbid:
+            tid = int(m.tmdbid)
+            by_tmdb[tid] = _pick_collection_library_row(by_tmdb.get(tid), m, anchor)
+        else:
+            by_id_only[int(m.id)] = _pick_collection_library_row(by_id_only.get(int(m.id)), m, anchor)
+
+    members: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+
+    def _append_library_member(m: Movie) -> None:
+        mid = int(m.id)
+        if mid in seen_ids:
+            return
+        seen_ids.add(mid)
+        members.append(
+            {
+                "id": mid,
+                "tmdbid": int(m.tmdbid) if m.tmdbid else None,
+                "title": m.title,
+                "year": m.year,
+                "poster_url": m.remote_poster,
+                "status": _movie_collection_status(m),
+                "is_current": mid == int(anchor.id),
+            }
+        )
+
+    if tmdb_parts:
+        for part in tmdb_parts:
+            tid = int(part["tmdb_id"])
+            lib = by_tmdb.get(tid)
+            if lib is not None:
+                _append_library_member(lib)
+            else:
+                members.append(
+                    {
+                        "id": None,
+                        "tmdbid": tid,
+                        "title": str(part.get("title") or "").strip() or f"TMDB {tid}",
+                        "year": part.get("year"),
+                        "poster_url": _tmdb_poster_url(part.get("poster_path")),
+                        "status": "not_in_library",
+                        "is_current": bool(anchor.tmdbid and int(anchor.tmdbid) == tid),
+                    }
+                )
+        for m in list(by_tmdb.values()) + list(by_id_only.values()):
+            _append_library_member(m)
+        collection_total = len(tmdb_parts)
+    else:
+        rows = list(by_tmdb.values()) + list(by_id_only.values())
+        rows.sort(key=lambda m: (m.year or 0, str(m.title or "").lower(), m.id))
+        for m in rows:
+            _append_library_member(m)
+        collection_total = len(members)
+
+    if not any(mem.get("is_current") for mem in members):
+        if anchor.tmdbid is not None:
+            for mem in members:
+                if mem.get("tmdbid") == int(anchor.tmdbid):
+                    mem["is_current"] = True
+                    break
+        else:
+            for mem in members:
+                if mem.get("id") == int(anchor.id):
+                    mem["is_current"] = True
+                    break
+
+    members.sort(
+        key=lambda mem: (
+            mem.get("year") or 0,
+            str(mem.get("title") or "").lower(),
+            mem.get("id") or 0,
+            mem.get("tmdbid") or 0,
+        )
+    )
+    return (members, collection_total)
+
+
+def _placeholder_display_status_for_movie(session, movie_id: int) -> str | None:
+    row = (
+        session.query(Placeholder)
+        .filter(Placeholder.movie_id == int(movie_id))
+        .order_by(Placeholder.has_placeholder.desc(), Placeholder.updated_at.desc(), Placeholder.id.desc())
+        .first()
+    )
+    if not row:
+        return None
+    return str(getattr(row, "display_status", None) or "").strip() or None
+
+
+def _placeholder_display_status_for_episode(session, episode_id: int) -> str | None:
+    row = (
+        session.query(Placeholder)
+        .filter(Placeholder.episode_id == int(episode_id))
+        .order_by(Placeholder.has_placeholder.desc(), Placeholder.updated_at.desc(), Placeholder.id.desc())
+        .first()
+    )
+    if not row:
+        return None
+    return str(getattr(row, "display_status", None) or "").strip() or None
+
+
+def _episode_display_status_map(session, episode_ids: list[int]) -> dict[int, str | None]:
+    if not episode_ids:
+        return {}
+    rows = (
+        session.query(Placeholder)
+        .filter(Placeholder.episode_id.in_([int(x) for x in episode_ids]))
+        .order_by(Placeholder.has_placeholder.desc(), Placeholder.updated_at.desc(), Placeholder.id.desc())
+        .all()
+    )
+    out: dict[int, str | None] = {}
+    for row in rows:
+        eid = int(getattr(row, "episode_id", 0) or 0)
+        if not eid or eid in out:
+            continue
+        out[eid] = str(getattr(row, "display_status", None) or "").strip() or None
+    return out
 
 
 @router.get("/api/detail/movie/{movie_id}")
@@ -3575,6 +4308,8 @@ async def movie_detail(movie_id: int):
             payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
         )
         instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
+        collection_title, collection_tmdb_id = _collection_fields(movie.radarr_collection)
+        collection_members, collection_total = _movie_collection_members(session, movie)
         return {
             "ok": True,
             "type": "movie",
@@ -3589,7 +4324,15 @@ async def movie_detail(movie_id: int):
             "genres": movie.radarr_genres or [],
             "studio": movie.radarr_studio,
             "ratings": movie.radarr_ratings or {},
+            "ratings_display": _ratings_display(movie.radarr_ratings),
             "collection": movie.radarr_collection,
+            "collection_title": collection_title,
+            "collection_tmdb_id": collection_tmdb_id,
+            "collection_members": collection_members,
+            "collection_total": collection_total,
+            "actors": _people_display(movie.radarr_actors, cap=8),
+            "directors": _people_display(movie.radarr_directors, cap=4),
+            "trailer_url": _youtube_trailer_url(movie.radarr_trailer),
             "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": movie.instance_key,
             "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
@@ -3598,10 +4341,16 @@ async def movie_detail(movie_id: int):
             "imdbid": movie.imdbid,
             "tmdbid": movie.tmdbid,
             "status": movie.status,
+            "display_status": _placeholder_display_status_for_movie(session, int(movie.id)),
             "determination": movie.determination,
             "has_file": bool(movie.has_file),
             "has_placeholder": bool(movie.has_placeholder),
             "placeholder_filepath": movie.placeholder_filepath,
+            "file_path": movie.radarr_filepath,
+            "file_size_bytes": movie.moviefile_size,
+            "library_path": movie.radarrpath,
+            "radarr_id": movie.radarrid,
+            "last_found_in_arr": _iso(movie.last_found_in_radarr),
             "radarr_quality": movie.radarr_quality,
             "radarr_monitored": bool(movie.radarr_monitored),
             "radarr_release_status": movie.radarr_release_status,
@@ -3620,6 +4369,8 @@ async def movie_detail(movie_id: int):
 @router.get("/api/detail/series/{series_id}")
 async def series_detail(series_id: int):
     """Return full detail for a series, including all seasons and their episodes."""
+    from services.library_future_semantics import episode_row_is_future_outside_lookahead
+
     session = get_session()
     try:
         series = session.query(Series).filter(Series.id == series_id, Series.is_deleted == False).first()
@@ -3639,7 +4390,8 @@ async def series_detail(series_id: int):
             .order_by(Season.season_number.asc())
             .all()
         )
-        seasons_out = []
+        all_episode_ids: list[int] = []
+        season_episode_lists: list[tuple[Season, list[Episode]]] = []
         for season in seasons_raw:
             episodes_raw = (
                 session.query(Episode)
@@ -3647,9 +4399,24 @@ async def series_detail(series_id: int):
                 .order_by(Episode.episode_number.asc())
                 .all()
             )
+            season_episode_lists.append((season, episodes_raw))
+            all_episode_ids.extend(int(e.id) for e in episodes_raw)
+        ep_display = _episode_display_status_map(session, all_episode_ids)
+
+        seasons_out = []
+        for season, episodes_raw in season_episode_lists:
             ep_total = len(episodes_raw)
             ep_files = sum(1 for e in episodes_raw if e.has_file)
             ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
+            ep_future = 0
+            ep_missing = 0
+            for e in episodes_raw:
+                if bool(e.has_file) or bool(e.has_placeholder):
+                    continue
+                if episode_row_is_future_outside_lookahead(e, int(season.season_number or 0)):
+                    ep_future += 1
+                else:
+                    ep_missing += 1
             episodes_out = [
                 {
                     "id": ep.id,
@@ -3662,9 +4429,12 @@ async def series_detail(series_id: int):
                     "has_placeholder": bool(ep.has_placeholder),
                     "determination": ep.determination,
                     "status": ep.status,
+                    "display_status": ep_display.get(int(ep.id)),
                     "sonarr_quality": ep.sonarr_quality,
                     "sonarr_monitored": bool(ep.sonarr_monitored),
                     "placeholder_filepath": ep.placeholder_filepath,
+                    "file_size_bytes": ep.episodefile_size,
+                    "runtime": ep.sonarr_runtime,
                 }
                 for ep in episodes_raw
             ]
@@ -3677,8 +4447,15 @@ async def series_detail(series_id: int):
                 "episode_total": ep_total,
                 "episode_files": ep_files,
                 "episode_placeholders": ep_placeholders,
+                "episode_missing": ep_missing,
+                "episode_future": ep_future,
+                "monitored": bool(season.sonarr_monitored),
+                "poster_url": season.remote_poster,
                 "episodes": episodes_out,
             })
+
+        stats = _episode_stats_for_series(session, int(series.id))
+        last_aired_map = series_last_aired_map(session, [int(series.id)])
         return {
             "ok": True,
             "type": "series",
@@ -3693,6 +4470,8 @@ async def series_detail(series_id: int):
             "genres": series.sonarr_genres or [],
             "network": series.sonarr_network,
             "ratings": series.sonarr_ratings or {},
+            "ratings_display": _ratings_display(series.sonarr_ratings),
+            "actors": _people_display(series.sonarr_actors, cap=8),
             "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": series.instance_key,
             "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
@@ -3700,10 +4479,19 @@ async def series_detail(series_id: int):
             "arr_link": arr_link,
             "imdbid": series.imdbid,
             "tvdbid": series.tvdbid,
+            "tmdb_id": series.sonarr_tmdbid,
             "status": series.status,
             "sonarr_status": series.sonarr_status,
             "sonarr_monitored": bool(series.sonarr_monitored),
             "first_aired": _iso(series.sonarr_first_aired),
+            "last_aired_date": _iso(last_aired_map.get(int(series.id))),
+            "episode_stats": {
+                "total": int(stats.get("episode_total", 0) or 0),
+                "files": int(stats.get("episode_files", 0) or 0),
+                "placeholders": int(stats.get("episode_placeholders", 0) or 0),
+                "future": int(stats.get("episode_future", 0) or 0),
+                "missing": int(stats.get("episode_missing", 0) or 0),
+            },
             "updated_at": _iso(series.updated_at),
             "created_at": _iso(series.created_at),
             "seasons": seasons_out,
@@ -4138,15 +4926,28 @@ async def integrations_test(request: Request):
     service = str(payload.get("service") or "").strip().lower()
     url = str(payload.get("url") or "").strip()
     credential = str(payload.get("credential") or "").strip()
+    credential_key = str(payload.get("credential_key") or "").strip() or None
+    instance_id = str(payload.get("instance_id") or "").strip() or None
 
     if service not in {"plex", "jellyfin", "emby", "radarr", "sonarr"}:
         return JSONResponse(content={"ok": False, "message": "unsupported service"}, status_code=400)
     if not url:
         return JSONResponse(content={"ok": False, "message": "url is required"}, status_code=400)
-    if not credential:
-        return JSONResponse(content={"ok": False, "message": "credential is required"}, status_code=400)
 
-    result = test_integration_connection(service=service, url=url, token_or_key=credential)
+    resolved, resolve_err = resolve_integration_test_credential(
+        service=service,
+        url=url,
+        credential=credential,
+        credential_key=credential_key,
+        instance_id=instance_id,
+    )
+    if resolve_err or not resolved:
+        return JSONResponse(
+            content={"ok": False, "message": resolve_err or "credential is required"},
+            status_code=400,
+        )
+
+    result = test_integration_connection(service=service, url=url, token_or_key=resolved)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

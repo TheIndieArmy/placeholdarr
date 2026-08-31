@@ -896,6 +896,44 @@ a { color: inherit; }
   color: #4f7ef7;
 }
 
+/* Sidebar nav: inset pill selected state */
+.brand-theme-scope .nav-item {
+  width: calc(100% - 16px);
+  margin-left: 8px;
+  margin-right: 8px;
+  padding-left: 16px;
+  padding-right: 16px;
+  border-radius: 12px;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.brand-theme-scope .nav-sel-pill {
+  background-color: color-mix(in srgb, var(--brand-accent) 26%, transparent);
+  color: var(--brand-accent-2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-accent) 55%, transparent);
+}
+.brand-theme-scope .nav-sel-pill .material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  color: inherit;
+}
+
+/* Light mode: navy fill, mid-blue hairline, ice type */
+.brand-theme-scope.theme-light .nav-sel-pill {
+  background-color: var(--brand-fg);
+  color: #7dd3fc;
+  box-shadow: inset 0 0 0 1px var(--brand-fg-label);
+}
+.brand-theme-scope.theme-light .nav-sel-pill .material-symbols-outlined {
+  color: #7dd3fc;
+}
+
+.brand-theme-scope.theme-light .nav-item:not(.nav-sel-pill):hover {
+  background-color: color-mix(in srgb, var(--brand-accent) 42%, #ffffff);
+  color: var(--brand-fg);
+}
+
 /* Sidebar footer */
 .studio-sidebar-footer {
   padding: 20px 24px 24px;
@@ -1150,6 +1188,21 @@ a { color: inherit; }
   font-family: var(--brand-font-body), Inter, ui-sans-serif, system-ui, sans-serif;
 }
 
+/* Primary actions on brand yellow (stat yellow / top bar band). */
+.brand-theme-scope .btn-brand-accent {
+  background-color: var(--brand-accent);
+  color: var(--brand-fg-on-accent);
+  border-color: color-mix(in srgb, var(--brand-accent) 52%, var(--brand-border-strong));
+  transition-property: color, background-color, border-color;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+.brand-theme-scope .btn-brand-accent:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--brand-accent) 88%, var(--brand-chrome-page));
+  border-color: color-mix(in srgb, var(--brand-accent) 40%, var(--brand-chrome-page));
+}
+
 /* Primary actions that should follow the brand tertiary token (spectral cyan accent). */
 .brand-theme-scope .btn-brand-tertiary {
   background-color: var(--brand-accent-tertiary);
@@ -1350,8 +1403,9 @@ a { color: inherit; }
 }
 
 /*
- * Movie detail file-state tiles — always studio navy (same as onboarding integration logo wells),
- * independent of `.theme-light .bg-[#1e2430]` semantic remaps.
+ * Movie/series detail file-state tiles.
+ * Dark: studio navy cards. Light: score-card treatment (light surface, dark text);
+ * icon wells stay dark via inline styles for contrast.
  */
 .movie-file-state-dark-tile {
   background-color: #1e2430 !important;
@@ -1361,6 +1415,12 @@ a { color: inherit; }
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 8px 22px rgba(15, 23, 42, 0.1);
   text-decoration: none;
+}
+
+.brand-theme-scope.theme-light .movie-file-state-dark-tile {
+  background-color: #f8fafc !important;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .brand-theme-scope.theme-dark .movie-file-state-dark-tile {
@@ -1373,7 +1433,11 @@ a.movie-file-state-dark-tile:hover {
   border-color: rgba(100, 116, 139, 0.55);
 }
 
-/* Radarr instance tiles only — reads as a tappable control (Placeholdarr tile stays static). */
+.brand-theme-scope.theme-light a.movie-file-state-dark-tile:hover {
+  border-color: #cbd5e1;
+}
+
+/* Radarr/Sonarr instance tiles only — reads as a tappable control (Placeholdarr tile stays static). */
 a.movie-file-state-arr-tile {
   cursor: pointer;
   transition:
@@ -1391,6 +1455,14 @@ a.movie-file-state-arr-tile:hover {
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 14px 32px rgba(15, 23, 42, 0.2),
     0 0 0 1px rgba(251, 191, 36, 0.14);
+}
+
+.brand-theme-scope.theme-light a.movie-file-state-arr-tile:hover {
+  background-color: #f1f5f9 !important;
+  border-color: rgba(251, 191, 36, 0.55) !important;
+  box-shadow:
+    0 10px 24px rgba(15, 23, 42, 0.08),
+    0 0 0 1px rgba(251, 191, 36, 0.2);
 }
 
 .brand-theme-scope.theme-dark a.movie-file-state-arr-tile:hover {
@@ -1441,14 +1513,41 @@ a.movie-file-state-dark-tile:focus-visible {
 
 .movie-file-state-dark-tile .movie-file-state-tile-title {
   color: #f1f5f9 !important;
+  /* Reserve two lines so status always sits on the same row across tiles. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  width: 100%;
+  min-height: 2.5em;
+  max-height: 2.5em;
+  line-height: 1.25;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* Compress long labels (e.g. "Radarr Secondary") into the 2-line box. */
+  font-size: clamp(0.8125rem, 0.72rem + 0.35vw, 1rem) !important;
 }
 
 .movie-file-state-dark-tile .movie-file-state-tile-status {
   color: #e2e8f0 !important;
+  margin-top: auto;
 }
 
 .movie-file-state-dark-tile .movie-file-state-tile-caption {
   color: rgba(148, 163, 184, 0.92) !important;
+}
+
+.brand-theme-scope.theme-light .movie-file-state-dark-tile .movie-file-state-tile-title {
+  color: #0f172a !important;
+}
+
+.brand-theme-scope.theme-light .movie-file-state-dark-tile .movie-file-state-tile-status {
+  color: #1e293b !important;
+}
+
+.brand-theme-scope.theme-light .movie-file-state-dark-tile .movie-file-state-tile-caption {
+  color: #64748b !important;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -134,7 +134,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
 export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
   title: "Playback Source Integrations (Optional)",
   description:
-    "Placeholdarr can track playback activity from Tautulli, Jellyfin, or Emby to improve content recommendations and status tracking.",
+    "Placeholdarr can track playback from Tautulli, Jellyfin, or Emby so placeholder search starts when someone hits play.",
   services: [
     {
       id: "tautulli",
@@ -148,25 +148,13 @@ export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
           event: "Playback Start",
           displayName: "Playback Started",
           description: "User begins playing media",
-          required: false,
-        },
-        {
-          event: "Playback Stop",
-          displayName: "Playback Stopped",
-          description: "User stops or pauses playback",
-          required: false,
-        },
-        {
-          event: "Playback Resume",
-          displayName: "Playback Resumed",
-          description: "User resumes after pause",
-          required: false,
+          required: true,
         },
       ],
       notes: [
         "Requires Tautulli webhooks send to: Settings → Notifications → Webhooks",
         "Use the fixed instance key 'tautulli' (not derived from server name)",
-        "Optional: improves placeholder status and content recommendations",
+        "Playback Started is required; Placeholdarr only processes start events",
       ],
     },
     {
@@ -181,19 +169,13 @@ export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
           event: "Playback Start",
           displayName: "Playback Started",
           description: "User begins playing media",
-          required: false,
-        },
-        {
-          event: "Playback Stop",
-          displayName: "Playback Stopped",
-          description: "User stops playback",
-          required: false,
+          required: true,
         },
       ],
       notes: [
         "Requires applicable Jellyfin plugin or webhook integration",
         "Use the fixed instance key 'jellyfin' (not derived from server name)",
-        "Optional: improves placeholder status tracking",
+        "Playback Started is required; Placeholdarr only processes start events",
       ],
     },
     {
@@ -208,19 +190,13 @@ export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
           event: "Playback Start",
           displayName: "Playback Started",
           description: "User begins playing media",
-          required: false,
-        },
-        {
-          event: "Playback Stop",
-          displayName: "Playback Stopped",
-          description: "User stops playback",
-          required: false,
+          required: true,
         },
       ],
       notes: [
         "Requires Emby server webhook plugin configuration",
         "Use the fixed instance key 'emby' (not derived from server name)",
-        "Optional: improves placeholder status tracking",
+        "Playback Started is required; Placeholdarr only processes start events",
       ],
     },
   ],

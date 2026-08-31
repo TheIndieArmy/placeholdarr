@@ -75,6 +75,23 @@ def _take_pending_refresh() -> _RefreshBatch | None:
         return batch
 
 
+_PG_LOCK_NOT_AVAILABLE = "55P03"
+
+
+def _is_lock_timeout(exc: BaseException) -> bool:
+    pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
+    return str(pgcode or "") == _PG_LOCK_NOT_AVAILABLE
+
+
+def _full_sync_is_active() -> bool:
+    try:
+        from services.source_of_truth.sync_coordinator import is_full_sync_active
+
+        return bool(is_full_sync_active())
+    except Exception:
+        return False
+
+
 def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
     """Apply one refresh batch. Returns False when the advisory lock is already held."""
     from services.postgres.db import get_session
@@ -98,7 +115,7 @@ def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
                 pass
             return False
         try:
-            sess.execute(text("SET LOCAL lock_timeout = '15s'"))
+            sess.execute(text("SET LOCAL lock_timeout = '3s'"))
         except Exception:
             pass
 
@@ -117,11 +134,18 @@ def _execute_refresh_batch(batch: _RefreshBatch) -> bool:
             sess.rollback()
         except Exception:
             pass
-        logger.warning(
-            "series_episode_stats refresh failed (will retry): %s",
-            exc,
-            extra={"emoji_type": "warning"},
-        )
+        if _is_lock_timeout(exc):
+            logger.warning(
+                "series_episode_stats refresh hit lock timeout (will retry with backoff): %s",
+                exc,
+                extra={"emoji_type": "warning"},
+            )
+        else:
+            logger.warning(
+                "series_episode_stats refresh failed (will retry): %s",
+                exc,
+                extra={"emoji_type": "warning"},
+            )
         return False
     finally:
         if locked:
@@ -147,17 +171,20 @@ def _ensure_refresh_retry_worker() -> None:
 
     def _run() -> None:
         global _retry_worker
-        backoff_s = 0.25
+        backoff_s = 2.0
         while True:
+            if _full_sync_is_active():
+                time.sleep(30)
+                continue
             batch = _take_pending_refresh()
             if batch is None or batch.is_empty():
                 break
             if _execute_refresh_batch(batch):
-                backoff_s = 0.25
+                backoff_s = 2.0
                 continue
             _enqueue_refresh_batch(batch)
             time.sleep(backoff_s)
-            backoff_s = min(backoff_s * 1.5, 2.0)
+            backoff_s = min(backoff_s * 2.0, 60.0)
         with _RETRY_WORKER_LOCK:
             _retry_worker = None
 
@@ -174,6 +201,9 @@ def _ensure_refresh_retry_worker() -> None:
 
 def _drain_pending_refresh() -> None:
     """Run queued stats/version work; retry in the background when the advisory lock is busy."""
+    if _full_sync_is_active():
+        _ensure_refresh_retry_worker()
+        return
     while True:
         batch = _take_pending_refresh()
         if batch is None or batch.is_empty():

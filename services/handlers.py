@@ -295,6 +295,51 @@ def handle_webhook(
         session.close()
 
 
+def enqueue_synthetic_arr_adds(
+    *,
+    instance_key: str,
+    movie: bool,
+    lookups: list[Dict[str, Any]],
+) -> int:
+    """Enqueue MovieAdded/SeriesAdd-equivalent jobs for titles already in *arr.
+
+    Used after Collections add (including skipped / timeout-reconciled titles)
+    so placeholders are created even when *arr does not fire a webhook.
+    """
+    queued = 0
+    key = str(instance_key or "").strip().lower()
+    if not key or not lookups:
+        return 0
+    for lookup in lookups:
+        if not isinstance(lookup, dict):
+            continue
+        try:
+            arr_id = int(lookup.get("id") or 0)
+        except (TypeError, ValueError):
+            arr_id = 0
+        if arr_id <= 0:
+            continue
+        payload: Dict[str, Any] = (
+            {"eventType": "MovieAdded", "movie": {"id": arr_id}}
+            if movie
+            else {"eventType": "SeriesAdd", "series": {"id": arr_id}}
+        )
+        try:
+            handle_webhook(payload, instance=key)
+            queued += 1
+        except Exception as exc:
+            logger.warning(
+                f"Failed to enqueue synthetic ARR add ingest instance={key} arr_id={arr_id}: {exc}",
+                extra={"emoji_type": "warning"},
+            )
+    if queued:
+        logger.info(
+            f"Enqueued {queued} synthetic {'movie' if movie else 'series'} add ingest job(s) instance={key}",
+            extra={"emoji_type": "info"},
+        )
+    return queued
+
+
 def handle_event(event: Dict[str, Any]) -> bool:
     """Compatibility entrypoint used by some scripts/tests."""
     instance = None

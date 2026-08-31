@@ -180,7 +180,7 @@ export function getBrandSemanticTokens(brand: Brand, mode: ThemeMode, accent: Ac
       chromeSidebar: "#D8E8F6",
       chromeHeader: "#EEF6FC",
       chromeMain: "#EEF5FB",
-      navHover: "#C9E8F5",
+      navHover: "#FDE68A",
       topBarBand: "#FDE047",
     };
   }

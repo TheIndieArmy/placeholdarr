@@ -1,10 +1,10 @@
-import { fetchJson } from "./client";
+import { fetchJson, postJson, ApiUnauthorizedError } from "./client";
+import { reloadIfFrontendStale } from "../frontendBuild";
 import type {
   ActivityRow,
   CalendarErrorResponse,
   CalendarResponse,
   DetailResponse,
-  ErrorRow,
   IntegrationTestResponse,
   LibraryResponse,
   LibraryVersionResponse,
@@ -24,15 +24,67 @@ export function getStats(): Promise<StatsResponse> {
 }
 
 export function getActivity(limit = 100): Promise<ActivityRow[]> {
-  return fetchJson<ActivityRow[]>(`/api/activity?limit=${limit}`);
+  return getActivityOperationsPage({ limit }).then((p) => p.items);
+}
+
+export type ActivityFeedPage<T> = {
+  items: T[];
+  has_more: boolean;
+  next_before_time?: string | null;
+  next_before_id?: number | null;
+};
+
+export function getActivityOperationsPage(opts?: {
+  limit?: number;
+  beforeTime?: string | null;
+  beforeId?: number | null;
+}): Promise<ActivityFeedPage<ActivityRow>> {
+  const limit = opts?.limit ?? 100;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (opts?.beforeTime) params.set("before_time", opts.beforeTime);
+  if (opts?.beforeId != null) params.set("before_id", String(opts.beforeId));
+  return fetchJson<ActivityFeedPage<ActivityRow>>(`/api/activity/operations?${params}`);
 }
 
 export function getActivityOperations(limit = 100): Promise<ActivityRow[]> {
-  return fetchJson<ActivityRow[]>(`/api/activity/operations?limit=${limit}`);
+  return getActivityOperationsPage({ limit }).then((p) => p.items);
+}
+
+export function getPlaceholderActivityPage(opts?: {
+  limit?: number;
+  beforeTime?: string | null;
+  beforeId?: number | null;
+}): Promise<ActivityFeedPage<PlaceholderActivityRow>> {
+  const limit = opts?.limit ?? 100;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (opts?.beforeTime) params.set("before_time", opts.beforeTime);
+  if (opts?.beforeId != null) params.set("before_id", String(opts.beforeId));
+  return fetchJson<ActivityFeedPage<PlaceholderActivityRow>>(`/api/activity/placeholders?${params}`);
 }
 
 export function getPlaceholderActivity(limit = 100): Promise<PlaceholderActivityRow[]> {
-  return fetchJson<PlaceholderActivityRow[]>(`/api/activity/placeholders?limit=${limit}`);
+  return getPlaceholderActivityPage({ limit }).then((p) => p.items);
+}
+
+export type ActiveSearchItem = {
+  kind?: string;
+  title?: string;
+  subtitle?: string;
+  instance?: string;
+  line?: string;
+  arr_percent?: number | null;
+};
+
+export type ActiveSearchesResponse = {
+  active: boolean;
+  items: ActiveSearchItem[];
+  details: string;
+  started_at?: string | null;
+  updated_at?: string | null;
+};
+
+export function getActiveSearches(): Promise<ActiveSearchesResponse> {
+  return fetchJson<ActiveSearchesResponse>("/api/activity/active-searches");
 }
 
 export type LibraryFetchResult =
@@ -48,6 +100,8 @@ export async function getLibrary(
     summary?: boolean;
     mediaType?: "movie" | "series";
     ifNoneMatch?: number | string | null;
+    /** Bypass any stale browser HTTP cache for this shelf fetch. */
+    bustCache?: boolean;
   },
 ): Promise<LibraryFetchResult> {
   const summary = opts?.summary === true;
@@ -55,6 +109,7 @@ export async function getLibrary(
   if (summary) q.set("summary", "true");
   if (opts?.mediaType === "movie") q.set("media_type", "movie");
   if (opts?.mediaType === "series") q.set("media_type", "series");
+  if (opts?.bustCache) q.set("cb", String(Date.now()));
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts?.ifNoneMatch != null && opts.ifNoneMatch !== "") {
@@ -63,12 +118,20 @@ export async function getLibrary(
 
   let response: Response;
   try {
-    response = await fetch(`/api/library?${q.toString()}`, { headers });
+    response = await fetch(`/api/library?${q.toString()}`, {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers,
+    });
   } catch (err) {
     if (err instanceof TypeError) {
       throw new Error("Cannot reach the Placeholdarr API (network error). Trying to reconnect…");
     }
     throw err instanceof Error ? err : new Error(String(err));
+  }
+
+  if (response.status === 401) {
+    throw new Error("authentication required");
   }
 
   if (response.status === 304) {
@@ -149,10 +212,6 @@ export function getCalendar(month: string): Promise<CalendarResponse | CalendarE
   return fetchJson<CalendarResponse | CalendarErrorResponse>(`/api/calendar?month=${encodeURIComponent(month)}`);
 }
 
-export function getErrors(limit = 100): Promise<ErrorRow[]> {
-  return fetchJson<ErrorRow[]>(`/api/errors?limit=${limit}`);
-}
-
 export function getLogs(
   level: "all" | "debug" | "info" | "warn" | "error" | "critical",
   tail = 500,
@@ -201,8 +260,10 @@ export function openLogsEventSource(
   return () => source.close();
 }
 
-export function getHealth(): Promise<HealthResponse> {
-  return fetchJson<HealthResponse>("/api/health");
+export async function getHealth(): Promise<HealthResponse> {
+  const health = await fetchJson<HealthResponse>("/api/health");
+  reloadIfFrontendStale(health);
+  return health;
 }
 
 export function getReady(): Promise<ReadyResponse> {
@@ -259,23 +320,28 @@ export async function saveSettings(
   if (applyScope) {
     body.apply_scope = applyScope;
   }
-  const response = await fetch("/api/settings/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  return (await response.json()) as SaveSettingsResponse;
+  return postJson<SaveSettingsResponse>("/api/settings/save", body);
 }
 
 export async function testIntegrationConnection(input: {
   service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr";
   url: string;
   credential: string;
+  /** Settings secret key (e.g. PLEX_TOKEN). Used when credential is blank. */
+  credential_key?: string;
+  /** ARR instance id. Used when credential is blank for radarr/sonarr. */
+  instance_id?: string;
 }): Promise<IntegrationTestResponse> {
-  const response = await fetch("/api/integrations/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(input),
-  });
-  return (await response.json()) as IntegrationTestResponse;
+  // The API returns HTTP 400 with `{ ok: false, message }` for failed connection tests
+  // and missing fields. Treat that as a normal result so callers can show the message
+  // instead of leaving UI stuck on "Testing…".
+  try {
+    return await postJson<IntegrationTestResponse>("/api/integrations/test", input);
+  } catch (err) {
+    if (err instanceof ApiUnauthorizedError) {
+      throw err;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: message || "Connection test failed" };
+  }
 }

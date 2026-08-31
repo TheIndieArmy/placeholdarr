@@ -1,8 +1,8 @@
-export type DashboardTab = "activity" | "library" | "calendar" | "errors" | "logs" | "settings" | "setup";
+export type DashboardTab = "activity" | "library" | "collections" | "calendar" | "logs" | "settings" | "setup";
 
 export type ActivitySubPage = "placeholders" | "tasks" | "operations";
 
-export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh";
+export type TaskKey = "full_sync" | "lite_sync" | "calendar_only" | "placeholder_refresh" | "collections_sync";
 
 export interface ScheduledTaskRow {
   task_key: TaskKey;
@@ -110,26 +110,26 @@ export interface ActivityRow {
 }
 
 export interface PlaceholderActivityRow {
-  id: number;
+  id: number | string;
   type: "placeholder";
   action: "Created" | "Deleted" | "Status";
-  item_type: "movie" | "episode" | "batch";
+  item_type: "movie" | "episode" | "batch" | "series";
   item_title: string;
   series_title?: string | null;
   path: string;
   reason: string;
   status: string;
   time?: string | null;
-  /** Server-side batch of calendar-driven status updates; expands in the UI. */
-  group_kind?: "calendar_status_sync" | string;
+  /** Server-side batch (calendar status sync or series-add creates); expands in the UI. */
+  group_kind?: "calendar_status_sync" | "series_create_batch" | "series_added_create" | "series_bulk_delete" | string;
   children?: PlaceholderActivityChildRow[];
 }
 
 export interface PlaceholderActivityChildRow {
-  id: number;
+  id: number | string;
   type?: "placeholder";
   action?: string;
-  item_type?: "movie" | "episode";
+  item_type?: "movie" | "episode" | "series" | "batch";
   item_title?: string;
   series_title?: string | null;
   path?: string;
@@ -158,6 +158,9 @@ export interface LibraryItem {
   type: LibraryItemType;
   title: string;
   year: number;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
   /** Series network (Sonarr). */
   network?: string | null;
   poster_url?: string | null;
@@ -174,6 +177,16 @@ export interface LibraryItem {
   is_future: boolean;
   has_missing: boolean;
   overview?: string | null;
+  /** Movie: theatrical release (in cinemas), ISO date. */
+  theater_release_date?: string | null;
+  /** Movie: digital release, ISO date. */
+  digital_release_date?: string | null;
+  /** Movie: physical release, ISO date. */
+  physical_release_date?: string | null;
+  /** Series: Sonarr first-aired / premiere (ISO date). */
+  premiere_date?: string | null;
+  /** Series: latest episode air date on or before today (ISO date). */
+  last_aired_date?: string | null;
   /** When this title was first indexed in Placeholdarr (ISO 8601). */
   created_at?: string | null;
   /** Last catalog/metadata update for this row (ISO 8601). */
@@ -203,10 +216,37 @@ export interface ArrInstanceOpenLink {
   has_placeholder?: boolean;
   /** When false, this ARR instance does not have this title/show; UI shows "-" for the status line. */
   present?: boolean;
+  /** Monitored flag for this title on this ARR instance (when known). */
+  monitored?: boolean;
   episode_files?: number;
   episode_placeholders?: number;
   /** Episodes tracked for this show on this Sonarr instance (for ``files/total`` on series detail). */
   episode_total?: number;
+}
+
+export interface DetailRatingDisplay {
+  source: string;
+  value: string;
+  votes?: string | null;
+  is_default?: boolean;
+}
+
+export interface DetailActorDisplay {
+  name: string;
+  role?: string | null;
+}
+
+export interface DetailCollectionMember {
+  /** Placeholdarr movie id when this title is in the catalog; null for TMDB-only. */
+  id?: number | null;
+  tmdbid?: number | null;
+  title: string;
+  year?: number | null;
+  poster_url?: string | null;
+  /** downloaded | placeholder | missing | not_in_library */
+  status: "downloaded" | "placeholder" | "missing" | "not_in_library";
+  /** Highlight the title currently being viewed. */
+  is_current?: boolean;
 }
 
 export interface MovieDetailResponse {
@@ -223,7 +263,15 @@ export interface MovieDetailResponse {
   genres?: string[] | null;
   studio?: string | null;
   ratings?: Record<string, unknown> | null;
+  ratings_display?: DetailRatingDisplay[];
   collection?: Record<string, unknown> | null;
+  collection_title?: string | null;
+  collection_tmdb_id?: number | null;
+  collection_members?: DetailCollectionMember[];
+  collection_total?: number | null;
+  actors?: DetailActorDisplay[];
+  directors?: DetailActorDisplay[];
+  trailer_url?: string | null;
   is_4k: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
@@ -234,10 +282,17 @@ export interface MovieDetailResponse {
   imdbid?: string | null;
   tmdbid?: number | null;
   status?: string | null;
+  /** Placeholder display status (REQUEST, SEARCHING, …) — not legacy movie.status. */
+  display_status?: string | null;
   determination?: string | null;
   has_file: boolean;
   has_placeholder: boolean;
   placeholder_filepath?: string | null;
+  file_path?: string | null;
+  file_size_bytes?: number | null;
+  library_path?: string | null;
+  radarr_id?: number | null;
+  last_found_in_arr?: string | null;
   radarr_quality?: string | null;
   radarr_monitored?: boolean;
   radarr_release_status?: string | null;
@@ -260,9 +315,12 @@ export interface SeriesEpisodeDetail {
   has_placeholder: boolean;
   determination?: string | null;
   status?: string | null;
+  display_status?: string | null;
   sonarr_quality?: string | null;
   sonarr_monitored?: boolean;
   placeholder_filepath?: string | null;
+  file_size_bytes?: number | null;
+  runtime?: number | null;
 }
 
 export interface SeriesSeasonDetail {
@@ -274,6 +332,10 @@ export interface SeriesSeasonDetail {
   episode_total: number;
   episode_files: number;
   episode_placeholders: number;
+  episode_missing?: number;
+  episode_future?: number;
+  monitored?: boolean;
+  poster_url?: string | null;
   episodes: SeriesEpisodeDetail[];
 }
 
@@ -290,7 +352,10 @@ export interface SeriesDetailResponse {
   certification?: string | null;
   genres?: string[] | null;
   network?: string | null;
+  network_logo_url?: string | null;
   ratings?: Record<string, unknown> | null;
+  ratings_display?: DetailRatingDisplay[];
+  actors?: DetailActorDisplay[];
   is_4k: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
@@ -300,10 +365,19 @@ export interface SeriesDetailResponse {
   arr_instance_links?: ArrInstanceOpenLink[];
   imdbid?: string | null;
   tvdbid?: number | null;
+  tmdb_id?: number | null;
   status?: string | null;
   sonarr_status?: string | null;
   sonarr_monitored?: boolean;
   first_aired?: string | null;
+  last_aired_date?: string | null;
+  episode_stats?: {
+    total: number;
+    files: number;
+    placeholders: number;
+    future: number;
+    missing: number;
+  };
   updated_at?: string | null;
   created_at?: string | null;
   seasons: SeriesSeasonDetail[];
@@ -315,13 +389,6 @@ export interface DetailErrorResponse {
 }
 
 export type DetailResponse = MovieDetailResponse | SeriesDetailResponse | DetailErrorResponse;
-
-export interface ErrorRow {
-  source: string;
-  label: string;
-  error: string;
-  time?: string | null;
-}
 
 export interface LogsResponse {
   lines: string[];
@@ -443,6 +510,8 @@ export interface SettingsSection {
 
 export interface HealthResponse {
   ok: boolean;
+  app_version?: string;
+  frontend_build?: string;
 }
 
 export interface ReadyResponse {
@@ -453,7 +522,8 @@ export interface ReadyResponse {
 export type DashboardEvent =
   | { type: "ping"; ts: number }
   | { type: "startup_sync_complete"; value: boolean }
-  | { type: "library_version"; movies_version: number; series_version: number };
+  | { type: "library_version"; movies_version: number; series_version: number }
+  | { type: "task_runs_version"; version: string };
 
 export interface SettingsStatus {
   setup_complete: boolean;
@@ -467,6 +537,8 @@ export interface SettingsStatus {
 export interface SettingsPayload {
   status: SettingsStatus;
   sections: SettingsSection[];
+  /** Not a settings field — used to display webhook URLs Radarr/Sonarr/etc. need. */
+  webhook_api_key?: string | null;
 }
 
 export interface SaveSettingsResponse {
@@ -483,5 +555,419 @@ export interface SaveSettingsResponse {
 
 export interface IntegrationTestResponse {
   ok: boolean;
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
+// Collections (rule-based Plex collection builder)
+// ---------------------------------------------------------------------------
+
+export type CollectionSourceType =
+  | "catalog"
+  | "tmdb"
+  | "tmdb_trending"
+  | "tmdb_popular"
+  | "tmdb_upcoming"
+  | "tmdb_discover"
+  | "tmdb_url"
+  | "tmdb_list"
+  | "tmdb_person"
+  | "tmdb_company"
+  | "tmdb_keyword"
+  | "tmdb_collection"
+  | "mdblist"
+  | "trakt"
+  | "trakt_list"
+  | "trakt_chart"
+  | "stevenlu"
+  | "anilist"
+  | "tautulli"
+  | "arr_tag";
+
+export interface CollectionSourceBlock {
+  type: CollectionSourceType;
+  /** tmdb / tmdb_trending */
+  window?: "day" | "week";
+  /** tmdb discover / tmdb_discover */
+  genre_ids?: number[];
+  year_from?: number | null;
+  year_to?: number | null;
+  provider_ids?: number[];
+  watch_region?: string;
+  min_vote_average?: number | null;
+  /** tmdb discover|page / tmdb_discover / tmdb_url / legacy tmdb company|keyword URL pages */
+  sort_by?: string | null;
+  /** tmdb_list / tmdb_person / tmdb_company / tmdb_keyword / tmdb_collection — id or TMDB URL */
+  list_id?: string;
+  tmdb_ref?: string;
+  /** mdblist / trakt list / anilist / stevenlu — pasted URL or user/slug */
+  list_ref?: string;
+  /** tmdb / trakt / tautulli / legacy trakt_chart subtype */
+  subtype?: string;
+  /** trakt chart period for watched/played/collected */
+  period?: string;
+  /** tautulli */
+  days?: number;
+  minimum_plays?: number;
+  /** arr_tag */
+  instance_key?: string;
+  tag_id?: number | null;
+  /** per-source candidate cap */
+  limit?: number;
+}
+
+export type CollectionFilterField =
+  | "genre"
+  | "year"
+  | "certification"
+  | "studio_network"
+  | "monitored"
+  | "quality_profile"
+  | "original_language"
+  | "instance"
+  | "release_window"
+  | "rating";
+
+export type CollectionReleaseWindowBasis =
+  | "premiered"
+  | "latest_episode"
+  | "latest_season"
+  | "theater"
+  | "digital"
+  | "physical";
+
+/** Year filter: premiere/release year vs TV first–last air overlap. */
+export type CollectionYearBasis = "premiered" | "aired_during";
+
+/** Radarr nested rating providers for movie rating filters. TV uses Sonarr's flat score. */
+export type CollectionRatingProvider =
+  | "imdb"
+  | "tmdb"
+  | "trakt"
+  | "metacritic"
+  | "rottenTomatoes";
+
+export interface CollectionFilterBlock {
+  field: CollectionFilterField;
+  op?: string;
+  value?: string | number | boolean | null;
+  value_to?: number | null;
+  values?: string[];
+  /** release_window: TV air-date mode or movie release type. year: premiere vs was-airing-during. */
+  basis?: CollectionReleaseWindowBasis | CollectionYearBasis | null;
+  /** rating only (movies): which Radarr ratings.* key to use. */
+  provider?: CollectionRatingProvider | null;
+  /** rating only: require at least this many votes on the chosen score. */
+  min_votes?: number | null;
+}
+
+export type CollectionSortOption = "popularity" | "release_date" | "latest_aired" | "title" | "rating";
+
+/** Boolean filter tree: groups carry and/or and may nest rules or sub-groups (depth ≤ 3). */
+export interface CollectionFilterGroup {
+  op: "and" | "or";
+  children: CollectionFilterNode[];
+}
+
+export type CollectionFilterNode = CollectionFilterBlock | CollectionFilterGroup;
+
+/** Legacy recipes store a flat rule list (implicit single AND group). */
+export type CollectionFilters = CollectionFilterBlock[] | CollectionFilterGroup;
+
+export interface CollectionPinnedItem {
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+  title: string;
+  year?: number | null;
+  poster?: string | null;
+}
+
+export interface CollectionPins {
+  include?: CollectionPinnedItem[];
+  exclude?: CollectionPinnedItem[];
+}
+
+export interface CollectionSetConfig {
+  category: "genre" | "decade" | "content_rating" | "tag" | "release_timing";
+  /** @deprecated Legacy alias; prefer category. Still accepted when loading older recipes. */
+  dimension?: "genre" | "decade" | "content_rating" | "tag" | "release_timing";
+  selection_mode: "all" | "include" | "exclude";
+  values: string[];
+  title_pattern: string;
+  sort?: CollectionSortOption | null;
+  limit?: number | null;
+  min_items?: number;
+  /** Required when category is tag. */
+  instance_key?: string | null;
+  /** release_timing: which release date to use (theater/digital/physical or TV premiere modes). */
+  release_basis?: string | null;
+  /** Titles previously synced per Plex section id (server-managed). */
+  managed_by_section?: Record<string, string[]>;
+}
+
+export interface CollectionDefinition {
+  /** "collection_set" for one-config → many Plex collections; omit / "recipe" for normal recipes. */
+  mode?: "recipe" | "collection_set";
+  collection_set?: CollectionSetConfig;
+  sources: CollectionSourceBlock[];
+  filters: CollectionFilters;
+  limit?: number | null;
+  sort?: CollectionSortOption | null;
+  /** When sort is rating (movies): which Radarr ratings.* key to order by. */
+  sort_provider?: CollectionRatingProvider | null;
+  pins?: CollectionPins;
+  /**
+   * When true, sync may claim an existing unlabeled Plex collection with the same
+   * title (per library) instead of refusing. Membership then follows the recipe.
+   */
+  adopt_existing?: boolean;
+}
+
+export interface CollectionRunSummary {
+  status: "ok" | "error" | "cleared" | "removed" | "skipped" | "dormant";
+  mode?: "collection_set" | string;
+  error?: string;
+  reason?: string;
+  window_cleared?: boolean;
+  when_inactive_applied?: "keep" | "clear" | "delete";
+  pinned_in?: number;
+  pinned_out?: number;
+  tmdb_candidates?: number | null;
+  matched_in_catalog?: number;
+  after_filters?: number;
+  selected?: number;
+  in_target_library?: number | null;
+  unresolved?: number | null;
+  /** Source titles not in ARR (last run). Pre-filter; not Plex unresolved. */
+  missing_from_arr_count?: number;
+  /** Titles missing now that were not in the previous run's missing set. Null = no baseline yet. */
+  missing_from_arr_new?: number | null;
+  missing_from_arr_keys?: string[];
+  synced?: { added: number; removed: number; total: number; created: boolean };
+  libraries?: CollectionLibrarySyncSummary[];
+  collection_set?: {
+    category?: string;
+    dimension?: string;
+    collection_count?: number;
+    collections?: {
+      value: string;
+      title: string;
+      plex_section_id?: number;
+      selected?: number;
+      synced?: { added: number; removed: number; total: number; created: boolean };
+    }[];
+    managed_titles?: Record<string, string[]>;
+    removed_titles?: string[];
+  };
+}
+
+export interface CollectionLibrarySyncSummary {
+  plex_section_id: number;
+  in_target_library?: number | null;
+  unresolved?: number | null;
+  plex_error?: string | null;
+  synced?: { added: number; removed: number; total: number; created: boolean };
+}
+
+export interface CollectionActiveWindow {
+  /** MM-DD, annually recurring; wrap-around (start > end) spans the new year. */
+  start: string;
+  end: string;
+  when_inactive: "keep" | "clear" | "delete";
+}
+
+export interface CollectionRecipe {
+  id: number;
+  name: string;
+  enabled: boolean;
+  plex_section_id: number;
+  /** Extra + primary Plex section ids (same type). First id matches plex_section_id. */
+  plex_section_ids?: number[];
+  plex_section_type: "movie" | "show";
+  collection_title: string;
+  /** Owned Plex collection ratingKeys per section: { sectionId: { title: ratingKey } }. Read-only. */
+  plex_collection_keys?: Record<string, Record<string, string>>;
+  definition: CollectionDefinition;
+  /** Null = follow the global COLLECTIONS_SYNC_INTERVAL_HOURS cadence. */
+  run_interval_hours: number | null;
+  active_window: CollectionActiveWindow | null;
+  /** Whether today falls inside the active window (always true without one). */
+  window_active: boolean;
+  last_run_at: string | null;
+  last_run_summary: CollectionRunSummary | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CollectionRecipesResponse {
+  recipes: CollectionRecipe[];
+  tmdb_configured: boolean;
+  trakt_configured: boolean;
+  tautulli_configured?: boolean;
+}
+
+export interface PlexSectionOption {
+  id: number;
+  title: string;
+  type: "movie" | "show";
+  item_count: number;
+}
+
+export interface CollectionTmdbMeta {
+  configured: boolean;
+  genres: { id: number; name: string }[];
+  providers: { id: number; name: string; priority?: number | null }[];
+  regions: { code: string; name: string }[];
+}
+
+export interface CollectionBuilderMeta {
+  instances: { instance_key: string; label: string; arr_type: string }[];
+  /** key is "{instance_key}:{profile_id}" — matches engine filter values. */
+  quality_profiles: { key: string; name: string; instance_key: string; instance_label: string }[];
+  languages: string[];
+  /** Distinct Radarr/Sonarr genre names present in the catalog (matches filter evaluation). */
+  genres: string[];
+  /** Distinct Radarr/Sonarr certifications present in the catalog (matches filter evaluation). */
+  certifications: string[];
+  /** Decade labels (e.g. 1990s) derived from catalog years. */
+  decades?: string[];
+  /** Tags from configured *arr instances for arr_tag sources. */
+  arr_tags?: { instance_key: string; instance_label: string; tag_id: number; label: string }[];
+  tautulli_configured?: boolean;
+}
+
+export type CollectionExplainStatus = "pass" | "fail" | "skip";
+
+export interface CollectionExplainCheck {
+  status: CollectionExplainStatus;
+  detail?: string | null;
+  /** Source checks */
+  type?: string;
+  list_ref?: string | null;
+  /** Filter rule checks */
+  field?: string;
+  op?: string | null;
+  value?: string | number | boolean | null;
+  value_to?: number | null;
+  values?: string[] | null;
+  basis?: CollectionReleaseWindowBasis | CollectionYearBasis | null;
+  provider?: CollectionRatingProvider | null;
+  min_votes?: number | null;
+}
+
+export interface CollectionExplainRuleNode extends CollectionExplainCheck {
+  kind: "rule";
+}
+
+export interface CollectionExplainGroupNode {
+  kind: "group";
+  op: "and" | "or";
+  status: CollectionExplainStatus;
+  children: CollectionExplainNode[];
+}
+
+export type CollectionExplainNode = CollectionExplainRuleNode | CollectionExplainGroupNode;
+
+export interface CollectionExplainStage {
+  key: "sources" | "catalog" | "filters" | "pins" | "limit" | "library";
+  status: CollectionExplainStatus;
+  detail: string | null;
+  checks: CollectionExplainCheck[];
+  /** Filters stage only: verdict tree mirroring the filter structure. */
+  tree?: CollectionExplainGroupNode | null;
+}
+
+export interface CollectionExplainResponse {
+  in_collection: boolean;
+  stages: CollectionExplainStage[];
+}
+
+export interface CollectionPreviewSampleItem {
+  id: number;
+  title: string;
+  year: number | null;
+  tmdb_id: number | null;
+  tvdb_id: number | null;
+  poster: string | null;
+  has_file?: boolean;
+  has_placeholder?: boolean;
+  file_state?: "file" | "placeholder" | "mixed" | "none";
+  in_libraries?: number[];
+}
+
+export interface CollectionMissingFromArrItem {
+  title: string;
+  year: number | null;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+  poster: string | null;
+}
+
+export interface CollectionPreviewResponse {
+  mode?: "collection_set" | string;
+  set_category?: string;
+  /** @deprecated Prefer set_category. */
+  set_dimension?: string;
+  set_collections?: {
+    value: string;
+    title: string;
+    selected: number;
+    in_target_library?: number | null;
+    by_library?: Record<string, number>;
+  }[];
+  set_collection_count?: number;
+  tmdb_candidates: number | null;
+  matched_in_catalog: number;
+  after_filters: number;
+  pinned_in: number;
+  pinned_out: number;
+  selected: number;
+  in_target_library: number | null;
+  unresolved: number | null;
+  plex_error: string | null;
+  libraries?: CollectionLibrarySyncSummary[];
+  sample: CollectionPreviewSampleItem[];
+  missing_from_arr?: CollectionMissingFromArrItem[];
+  missing_from_arr_count?: number;
+  missing_from_arr_prefilter_count?: number;
+  missing_from_arr_filter_gaps?: string[];
+}
+
+export interface CollectionArrAddInstanceOptions {
+  instance_key: string;
+  label: string;
+  arr_type: string;
+  quality_profiles: { id: number; name: string }[];
+  root_folders: { id?: number | null; path: string }[];
+}
+
+export interface CollectionArrAddOptionsResponse {
+  instances: CollectionArrAddInstanceOptions[];
+}
+
+export interface CollectionArrAddItem {
+  title: string;
+  year?: number | null;
+  tmdb_id?: number | null;
+  tvdb_id?: number | null;
+  imdb_id?: string | null;
+}
+
+export interface CollectionArrAddResult {
+  title: string;
+  instance_key: string;
+  status: "ok" | "skipped" | "error";
+  error?: string | null;
+}
+
+export interface CollectionArrAddResponse {
+  ok: boolean;
+  added: number;
+  skipped: number;
+  errors: number;
+  results: CollectionArrAddResult[];
+  warnings?: string[];
   message: string;
 }

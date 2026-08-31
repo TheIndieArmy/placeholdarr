@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import signal
 import subprocess
 import time
@@ -12,7 +13,7 @@ import contextvars  # noqa: F401
 import asyncio.coroutines  # noqa: F401
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from core.logger import logger
 from core.config import settings
 from services.postgres.utils import check_db
@@ -530,6 +531,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Dashboard authentication (session cookie + API gate). SessionMiddleware must wrap AuthGate.
+from starlette.middleware.sessions import SessionMiddleware
+from services.auth import ensure_session_secret
+from services.auth_middleware import AuthGateMiddleware
+from routes.auth import router as auth_router
+
+app.include_router(auth_router)
+
 # Dashboard UI
 from routes.dashboard import router as dashboard_router
 app.include_router(dashboard_router)
@@ -537,13 +546,48 @@ app.include_router(dashboard_router)
 from routes.tasks import router as tasks_router
 app.include_router(tasks_router)
 
+# Rule-based Plex collection builder
+from routes.collections import router as collections_router
+app.include_router(collections_router)
+
 # Customizable status message templates
 from routes.messages import router as messages_router
 app.include_router(messages_router)
 
+from routes.whats_new import router as whats_new_router
+app.include_router(whats_new_router)
+
+app.add_middleware(AuthGateMiddleware)
+_session_https_only = bool(getattr(settings, "AUTH_COOKIE_SECURE", False))
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=ensure_session_secret(),
+    session_cookie="placeholdarr_session",
+    same_site="lax",
+    https_only=_session_https_only,
+    max_age=60 * 60 * 24 * 14,
+)
+
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):
+async def webhook(request: Request):
     try:
+        from services.auth import get_auth_mode, verify_webhook_api_key
+
+        # /webhook is exempt from cookie/CSRF checks; machine callers use ?apikey=.
+        # Skipped only in AUTH_MODE=disabled.
+        if get_auth_mode() != "disabled":
+            provided_key = request.query_params.get("apikey")
+            if not verify_webhook_api_key(provided_key):
+                raw_instance = request.query_params.get("instance", "")
+                safe_instance = re.sub(r"[^A-Za-z0-9_-]", "", raw_instance)[:64] or "unknown"
+                logger.warning(
+                    "Webhook rejected: missing or invalid apikey "
+                    f"instance={safe_instance} "
+                    f"present={'yes' if provided_key else 'no'}",
+                    extra={"emoji_type": "warning"},
+                )
+                raise HTTPException(status_code=401, detail="Invalid or missing apikey")
+
         payload = await request.json()
         instance_raw = request.query_params.get("instance", "").strip() or None
         instance_id_raw = request.query_params.get("instance_id", "").strip() or None
@@ -561,7 +605,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         try:
             from services.handlers import (
-                handle_webhook as new_handle,
                 resolve_canonical_webhook_instance,
                 validate_webhook_payload,
             )
@@ -581,7 +624,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             )
             raise HTTPException(status_code=400, detail=reason)
 
-        background_tasks.add_task(new_handle, payload, canonical_instance)
+        from services.webhook_ingest import enqueue_webhook_persist
+
+        enqueue_webhook_persist(payload, canonical_instance)
         return {"status": "accepted"}
     except HTTPException:
         raise

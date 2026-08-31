@@ -1,5 +1,6 @@
 # Stage 1: Build frontend assets (React + TypeScript)
-FROM node:20-alpine AS frontend-build
+# Build once on the host architecture; the output is arch-independent static files.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-build
 
 WORKDIR /app/frontend
 
