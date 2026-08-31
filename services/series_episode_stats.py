@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from typing import Any, Iterable
 
 from sqlalchemy import and_, case, func, or_
@@ -248,3 +248,31 @@ def series_episode_counts_map(session: Session, series_rows: list[Series]) -> di
         materialized.update(computed)
 
     return materialized
+
+
+def series_last_aired_map(session: Session, series_ids: list[int]) -> dict[int, date | None]:
+    """Per series: latest episode air_date on or before today (excludes future episodes)."""
+    ids = sorted({int(x) for x in series_ids if x is not None})
+    if not ids:
+        return {}
+    today = datetime.now(timezone.utc).date()
+    out: dict[int, date | None] = {}
+    chunk_size = 500
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i : i + chunk_size]
+        rows = (
+            session.query(Season.series_id, func.max(Episode.air_date))
+            .join(Episode, Episode.season_id == Season.id)
+            .filter(
+                Season.series_id.in_(chunk),
+                Season.is_deleted.is_(False),
+                Episode.is_deleted.is_(False),
+                Episode.air_date.isnot(None),
+                Episode.air_date <= today,
+            )
+            .group_by(Season.series_id)
+            .all()
+        )
+        for series_id, latest in rows:
+            out[int(series_id)] = latest
+    return out

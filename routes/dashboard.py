@@ -48,8 +48,9 @@ from services.postgres.models import (
 from services.library_catalog_version import get_library_versions, library_etag_for_shelf
 from services.library_poster_paths import library_poster_cache_token, load_library_poster_path
 from services.library_future_semantics import movie_row_is_future_outside_lookahead
-from services.series_episode_stats import series_episode_counts_map, series_stats_dict_from_row
+from services.series_episode_stats import series_episode_counts_map, series_last_aired_map, series_stats_dict_from_row
 from services.source_of_truth.status_intent import StatusSource
+from services.source_of_truth.sync_runner import _extract_date
 from services.source_of_truth.calendar_phase import _compute_calendar_decision, _release_type_label
 
 router = APIRouter()
@@ -460,6 +461,49 @@ def _iso(value) -> str | None:
         return value.isoformat()
     except AttributeError:
         return str(value)
+
+
+def _movie_radarr_payload(movie: Movie) -> dict[str, Any]:
+    raw = getattr(movie, "radarr_payload_raw", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _library_movie_release_dates(movie: Movie) -> dict[str, str | None]:
+    """List-view release columns: DB fields first, then Radarr payload fallbacks."""
+    payload = _movie_radarr_payload(movie)
+    theater = (
+        getattr(movie, "theater_release_date", None)
+        or getattr(movie, "radarr_premiered", None)
+        or _extract_date(payload.get("inCinemas"))
+    )
+    digital = getattr(movie, "digital_release_date", None) or _extract_date(payload.get("digitalRelease"))
+    physical = getattr(movie, "physical_release_date", None) or _extract_date(payload.get("physicalRelease"))
+    return {
+        "theater_release_date": _iso(theater),
+        "digital_release_date": _iso(digital),
+        "physical_release_date": _iso(physical),
+    }
+
+
+def _latest_release_iso(values: list[str | None]) -> str | None:
+    best_date: date | None = None
+    best_iso: str | None = None
+    for raw in values:
+        if not raw:
+            continue
+        parsed = _extract_date(raw)
+        if parsed is None:
+            continue
+        if best_date is None or parsed > best_date:
+            best_date = parsed
+            best_iso = _iso(parsed)
+    return best_iso
+
+
+def _merge_movie_release_dates(merged: dict[str, Any], rows: list[dict]) -> None:
+    for field in ("theater_release_date", "digital_release_date", "physical_release_date"):
+        merged[field] = _latest_release_iso([r.get(field) for r in rows])
+
 
 # ---------------------------------------------------------------------------
 # HTML page
@@ -3155,6 +3199,7 @@ def _merge_movie_library_rows(entries: list[tuple[Movie, dict]]) -> list[dict]:
             "missing": 1 if merged["has_missing"] else 0,
         }
         merged["instance_label"] = None
+        _merge_movie_release_dates(merged, [r for _, r in group])
         _apply_earliest_added_to_merged_row(merged, [r for _, r in group], id_prefix="movie")
         out.append(merged)
     return out
@@ -3778,6 +3823,7 @@ def _build_library_payload(
                 "has_placeholder": bool(movie.has_placeholder),
                 "is_future": movie_is_future,
                 "has_missing": movie_has_missing,
+                **_library_movie_release_dates(movie),
                 "created_at": _iso(getattr(movie, "created_at", None)),
                 "updated_at": _iso(getattr(movie, "updated_at", None)),
                 "overview": movie.radarr_overview,
@@ -3804,8 +3850,10 @@ def _build_library_payload(
                 .all()
             )
             series_episode_counts = series_episode_counts_map(session, series_rows)
+            series_last_aired = series_last_aired_map(session, [int(s.id) for s in series_rows])
         else:
             series_rows = []
+            series_last_aired = {}
         for series in series_rows:
             instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
             counts = series_episode_counts.get(
@@ -3862,6 +3910,8 @@ def _build_library_payload(
                 "has_placeholder": counts["episode_placeholders"] > 0,
                 "is_future": series_is_future,
                 "has_missing": series_has_missing,
+                "premiere_date": _iso(series.sonarr_first_aired),
+                "last_aired_date": _iso(series_last_aired.get(int(series.id))),
                 "created_at": _iso(getattr(series, "created_at", None)),
                 "updated_at": _iso(getattr(series, "updated_at", None)),
                 "overview": series.sonarr_series_overview,
@@ -3958,9 +4008,14 @@ async def library(
         summary,
         media_type,
     )
+    library_cache_headers = {
+        "Cache-Control": "no-store",
+        "ETag": f'"{etag}"',
+    }
     if payload is None:
-        return Response(status_code=304)
-    response.headers["ETag"] = f'"{etag}"'
+        return Response(status_code=304, headers=library_cache_headers)
+    response.headers["Cache-Control"] = library_cache_headers["Cache-Control"]
+    response.headers["ETag"] = library_cache_headers["ETag"]
     return payload
 
 

@@ -45,6 +45,7 @@ import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
@@ -64,13 +65,12 @@ import type {
   SettingsStatus,
   StatsResponse,
 } from "./types/api";
-import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
 import { LibraryPanel } from "./library/LibraryPanel";
-import { LIBRARY_CARD_PREVIEW_PATH } from "./library/cardSettings";
 import { titleSortKey, type LibrarySortKey } from "./library/librarySort";
 import {
   LIBRARY_MOVIES_SORT_KEY,
   LIBRARY_TV_SORT_KEY,
+  librarySortOptionsForShelf,
   readStoredLibrarySort,
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
@@ -152,6 +152,16 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
   const p = pathname.replace(/\/$/, "") || "/";
   if (p === LIBRARY_TV_PATH) return "tv";
   if (p === LIBRARY_MOVIES_PATH) return "movies";
+  return null;
+}
+
+/** List shelf or infer from detail route so library cache + grid stay warm while viewing an item. */
+function getLibraryShelfKey(pathname: string): "movies" | "tv" | null {
+  const list = getLibraryListShelf(pathname);
+  if (list) return list;
+  const p = pathname.replace(/\/$/, "") || "/";
+  if (p.startsWith("/library/movie/")) return "movies";
+  if (p.startsWith("/library/series/")) return "tv";
   return null;
 }
 
@@ -689,8 +699,8 @@ export function App() {
     };
   });
   const [libraryShelfSort, setLibraryShelfSort] = useState<{ movies: LibrarySortKey; tv: LibrarySortKey }>(() => ({
-    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY),
-    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY),
+    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY, "movies"),
+    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY, "tv"),
   }));
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
   const [calendarFilters, setCalendarFilters] = useState<CalendarFilters>({
@@ -756,6 +766,7 @@ export function App() {
 
   const currentTab = getTabFromPath(location.pathname);
   const libraryListShelf = getLibraryListShelf(location.pathname);
+  const libraryShelfKey = getLibraryShelfKey(location.pathname);
   const currentTabRef = useRef(currentTab);
   currentTabRef.current = currentTab;
 
@@ -817,8 +828,8 @@ export function App() {
     invalidateLibraryShelves,
     refreshLibraryShelves,
   } = useLibraryShelves({
-    listShelf: libraryListShelf,
-    enabled: authReady && currentTab === "library" && libraryListShelf !== null,
+    listShelf: libraryShelfKey,
+    enabled: authReady && currentTab === "library" && libraryShelfKey !== null,
     liveVersionSync: eventsConnected,
     onSuccess: () => setLastDashboardSuccessAt(Date.now()),
     onError: (message) => setErrorMessage(message),
@@ -1376,22 +1387,22 @@ export function App() {
   }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
   const activeShelfCache =
-    libraryListShelf === "movies" ? libraryCache.movies : libraryListShelf === "tv" ? libraryCache.tv : undefined;
+    libraryShelfKey === "movies" ? libraryCache.movies : libraryShelfKey === "tv" ? libraryCache.tv : undefined;
 
   const filteredLibrary = useMemo(() => {
-    if (!libraryListShelf) return [];
+    if (!libraryShelfKey) return [];
     const shelfItems = activeShelfCache?.items ?? [];
-    const shelfFilter = libraryListShelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
+    const shelfFilter = libraryShelfKey === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
     return shelfItems
       .filter((item) => {
-        if (libraryListShelf === "movies" && item.type !== "movie") return false;
-        if (libraryListShelf === "tv" && item.type !== "series") return false;
+        if (libraryShelfKey === "movies" && item.type !== "movie") return false;
+        if (libraryShelfKey === "tv" && item.type !== "series") return false;
         if (shelfFilter === "placeholders") return item.has_placeholder;
         if (shelfFilter === "future") return item.is_future;
         if (shelfFilter === "missing") return item.has_missing;
         return true;
       });
-  }, [activeShelfCache?.items, libraryListShelf, libraryShelfFilters]);
+  }, [activeShelfCache?.items, libraryShelfKey, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
     const filter = logFilter.trim().toLowerCase();
@@ -1616,6 +1627,10 @@ export function App() {
   }, [location.pathname]);
 
   function renderTabBody() {
+    const isLibraryDetailRoute =
+      location.pathname.startsWith("/library/") &&
+      (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
+
     // Settings has its own loading UI (`SettingsPanel` when payload is null). Do not gate it on the global
     // bootstrap flag — otherwise cold loads on `/settings/...` or slow first refresh can show an empty main area.
     if ((loading || (libraryLoading && currentTab === "library" && libraryListShelf)) && currentTab !== "settings") {
@@ -1630,8 +1645,48 @@ export function App() {
       );
     }
 
-    if (location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"))) {
-      return <DetailRoutePage brand={brand} themeMode={themeMode} scrollContainerRef={contentScrollRef} />;
+    if (currentTab === "library") {
+      const shelf = libraryShelfKey;
+      if (shelf === "movies" || shelf === "tv") {
+        const libraryPanel = (
+          <LibraryPanel
+            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
+            items={filteredLibrary}
+            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
+            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
+            onFilterChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
+            sortOptions={librarySortOptionsForShelf(shelf === "tv" ? "tv" : "movies")}
+            onSortChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+          />
+        );
+        return (
+          <>
+            <div hidden={isLibraryDetailRoute} aria-hidden={isLibraryDetailRoute}>
+              {libraryPanel}
+            </div>
+            {isLibraryDetailRoute ? (
+              <DetailRoutePage brand={brand} themeMode={themeMode} scrollContainerRef={contentScrollRef} />
+            ) : null}
+          </>
+        );
+      }
+      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
 
     if (currentTab === "activity") {
@@ -1708,50 +1763,6 @@ export function App() {
           onLoadOlder={loadOlder}
         />
       );
-    }
-
-    if (currentTab === "library") {
-      if (location.pathname === LIBRARY_CARD_PREVIEW_PATH) {
-        return (
-          <LibraryCardStylePreview
-            items={filteredLibrary}
-            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
-            themeMode={themeMode}
-            onBack={() => navigate(LIBRARY_MOVIES_PATH)}
-          />
-        );
-      }
-      const shelf = libraryListShelf;
-      if (shelf === "movies" || shelf === "tv") {
-        return (
-          <LibraryPanel
-            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
-            items={filteredLibrary}
-            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
-            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
-            onFilterChange={(value) => {
-              if (shelf === "tv") {
-                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
-              } else {
-                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
-              }
-            }}
-            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
-            onSortChange={(value) => {
-              if (shelf === "tv") {
-                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
-              } else {
-                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
-              }
-            }}
-            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-            onOpenCardStylePreview={() => navigate(LIBRARY_CARD_PREVIEW_PATH)}
-            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
-            themeMode={themeMode}
-          />
-        );
-      }
-      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
 
     if (currentTab === "collections") {
@@ -2716,8 +2727,8 @@ export function App() {
                 <button
                   type="button"
                   disabled={whatsNewBusy}
-                  className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                  style={{ backgroundColor: brandAccent.hex }}
+                  className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(brandAccent.hex)}
                   onClick={() => {
                     const ids = whatsNewNotices.map((n) => n.id);
                     void (async () => {
@@ -2803,8 +2814,8 @@ function TaskRunConfirmModals(props: {
               type="button"
               disabled={props.pending}
               onClick={props.onConfirmFull}
-              className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
+              className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+              style={accentFilledStyle(accent.hex)}
             >
               {props.pending ? "Starting…" : "Run full sync"}
             </button>
@@ -2822,8 +2833,8 @@ function TaskRunConfirmModals(props: {
                 type="button"
                 disabled={props.pending}
                 onClick={props.onConfirmLite}
-                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                style={{ backgroundColor: accent.hex }}
+                className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                style={accentFilledStyle(accent.hex)}
               >
                 {props.pending ? "Starting…" : "Run lite sync"}
               </button>
@@ -4062,8 +4073,8 @@ function CalendarPanel(props: {
                   <button
                     type="button"
                     onClick={() => { closeOverlay(); props.onOpenSpotlightDetail(props.selectedItem!); }}
-                    className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-white transition-colors"
-                    style={{ backgroundColor: accent.hex }}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} transition-colors`}
+                    style={accentFilledStyle(accent.hex)}
                   >
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                     Full Detail
@@ -4113,8 +4124,8 @@ function CalendarDayCell(props: {
       {/* Day number */}
       <div className="flex items-center justify-between mb-1">
         <span className={`text-[14px] font-bold font-headline leading-none ${
-          day.is_today ? "w-5 h-5 flex items-center justify-center rounded-full text-white text-[12px]" : "text-slate-400"
-        }`} style={day.is_today ? { backgroundColor: accent.hex } : undefined}>
+          day.is_today ? `w-5 h-5 flex items-center justify-center rounded-full ${FG_ON_ACCENT_TEXT_CLASS} text-[12px]` : "text-slate-400"
+        }`} style={day.is_today ? accentFilledStyle(accent.hex) : undefined}>
           {day.day_number}
         </span>
       </div>
@@ -5314,8 +5325,8 @@ function ArrInstancesEditor(props: {
               <div className="flex justify-end pt-2">
                 <button
                   type="button"
-                  className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-                  style={{ backgroundColor: props.accent.hex }}
+                  className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                  style={accentFilledStyle(props.accent.hex)}
                   onClick={() => setWebhookSetupDialog(null)}
                 >
                   Done
@@ -6278,8 +6289,8 @@ function SecurityAccountControls(props: {
                 <button
                   type="button"
                   disabled={webhookRegenBusy}
-                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                  style={{ backgroundColor: props.accentHex }}
+                  className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(props.accentHex)}
                   onClick={() => void onRegenerateWebhookKey()}
                 >
                   {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
@@ -6335,8 +6346,8 @@ function SecurityAccountControls(props: {
           <button
             type="submit"
             disabled={busy}
-            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-            style={{ backgroundColor: props.accentHex }}
+            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+            style={accentFilledStyle(props.accentHex)}
           >
             {busy ? "Updating…" : "Update password"}
           </button>
@@ -6399,8 +6410,8 @@ function SecurityAccountControls(props: {
             <div className="flex justify-end pt-2">
               <button
                 type="button"
-                className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-                style={{ backgroundColor: props.accentHex }}
+                className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accentHex)}
                 onClick={() => setWebhookUrlsModalOpen(false)}
               >
                 Done
@@ -6803,8 +6814,8 @@ function SettingsPanel(props: {
               onClick={() => props.onSave()}
               disabled={!props.hasUnsavedChanges || props.messagesSaveBlocked}
               title={props.messagesSaveBlocked ? "Fix status message template errors before saving" : undefined}
-              className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ backgroundColor: accent.hex }}
+              className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+              style={accentFilledStyle(accent.hex)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               Save Settings
@@ -8342,8 +8353,8 @@ function NfoBackfillApplyScopeModal(props: {
               type="button"
               onClick={() => props.onConfirm(scope)}
               disabled={props.saving}
-              className="flex items-center gap-2 px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
+              className={`flex items-center gap-2 px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50`}
+              style={accentFilledStyle(accent.hex)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               {props.saving ? "Saving…" : "Save"}
@@ -8567,8 +8578,8 @@ function StatusMessagesTokenModal(props: {
             <button
               type="button"
               onClick={commitAndClose}
-              className="px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg"
-              style={{ backgroundColor: accent.hex }}
+              className={`px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg`}
+              style={accentFilledStyle(accent.hex)}
             >
               Done
             </button>
@@ -8958,8 +8969,8 @@ function PlaybackWebhookSetupModal(props: {
         <div className="flex justify-end pt-2">
           <button
             type="button"
-            className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-            style={{ backgroundColor: props.accent.hex }}
+            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+            style={accentFilledStyle(props.accent.hex)}
             onClick={() => props.onClose()}
           >
             Done
@@ -9717,8 +9728,8 @@ function OnboardingWizard(props: {
               return (
                 <div key={s.key} className="flex items-center flex-1 last:flex-none">
                   <div className={`flex flex-col items-center gap-1 min-w-max ${active ? "" : done ? "text-green-400" : "text-slate-600"}`} style={active ? { color: accent.icon } : undefined}>
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? "text-white" : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
-                      style={active ? { backgroundColor: accent.hex, borderColor: accent.hex } : undefined}>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? FG_ON_ACCENT_TEXT_CLASS : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
+                      style={active ? { ...accentFilledStyle(accent.hex), borderColor: accent.hex } : undefined}>
                       {done ? <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check</span> : i + 1}
                     </div>
                     <span className="text-[12px] font-headline uppercase tracking-wider">{s.name}</span>
@@ -10214,8 +10225,8 @@ function OnboardingWizard(props: {
                     setStepError(err instanceof Error ? err.message : String(err));
                   }
                 }}
-                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ backgroundColor: accent.hex }}
+                className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed`}
+                style={accentFilledStyle(accent.hex)}
                 >
                 {previewMode
                   ? "Next"

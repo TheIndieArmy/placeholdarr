@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
   checkCollectionTitleConflicts,
   getCollectionBuilderMeta,
@@ -449,8 +450,8 @@ export function CollectionSetEditor(props: {
             type="button"
             disabled={!canSave || props.saving}
             onClick={handleSave}
-            className="rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40"
-            style={{ backgroundColor: accentHex }}
+            className={`rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
+            style={accentFilledStyle(accentHex)}
           >
             {props.saving ? "Saving…" : "Save"}
           </button>
@@ -636,9 +637,9 @@ export function CollectionSetEditor(props: {
                     }))
                   }
                   className={`rounded-lg px-3 py-1.5 text-[13px] border transition-colors ${
-                    active ? "text-[#0a0e14] border-transparent" : theme.chipInactive
+                    active ? `${FG_ON_ACCENT_TEXT_CLASS} border-transparent` : theme.chipInactive
                   }`}
-                  style={active ? { backgroundColor: accentHex } : undefined}
+                  style={active ? accentFilledStyle(accentHex) : undefined}
                 >
                   {opt.label}
                 </button>
@@ -758,8 +759,8 @@ export function CollectionSetEditor(props: {
                 {nameCheck.conflicts.every((c) => c.reason !== "other_recipe") ? (
                   <button
                     type="button"
-                    className="px-3 py-1.5 rounded-md text-[12px] font-headline uppercase tracking-wider text-white"
-                    style={{ backgroundColor: accentHex }}
+                    className={`px-3 py-1.5 rounded-md text-[12px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                    style={accentFilledStyle(accentHex)}
                     onClick={() => {
                       setAdoptExisting(true);
                       setNameCheck({ status: "idle" });
@@ -803,9 +804,9 @@ export function CollectionSetEditor(props: {
                       type="button"
                       onClick={() => toggleValue(opt.id)}
                       className={`rounded-md px-2.5 py-1 text-[12px] border ${
-                        active ? "text-[#0a0e14] border-transparent" : theme.chipInactive
+                        active ? `${FG_ON_ACCENT_TEXT_CLASS} border-transparent` : theme.chipInactive
                       }`}
-                      style={active ? { backgroundColor: accentHex } : undefined}
+                      style={active ? accentFilledStyle(accentHex) : undefined}
                     >
                       {opt.label}
                     </button>

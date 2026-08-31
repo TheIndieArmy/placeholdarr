@@ -1,4 +1,5 @@
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
   addCollectionTitlesToArr,
   arrAddItemKey,
@@ -450,8 +451,8 @@ export function ArrAddModal(props: {
               type="button"
               disabled={!canSubmit}
               onClick={() => void submit()}
-              className="rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] transition-opacity disabled:opacity-40"
-              style={{ backgroundColor: props.accentHex }}
+              className={`rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} transition-opacity disabled:opacity-40`}
+              style={accentFilledStyle(props.accentHex)}
             >
               {`Add to ${arrLabel}`}
             </button>

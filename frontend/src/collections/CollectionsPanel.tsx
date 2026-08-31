@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ThemeMode } from "../brandTypes";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
   checkCollectionTitleConflicts,
   createCollectionRecipe,
@@ -442,8 +443,8 @@ export function CollectionsPanel(props: {
                 {titleConflict.conflicts.every((c) => c.reason !== "other_recipe") ? (
                   <button
                     type="button"
-                    className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-60"
-                    style={{ backgroundColor: accentHex }}
+                    className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-60`}
+                    style={accentFilledStyle(accentHex)}
                     onClick={() => void handleAdoptConflict()}
                     disabled={saving}
                   >
@@ -595,8 +596,8 @@ export function CollectionsPanel(props: {
               setSaveError(null);
               setEditing("new");
             }}
-            className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ backgroundColor: accentHex }}
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40 disabled:cursor-not-allowed`}
+            style={accentFilledStyle(accentHex)}
           >
             <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
               add

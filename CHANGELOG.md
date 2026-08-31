@@ -7,6 +7,18 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Changed
+
+- **Library sort (Movies)**: **Year (newest/oldest)** matches *arr-style year + title ordering; **Theatrical**, **Digital**, and **Physical** release date sorts.
+- **Library shelf cache**: Refetches when movie rows lack theatrical dates; library list fetches bypass browser HTTP cache (`no-store`) so release-type sort does not stick on title A–Z after API upgrades.
+- **Library detail back**: Grid stays mounted while viewing an item so returning from movie/TV detail is instant instead of rebuilding the full shelf.
+- **Library sort (TV)**: **Premiere** and **Last aired** (episodes on or before today) newest/oldest options.
+- **Yellow accent buttons**: Active pills and primary actions on brand yellow use dark slate text (`--brand-fg-on-accent`) across library, settings, collections, modals, and onboarding.
+
+### Removed
+
+- **Library card style preview page**: `/library/card-styles` and **Compare all styles** removed; style pills on Movies/TV remain.
+
 ## [0.9.20] - 2026-08-30
 
 ### Summary

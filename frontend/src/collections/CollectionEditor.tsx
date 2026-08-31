@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ThemeMode } from "../brandTypes";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import {
   checkCollectionTitleConflicts,
   explainCollectionItem,
@@ -368,9 +369,9 @@ function MultiChipPicker(props: {
             type="button"
             onClick={() => props.onToggle(opt.key)}
             className={`${chipBase} ${
-              active ? "text-[#0a0e14] border-transparent" : theme.chipInactive
+              active ? `${FG_ON_ACCENT_TEXT_CLASS} border-transparent` : theme.chipInactive
             }`}
-            style={active ? { backgroundColor: props.accentHex } : undefined}
+            style={active ? accentFilledStyle(props.accentHex) : undefined}
           >
             {opt.label}
           </button>
@@ -2574,8 +2575,8 @@ export function CollectionEditor(props: {
                   {nameCheck.conflicts.every((c) => c.reason !== "other_recipe") ? (
                     <button
                       type="button"
-                      className="px-3 py-1.5 rounded-md text-[12px] font-headline uppercase tracking-wider text-white"
-                      style={{ backgroundColor: accentHex }}
+                      className={`px-3 py-1.5 rounded-md text-[12px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                      style={accentFilledStyle(accentHex)}
                       onClick={() => {
                         setDefinition((prev) => ({ ...prev, adopt_existing: true }));
                         setNameCheck({ status: "idle" });
@@ -3058,8 +3059,8 @@ export function CollectionEditor(props: {
                   : null,
               });
             }}
-            className="rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider text-[#0a0e14] transition-opacity disabled:opacity-40"
-            style={{ backgroundColor: accentHex }}
+            className={`rounded-lg px-5 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} transition-opacity disabled:opacity-40`}
+            style={accentFilledStyle(accentHex)}
           >
             {props.saving ? "Saving…" : props.recipe ? "Save changes" : "Create collection"}
           </button>
@@ -3267,9 +3268,9 @@ export function CollectionEditor(props: {
                           type="button"
                           onClick={() => setPreviewPane("catalog")}
                           className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
-                            previewPane === "catalog" ? "text-[#0a0e14]" : theme.chipInactive
+                            previewPane === "catalog" ? FG_ON_ACCENT_TEXT_CLASS : theme.chipInactive
                           }`}
-                          style={previewPane === "catalog" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
+                          style={previewPane === "catalog" ? { ...accentFilledStyle(accentHex), borderColor: accentHex } : undefined}
                         >
                           In catalog
                         </button>
@@ -3277,9 +3278,9 @@ export function CollectionEditor(props: {
                           type="button"
                           onClick={() => setPreviewPane("missing")}
                           className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
-                            previewPane === "missing" ? "text-[#0a0e14]" : theme.chipInactive
+                            previewPane === "missing" ? FG_ON_ACCENT_TEXT_CLASS : theme.chipInactive
                           }`}
-                          style={previewPane === "missing" ? { backgroundColor: accentHex, borderColor: accentHex } : undefined}
+                          style={previewPane === "missing" ? { ...accentFilledStyle(accentHex), borderColor: accentHex } : undefined}
                         >
                           Missing from catalog ({missingCount})
                         </button>
@@ -3332,8 +3333,8 @@ export function CollectionEditor(props: {
                             type="button"
                             disabled={selectedMissing.size < 1 || selectedMissing.size > ARR_ADD_BATCH_CAP}
                             onClick={() => setArrModalOpen(true)}
-                            className="ml-auto rounded-lg px-4 py-1.5 text-[13px] font-headline uppercase tracking-wider text-[#0a0e14] disabled:opacity-40"
-                            style={{ backgroundColor: accentHex }}
+                            className={`ml-auto rounded-lg px-4 py-1.5 text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-40`}
+                            style={accentFilledStyle(accentHex)}
                           >
                             Add to {sectionType === "movie" ? "Radarr" : "Sonarr"}
                           </button>
@@ -3438,11 +3439,11 @@ export function CollectionEditor(props: {
                               type="button"
                               onClick={() => setSampleLibraryFilter(null)}
                               className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
-                                sampleLibraryFilter == null ? "text-[#0a0e14]" : theme.chipInactive
+                                sampleLibraryFilter == null ? FG_ON_ACCENT_TEXT_CLASS : theme.chipInactive
                               }`}
                               style={
                                 sampleLibraryFilter == null
-                                  ? { backgroundColor: accentHex, borderColor: accentHex }
+                                  ? { ...accentFilledStyle(accentHex), borderColor: accentHex }
                                   : undefined
                               }
                             >
@@ -3454,11 +3455,11 @@ export function CollectionEditor(props: {
                                 type="button"
                                 onClick={() => setSampleLibraryFilter(lib.id)}
                                 className={`rounded-md border px-2 py-1 text-[11px] font-headline uppercase tracking-wider ${
-                                  sampleLibraryFilter === lib.id ? "text-[#0a0e14]" : theme.chipInactive
+                                  sampleLibraryFilter === lib.id ? FG_ON_ACCENT_TEXT_CLASS : theme.chipInactive
                                 }`}
                                 style={
                                   sampleLibraryFilter === lib.id
-                                    ? { backgroundColor: accentHex, borderColor: accentHex }
+                                    ? { ...accentFilledStyle(accentHex), borderColor: accentHex }
                                     : undefined
                                 }
                               >

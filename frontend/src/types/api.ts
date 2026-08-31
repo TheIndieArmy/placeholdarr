@@ -177,6 +177,16 @@ export interface LibraryItem {
   is_future: boolean;
   has_missing: boolean;
   overview?: string | null;
+  /** Movie: theatrical release (in cinemas), ISO date. */
+  theater_release_date?: string | null;
+  /** Movie: digital release, ISO date. */
+  digital_release_date?: string | null;
+  /** Movie: physical release, ISO date. */
+  physical_release_date?: string | null;
+  /** Series: Sonarr first-aired / premiere (ISO date). */
+  premiere_date?: string | null;
+  /** Series: latest episode air date on or before today (ISO date). */
+  last_aired_date?: string | null;
   /** When this title was first indexed in Placeholdarr (ISO 8601). */
   created_at?: string | null;
   /** Last catalog/metadata update for this row (ISO 8601). */

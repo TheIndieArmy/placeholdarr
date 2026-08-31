@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import type { ThemeMode } from "./brandTypes";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 
 export function ConfirmModal(props: {
   title: string;
@@ -66,8 +67,8 @@ export function ConfirmModal(props: {
           <button
             type="button"
             onClick={props.onConfirm}
-            className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-[#0a0e14]"
-            style={{ backgroundColor: props.accentHex }}
+            className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+            style={accentFilledStyle(props.accentHex)}
           >
             {confirmLabel}
           </button>

@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { LibraryItem } from "../types/api";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 import type { ThemeMode } from "../brandTypes";
 import { LibraryCardControls } from "./LibraryCardControls";
 import { LibraryGridCard } from "./LibraryGridCard";
@@ -70,9 +71,9 @@ export function LibraryPanel(props: {
   activeFilter: LibraryShelfFilter;
   onFilterChange: (value: LibraryShelfFilter) => void;
   sortKey: LibrarySortKey;
+  sortOptions: { id: LibrarySortKey; label: string }[];
   onSortChange: (value: LibrarySortKey) => void;
   onOpenDetail: (item: LibraryItem) => void;
-  onOpenCardStylePreview: () => void;
   accent: { hex: string; icon: string };
   themeMode: ThemeMode;
 }) {
@@ -122,14 +123,12 @@ export function LibraryPanel(props: {
               onClick={() => props.onFilterChange(f.id)}
               className={`px-4 py-1.5 rounded-md text-[14px] font-headline uppercase tracking-wider transition-colors ${
                 f.id === props.activeFilter
-                  ? isLight
-                    ? "text-slate-900 font-semibold"
-                    : "text-white font-semibold"
+                  ? `${FG_ON_ACCENT_TEXT_CLASS} font-semibold`
                   : isLight
                     ? "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
                     : "text-slate-400 hover:text-slate-200"
               }`}
-              style={f.id === props.activeFilter ? { backgroundColor: accent.hex } : undefined}
+              style={f.id === props.activeFilter ? accentFilledStyle(accent.hex) : undefined}
             >
               {f.label}
             </button>
@@ -143,8 +142,9 @@ export function LibraryPanel(props: {
           accent={accent}
           themeMode={props.themeMode}
           sortKey={props.sortKey}
+          sortOptions={props.sortOptions}
+          sortShelf={props.shelfTitle === "TV Library" ? "tv" : "movies"}
           onSortChange={props.onSortChange}
-          onOpenPreview={props.onOpenCardStylePreview}
         />
       </div>
 
