@@ -21,11 +21,14 @@ class WhatsNewNotice:
     body: str
     cta_label: str | None = None
     cta_path: str | None = None
+    # When True, unmatched upgrades open the startup modal until acknowledged.
+    requires_ack: bool = False
 
 
 # Show when last_seen < since_version (skip-version upgrades still match).
 # New installs stamp last_seen to APP_VERSION before setup completes, so they
 # never see upgrade-only notices.
+# Titles omit the version — the UI groups notices under a version header.
 NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="webhook-apikey",
@@ -40,6 +43,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Security",
         cta_path="/settings/security",
+        requires_ack=True,
     ),
     WhatsNewNotice(
         id="collections-beta",
@@ -70,6 +74,21 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         ),
         cta_label="Open Collections",
         cta_path="/collections",
+        requires_ack=True,
+    ),
+    WhatsNewNotice(
+        id="library-detail-0-9-21",
+        since_version="0.9.21",
+        title="Redesigned library detail",
+        body=(
+            "Movie and TV detail pages are redesigned: overview and meta up front, Arr status tiles, "
+            "score cards with provider icons, cast, and a franchise collection strip for movies "
+            "(including titles not yet in your catalog when a TMDB key is configured). "
+            "Library shelves also gain year / release-type sorts for movies and premiere / last-aired "
+            "sorts for TV. Open any title from Movies or TV to try the new layout."
+        ),
+        cta_label="Open Movies",
+        cta_path="/library",
     ),
 )
 
@@ -139,6 +158,7 @@ def _notice_payload(notice: WhatsNewNotice) -> dict[str, Any]:
         "body": notice.body,
         "cta_label": notice.cta_label,
         "cta_path": notice.cta_path,
+        "requires_ack": bool(notice.requires_ack),
     }
 
 
@@ -154,10 +174,19 @@ def _notices_newest_update_first(notices: tuple[WhatsNewNotice, ...] | list[What
     )
 
 
-def pending_notices(*, setup_complete: bool, session=None) -> dict[str, Any]:
-    """Return notices for this install and stamp last_seen for first-run setup."""
-    last_seen = get_last_seen_app_version(session=session)
+def _matched_undismissed(*, last_seen: str | None, session=None) -> list[WhatsNewNotice]:
     dismissed = set(_dismissed_ids(session=session))
+    effective_last = last_seen if last_seen else "0.0.0"
+    return [
+        notice
+        for notice in NOTICES
+        if version_less(effective_last, notice.since_version) and notice.id not in dismissed
+    ]
+
+
+def pending_notices(*, setup_complete: bool, session=None) -> dict[str, Any]:
+    """Return action-required notices for this install; silent-ack informational upgrades."""
+    last_seen = get_last_seen_app_version(session=session)
 
     if not setup_complete:
         if last_seen != APP_VERSION:
@@ -168,16 +197,24 @@ def pending_notices(*, setup_complete: bool, session=None) -> dict[str, Any]:
             "notices": [],
         }
 
-    effective_last = last_seen if last_seen else "0.0.0"
-    matched = [
-        notice
-        for notice in NOTICES
-        if version_less(effective_last, notice.since_version) and notice.id not in dismissed
-    ]
+    matched = _matched_undismissed(last_seen=last_seen, session=session)
+    action = [notice for notice in matched if notice.requires_ack]
+    if not action:
+        # Informational-only upgrades (e.g. 0.9.21 library detail) stay in the
+        # version-chip catalog without blocking startup.
+        if last_seen != APP_VERSION:
+            set_last_seen_app_version(APP_VERSION, session=session)
+            last_seen = APP_VERSION
+        return {
+            "app_version": APP_VERSION,
+            "last_seen_app_version": last_seen,
+            "notices": [],
+        }
+
     return {
         "app_version": APP_VERSION,
         "last_seen_app_version": last_seen,
-        "notices": [_notice_payload(notice) for notice in _notices_newest_update_first(matched)],
+        "notices": [_notice_payload(notice) for notice in _notices_newest_update_first(action)],
     }
 
 

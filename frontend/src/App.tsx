@@ -17,11 +17,6 @@ import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
   getMovieDetail,
-  getEntityReconcileStatus,
-  refreshEpisodePlaceholder,
-  refreshMoviePlaceholder,
-  refreshSeriesPlaceholder,
-  type EntityReconcileStartResponse,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
@@ -32,7 +27,7 @@ import {
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
-import { dismissWhatsNew, getWhatsNew, type WhatsNewNotice } from "./api/whatsNew";
+import { dismissWhatsNew, getWhatsNew, groupWhatsNewByVersion, type WhatsNewNotice } from "./api/whatsNew";
 import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -45,6 +40,7 @@ import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
 import tautulliIcon from "./assets/services/tautulli.svg";
 import type {
   ActivityRow,
@@ -64,13 +60,17 @@ import type {
   SettingsStatus,
   StatsResponse,
 } from "./types/api";
-import { LibraryCardStylePreview } from "./library/LibraryCardStylePreview";
 import { LibraryPanel } from "./library/LibraryPanel";
-import { LIBRARY_CARD_PREVIEW_PATH } from "./library/cardSettings";
+import {
+  LibraryReconcileProvider,
+  LibraryReconcileSidebarFooter,
+} from "./library/LibraryReconcileContext";
+import { DetailRoutePage } from "./library/detail/DetailRoutePage";
 import { titleSortKey, type LibrarySortKey } from "./library/librarySort";
 import {
   LIBRARY_MOVIES_SORT_KEY,
   LIBRARY_TV_SORT_KEY,
+  librarySortOptionsForShelf,
   readStoredLibrarySort,
 } from "./library/librarySortSettings";
 import { useLibraryShelves } from "./library/useLibraryShelves";
@@ -152,6 +152,16 @@ function getLibraryListShelf(pathname: string): "movies" | "tv" | null {
   const p = pathname.replace(/\/$/, "") || "/";
   if (p === LIBRARY_TV_PATH) return "tv";
   if (p === LIBRARY_MOVIES_PATH) return "movies";
+  return null;
+}
+
+/** List shelf or infer from detail route so library cache + grid stay warm while viewing an item. */
+function getLibraryShelfKey(pathname: string): "movies" | "tv" | null {
+  const list = getLibraryListShelf(pathname);
+  if (list) return list;
+  const p = pathname.replace(/\/$/, "") || "/";
+  if (p.startsWith("/library/movie/")) return "movies";
+  if (p.startsWith("/library/series/")) return "tv";
   return null;
 }
 
@@ -689,8 +699,8 @@ export function App() {
     };
   });
   const [libraryShelfSort, setLibraryShelfSort] = useState<{ movies: LibrarySortKey; tv: LibrarySortKey }>(() => ({
-    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY),
-    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY),
+    movies: readStoredLibrarySort(LIBRARY_MOVIES_SORT_KEY, "movies"),
+    tv: readStoredLibrarySort(LIBRARY_TV_SORT_KEY, "tv"),
   }));
   const [calendarMonth, setCalendarMonth] = useState(getCurrentMonthToken());
   const [calendarFilters, setCalendarFilters] = useState<CalendarFilters>({
@@ -756,6 +766,7 @@ export function App() {
 
   const currentTab = getTabFromPath(location.pathname);
   const libraryListShelf = getLibraryListShelf(location.pathname);
+  const libraryShelfKey = getLibraryShelfKey(location.pathname);
   const currentTabRef = useRef(currentTab);
   currentTabRef.current = currentTab;
 
@@ -817,8 +828,8 @@ export function App() {
     invalidateLibraryShelves,
     refreshLibraryShelves,
   } = useLibraryShelves({
-    listShelf: libraryListShelf,
-    enabled: authReady && currentTab === "library" && libraryListShelf !== null,
+    listShelf: libraryShelfKey,
+    enabled: authReady && currentTab === "library" && libraryShelfKey !== null,
     liveVersionSync: eventsConnected,
     onSuccess: () => setLastDashboardSuccessAt(Date.now()),
     onError: (message) => setErrorMessage(message),
@@ -1376,22 +1387,22 @@ export function App() {
   }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
   const activeShelfCache =
-    libraryListShelf === "movies" ? libraryCache.movies : libraryListShelf === "tv" ? libraryCache.tv : undefined;
+    libraryShelfKey === "movies" ? libraryCache.movies : libraryShelfKey === "tv" ? libraryCache.tv : undefined;
 
   const filteredLibrary = useMemo(() => {
-    if (!libraryListShelf) return [];
+    if (!libraryShelfKey) return [];
     const shelfItems = activeShelfCache?.items ?? [];
-    const shelfFilter = libraryListShelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
+    const shelfFilter = libraryShelfKey === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies;
     return shelfItems
       .filter((item) => {
-        if (libraryListShelf === "movies" && item.type !== "movie") return false;
-        if (libraryListShelf === "tv" && item.type !== "series") return false;
+        if (libraryShelfKey === "movies" && item.type !== "movie") return false;
+        if (libraryShelfKey === "tv" && item.type !== "series") return false;
         if (shelfFilter === "placeholders") return item.has_placeholder;
         if (shelfFilter === "future") return item.is_future;
         if (shelfFilter === "missing") return item.has_missing;
         return true;
       });
-  }, [activeShelfCache?.items, libraryListShelf, libraryShelfFilters]);
+  }, [activeShelfCache?.items, libraryShelfKey, libraryShelfFilters]);
 
   const visibleLogs = useMemo(() => {
     const filter = logFilter.trim().toLowerCase();
@@ -1616,6 +1627,10 @@ export function App() {
   }, [location.pathname]);
 
   function renderTabBody() {
+    const isLibraryDetailRoute =
+      location.pathname.startsWith("/library/") &&
+      (location.pathname.includes("/movie/") || location.pathname.includes("/series/"));
+
     // Settings has its own loading UI (`SettingsPanel` when payload is null). Do not gate it on the global
     // bootstrap flag — otherwise cold loads on `/settings/...` or slow first refresh can show an empty main area.
     if ((loading || (libraryLoading && currentTab === "library" && libraryListShelf)) && currentTab !== "settings") {
@@ -1630,8 +1645,53 @@ export function App() {
       );
     }
 
-    if (location.pathname.startsWith("/library/") && (location.pathname.includes("/movie/") || location.pathname.includes("/series/"))) {
-      return <DetailRoutePage brand={brand} themeMode={themeMode} scrollContainerRef={contentScrollRef} />;
+    if (currentTab === "library") {
+      const shelf = libraryShelfKey;
+      if (shelf === "movies" || shelf === "tv") {
+        const libraryPanel = (
+          <LibraryPanel
+            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
+            items={filteredLibrary}
+            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
+            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
+            onFilterChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
+            sortOptions={librarySortOptionsForShelf(shelf === "tv" ? "tv" : "movies")}
+            onSortChange={(value) => {
+              if (shelf === "tv") {
+                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
+              } else {
+                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
+              }
+            }}
+            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
+            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
+            themeMode={themeMode}
+          />
+        );
+        return (
+          <>
+            <div hidden={isLibraryDetailRoute} aria-hidden={isLibraryDetailRoute}>
+              {libraryPanel}
+            </div>
+            {isLibraryDetailRoute ? (
+              <DetailRoutePage
+                brand={brand}
+                themeMode={themeMode}
+                accent={{ hex: brandAccent.hex, icon: brandAccent.icon, label: brandAccent.label }}
+                scrollContainerRef={contentScrollRef}
+              />
+            ) : null}
+          </>
+        );
+      }
+      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
 
     if (currentTab === "activity") {
@@ -1708,50 +1768,6 @@ export function App() {
           onLoadOlder={loadOlder}
         />
       );
-    }
-
-    if (currentTab === "library") {
-      if (location.pathname === LIBRARY_CARD_PREVIEW_PATH) {
-        return (
-          <LibraryCardStylePreview
-            items={filteredLibrary}
-            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
-            themeMode={themeMode}
-            onBack={() => navigate(LIBRARY_MOVIES_PATH)}
-          />
-        );
-      }
-      const shelf = libraryListShelf;
-      if (shelf === "movies" || shelf === "tv") {
-        return (
-          <LibraryPanel
-            shelfTitle={shelf === "tv" ? "TV Library" : "Movies"}
-            items={filteredLibrary}
-            catalogTotal={activeShelfCache?.total ?? filteredLibrary.length}
-            activeFilter={shelf === "tv" ? libraryShelfFilters.tv : libraryShelfFilters.movies}
-            onFilterChange={(value) => {
-              if (shelf === "tv") {
-                setLibraryShelfFilters((prev) => ({ ...prev, tv: value }));
-              } else {
-                setLibraryShelfFilters((prev) => ({ ...prev, movies: value }));
-              }
-            }}
-            sortKey={shelf === "tv" ? libraryShelfSort.tv : libraryShelfSort.movies}
-            onSortChange={(value) => {
-              if (shelf === "tv") {
-                setLibraryShelfSort((prev) => ({ ...prev, tv: value }));
-              } else {
-                setLibraryShelfSort((prev) => ({ ...prev, movies: value }));
-              }
-            }}
-            onOpenDetail={(item) => openLibraryDetail({ type: item.type, item_id: item.item_id, title: item.title })}
-            onOpenCardStylePreview={() => navigate(LIBRARY_CARD_PREVIEW_PATH)}
-            accent={{ hex: brandAccent.hex, icon: brandAccent.icon }}
-            themeMode={themeMode}
-          />
-        );
-      }
-      return <Navigate to={LIBRARY_MOVIES_PATH} replace />;
     }
 
     if (currentTab === "collections") {
@@ -2695,29 +2711,14 @@ export function App() {
 
         {whatsNewNotices.length > 0 ? (
           <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
-            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-5">
-              <p className="text-[13px] font-headline uppercase tracking-widest text-slate-400">What&apos;s new</p>
-              {whatsNewNotices.map((notice) => (
-                <div key={notice.id} className="space-y-2">
-                  <h3 className="text-[20px] font-headline font-bold text-white">{notice.title}</h3>
-                  <p className="text-[16px] text-slate-300 leading-relaxed whitespace-pre-wrap">{notice.body}</p>
-                  {notice.cta_path && notice.cta_label ? (
-                    <button
-                      type="button"
-                      className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
-                      onClick={() => tryNavigate(notice.cta_path as string)}
-                    >
-                      {notice.cta_label}
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-              <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="w-full max-w-lg max-h-[min(90vh,720px)] flex flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl">
+              <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[#424753]/40 bg-[#171c22] px-6 py-4">
+                <p className="text-[13px] font-headline uppercase tracking-widest text-slate-400">What&apos;s new</p>
                 <button
                   type="button"
                   disabled={whatsNewBusy}
-                  className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                  style={{ backgroundColor: brandAccent.hex }}
+                  className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(brandAccent.hex)}
                   onClick={() => {
                     const ids = whatsNewNotices.map((n) => n.id);
                     void (async () => {
@@ -2737,6 +2738,32 @@ export function App() {
                 >
                   Got it
                 </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 space-y-6">
+                {groupWhatsNewByVersion(whatsNewNotices).map((group) => (
+                  <section key={group.version} className="space-y-4">
+                    <h2 className="text-[13px] font-headline uppercase tracking-widest text-slate-400 border-b border-[#424753]/35 pb-2">
+                      {group.version}
+                    </h2>
+                    <div className="space-y-5">
+                      {group.notices.map((notice) => (
+                        <div key={notice.id} className="space-y-2">
+                          <h3 className="text-[20px] font-headline font-bold text-white">{notice.title}</h3>
+                          <p className="text-[16px] text-slate-300 leading-relaxed whitespace-pre-wrap">{notice.body}</p>
+                          {notice.cta_path && notice.cta_label ? (
+                            <button
+                              type="button"
+                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
+                              onClick={() => tryNavigate(notice.cta_path as string)}
+                            >
+                              {notice.cta_label}
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ))}
               </div>
             </div>
           </div>
@@ -2803,8 +2830,8 @@ function TaskRunConfirmModals(props: {
               type="button"
               disabled={props.pending}
               onClick={props.onConfirmFull}
-              className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
+              className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+              style={accentFilledStyle(accent.hex)}
             >
               {props.pending ? "Starting…" : "Run full sync"}
             </button>
@@ -2822,768 +2849,13 @@ function TaskRunConfirmModals(props: {
                 type="button"
                 disabled={props.pending}
                 onClick={props.onConfirmLite}
-                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                style={{ backgroundColor: accent.hex }}
+                className={`px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                style={accentFilledStyle(accent.hex)}
               >
                 {props.pending ? "Starting…" : "Run lite sync"}
               </button>
             </>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-type LibraryReconcileSidebarStatus = {
-  message: string | null;
-  kind: "info" | "success" | "error";
-  busy: boolean;
-};
-
-type LibraryReconcileContextValue = {
-  status: LibraryReconcileSidebarStatus;
-  runReconcile: (startReconcile: () => Promise<EntityReconcileStartResponse>) => Promise<void>;
-};
-
-const LibraryReconcileContext = createContext<LibraryReconcileContextValue | null>(null);
-
-function useLibraryReconcile(): LibraryReconcileContextValue {
-  const ctx = useContext(LibraryReconcileContext);
-  if (!ctx) {
-    throw new Error("useLibraryReconcile must be used within LibraryReconcileProvider");
-  }
-  return ctx;
-}
-
-function LibraryReconcileProvider(props: { children: ReactNode }) {
-  const [status, setStatus] = useState<LibraryReconcileSidebarStatus>({
-    message: null,
-    kind: "info",
-    busy: false,
-  });
-  const [pollingJobId, setPollingJobId] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (status.kind !== "success" || !status.message) return;
-    const clearTimer = window.setTimeout(() => {
-      setStatus({ message: null, kind: "info", busy: false });
-    }, 3000);
-    return () => window.clearTimeout(clearTimer);
-  }, [status.kind, status.message]);
-
-  useEffect(() => {
-    if (pollingJobId == null) return;
-
-    let stopped = false;
-
-    const poll = async () => {
-      try {
-        const jobStatus = await getEntityReconcileStatus(pollingJobId);
-        if (stopped) return;
-
-        if (jobStatus.status === "failed") {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "error",
-            message: jobStatus.error_message || "Refresh failed",
-          });
-          return;
-        }
-
-        if (jobStatus.status === "done") {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "success",
-            message: "Refresh complete",
-          });
-          return;
-        }
-
-        setStatus({
-          busy: true,
-          kind: "info",
-          message: jobStatus.step_label || "Working…",
-        });
-      } catch (e) {
-        if (!stopped) {
-          setPollingJobId(null);
-          setStatus({
-            busy: false,
-            kind: "error",
-            message: e instanceof Error ? e.message : "Could not load refresh status",
-          });
-        }
-      }
-    };
-
-    poll();
-    const interval = window.setInterval(poll, 1500);
-    return () => {
-      stopped = true;
-      window.clearInterval(interval);
-    };
-  }, [pollingJobId]);
-
-  const runReconcile = useCallback(async (startReconcile: () => Promise<EntityReconcileStartResponse>) => {
-    setPollingJobId(null);
-    setStatus({ busy: true, kind: "info", message: "Refresh queued…" });
-    try {
-      const out = await startReconcile();
-      if (!out.ok || out.job_id == null) {
-        throw new Error(out.message || "Failed to start refresh");
-      }
-      setStatus({
-        busy: true,
-        kind: "info",
-        message: out.step_label || "Refresh queued…",
-      });
-      setPollingJobId(out.job_id);
-    } catch (e) {
-      setStatus({
-        busy: false,
-        kind: "error",
-        message: e instanceof Error ? e.message : "Failed to start refresh",
-      });
-    }
-  }, []);
-
-  const value = useMemo(() => ({ status, runReconcile }), [status, runReconcile]);
-
-  return (
-    <LibraryReconcileContext.Provider value={value}>
-      {props.children}
-    </LibraryReconcileContext.Provider>
-  );
-}
-
-function LibraryReconcileSidebarFooter(props: { isStudioGlass: boolean }) {
-  const ctx = useContext(LibraryReconcileContext);
-  const { message, kind, busy } = ctx?.status ?? { message: null, kind: "info" as const, busy: false };
-  if (!message && !busy) return null;
-
-  const textClass =
-    kind === "error"
-      ? "text-red-400"
-      : kind === "success"
-        ? "text-emerald-400"
-        : props.isStudioGlass
-          ? "text-slate-400"
-          : "text-slate-600";
-
-  return (
-    <div
-      className={`w-full shrink-0 border-t px-4 pt-3 pb-6 ${props.isStudioGlass ? "border-[#424753]/40 bg-[#141a24]" : "border-[#d7e2f0] bg-[#eef3f8]"}`}
-      aria-live="polite"
-    >
-      <div className={`flex min-h-[2.75rem] items-center gap-2 text-[14px] leading-snug ${textClass}`}>
-        {busy ? (
-          <span className="material-symbols-outlined shrink-0 animate-spin" style={{ fontSize: 16 }}>
-            progress_activity
-          </span>
-        ) : kind === "success" ? (
-          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
-            check_circle
-          </span>
-        ) : kind === "error" ? (
-          <span className="material-symbols-outlined shrink-0" style={{ fontSize: 16 }}>
-            error
-          </span>
-        ) : null}
-        <span className="line-clamp-3">{message || "Working…"}</span>
-      </div>
-    </div>
-  );
-}
-
-function LibraryReconcileControl(props: {
-  label: string;
-  startReconcile: () => Promise<EntityReconcileStartResponse>;
-  buttonClassName?: string;
-}) {
-  const { status, runReconcile } = useLibraryReconcile();
-
-  return (
-    <button
-      type="button"
-      disabled={status.busy}
-      onClick={() => {
-        void runReconcile(props.startReconcile);
-      }}
-      className={
-        props.buttonClassName
-          ?? "px-3 py-2 rounded-lg border border-[#424753]/50 text-[12px] uppercase tracking-wider text-slate-200 hover:bg-[#252e3a] disabled:opacity-50"
-      }
-    >
-      {props.label}
-    </button>
-  );
-}
-
-function DetailRoutePage(props: { brand: Brand; themeMode: ThemeMode; scrollContainerRef: React.RefObject<HTMLElement | null> }) {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
-  const [payload, setPayload] = useState<MovieDetailResponse | SeriesDetailResponse | null>(null);
-  const [openSeasons, setOpenSeasons] = useState<number[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const pathParts = location.pathname.split("/");
-  const entityType = pathParts[2] || "";
-  const itemId = pathParts[3] || "";
-
-  useEffect(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const container = props.scrollContainerRef.current;
-        if (container) container.scrollTop = 0;
-        window.scrollTo(0, 0);
-        document.documentElement.scrollTop = 0;
-        document.body.scrollTop = 0;
-      });
-    });
-  }, [entityType, itemId, props.scrollContainerRef]);
-
-  useEffect(() => {
-    if (loading) return;
-    const container = props.scrollContainerRef.current;
-    if (container) container.scrollTop = 0;
-    window.scrollTo(0, 0);
-  }, [loading, props.scrollContainerRef]);
-
-  useEffect(() => {
-    let stopped = false;
-    async function load() {
-      if (!entityType || !itemId) return;
-      setLoading(true);
-      setError(null);
-      try {
-        if (entityType === "movie") {
-          const result = await getMovieDetail(Number(itemId));
-          if (result.ok && !stopped) {
-            setPayload(result);
-          } else if (!stopped && !result.ok) {
-            setError((result as { message?: string }).message || "Movie not found");
-          } else if (!stopped) {
-            setError("Movie not found");
-          }
-        } else if (entityType === "series") {
-          const result = await getSeriesDetail(Number(itemId));
-          if (result.ok && result.type === "series" && !stopped) {
-            setPayload(result);
-            setOpenSeasons([]);
-          } else if (!stopped && !result.ok) {
-            setError((result as { message?: string }).message || "Series not found");
-          } else if (!stopped) {
-            setError("Series not found");
-          }
-        } else if (!stopped) {
-          setError("Unsupported detail type");
-        }
-      } catch (err) {
-        if (!stopped) setError(err instanceof Error ? err.message : "Failed to load detail");
-      } finally {
-        if (!stopped) setLoading(false);
-      }
-    }
-    load();
-    return () => { stopped = true; };
-  }, [entityType, itemId]);
-
-  return (
-    <div className={`min-h-screen ${isLight ? "bg-[#eef3f8]" : "bg-[#0f1419]"}`}>
-      <div className={`px-6 py-4 border-b flex items-center gap-3 ${isLight ? "border-[#d7e2f0]" : "border-[#424753]/30"}`}>
-        <button type="button" onClick={() => {
-          sessionStorage.setItem("libraryScrollRestorePending", "1");
-          navigate(-1);
-        }}
-          className={`flex items-center gap-1.5 text-[14px] font-headline uppercase tracking-wider transition-colors ${isLight ? "text-slate-500 hover:text-slate-900" : "text-slate-400 hover:text-white"}`}>
-          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_back</span>
-          Library
-        </button>
-        <span className={isLight ? "text-slate-400" : "text-slate-600"}>/</span>
-        <span className={`text-[14px] font-headline uppercase tracking-wider ${isLight ? "text-slate-700" : "text-slate-300"}`}>
-          {loading ? "Loading..." : payload?.title || "Detail"}
-        </span>
-      </div>
-      {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <div className="flex items-center gap-3 text-slate-400">
-            <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: accent.hex }} />
-            <span className="text-[16px] font-headline uppercase tracking-widest">Loading detail...</span>
-          </div>
-        </div>
-      ) : null}
-      {error ? (
-        <div
-          className={`mx-6 mt-4 rounded-xl border p-4 text-[16px] ${
-            isLight ? "border-red-200 bg-red-50 text-red-800" : "border-red-500/30 bg-red-600/15 text-red-300"
-          }`}
-        >
-          {error}
-        </div>
-      ) : null}
-      {!loading && !error && payload?.type === "movie" ? <MovieDetail payload={payload} brand={props.brand} themeMode={props.themeMode} /> : null}
-      {!loading && !error && payload?.type === "series" ? (
-        <SeriesDetail
-          payload={payload}
-          brand={props.brand}
-          themeMode={props.themeMode}
-          openSeasons={openSeasons}
-          onToggleSeason={(seasonId) => setOpenSeasons((prev) => (prev.includes(seasonId) ? prev.filter((id) => id !== seasonId) : [...prev, seasonId]))}
-        />
-      ) : null}
-      {!loading && !error && payload?.type === "movie" ? (
-        <div className="px-6 md:px-10 pb-6">
-          <LibraryReconcileControl
-            label="Refresh placeholder"
-            startReconcile={() => refreshMoviePlaceholder(payload.id)}
-          />
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/** Logo well for movie file-state strip — matches onboarding ARR integration icon boxes (`#1e2430` + ring). */
-const MOVIE_FILE_STATE_RADARR_LOGO_WELL: CSSProperties = {
-  backgroundColor: "#1e2430",
-  border: "2px solid rgba(250, 204, 21, 0.78)",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-};
-
-const MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL: CSSProperties = {
-  backgroundColor: "#1e2430",
-  border: "2px solid rgba(251, 191, 36, 0.78)",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-};
-
-/** Sonarr icon well — matches onboarding ``ONBOARDING_ARR_VISUAL.sonarr`` ring. */
-const SERIES_FILE_STATE_SONARR_LOGO_WELL: CSSProperties = {
-  backgroundColor: "#1e2430",
-  border: "2px solid rgba(56, 189, 248, 0.8)",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-};
-
-function seriesFileStateSonarrFileTotal(present: boolean, episodeFiles: number): string {
-  if (!present) return "-";
-  return String(Math.max(0, Math.floor(Number.isFinite(episodeFiles) ? episodeFiles : 0)));
-}
-
-function movieFileStateRadarrStatus(row: { present: boolean; has_file_known: boolean; has_file: boolean }): string {
-  if (!row.present) return "-";
-  if (!row.has_file_known) return "-";
-  return row.has_file ? "Yes" : "No";
-}
-
-/**
- * Onboarding-style integration tiles: fixed navy icon wells, **Placeholdarr** first (placeholder on disk),
- * then each Radarr instance (name under logo, whole tile links to Radarr). Outer frame follows light/dark.
- */
-function MovieFileStateSection(props: {
-  links: ArrInstanceOpenLink[] | undefined;
-  arrLink?: string | null;
-  hasFile: boolean;
-  hasPlaceholder: boolean;
-  instanceLabel?: string | null;
-  isLight: boolean;
-  brand: Brand;
-  accentHex: string;
-  radarrIconSrc: string;
-}) {
-  const instanceLabel = String(props.instanceLabel || "Radarr").trim() || "Radarr";
-  const rawMovieLinks = props.links;
-  const linkRows: {
-    label: string;
-    url: string;
-    present: boolean;
-    has_file: boolean;
-    has_file_known: boolean;
-    has_placeholder: boolean;
-  }[] = Array.isArray(rawMovieLinks) && rawMovieLinks.length
-    ? rawMovieLinks.map((l) => ({
-        label: l.label,
-        url: l.url,
-        present: l.present !== false,
-        has_file: l.has_file === true,
-        has_file_known: typeof l.has_file === "boolean",
-        has_placeholder: Boolean(l.has_placeholder),
-      }))
-    : rawMovieLinks == null
-      ? (() => {
-          const u = String(props.arrLink || "").trim();
-          if (!u) return [];
-          return [
-            {
-              label: instanceLabel,
-              url: u,
-              present: true,
-              has_file: props.hasFile,
-              has_file_known: true,
-              has_placeholder: props.hasPlaceholder,
-            },
-          ];
-        })()
-      : [];
-
-  const placeholderOnDisk =
-    Boolean(props.hasPlaceholder) || linkRows.some((r) => r.has_placeholder);
-  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
-
-  return (
-    <div
-      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
-        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
-      }`}
-    >
-      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
-        <div
-          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-          role="group"
-          aria-label="Placeholder dummy on disk"
-        >
-          <div
-            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
-            aria-hidden
-          >
-            <BrandLogo
-              brand={props.brand}
-              accentHex={props.accentHex}
-              variant="yellow"
-              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
-            />
-          </div>
-          <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{brandLabel}</div>
-          <div className="movie-file-state-tile-status text-[20px] font-bold font-headline tabular-nums leading-none">
-            {placeholderOnDisk ? "Yes" : "No"}
-          </div>
-        </div>
-        {linkRows.map((row, idx) => {
-          const status = movieFileStateRadarrStatus(row);
-          return (
-            <a
-              key={`${row.url}-${idx}`}
-              href={row.url}
-              target="_blank"
-              rel="noreferrer"
-              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-            >
-              <div
-                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-                style={MOVIE_FILE_STATE_RADARR_LOGO_WELL}
-                aria-hidden
-              >
-                <img src={props.radarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
-              </div>
-              <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{row.label}</div>
-              <div className="movie-file-state-tile-status text-[20px] font-bold font-headline tabular-nums leading-none">{status}</div>
-            </a>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Same integration strip as movie detail: **Placeholdarr** first, then each **Sonarr** instance.
- * **Placeholdarr** shows total **placeholder** episode count; each Sonarr tile shows **downloaded episode file**
- * count, or ``-`` when ``present: false``. Uses ``arr_instance_links`` whenever the API sends a non-empty array
- * (do not fall back to ``arr_link`` when the array is empty — that would hide padded multi-instance rows).
- */
-function SeriesFileStateSection(props: {
-  seasons: SeriesSeasonDetail[];
-  links: ArrInstanceOpenLink[] | undefined;
-  arrLink?: string | null;
-  instanceLabel?: string | null;
-  isLight: boolean;
-  brand: Brand;
-  accentHex: string;
-  sonarrIconSrc: string;
-}) {
-  const instanceLabel = String(props.instanceLabel || "Sonarr").trim() || "Sonarr";
-  const rawLinks = props.links;
-  const linkRows: { label: string; url: string; present: boolean; episode_files: number }[] = Array.isArray(rawLinks) && rawLinks.length
-    ? rawLinks.map((l) => ({
-        label: l.label,
-        url: l.url,
-        present: l.present !== false,
-        episode_files: typeof l.episode_files === "number" ? l.episode_files : 0,
-      }))
-    : rawLinks == null
-      ? (() => {
-          const u = String(props.arrLink || "").trim();
-          if (!u) return [];
-          const files = (props.seasons || []).reduce((a, s) => a + Number(s.episode_files || 0), 0);
-          return [{ label: instanceLabel, url: u, present: true, episode_files: files }];
-        })()
-      : [];
-
-  const aggPlaceholders = useMemo(
-    () => (props.seasons || []).reduce((a, s) => a + Number(s.episode_placeholders || 0), 0),
-    [props.seasons],
-  );
-
-  const brandLabel = getBrandAccent(props.brand, props.isLight ? "light" : "dark").label;
-  const phTotalStr = String(Math.max(0, Math.floor(aggPlaceholders)));
-
-  return (
-    <div
-      className={`mb-4 rounded-lg border px-3 py-3 md:px-4 md:py-3 ${
-        props.isLight ? "border-[#d7e2f0] bg-white shadow-sm" : "border-[#424753]/40 bg-[#171c22]"
-      }`}
-    >
-      <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
-        <div
-          className="movie-file-state-dark-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-          role="group"
-          aria-label="Episodes with placeholder files"
-        >
-          <div
-            className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-            style={MOVIE_FILE_STATE_PLACEHOLDARR_LOGO_WELL}
-            aria-hidden
-          >
-            <BrandLogo
-              brand={props.brand}
-              accentHex={props.accentHex}
-              variant="yellow"
-              className="h-10 w-auto max-w-[4.75rem] object-contain object-center"
-            />
-          </div>
-          <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{brandLabel}</div>
-          <div className="movie-file-state-tile-status text-[26px] font-black font-headline tabular-nums leading-none">{phTotalStr}</div>
-          <div className="movie-file-state-tile-caption mt-0.5 text-[12px] font-headline font-medium uppercase tracking-wider">Episodes</div>
-        </div>
-        {linkRows.map((row, idx) => {
-          const totalStr = seriesFileStateSonarrFileTotal(row.present, row.episode_files);
-          return (
-            <a
-              key={`${row.label}-${row.url}-${idx}`}
-              href={row.url}
-              target="_blank"
-              rel="noreferrer"
-              className="movie-file-state-dark-tile movie-file-state-arr-tile flex min-w-[7.5rem] flex-1 flex-col items-center gap-3 px-4 py-5 text-center sm:min-w-[9rem] sm:max-w-[11rem]"
-            >
-              <div
-                className="movie-file-state-arr-well flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl"
-                style={SERIES_FILE_STATE_SONARR_LOGO_WELL}
-                aria-hidden
-              >
-                <img src={props.sonarrIconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
-              </div>
-              <div className="movie-file-state-tile-title text-[16px] font-semibold font-headline leading-tight">{row.label}</div>
-              <div className="movie-file-state-tile-status text-[26px] font-black font-headline tabular-nums leading-none">{totalStr}</div>
-              <div className="movie-file-state-tile-caption mt-0.5 text-[12px] font-headline font-medium uppercase tracking-wider">Episodes</div>
-            </a>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function MovieDetail(props: { payload: MovieDetailResponse; brand: Brand; themeMode: ThemeMode }) {
-  const payload = props.payload;
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
-  const heroArtUrl = payload.backdrop_url || payload.poster_url;
-  return (
-    <div>
-      {/* Hero banner */}
-      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] overflow-hidden"
-        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.90)" : "rgba(8,12,18,0.78)"} 18%, ${isLight ? "rgba(238,243,248,0.52)" : "rgba(8,12,18,0.45)"} 42%, ${isLight ? "rgba(238,243,248,0.10)" : "rgba(8,12,18,0.08)"}), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
-        <div
-          className="absolute inset-0"
-          style={{
-            background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
-          }}
-        />
-      </div>
-
-      <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
-          <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
-            {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">MOV</div>}
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
-            {payload.year ? (
-              <div className="text-[22px] font-semibold tabular-nums md:text-[26px]" style={{ color: accent.icon }}>
-                {payload.year}
-              </div>
-            ) : null}
-            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-          </div>
-        </div>
-
-        {payload.overview && <p className={`text-[20px] leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
-
-        <MovieFileStateSection
-          links={payload.arr_instance_links}
-          arrLink={payload.arr_link}
-          hasFile={payload.has_file}
-          hasPlaceholder={payload.has_placeholder}
-          instanceLabel={payload.instance_label}
-          isLight={isLight}
-          brand={props.brand}
-          accentHex={accent.hex}
-          radarrIconSrc={radarrIcon}
-        />
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {[
-            { label: "Quality", value: payload.radarr_quality },
-            { label: "Theatrical", value: payload.theater_release_date },
-            { label: "Digital", value: payload.digital_release_date },
-            { label: "Physical", value: payload.physical_release_date },
-          ].filter(m => m.value).map(m => (
-            <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-              <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-              <div className={`text-[18px] font-semibold ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
-            </div>
-          ))}
-        </div>
-
-      </div>
-    </div>
-  );
-}
-
-function SeriesDetail(props: {
-  payload: SeriesDetailResponse;
-  brand: Brand;
-  themeMode: ThemeMode;
-  openSeasons: number[];
-  onToggleSeason: (seasonId: number) => void;
-}) {
-  const payload = props.payload;
-  const accent = getBrandAccent(props.brand, props.themeMode);
-  const isLight = props.themeMode === "light";
-  const heroArtUrl = payload.backdrop_url || payload.poster_url;
-  const seasonsDesc = useMemo(
-    () => [...(payload.seasons || [])].sort((a, b) => (b.season_number || 0) - (a.season_number || 0)),
-    [payload.seasons],
-  );
-  return (
-    <div>
-      {/* Hero banner — light mode uses the same soft scrim treatment as movie detail */}
-      <div className="relative h-[22rem] md:h-[30rem] lg:h-[34rem] overflow-hidden"
-        style={heroArtUrl ? { backgroundImage: `linear-gradient(to right, ${isLight ? "rgba(238,243,248,0.90)" : "rgba(8,12,18,0.78)"} 18%, ${isLight ? "rgba(238,243,248,0.52)" : "rgba(8,12,18,0.45)"} 42%, ${isLight ? "rgba(238,243,248,0.10)" : "rgba(8,12,18,0.08)"}), url(${heroArtUrl})`, backgroundSize: "cover", backgroundPosition: "center 35%" } : { backgroundColor: alphaColor(accent.hex, isLight ? 0.14 : 0.2) }}>
-        <div
-          className="absolute inset-0"
-          style={{
-            background: isLight
-              ? "linear-gradient(180deg, rgba(238,243,248,0) 32%, rgba(238,243,248,0.2) 58%, rgba(238,243,248,0.72) 80%, rgba(238,243,248,0.96) 93%, rgba(238,243,248,1) 100%)"
-              : "linear-gradient(180deg, rgba(15,20,25,0) 32%, rgba(15,20,25,0.22) 58%, rgba(15,20,25,0.72) 80%, rgba(15,20,25,0.96) 93%, rgba(15,20,25,1) 100%)",
-          }}
-        />
-      </div>
-
-      <div className="px-6 md:px-10 lg:px-12 -mt-64 md:-mt-80 lg:-mt-96 relative pb-10">
-        <div className="flex gap-6 md:gap-10 items-end mb-8 md:mb-10">
-          <div className={`flex-none w-40 h-60 md:w-52 md:h-[19.5rem] lg:w-56 lg:h-[21rem] rounded-2xl overflow-hidden border-2 shadow-[0_30px_80px_rgba(0,0,0,0.5)] ${isLight ? "border-[#d7e2f0] bg-white" : "border-[#424753]/40 bg-[#1e2430]"}`}>
-            {payload.poster_url ? <img src={payload.poster_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-600 font-bold">TV</div>}
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col justify-end pb-1 md:pb-2">
-            {payload.year ? (
-              <div className="text-[22px] font-semibold tabular-nums md:text-[26px]" style={{ color: accent.icon }}>
-                {payload.year}
-              </div>
-            ) : null}
-            <h1 className={`mt-1 text-4xl font-black font-headline tracking-tight leading-[1.02] md:text-5xl lg:text-6xl ${isLight ? "text-slate-900" : "text-white"}`}>{payload.title}</h1>
-          </div>
-        </div>
-
-        {payload.overview && <p className={`text-[20px] leading-relaxed max-w-5xl mb-8 ${isLight ? "text-slate-700" : "text-slate-200"}`}>{payload.overview}</p>}
-
-        <SeriesFileStateSection
-          seasons={payload.seasons || []}
-          links={payload.arr_instance_links}
-          arrLink={payload.arr_link}
-          instanceLabel={payload.instance_label}
-          isLight={isLight}
-          brand={props.brand}
-          accentHex={accent.hex}
-          sonarrIconSrc={sonarrIcon}
-        />
-        <div className="mb-6">
-          <LibraryReconcileControl
-            label="Refresh series placeholders"
-            startReconcile={() => refreshSeriesPlaceholder(payload.id)}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
-          {[
-            { label: "First Aired", value: payload.first_aired },
-            { label: "Network", value: payload.network },
-          ]
-            .filter((m) => m.value != null && String(m.value).length > 0)
-            .map((m) => (
-              <div key={m.label} className={`rounded-xl border p-5 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-                <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-1">{m.label}</div>
-                <div className={`text-[18px] font-semibold tabular-nums ${isLight ? "text-slate-900" : "text-white"}`}>{m.value}</div>
-              </div>
-            ))}
-        </div>
-
-        <div className="mb-4">
-          <h3 className="text-[14px] font-headline uppercase tracking-widest text-slate-500 mb-3">Seasons &amp; Episodes</h3>
-        </div>
-        <div className="space-y-2">
-          {seasonsDesc.map(season => {
-            const open = props.openSeasons.includes(season.id);
-            return (
-              <div key={season.id} className={`border rounded-xl overflow-hidden ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}>
-                <button type="button" onClick={() => props.onToggleSeason(season.id)}
-                  className={`w-full flex items-center justify-between px-5 py-4 text-left transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-[#1e2430]/50"}`}>
-                  <div className="flex items-center gap-3">
-                    <span className="material-symbols-outlined text-slate-500 transition-transform" style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>chevron_right</span>
-                    <span className={`text-[16px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
-                      {season.season_number === 0 ? "Specials" : `Season ${season.season_number}`}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-[14px] font-headline uppercase tracking-wider">
-                    <span className="text-slate-500">{season.episode_total} episodes</span>
-                    <span className="px-2 py-0.5 rounded bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder {season.episode_placeholders}</span>
-                    <span className="px-2 py-0.5 rounded bg-green-600/20 border border-green-500/30 text-green-300">Downloaded {season.episode_files}</span>
-                  </div>
-                </button>
-                {open && (
-                  <div className={`border-t divide-y ${isLight ? "border-slate-200 divide-slate-200" : "border-[#424753]/30 divide-[#424753]/15"}`}>
-                    {season.episodes.map(ep => (
-                      <div key={ep.id} className={`flex items-start gap-4 px-5 py-3 transition-colors ${isLight ? "hover:bg-slate-50" : "hover:bg-[#1e2430]/30"}`}>
-                        <span className="flex-none w-10 text-[14px] text-slate-500 font-mono pt-0.5">E{String(ep.episode_number).padStart(2, "0")}</span>
-                        <div className="flex-1 min-w-0">
-                          <div className={`text-[16px] font-medium ${isLight ? "text-slate-900" : "text-white"}`}>{ep.title || `Episode ${ep.episode_number}`}</div>
-                          <div className="ui-field-description-compact mt-0.5">{ep.air_date || "No air date"}</div>
-                        </div>
-                        <div className="flex-none">
-                          {ep.has_placeholder
-                            ? <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-teal-600/20 border border-teal-500/30 text-teal-300">Placeholder</span>
-                            : ep.has_file
-                              ? <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-green-600/20 border border-green-500/30 text-green-300">Downloaded</span>
-                              : <span className="px-2 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-red-600/20 border border-red-500/30 text-red-300">Missing</span>
-                          }
-                        </div>
-                        <LibraryReconcileControl
-                          label="Refresh"
-                          startReconcile={() => refreshEpisodePlaceholder(ep.id)}
-                          buttonClassName="ml-2 text-[11px] uppercase tracking-wider text-slate-400 hover:text-slate-200 disabled:opacity-50"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>
@@ -4062,8 +3334,8 @@ function CalendarPanel(props: {
                   <button
                     type="button"
                     onClick={() => { closeOverlay(); props.onOpenSpotlightDetail(props.selectedItem!); }}
-                    className="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider text-white transition-colors"
-                    style={{ backgroundColor: accent.hex }}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} transition-colors`}
+                    style={accentFilledStyle(accent.hex)}
                   >
                     <span className="material-symbols-outlined" style={{ fontSize: 14 }}>open_in_new</span>
                     Full Detail
@@ -4113,8 +3385,8 @@ function CalendarDayCell(props: {
       {/* Day number */}
       <div className="flex items-center justify-between mb-1">
         <span className={`text-[14px] font-bold font-headline leading-none ${
-          day.is_today ? "w-5 h-5 flex items-center justify-center rounded-full text-white text-[12px]" : "text-slate-400"
-        }`} style={day.is_today ? { backgroundColor: accent.hex } : undefined}>
+          day.is_today ? `w-5 h-5 flex items-center justify-center rounded-full ${FG_ON_ACCENT_TEXT_CLASS} text-[12px]` : "text-slate-400"
+        }`} style={day.is_today ? accentFilledStyle(accent.hex) : undefined}>
           {day.day_number}
         </span>
       </div>
@@ -5314,8 +4586,8 @@ function ArrInstancesEditor(props: {
               <div className="flex justify-end pt-2">
                 <button
                   type="button"
-                  className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-                  style={{ backgroundColor: props.accent.hex }}
+                  className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                  style={accentFilledStyle(props.accent.hex)}
                   onClick={() => setWebhookSetupDialog(null)}
                 >
                   Done
@@ -6278,8 +5550,8 @@ function SecurityAccountControls(props: {
                 <button
                   type="button"
                   disabled={webhookRegenBusy}
-                  className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-                  style={{ backgroundColor: props.accentHex }}
+                  className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+                  style={accentFilledStyle(props.accentHex)}
                   onClick={() => void onRegenerateWebhookKey()}
                 >
                   {webhookRegenBusy ? "Regenerating…" : "Yes, regenerate"}
@@ -6335,8 +5607,8 @@ function SecurityAccountControls(props: {
           <button
             type="submit"
             disabled={busy}
-            className="px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider text-white disabled:opacity-50"
-            style={{ backgroundColor: props.accentHex }}
+            className={`px-4 py-2 rounded-lg text-[13px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-50`}
+            style={accentFilledStyle(props.accentHex)}
           >
             {busy ? "Updating…" : "Update password"}
           </button>
@@ -6399,8 +5671,8 @@ function SecurityAccountControls(props: {
             <div className="flex justify-end pt-2">
               <button
                 type="button"
-                className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-                style={{ backgroundColor: props.accentHex }}
+                className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accentHex)}
                 onClick={() => setWebhookUrlsModalOpen(false)}
               >
                 Done
@@ -6803,8 +6075,8 @@ function SettingsPanel(props: {
               onClick={() => props.onSave()}
               disabled={!props.hasUnsavedChanges || props.messagesSaveBlocked}
               title={props.messagesSaveBlocked ? "Fix status message template errors before saving" : undefined}
-              className="flex items-center gap-2 px-5 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ backgroundColor: accent.hex }}
+              className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+              style={accentFilledStyle(accent.hex)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               Save Settings
@@ -8342,8 +7614,8 @@ function NfoBackfillApplyScopeModal(props: {
               type="button"
               onClick={() => props.onConfirm(scope)}
               disabled={props.saving}
-              className="flex items-center gap-2 px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50"
-              style={{ backgroundColor: accent.hex }}
+              className={`flex items-center gap-2 px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg disabled:opacity-50`}
+              style={accentFilledStyle(accent.hex)}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 16 }}>save</span>
               {props.saving ? "Saving…" : "Save"}
@@ -8567,8 +7839,8 @@ function StatusMessagesTokenModal(props: {
             <button
               type="button"
               onClick={commitAndClose}
-              className="px-4 py-2 text-white text-[14px] font-headline uppercase tracking-wider rounded-lg"
-              style={{ backgroundColor: accent.hex }}
+              className={`px-4 py-2 ${FG_ON_ACCENT_TEXT_CLASS} text-[14px] font-headline uppercase tracking-wider rounded-lg`}
+              style={accentFilledStyle(accent.hex)}
             >
               Done
             </button>
@@ -8958,8 +8230,8 @@ function PlaybackWebhookSetupModal(props: {
         <div className="flex justify-end pt-2">
           <button
             type="button"
-            className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
-            style={{ backgroundColor: props.accent.hex }}
+            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+            style={accentFilledStyle(props.accent.hex)}
             onClick={() => props.onClose()}
           >
             Done
@@ -9717,8 +8989,8 @@ function OnboardingWizard(props: {
               return (
                 <div key={s.key} className="flex items-center flex-1 last:flex-none">
                   <div className={`flex flex-col items-center gap-1 min-w-max ${active ? "" : done ? "text-green-400" : "text-slate-600"}`} style={active ? { color: accent.icon } : undefined}>
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? "text-white" : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
-                      style={active ? { backgroundColor: accent.hex, borderColor: accent.hex } : undefined}>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-bold font-headline border-2 transition-colors ${active ? FG_ON_ACCENT_TEXT_CLASS : done ? "bg-green-600/20 border-green-500 text-green-400" : "bg-[#252e3a] border-[#424753]/40 text-slate-600"}`}
+                      style={active ? { ...accentFilledStyle(accent.hex), borderColor: accent.hex } : undefined}>
                       {done ? <span className="material-symbols-outlined" style={{ fontSize: 14 }}>check</span> : i + 1}
                     </div>
                     <span className="text-[12px] font-headline uppercase tracking-wider">{s.name}</span>
@@ -10214,8 +9486,8 @@ function OnboardingWizard(props: {
                     setStepError(err instanceof Error ? err.message : String(err));
                   }
                 }}
-                className="flex items-center gap-2 px-5 py-2 text-white rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ backgroundColor: accent.hex }}
+                className={`flex items-center gap-2 px-5 py-2 ${FG_ON_ACCENT_TEXT_CLASS} rounded-lg text-[14px] font-headline uppercase tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed`}
+                style={accentFilledStyle(accent.hex)}
                 >
                 {previewMode
                   ? "Next"

@@ -1,6 +1,7 @@
 import { FormEvent, useState, type CSSProperties } from "react";
 import type { AuthStatus } from "../api/auth";
 import { loginAuth, setupAuth } from "../api/auth";
+import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
 
 type AuthGateProps = {
   status: AuthStatus;
@@ -154,8 +155,8 @@ function AuthCredentialForm(props: {
       <button
         type="submit"
         disabled={busy}
-        className="w-full py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white disabled:opacity-60"
-        style={{ backgroundColor: props.accentHex }}
+        className={`w-full py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-60`}
+        style={accentFilledStyle(props.accentHex)}
       >
         {busy ? "Please wait…" : props.mode === "setup" ? "Create account" : "Sign in"}
       </button>

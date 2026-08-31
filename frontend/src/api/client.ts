@@ -45,11 +45,39 @@ function mergeHeaders(init?: RequestInit): Headers {
 
 async function parseErrorMessage(response: Response, fallback: string): Promise<string> {
   try {
-    const payload = (await response.json()) as { message?: string; detail?: string };
-    return payload.message || payload.detail || fallback;
+    const payload = (await response.json()) as { message?: unknown; detail?: unknown };
+    const fromMessage = stringifyApiErrorField(payload.message);
+    if (fromMessage) return fromMessage;
+    const fromDetail = stringifyApiErrorField(payload.detail);
+    if (fromDetail) return fromDetail;
+    return fallback;
   } catch {
     return fallback;
   }
+}
+
+function stringifyApiErrorField(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "msg" in item) return String((item as { msg?: unknown }).msg || "");
+        return "";
+      })
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return parts.length ? parts.join("; ") : null;
+  }
+  if (typeof value === "object" && value && "msg" in value) {
+    const msg = String((value as { msg?: unknown }).msg || "").trim();
+    return msg || null;
+  }
+  return null;
 }
 
 export class ApiUnauthorizedError extends Error {

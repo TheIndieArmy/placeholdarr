@@ -100,6 +100,8 @@ export async function getLibrary(
     summary?: boolean;
     mediaType?: "movie" | "series";
     ifNoneMatch?: number | string | null;
+    /** Bypass any stale browser HTTP cache for this shelf fetch. */
+    bustCache?: boolean;
   },
 ): Promise<LibraryFetchResult> {
   const summary = opts?.summary === true;
@@ -107,6 +109,7 @@ export async function getLibrary(
   if (summary) q.set("summary", "true");
   if (opts?.mediaType === "movie") q.set("media_type", "movie");
   if (opts?.mediaType === "series") q.set("media_type", "series");
+  if (opts?.bustCache) q.set("cb", String(Date.now()));
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts?.ifNoneMatch != null && opts.ifNoneMatch !== "") {
@@ -117,6 +120,7 @@ export async function getLibrary(
   try {
     response = await fetch(`/api/library?${q.toString()}`, {
       credentials: "same-origin",
+      cache: "no-store",
       headers,
     });
   } catch (err) {
