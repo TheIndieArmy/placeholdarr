@@ -7,8 +7,13 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.20] - 2026-08-30
+
 ### Summary
 
+- **Playback setup modal**: Media cards open setup steps for Tautulli / Jellyfin / Emby webhooks (Settings and onboarding).
+- **Webhook copy confirmation**: Copy buttons show a checkmark for a couple seconds after a successful copy.
+- **Onboarding Look and feel**: Status / poster overlay fields live only on Look and feel, not again on Behavior.
 - **Activity layout**: Placeholders + Tasks (infinite scroll, filters, series batches, Active searches); Operations removed from Activity.
 - **Activity series-add batches**: Burst “Series added” creates collapse into one expandable row.
 - **Activity series create batches**: Same-series Created rows within a few minutes group (sync or SeriesAdd).
@@ -25,9 +30,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Media Integrations configure**: Connect and Configure open an ARR-style modal (Cancel / Test / Save).
 - **Collection Sources**: TMDB, Trakt, and Tautulli collection APIs move to Settings → Collection Sources.
 - **Media/ARR Test button**: Closing and reopening Configure clears the success check; Save still works when details are already complete.
+- **Collection poster titles**: Long titles on collection posters scale down so more of the name stays readable.
 
 ### Added
 
+- **Playback setup modal**: Per-player Tautulli / Jellyfin / Emby webhook instructions from media cards.
+- **Webhook copy confirmation**: Copy controls swap to a check icon briefly after copying.
 - **Activity layout**: Placeholders and Tasks under Activity (filters, day groups, Active searches on Tasks).
 - **Activity scroll**: Placeholders append older history on scroll (cursor `before_time` / `before_id`).
 - **Activity series-add batches**: Consecutive “Series added” episode creates group into one expandable row.
@@ -37,11 +45,14 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
+- **Plex media card copy**: Playback needs Tautulli; card action is Playback setup (not Webhook URL).
+- **Onboarding Behavior step**: Look and feel fields (status updates, projection, poster overlay) no longer appear under Behavior.
 - **Activity feed APIs**: `/api/activity/placeholders` and `/api/activity/operations` return `{ items, has_more, next_before_time, next_before_id }`.
 - **Activity promoted**: Proposed Placeholders / Tasks replace the old Activity tabs; `/activity/proposed/*` and `/activity/operations` redirect.
 - **Activity series delete title**: Series tombstone bulk-delete rows use a single series title; multi-episode bursts expand like create batches.
 - **Activity reason prose**: Placeholder Created/Deleted reasons that are already sentences are not snake_case-humanized.
 - **Media Integrations configure**: Connect and Configure open a modal with Cancel, Test, and Save instead of expanding a form under the cards.
+- **Collection poster titles**: Poster title fallback uses dynamic font sizing so longer names fit better.
 
 ### Removed
 

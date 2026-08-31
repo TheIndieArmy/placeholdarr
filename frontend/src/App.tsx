@@ -31,7 +31,7 @@ import {
 } from "./api/dashboard";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
-import { changePassword, getAuthStatus, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
+import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
 import { dismissWhatsNew, getWhatsNew, type WhatsNewNotice } from "./api/whatsNew";
 import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
@@ -328,7 +328,6 @@ const BEHAVIOR_WIZARD_SECTIONS = [
   "Library sync",
   "Calendar",
   "Lookahead",
-  "Status Updates",
   "Advanced",
 ] as const;
 
@@ -527,6 +526,8 @@ function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
   }
   out.PLACEHOLDER_STATUS_UPDATES = "ALL";
   out.PLACEHOLDER_STATUS_PROJECTION_MODE = "both";
+  // Real webhook key from the server so preview URLs match Settings (tokenized ?apikey=).
+  out.WEBHOOK_API_KEY = payload.webhook_api_key ?? "";
   return out;
 }
 
@@ -1840,6 +1841,15 @@ export function App() {
             setAuthStatus(status);
           }}
           onValueChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
+          onPartialPersist={async (partial) => {
+            const result = await saveSettings(partial, true);
+            if (!result.ok) {
+              const first = Object.entries(result.errors || {})[0];
+              throw new Error(first ? `${first[0]}: ${first[1]}` : "Unable to save playback notifier");
+            }
+            setFieldValues((prev) => ({ ...prev, ...partial }));
+            setBaselineValues((prev) => ({ ...prev, ...partial }));
+          }}
           onStatusMessagesMetaChange={handleStatusMessagesMetaChange}
           registerStatusMessagesSaveFlow={registerStatusMessagesSaveFlow}
           onSave={async () => {
@@ -4371,18 +4381,61 @@ function deriveIs4kFromRole(role: string) {
   return role !== "primary";
 }
 
-function getPlexLibraryIdNote(fieldKey: string) {
-  const shared =
-    "For best request clarity and fewer scanner/trash cleanup issues, keep placeholders in separate Plex libraries from real media. Required when Plex is enabled.";
-  const nfoAgents =
-    "In Plex, edit that library’s metadata/agents so local NFO files are used (often Local Media Assets or “prefer local metadata”—labels vary by Plex version); Placeholdarr relies on sidecar .nfo files.";
+function getPlexLibraryIdPathHint(fieldKey: string): string | null {
   if (fieldKey === "PLEX_MOVIE_SECTION_ID") {
-    return `Use the Plex library ID for the placeholder movie library that points at your derived \`movies\` path. ${shared} ${nfoAgents}`;
+    return "ID of the placeholder Movies library that points at your derived movies path.";
   }
   if (fieldKey === "PLEX_TV_SECTION_ID") {
-    return `Use the Plex library ID for the placeholder TV library that points at your derived \`tv\` path. ${shared} ${nfoAgents}`;
+    return "ID of the placeholder TV library that points at your derived tv path.";
   }
   return null;
+}
+
+/** Folder / library advice for Plex setup (no em dashes; kept short for in-card / in-modal disclosure). */
+function getPlexLibraryTips(fieldKey: string = "setup"): string[] {
+  const pathHint = getPlexLibraryIdPathHint(fieldKey);
+  const tips: string[] = [];
+  if (pathHint) {
+    tips.push(pathHint);
+  } else {
+    tips.push(
+      "Before connecting, create separate placeholder Movies and TV libraries in Plex that point at your derived movies and tv paths, then enter those library IDs in Configure.",
+    );
+  }
+  tips.push(
+    "Keep placeholders in separate Plex libraries from real media for clearer requests and fewer scanner or trash cleanup issues.",
+  );
+  tips.push(
+    "In each placeholder library's metadata agents, enable local NFO / Local Media Assets (wording varies by Plex version) so Placeholdarr sidecar .nfo files show in the UI.",
+  );
+  return tips;
+}
+
+function PlexLibraryTipsDisclosure(props: { fieldKey?: string; className?: string; defaultOpen?: boolean }) {
+  const tips = getPlexLibraryTips(props.fieldKey ?? "setup");
+  const [open, setOpen] = useState(Boolean(props.defaultOpen));
+  return (
+    <div className={props.className ?? "mb-1.5"}>
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-[12px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="material-symbols-outlined" style={{ fontSize: 16 }} aria-hidden>
+          {open ? "expand_less" : "expand_more"}
+        </span>
+        Library tips
+      </button>
+      {open ? (
+        <ul className="mt-1.5 max-w-full list-disc space-y-1.5 break-words pl-5 text-left text-[13px] leading-snug text-slate-400">
+          {tips.map((tip) => (
+            <li key={tip}>{tip}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
 }
 
 function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] {
@@ -5724,10 +5777,10 @@ function LibraryPathsForm(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
+            {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
             {field.description && !isPlexSectionIdField(field.key) ? (
               <p className="ui-field-description mt-1">{field.description}</p>
             ) : null}
-            {getPlexLibraryIdNote(field.key) ? <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p> : null}
           </div>
         </div>
         {field.type === "bool" ? (
@@ -5902,7 +5955,7 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
   return (
     <div className={wrapClass}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
-        Lookahead keeps your storage usage low by only monitoring and searching for episodes in Sonarr as you progress
+        Lookahead keeps your storage usage minimized by only monitoring and searching for episodes in Sonarr as you progress
         watching a series.
       </p>
       <p className="ui-field-description mt-3 text-slate-300 leading-relaxed">
@@ -6414,16 +6467,14 @@ function SettingsPanel(props: {
   onStatusMessagesMetaChange: (meta: { dirty: boolean; hasValidationErrors: boolean }) => void;
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
+  onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
   const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
-  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
-    serviceId: "tautulli" | "jellyfin" | "emby";
-    instanceParam: string;
-  } | null>(null);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const mediaPanelCancelRef = useRef<() => void>(() => {});
@@ -6572,17 +6623,14 @@ function SettingsPanel(props: {
     const card = panelId ? ONBOARDING_MEDIA_CARDS.find((c) => c.id === panelId) : undefined;
     const conn = card ? mediaCardConnectionKeys(card) : null;
     const cfg = panelId ? mediaCardPlaybackWebhookConfig(panelId) : null;
-    const instanceParam = cfg
-      ? String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey
-      : "";
     const prevUrl = conn ? String(mediaPanelSnapshotRef.current[conn.urlKey] ?? "").trim() : "";
     const newUrl = conn ? String(props.values[conn.urlKey] ?? "").trim() : "";
     const urlChanged = normalizeArrInstanceUrlForDedupe(prevUrl) !== normalizeArrInstanceUrlForDedupe(newUrl);
     setMediaPanel(null);
     setMediaPanelTestPassed(false);
     setMediaFooterTestBusy(false);
-    if (cfg && urlChanged) {
-      setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
+    if (cfg && panelId && urlChanged) {
+      setPlaybackWebhookDialog(panelId);
     }
   }
 
@@ -6613,6 +6661,7 @@ function SettingsPanel(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
+            {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
             {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
               (field.key === "STARTUP_SYNC_MODE" ? (
                 <StartupSyncModeDescription spacing="settings" />
@@ -6625,9 +6674,6 @@ function SettingsPanel(props: {
               ) : field.description && !isPlexSectionIdField(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
-            {getPlexLibraryIdNote(field.key) ? (
-              <p className="ui-field-description mt-1">{getPlexLibraryIdNote(field.key)}</p>
-            ) : null}
             {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
               <p className="ui-field-description ui-field-description-accent3 mt-2 leading-relaxed">
                 If you have Startup ARR sync mode set to OFF, then a scheduled sync is recommended.
@@ -6837,6 +6883,12 @@ function SettingsPanel(props: {
                                 )}
                               </div>
                               <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                              {card.id === "plex" ? (
+                                <PlexLibraryTipsDisclosure
+                                  className="mt-3 w-full"
+                                  defaultOpen={!hasConnection}
+                                />
+                              ) : null}
                               {!hasConnection ? (
                                 <button
                                   type="button"
@@ -6919,18 +6971,15 @@ function SettingsPanel(props: {
                                     {mediaCardPlaybackWebhookConfig(card.id) ? (
                                       <button
                                         type="button"
-                                        onClick={() => {
-                                          const cfg = mediaCardPlaybackWebhookConfig(card.id);
-                                          if (!cfg) return;
-                                          const instanceParam =
-                                            String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
-                                          setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
-                                        }}
+                                        onClick={() => setPlaybackWebhookDialog(card.id)}
                                         className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                                       >
-                                        Webhook URL
+                                        Playback setup
                                       </button>
                                     ) : null}
+                                    <p className="text-center text-[12px] text-slate-500">
+                                      Playback: {mediaCardPlaybackSourceLabel(card.id)}
+                                    </p>
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -6949,7 +6998,14 @@ function SettingsPanel(props: {
                         })}
                       </div>
                       {(() => {
-                        const remaining = active.fields.filter((field) => !ONBOARDING_MEDIA_CARDS.some((card) => [card.enabledKey, ...card.keys].includes(field.key)));
+                        const remaining = active.fields.filter(
+                          (field) =>
+                            !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
+                            !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                            !ONBOARDING_MEDIA_CARDS.some((card) =>
+                              [card.enabledKey, ...card.keys].includes(field.key),
+                            ),
+                        );
                         return remaining.length ? renderOnboardingStyleSectionRows(remaining) : null;
                       })()}
                     </div>
@@ -7259,7 +7315,8 @@ function SettingsPanel(props: {
     })() : null}
     {playbackWebhookDialog ? (
       <PlaybackWebhookSetupModal
-        dialog={playbackWebhookDialog}
+        cardId={playbackWebhookDialog}
+        values={props.values}
         onClose={() => setPlaybackWebhookDialog(null)}
         accent={accent}
         displayOrigin={resolveWebhookDisplayOrigin(props.values)}
@@ -8527,7 +8584,7 @@ const ONBOARDING_MEDIA_CARDS = [
     id: "plex" as const,
     title: "Plex",
     enabledKey: "ENABLE_PLEX",
-    note: "Tautulli is required for Plex playback webhooks and playback-aware routing. For each placeholder Plex library, enable local / NFO metadata agents so Placeholdarr sidecar NFO files show up in the UI.",
+    note: "Playback needs Tautulli so Placeholdarr hears when someone hits play.",
     keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
   },
   {
@@ -8636,16 +8693,41 @@ const JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE = `{
 }`;
 
 type PlaybackWebhookServiceId = "tautulli" | "jellyfin" | "emby";
+type MediaCardId = (typeof ONBOARDING_MEDIA_CARDS)[number]["id"];
 
-function mediaCardPlaybackWebhookConfig(cardId: (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]): {
+function mediaCardPlaybackWebhookConfig(cardId: MediaCardId): {
   serviceId: PlaybackWebhookServiceId;
   instanceKeyField: string;
   defaultKey: string;
 } | null {
-  if (cardId === "plex") return { serviceId: "tautulli", instanceKeyField: "TAUTULLI_INSTANCE_KEY", defaultKey: "tautulli" };
-  if (cardId === "jellyfin") return { serviceId: "jellyfin", instanceKeyField: "JELLYFIN_INSTANCE_KEY", defaultKey: "jellyfin" };
-  if (cardId === "emby") return { serviceId: "emby", instanceKeyField: "EMBY_INSTANCE_KEY", defaultKey: "emby" };
+  if (cardId === "plex") {
+    return {
+      serviceId: "tautulli",
+      instanceKeyField: "TAUTULLI_INSTANCE_KEY",
+      defaultKey: "tautulli",
+    };
+  }
+  if (cardId === "jellyfin") {
+    return {
+      serviceId: "jellyfin",
+      instanceKeyField: "JELLYFIN_INSTANCE_KEY",
+      defaultKey: "jellyfin",
+    };
+  }
+  if (cardId === "emby") {
+    return {
+      serviceId: "emby",
+      instanceKeyField: "EMBY_INSTANCE_KEY",
+      defaultKey: "emby",
+    };
+  }
   return null;
+}
+
+function mediaCardPlaybackSourceLabel(cardId: MediaCardId): string {
+  if (cardId === "plex") return "Tautulli";
+  if (cardId === "jellyfin") return "Jellyfin webhook";
+  return "Emby webhook";
 }
 
 function collectWebhookDestinations(values: FieldValueMap): { id: string; label: string; url: string }[] {
@@ -8665,6 +8747,7 @@ function collectWebhookDestinations(values: FieldValueMap): { id: string; label:
   for (const card of ONBOARDING_MEDIA_CARDS) {
     const cfg = mediaCardPlaybackWebhookConfig(card.id);
     if (!cfg || !mediaCardHasStoredConnection(card, values)) continue;
+    if (!Boolean(values[card.enabledKey])) continue;
     const instanceParam = String(values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
     const name = cfg.serviceId === "tautulli" ? "Tautulli (Plex)" : cfg.serviceId === "jellyfin" ? "Jellyfin" : "Emby";
     rows.push({
@@ -8692,12 +8775,20 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
   const variant = props.variant ?? "inline";
   const iconSize = variant === "header" ? 16 : 14;
   const [copyHint, setCopyHint] = useState<"idle" | "ok" | "err">("idle");
+  const resetTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current != null) window.clearTimeout(resetTimerRef.current);
+    };
+  }, []);
   const title =
     copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed — select URL text or use HTTPS" : "Copy to clipboard";
+  const icon = copyHint === "ok" ? "check" : copyHint === "err" ? "error" : "content_copy";
+  const ariaLabel = copyHint === "ok" ? "Copied" : copyHint === "err" ? "Copy failed" : props.ariaLabel;
   return (
     <button
       type="button"
-      aria-label={props.ariaLabel}
+      aria-label={ariaLabel}
       title={title}
       onClick={(e) => {
         e.preventDefault();
@@ -8705,15 +8796,20 @@ function WebhookStepCopyButton(props: { text: string; ariaLabel: string; variant
         void (async () => {
           const ok = await copyTextToClipboard(props.text);
           setCopyHint(ok ? "ok" : "err");
-          window.setTimeout(() => setCopyHint("idle"), 2200);
+          if (resetTimerRef.current != null) window.clearTimeout(resetTimerRef.current);
+          resetTimerRef.current = window.setTimeout(() => setCopyHint("idle"), 2000);
         })();
       }}
-      className={`inline-flex shrink-0 items-center justify-center rounded border border-[#424753]/50 bg-[#252e3a]/80 text-slate-300 transition hover:border-[#424753]/80 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${
-        variant === "header" ? "h-7 w-7" : "h-6 w-6"
-      } ${props.className ?? ""}`}
+      className={`inline-flex shrink-0 items-center justify-center rounded border bg-[#252e3a]/80 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${
+        copyHint === "ok"
+          ? "border-emerald-500/60 text-emerald-400"
+          : copyHint === "err"
+            ? "border-rose-500/60 text-rose-400"
+            : "border-[#424753]/50 text-slate-300 hover:border-[#424753]/80 hover:text-white"
+      } ${variant === "header" ? "h-7 w-7" : "h-6 w-6"} ${props.className ?? ""}`}
     >
       <span className="material-symbols-outlined" style={{ fontSize: iconSize }} aria-hidden>
-        content_copy
+        {icon}
       </span>
     </button>
   );
@@ -8758,84 +8854,113 @@ function MaskedWebhookUrlField(props: {
 }
 
 function PlaybackWebhookSetupModal(props: {
-  dialog: { serviceId: PlaybackWebhookServiceId; instanceParam: string };
+  cardId: MediaCardId;
+  values: FieldValueMap;
   onClose: () => void;
   accent: { hex: string };
   displayOrigin: string;
   webhookApiKey: string;
 }) {
-  const pb = props.dialog;
-  const webhookUrl = appendWebhookApiKey(
-    `${props.displayOrigin}/webhook?instance=${encodeURIComponent(pb.instanceParam)}`,
-    props.webhookApiKey,
+  const cfg = mediaCardPlaybackWebhookConfig(props.cardId);
+  const cardTitle = ONBOARDING_MEDIA_CARDS.find((c) => c.id === props.cardId)?.title ?? props.cardId;
+  const [apiKey, setApiKey] = useState(() => String(props.webhookApiKey || "").trim());
+
+  useEffect(() => {
+    const fromProps = String(props.webhookApiKey || "").trim();
+    if (fromProps) {
+      setApiKey(fromProps);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await getWebhookApiKey();
+        const key = String(res.webhook_api_key || "").trim();
+        if (!cancelled && key) setApiKey(key);
+      } catch {
+        /* leave URL without apikey; Security page can show the real key */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.webhookApiKey]);
+
+  if (!cfg) return null;
+
+  const nativeServiceId = cfg.serviceId;
+  const nativeInstanceParam = String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
+  const nativeWebhookUrl = appendWebhookApiKey(
+    `${props.displayOrigin}/webhook?instance=${encodeURIComponent(nativeInstanceParam)}`,
+    apiKey,
   );
-  const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === pb.serviceId);
-  const name = svcMeta?.name ?? pb.serviceId;
+  const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === nativeServiceId);
+  const nativeName = svcMeta?.name ?? nativeServiceId;
+
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
       <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
-        <h3 className="text-[20px] font-headline font-bold text-white">Configure webhooks in {name}</h3>
+        <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
         <p className="text-[16px] text-slate-300">
-          {pb.serviceId === "tautulli"
-            ? `${name} must notify Placeholdarr at this URL so Plex playback is tracked.`
-            : `${name} can send playback events to Placeholdarr using this URL.`}
+          Point {mediaCardPlaybackSourceLabel(props.cardId)} at Placeholdarr so placeholder search starts when someone hits play.
         </p>
-        <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
-          {pb.serviceId === "tautulli" ? (
-            <>
-              <li>Open Tautulli and go to Settings → Notification Agents.</li>
-              <li>Create a new Webhook notification agent.</li>
-              <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
-              <li>
-                <span className="text-slate-200">Webhook URL</span>
-                <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} />
-              </li>
-              <li>Paste the JSON payload template below, then save.</li>
-            </>
-          ) : pb.serviceId === "jellyfin" ? (
-            <>
-              <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
-              <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
-              <li>Set Events to include Playback Start and Content Type to application/json.</li>
-              <li>
-                <span className="text-slate-200">Webhook URL</span>
-                <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} />
-              </li>
-              <li>Paste the JSON payload template below, then save the webhook.</li>
-            </>
-          ) : (
-            <>
-              <li>In Emby, go to Settings → Notifications.</li>
-              <li>Add or edit a webhook notification.</li>
-              <li>
-                <span className="text-slate-200">Webhook URL</span>
-                <MaskedWebhookUrlField url={webhookUrl} ariaLabel={`Copy ${name} webhook URL`} />
-              </li>
-              <li>Enable Playback Start, then save.</li>
-            </>
-          )}
-        </ol>
-        {pb.serviceId === "tautulli" || pb.serviceId === "jellyfin" ? (
+
+        {nativeServiceId === "tautulli" ? (
+          <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+            <li>Open Tautulli and go to Settings → Notification Agents.</li>
+            <li>Create a new Webhook notification agent.</li>
+            <li>Set Trigger to Playback Start and Payload Format to JSON.</li>
+            <li>
+              <span className="text-slate-200">Webhook URL</span>
+              <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
+            </li>
+            <li>Paste the JSON payload template below, then save.</li>
+          </ol>
+        ) : nativeServiceId === "jellyfin" ? (
+          <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+            <li>In Jellyfin, install the Webhook plugin (Dashboard → Plugins → Catalog) if needed.</li>
+            <li>Go to Dashboard → Plugins → Webhook and click Add Webhook.</li>
+            <li>Set Events to include Playback Start and Content Type to application/json.</li>
+            <li>
+              <span className="text-slate-200">Webhook URL</span>
+              <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
+            </li>
+            <li>Paste the JSON payload template below, then save the webhook.</li>
+          </ol>
+        ) : (
+          <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+            <li>In Emby, go to Settings → Notifications.</li>
+            <li>Add or edit a webhook notification.</li>
+            <li>
+              <span className="text-slate-200">Webhook URL</span>
+              <MaskedWebhookUrlField url={nativeWebhookUrl} ariaLabel={`Copy ${nativeName} webhook URL`} />
+            </li>
+            <li>Enable Playback Start, then save.</li>
+          </ol>
+        )}
+
+        {nativeServiceId === "tautulli" || nativeServiceId === "jellyfin" ? (
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <div className="text-[12px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
               <WebhookStepCopyButton
-                text={pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
-                ariaLabel={`Copy ${name} JSON payload template`}
+                text={nativeServiceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}
+                ariaLabel={`Copy ${nativeName} JSON payload template`}
                 variant="header"
               />
             </div>
             <pre className="overflow-x-auto rounded border border-[#424753]/40 bg-[#0a0d11] p-3 text-[13px] font-mono leading-relaxed text-slate-300">
-              <code>{pb.serviceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
+              <code>{nativeServiceId === "tautulli" ? TAUTULLI_WEBHOOK_PAYLOAD_TEMPLATE : JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE}</code>
             </pre>
           </div>
         ) : null}
+
         <div className="flex justify-end pt-2">
           <button
             type="button"
             className="px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider text-white"
             style={{ backgroundColor: props.accent.hex }}
-            onClick={props.onClose}
+            onClick={() => props.onClose()}
           >
             Done
           </button>
@@ -8959,17 +9084,16 @@ function MediaServerConfigModal(props: {
         <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
           {availableFields.map((field) => {
             const value = props.values[field.key];
-            const plexNote = getPlexLibraryIdNote(field.key);
+            const plexSection = isPlexSectionIdField(field.key);
             return (
               <div key={field.key}>
-                <label className="block text-[14px] font-semibold text-slate-300 mb-1">{field.label}</label>
-                {plexNote ? (
-                  <p className="text-[13px] text-slate-500 mb-1.5">{plexNote}</p>
-                ) : field.description ? (
-                  <p className="text-[13px] text-slate-500 mb-1.5">{field.description}</p>
+                <label className="mb-1 block text-[14px] font-semibold text-slate-300">{field.label}</label>
+                {plexSection ? <PlexLibraryTipsDisclosure fieldKey={field.key} /> : null}
+                {!plexSection && field.description ? (
+                  <p className="mb-1.5 text-[13px] text-slate-500">{field.description}</p>
                 ) : null}
                 {field.type === "bool" ? (
-                  <label className="flex items-center gap-3 cursor-pointer select-none w-fit">
+                  <label className="flex w-fit cursor-pointer select-none items-center gap-3">
                     <ToggleSwitch
                       checked={Boolean(value)}
                       onChange={(v) => props.onFieldChange(field.key, v)}
@@ -8980,7 +9104,7 @@ function MediaServerConfigModal(props: {
                   </label>
                 ) : (
                   <input
-                    className={`w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${props.focusClass}`}
+                    className={`w-full rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${props.focusClass}`}
                     type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
                     value={String(value ?? "")}
                     placeholder={
@@ -9320,10 +9444,7 @@ function OnboardingWizard(props: {
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
   const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
-  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<{
-    serviceId: PlaybackWebhookServiceId;
-    instanceParam: string;
-  } | null>(null);
+  const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
@@ -9676,6 +9797,12 @@ function OnboardingWizard(props: {
                           )}
                         </div>
                         <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                        {card.id === "plex" ? (
+                          <PlexLibraryTipsDisclosure
+                            className="mt-3 w-full"
+                            defaultOpen={!hasConnection}
+                          />
+                        ) : null}
 
                         {!hasConnection ? (
                           <button
@@ -9768,18 +9895,15 @@ function OnboardingWizard(props: {
                               {mediaCardPlaybackWebhookConfig(card.id) ? (
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    const cfg = mediaCardPlaybackWebhookConfig(card.id);
-                                    if (!cfg) return;
-                                    const instanceParam =
-                                      String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
-                                    setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
-                                  }}
+                                  onClick={() => setPlaybackWebhookDialog(card.id)}
                                   className="w-full rounded-xl border border-white/10 bg-transparent py-2.5 text-[14px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
                                 >
-                                  Webhook URL
+                                  Playback setup
                                 </button>
                               ) : null}
+                              <p className="text-center text-[12px] text-slate-500">
+                                Playback: {mediaCardPlaybackSourceLabel(card.id)}
+                              </p>
                               <button
                                 type="button"
                                 onClick={() => {
@@ -10024,11 +10148,6 @@ function OnboardingWizard(props: {
                         <LookaheadSectionIntro variant="onboarding" embedded />
                         <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
                       </div>
-                    ) : sectionName === "Status Updates" ? (
-                      <div className={surfaceClass}>
-                        <StatusUpdatesSectionIntro variant="onboarding" embedded />
-                        <div className="mt-4 border-t border-[#424753]/25 pt-4">{fieldsBlock}</div>
-                      </div>
                     ) : (
                       <div className={surfaceClass}>{fieldsBlock}</div>
                     )}
@@ -10160,17 +10279,14 @@ function OnboardingWizard(props: {
               const connected = panelId ? ONBOARDING_MEDIA_CARDS.find((c) => c.id === panelId) : undefined;
               const conn = connected ? mediaCardConnectionKeys(connected) : null;
               const cfg = panelId ? mediaCardPlaybackWebhookConfig(panelId) : null;
-              const instanceParam = cfg
-                ? String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey
-                : "";
               const prevUrl = conn ? String(mediaPanelSnapshotRef.current[conn.urlKey] ?? "").trim() : "";
               const newUrl = conn ? String(props.values[conn.urlKey] ?? "").trim() : "";
               const urlChanged =
                 normalizeArrInstanceUrlForDedupe(prevUrl) !== normalizeArrInstanceUrlForDedupe(newUrl);
               setMediaPanel(null);
               setMediaPanelTestPassed(false);
-              if (cfg && urlChanged) {
-                setPlaybackWebhookDialog({ serviceId: cfg.serviceId, instanceParam });
+              if (cfg && panelId && urlChanged) {
+                setPlaybackWebhookDialog(panelId);
               }
             }}
             onTestBusyChange={setMediaFooterTestBusy}
@@ -10182,7 +10298,8 @@ function OnboardingWizard(props: {
       })() : null}
       {playbackWebhookDialog ? (
         <PlaybackWebhookSetupModal
-          dialog={playbackWebhookDialog}
+          cardId={playbackWebhookDialog}
+          values={props.values}
           onClose={() => setPlaybackWebhookDialog(null)}
           accent={accent}
           displayOrigin={resolveWebhookDisplayOrigin(props.values)}
@@ -10414,11 +10531,12 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   if (stepKey === "look_and_feel") {
     return [...LOOK_AND_FEEL_FIELD_KEYS];
   }
+  const lookAndFeelKeys = new Set<string>(LOOK_AND_FEEL_FIELD_KEYS);
   return [
     ...librarySync,
     ...calendar,
     ...lookaheadNonArr,
-    ...statusUpdates,
-    ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k)),
+    ...statusUpdates.filter((k) => !lookAndFeelKeys.has(k)),
+    ...advanced.filter((k) => !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(k) && !lookAndFeelKeys.has(k)),
   ];
 }

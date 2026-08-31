@@ -134,7 +134,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
 export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
   title: "Playback Source Integrations (Optional)",
   description:
-    "Placeholdarr can track playback activity from Tautulli, Jellyfin, or Emby to improve content recommendations and status tracking.",
+    "Placeholdarr can track playback from Tautulli, Jellyfin, or Emby so placeholder search starts when someone hits play.",
   services: [
     {
       id: "tautulli",
