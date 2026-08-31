@@ -1,4 +1,4 @@
-"""Dashboard routes: lightweight UI showing stats, activity, errors, and live logs."""
+"""Dashboard routes: lightweight UI showing stats, activity, and live logs."""
 
 import ast
 import asyncio
@@ -20,9 +20,15 @@ from sqlalchemy.orm import joinedload
 
 from core.config import parse_configured_arr_instances_json, settings
 from core.logger import logger
-from services.app_config import get_onboarding_status, get_settings_payload, reset_onboarding, save_settings
+from services.app_config import (
+    get_onboarding_status,
+    get_settings_payload,
+    reset_onboarding,
+    resolve_integration_test_credential,
+    save_settings,
+)
 from services.activity_markers import EVENT_CALENDAR_DATE_REFRESH, EVENT_STARTUP_SOURCE_OF_TRUTH
-from services.activity_snapshot import get_queue_download_activity_row
+from services.activity_snapshot import get_queue_download_activity_row, get_queue_download_snapshot
 from services.dashboard_stats_snapshot_hooks import build_dashboard_stats_payload
 from services.integrations import test_integration_connection
 from services.postgres.db import get_session
@@ -551,9 +557,9 @@ async def dashboard_collections_nested(path: str):
     return _serve_dashboard_index()
 
 
-@router.get("/errors", response_class=HTMLResponse)
+@router.get("/errors")
 async def dashboard_errors_page():
-    return _serve_dashboard_index()
+    return RedirectResponse(url="/logs", status_code=307)
 
 
 @router.get("/logs", response_class=HTMLResponse)
@@ -1115,10 +1121,17 @@ def _humanize_activity_reason(reason: str | None) -> str:
         "event materialization": "Event processing",
         "materialization run": "Materialization",
     }
-    text = str(reason or "").strip().lower()
-    if not text:
+    raw = str(reason or "").strip()
+    if not raw:
         return "Unknown"
-    return mapping.get(text, _humanize_snake_case(text))
+    text = raw.lower()
+    if text in mapping:
+        return mapping[text]
+    # Prose reasons (tombstone summaries, etc.) must stay intact — snake_case humanize
+    # turns hyphens into spaces and flattens the sentence.
+    if " " in raw or any(ch in raw for ch in "()-:/"):
+        return raw
+    return _humanize_snake_case(text)
 
 
 def _infer_reason_from_recent_events(
@@ -2375,18 +2388,56 @@ def _merge_regrouped_event_rows_from_flat(flat_event_rows: list[dict[str, Any]])
     return rest + grouped_out
 
 
-def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
-    """Return merged activity rows from system_activity_history + live queue/sync rows (empty table = fresh install)."""
+def _activity_feed_from_history(
+    session,
+    *,
+    limit: int,
+    before_time: datetime | None = None,
+    before_id: int | None = None,
+) -> tuple[list[dict[str, Any]], bool, str | None, int | None]:
+    """Return merged activity rows from system_activity_history + live queue/sync rows.
+
+    Returns ``(rows, has_more, next_before_time, next_before_id)``. Empty table = fresh install.
+    """
+    fetch_n = max(limit * 8, limit)
     try:
+        q = session.query(SystemActivityHistory)
+        if before_time is not None:
+            if before_id is not None:
+                q = q.filter(
+                    or_(
+                        SystemActivityHistory.occurred_at < before_time,
+                        and_(
+                            SystemActivityHistory.occurred_at == before_time,
+                            SystemActivityHistory.id < before_id,
+                        ),
+                    )
+                )
+            else:
+                q = q.filter(SystemActivityHistory.occurred_at < before_time)
+        elif before_id is not None:
+            q = q.filter(SystemActivityHistory.id < before_id)
+
         hist = (
-            session.query(SystemActivityHistory)
-            .order_by(SystemActivityHistory.occurred_at.desc())
-            .limit(max(limit * 8, limit))
+            q.order_by(
+                SystemActivityHistory.occurred_at.desc(),
+                SystemActivityHistory.id.desc(),
+            )
+            .limit(fetch_n + 1)
             .all()
         )
     except Exception as exc:
         logger.warning("system_activity_history read failed: %s", exc, extra={"emoji_type": "warning"})
         hist = []
+
+    has_more_hist = len(hist) > fetch_n
+    hist = hist[:fetch_n]
+    oldest_hist_time: str | None = None
+    oldest_hist_id: int | None = None
+    if hist:
+        oldest = hist[-1]
+        oldest_hist_time = oldest.occurred_at.isoformat() if oldest.occurred_at else None
+        oldest_hist_id = int(oldest.id) if oldest.id is not None else None
 
     flat: list[dict[str, Any]] = []
     for h in hist:
@@ -2403,13 +2454,15 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
     merged_events = _merge_regrouped_event_rows_from_flat(raw_events)
     combined = merged_events + raw_jobs
 
-    queue_activity_row = get_queue_download_activity_row()
+    # Live queue row only on the newest page (no before cursor).
+    if before_time is None and before_id is None:
+        queue_activity_row = get_queue_download_activity_row()
+        extra = [r for r in (queue_activity_row,) if r]
+        combined = combined + extra
+
     # Calendar sync appears only via ``system_activity_history`` snapshots from
     # ``EVENT_CALENDAR_DATE_REFRESH`` EventLog rows (``_activity_marker_row_for_calendar_event``).
     # Do not append a second synthetic row from log parsing — it duplicated the same run.
-    extra = [r for r in (queue_activity_row,) if r]
-
-    combined = combined + extra
 
     # ``startup_sync_progress`` persists multiple phase snapshots for the same run id.
     # Keep only the latest snapshot per startup sync row id so the activity list
@@ -2461,26 +2514,29 @@ def _activity_feed_from_history(session, *, limit: int) -> list[dict[str, Any]]:
     unique.sort(key=lambda x: x.get("time") or "", reverse=True)
 
     top = unique[:limit]
-    top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
-    grouped_candidates = [
-        row
-        for row in unique
-        if (
-            str(row.get("job_type") or "").startswith("sync_placeholder_")
-            or str(row.get("display_name") or "").startswith("Series Added:")
-        )
-    ]
-    missing_grouped = [
-        row
-        for row in grouped_candidates
-        if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
-    ]
-    if missing_grouped and top:
-        inject = missing_grouped[: min(3, len(top))]
-        top = top[: max(0, len(top) - len(inject))] + inject
-        top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
+    if before_time is None and before_id is None:
+        top_keys = {(row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) for row in top}
+        grouped_candidates = [
+            row
+            for row in unique
+            if (
+                str(row.get("job_type") or "").startswith("sync_placeholder_")
+                or str(row.get("display_name") or "").startswith("Series Added:")
+            )
+        ]
+        missing_grouped = [
+            row
+            for row in grouped_candidates
+            if (row.get("type"), row.get("id"), row.get("display_name"), row.get("time")) not in top_keys
+        ]
+        if missing_grouped and top:
+            inject = missing_grouped[: min(3, len(top))]
+            top = top[: max(0, len(top) - len(inject))] + inject
+            top = sorted(top, key=lambda x: x.get("time") or "", reverse=True)
 
-    return top[:limit]
+    page = top[:limit]
+    has_more = has_more_hist or len(unique) > limit
+    return page, bool(has_more and oldest_hist_time is not None), oldest_hist_time, oldest_hist_id
 
 
 _OPERATIONS_EXCLUDED_JOB_TYPES = frozenset(
@@ -2495,51 +2551,111 @@ _OPERATIONS_EXCLUDED_JOB_TYPES = frozenset(
 )
 
 
-def _activity_operations_feed(session, *, limit: int) -> list[dict[str, Any]]:
+def _activity_operations_feed(
+    session,
+    *,
+    limit: int,
+    before_time: datetime | None = None,
+    before_id: int | None = None,
+) -> dict[str, Any]:
     """Live/event feed: exclude scheduled maintenance progress and sync job rows."""
-    rows = _activity_feed_from_history(session, limit=max(limit * 2, limit))
+    rows, has_more, next_time, next_id = _activity_feed_from_history(
+        session,
+        limit=max(limit * 2, limit),
+        before_time=before_time,
+        before_id=before_id,
+    )
     out: list[dict[str, Any]] = []
     for row in rows:
         jt = str(row.get("job_type") or "").strip().lower()
         if jt in _OPERATIONS_EXCLUDED_JOB_TYPES:
             continue
         out.append(row)
-    return out[:limit]
+    page = out[:limit]
+    return {
+        "items": page,
+        "has_more": bool(has_more and len(page) > 0),
+        "next_before_time": next_time if has_more else None,
+        "next_before_id": next_id if has_more else None,
+    }
+
+
+@router.get("/api/activity/active-searches")
+async def activity_active_searches():
+    """Titles Placeholdarr is monitoring after a playback/search (not the full ARR queue)."""
+    snap = get_queue_download_snapshot()
+    if not snap:
+        return {
+            "active": False,
+            "items": [],
+            "details": "No titles being monitored",
+            "started_at": None,
+            "updated_at": None,
+        }
+    items = snap.get("items") if isinstance(snap.get("items"), list) else []
+    n = len(items)
+    if n == 0:
+        details = (
+            "Monitoring Radarr/Sonarr — queue is empty; indexer search may still be running "
+            "or nothing matched yet"
+        )
+    else:
+        details = f"{n} title(s) — monitoring search, queue, and import until the real file is in the library"
+    return {
+        "active": True,
+        "items": items,
+        "details": details,
+        "started_at": snap.get("started_at"),
+        "updated_at": snap.get("updated_at"),
+    }
 
 
 @router.get("/api/activity/operations")
-async def activity_operations(limit: int = Query(50, ge=1, le=200)):
+async def activity_operations(
+    limit: int = Query(50, ge=1, le=200),
+    before_time: Optional[str] = Query(None),
+    before_id: Optional[int] = Query(None, ge=1),
+):
     """Return live operations feed (webhooks, imports, queue monitor — not scheduled sync runs)."""
     session = get_session()
     try:
-        return _activity_operations_feed(session, limit=limit)
+        bt = _parse_activity_dt(before_time) if before_time else None
+        return _activity_operations_feed(session, limit=limit, before_time=bt, before_id=before_id)
     finally:
         session.close()
 
 
 @router.get("/api/activity")
-async def activity(limit: int = Query(50, ge=1, le=200)):
+async def activity(
+    limit: int = Query(50, ge=1, le=200),
+    before_time: Optional[str] = Query(None),
+    before_id: Optional[int] = Query(None, ge=1),
+):
     """Alias for operations feed (backward compatibility)."""
     session = get_session()
     try:
-        return _activity_operations_feed(session, limit=limit)
+        bt = _parse_activity_dt(before_time) if before_time else None
+        return _activity_operations_feed(session, limit=limit, before_time=bt, before_id=before_id)
     finally:
         session.close()
 
 
-def _resolve_history_item_titles(session, h: PlaceholderActivityHistory) -> tuple[str, str | None]:
-    """Fill item_title / series_title from history row or FK joins (hooks often leave titles empty)."""
+def _resolve_history_item_titles(
+    session, h: PlaceholderActivityHistory
+) -> tuple[str, str | None, int | None]:
+    """Fill item_title / series_title / series_id from history row or FK joins (hooks often leave titles empty)."""
     stored_title = (h.item_title or "").strip()
+    stored_series_id = int(h.series_id) if h.series_id is not None else None
     if stored_title:
-        return stored_title, h.series_title
+        return stored_title, h.series_title, stored_series_id
     item_type = str(h.item_type or "episode").strip().lower()
     if item_type == "movie":
         movie = session.query(Movie).filter(Movie.id == h.movie_id).first() if h.movie_id else None
-        return (movie.title if movie else "Unknown Movie"), None
+        return (movie.title if movie else "Unknown Movie"), None, None
     if item_type == "series":
         series = session.query(Series).filter(Series.id == h.series_id).first() if h.series_id else None
         title = series.title if series and getattr(series, "title", None) else "Unknown Series"
-        return title, title
+        return title, title, stored_series_id or (int(series.id) if series else None)
     episode = (
         session.query(Episode)
         .options(joinedload(Episode.season).joinedload(Season.series))
@@ -2565,11 +2681,14 @@ def _resolve_history_item_titles(session, h: PlaceholderActivityHistory) -> tupl
     else:
         item_title = "Unknown Episode"
     series_title = series.title if series else None
-    return item_title, series_title
+    resolved_series_id = stored_series_id
+    if resolved_series_id is None and series is not None and getattr(series, "id", None) is not None:
+        resolved_series_id = int(series.id)
+    return item_title, series_title, resolved_series_id
 
 
 def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> dict[str, Any]:
-    item_title, series_title = _resolve_history_item_titles(session, h)
+    item_title, series_title, resolved_series_id = _resolve_history_item_titles(session, h)
     action = str(h.action or "").strip()
     action_cap = action if action in ("Created", "Deleted", "Status") else ("Status" if not action else action.title())
     path_val = str(h.path or "") if h.path is not None else ""
@@ -2615,12 +2734,201 @@ def _activity_dict_from_history_row(session, h: PlaceholderActivityHistory) -> d
         "time": occurred,
     }
     extra_snapshot = h.extra_snapshot if isinstance(h.extra_snapshot, dict) else {}
+    if resolved_series_id is not None:
+        out["_series_id"] = int(resolved_series_id)
+    out["_history_id"] = int(h.id) if h.id is not None else None
     if action_cap == "Deleted":
         out["_bulk_series_delete"] = bool(extra_snapshot.get("bulk_series_delete"))
         out["_bulk_delete_series_id"] = extra_snapshot.get("bulk_delete_series_id")
         out["_bulk_delete_series_title"] = str(extra_snapshot.get("bulk_delete_series_title") or "").strip() or None
     if action_cap == "Status":
         out["_status_source"] = status_src
+    return out
+
+
+def _is_series_create_row(row: dict) -> bool:
+    """Episode (or series) Created row with a resolvable series id — any reason (sync, SeriesAdd, etc.)."""
+    if str(row.get("action") or "").strip() != "Created":
+        return False
+    if row.get("_series_id") is None:
+        return False
+    item_type = str(row.get("item_type") or "").strip().lower()
+    return item_type in {"episode", "series", "batch"} or item_type == ""
+
+
+def _series_create_batch_labels(cluster: list[dict], series_title: str) -> tuple[str, str]:
+    """Pick parent title (series name only) and reason from the dominant create reason."""
+    reasons = [str(c.get("reason") or "").strip() for c in cluster if str(c.get("reason") or "").strip()]
+    dominant = ""
+    if reasons:
+        counts: dict[str, int] = {}
+        for r in reasons:
+            counts[r] = counts.get(r, 0) + 1
+        dominant = max(counts.items(), key=lambda kv: kv[1])[0]
+    n = len(cluster)
+    title = str(series_title or "Series").strip() or "Series"
+    if dominant.lower() == "series added":
+        reason = f"{n} episode placeholders after Sonarr SeriesAdd for {title}."
+    elif dominant:
+        reason = f"{n} episode placeholders for {title} ({dominant})."
+    else:
+        reason = f"{n} episode placeholders created for {title}."
+    return title, reason
+
+
+def _group_series_placeholder_creates(rows: list[dict], *, max_gap_sec: int = 300) -> list[dict]:
+    """Collapse bursty per-episode Created rows for the same series into an expandable parent.
+
+    Clusters by series_id + time gap only (any create reason: SeriesAdd, lite/full sync, etc.).
+    Collection-named batches still need a create-time provenance stamp (deferred).
+    """
+    if not rows:
+        return rows
+    out: list[dict] = []
+    i = 0
+    parent_seq = 0
+    while i < len(rows):
+        row = rows[i]
+        if not _is_series_create_row(row):
+            out.append(row)
+            i += 1
+            continue
+
+        series_id = row.get("_series_id")
+        series_title = row.get("series_title") or row.get("item_title") or "Series"
+        cluster: list[dict] = [row]
+        j = i + 1
+        while j < len(rows):
+            nxt = rows[j]
+            if not _is_series_create_row(nxt):
+                break
+            if nxt.get("_series_id") != series_id:
+                break
+            t_last = _parse_activity_dt(cluster[-1].get("time"))
+            t_nxt = _parse_activity_dt(nxt.get("time"))
+            if t_last is None or t_nxt is None:
+                break
+            delta = (t_last - t_nxt).total_seconds()
+            if delta >= 0 and delta <= max_gap_sec:
+                cluster.append(nxt)
+                j += 1
+            else:
+                break
+
+        if len(cluster) < 2:
+            solo = dict(cluster[0])
+            solo.pop("_series_id", None)
+            solo.pop("_history_id", None)
+            out.append(solo)
+            i += 1
+            continue
+
+        parent_seq += 1
+        newest = cluster[0]
+        child_rows: list[dict] = []
+        for c in cluster:
+            child_rows.append(
+                {
+                    "id": c["id"],
+                    "type": "placeholder",
+                    "action": c.get("action"),
+                    "item_type": c.get("item_type"),
+                    "item_title": c.get("item_title"),
+                    "series_title": c.get("series_title"),
+                    "path": c.get("path") or "",
+                    "reason": c.get("reason"),
+                    "status": c.get("status"),
+                    "time": c.get("time"),
+                }
+            )
+        item_title, reason = _series_create_batch_labels(cluster, str(series_title or "Series"))
+        parent_id = -(910_000_000 + parent_seq)
+        out.append(
+            {
+                "id": parent_id,
+                "type": "placeholder",
+                "group_kind": "series_create_batch",
+                "action": "Created",
+                "item_type": "batch",
+                "item_title": item_title,
+                "series_title": str(series_title or ""),
+                "path": "",
+                "reason": reason,
+                "status": "Created",
+                "time": newest.get("time"),
+                "children": child_rows,
+                "_history_id": newest.get("_history_id"),
+                "_cursor_time": cluster[-1].get("time"),
+                "_cursor_id": cluster[-1].get("_history_id") or cluster[-1].get("id"),
+            }
+        )
+        i = j
+    return out
+
+
+def _strip_placeholder_activity_internal_keys(row: dict) -> dict:
+    cleaned = dict(row)
+    for key in (
+        "_status_source",
+        "_series_id",
+        "_history_id",
+        "_bulk_series_delete",
+        "_bulk_delete_series_id",
+        "_bulk_delete_series_title",
+        "_cursor_time",
+        "_cursor_id",
+    ):
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _oldest_placeholder_cursor(items: list[dict]) -> tuple[str | None, int | None]:
+    """Return (time, history_id) for the oldest leaf in a page of grouped rows."""
+    best_time: str | None = None
+    best_id: int | None = None
+    best_dt: datetime | None = None
+
+    def consider(time_s: Any, hist_id: Any) -> None:
+        nonlocal best_time, best_id, best_dt
+        dt = _parse_activity_dt(str(time_s) if time_s else None)
+        if dt is None:
+            return
+        try:
+            hid = int(hist_id) if hist_id is not None else None
+        except (TypeError, ValueError):
+            hid = None
+        if best_dt is None or dt < best_dt or (dt == best_dt and hid is not None and (best_id is None or hid < best_id)):
+            best_dt = dt
+            best_time = str(time_s) if time_s else None
+            best_id = hid
+
+    for row in items:
+        children = row.get("children")
+        if isinstance(children, list) and children:
+            if row.get("_cursor_time") is not None:
+                consider(row.get("_cursor_time"), row.get("_cursor_id"))
+            for child in children:
+                if isinstance(child, dict):
+                    consider(child.get("time"), child.get("id"))
+            continue
+        consider(row.get("time"), row.get("_history_id") or row.get("id"))
+    return best_time, best_id
+
+
+def _mark_series_bulk_delete_row(row: dict, *, series_title: str | None = None) -> dict:
+    """Normalize series tombstone delete rows for UI (series name once, group_kind)."""
+    out = dict(row)
+    title = (
+        str(series_title or "").strip()
+        or str(out.get("_bulk_delete_series_title") or "").strip()
+        or str(out.get("series_title") or "").strip()
+        or str(out.get("item_title") or "").strip()
+        or "Series"
+    )
+    out["group_kind"] = "series_bulk_delete"
+    out["item_type"] = "series"
+    out["item_title"] = title
+    out["series_title"] = title
     return out
 
 
@@ -2657,106 +2965,118 @@ def _group_series_tombstone_placeholder_deletes(rows: list[dict], *, max_gap_sec
             j += 1
 
         if len(group) <= 1:
-            out.append(row)
+            # Aggregate history row from materializer (count already in reason), or a lone episode delete.
+            out.append(_mark_series_bulk_delete_row(row, series_title=str(series_title or "") or None))
             i += 1
             continue
 
-        lead = dict(group[0])
+        lead = _mark_series_bulk_delete_row(group[0], series_title=str(series_title or "") or None)
         removed_n = len(group)
         lead["id"] = f"series-bulk-delete-{series_id}-{lead.get('time')}"
-        lead["item_type"] = "series"
-        lead["item_title"] = str(series_title or "Series")
-        lead["series_title"] = str(series_title or "")
-        lead["reason"] = f"Series removed tombstone cleanup - {removed_n} placeholders deleted"
+        lead["reason"] = f"Series removed: tombstone cleanup, {removed_n} placeholders deleted"
         lead["path"] = ""
+        lead["children"] = [
+            {
+                "id": c["id"],
+                "type": "placeholder",
+                "action": c.get("action"),
+                "item_type": c.get("item_type"),
+                "item_title": c.get("item_title"),
+                "series_title": c.get("series_title"),
+                "path": c.get("path") or "",
+                "reason": c.get("reason"),
+                "status": c.get("status"),
+                "time": c.get("time"),
+            }
+            for c in group
+        ]
         out.append(lead)
         i = j
     return out
 
 
-@router.get("/api/activity/placeholders")
-async def activity_placeholders(limit: int = Query(50, ge=1, le=200)):
-    """Return placeholder timeline from append-only history (fast read; hooks populate the table)."""
-    session = get_session()
-    try:
-        rows = (
-            session.query(PlaceholderActivityHistory)
-            .order_by(PlaceholderActivityHistory.occurred_at.desc())
-            .limit(max(limit * 4, limit))
-            .all()
+def _placeholder_activity_page(
+    session,
+    *,
+    limit: int,
+    before_time: datetime | None = None,
+    before_id: int | None = None,
+) -> dict[str, Any]:
+    """Paged placeholder timeline with server-side batch grouping."""
+    q = session.query(PlaceholderActivityHistory)
+    if before_time is not None:
+        if before_id is not None:
+            q = q.filter(
+                or_(
+                    PlaceholderActivityHistory.occurred_at < before_time,
+                    and_(
+                        PlaceholderActivityHistory.occurred_at == before_time,
+                        PlaceholderActivityHistory.id < before_id,
+                    ),
+                )
+            )
+        else:
+            q = q.filter(PlaceholderActivityHistory.occurred_at < before_time)
+    elif before_id is not None:
+        q = q.filter(PlaceholderActivityHistory.id < before_id)
+
+    fetch_n = max(limit * 4, limit)
+    rows = (
+        q.order_by(
+            PlaceholderActivityHistory.occurred_at.desc(),
+            PlaceholderActivityHistory.id.desc(),
         )
-        activity_list = [_activity_dict_from_history_row(session, h) for h in rows]
-        deduped = []
-        seen = set()
-        for row in sorted(activity_list, key=lambda x: x.get("time") or "", reverse=True):
-            key = (row.get("id"), row.get("action"), row.get("time"))
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(row)
-        grouped = _group_calendar_placeholder_status_rows(deduped)
-        grouped = _group_series_tombstone_placeholder_deletes(grouped)
-        return grouped[:limit]
-    finally:
-        session.close()
+        .limit(fetch_n + 1)
+        .all()
+    )
+    has_more_raw = len(rows) > fetch_n
+    rows = rows[:fetch_n]
+
+    activity_list = [_activity_dict_from_history_row(session, h) for h in rows]
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for row in sorted(activity_list, key=lambda x: (x.get("time") or "", x.get("id") or 0), reverse=True):
+        key = (row.get("id"), row.get("action"), row.get("time"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    grouped = _group_calendar_placeholder_status_rows(deduped)
+    grouped = _group_series_tombstone_placeholder_deletes(grouped)
+    grouped = _group_series_placeholder_creates(grouped)
+
+    page = grouped[:limit]
+    next_time, next_id = _oldest_placeholder_cursor(page)
+    has_more = len(grouped) > limit or has_more_raw
+    items = [_strip_placeholder_activity_internal_keys(r) for r in page]
+    return {
+        "items": items,
+        "has_more": bool(has_more and next_time is not None),
+        "next_before_time": next_time,
+        "next_before_id": next_id,
+    }
 
 
-@router.get("/api/errors")
-async def errors(limit: int = Query(50, ge=1, le=200)):
-    """Return recent errors from jobs, events, and observation trails."""
+@router.get("/api/activity/placeholders")
+async def activity_placeholders(
+    limit: int = Query(50, ge=1, le=200),
+    before_time: Optional[str] = Query(None, description="ISO timestamp cursor (exclusive upper bound)"),
+    before_id: Optional[int] = Query(None, ge=1, description="History id tie-break with before_time"),
+):
+    """Return placeholder timeline from append-only history (fast read; hooks populate the table).
+
+    Response is a page envelope: ``{ items, has_more, next_before_time, next_before_id }``.
+    """
     session = get_session()
     try:
-        items = []
-
-        # Failed jobs
-        failed_jobs = session.query(
-            Job.id, Job.job_type, Job.error_message, Job.updated_at
-        ).filter(Job.status == "FAILED").order_by(Job.updated_at.desc()).limit(limit).all()
-        for j in failed_jobs:
-            items.append({
-                "source": "job",
-                "id": j.id,
-                "label": j.job_type,
-                "error": j.error_message,
-                "time": j.updated_at.isoformat() if j.updated_at else None,
-            })
-
-        # Failed events
-        failed_events = session.query(
-            EventLog.id, EventLog.event_type, EventLog.error_message, EventLog.updated_at
-        ).filter(EventLog.status == "FAILED").order_by(EventLog.updated_at.desc()).limit(limit).all()
-        for e in failed_events:
-            items.append({
-                "source": "event",
-                "id": e.id,
-                "label": e.event_type,
-                "error": e.error_message,
-                "time": e.updated_at.isoformat() if e.updated_at else None,
-            })
-
-        # Observation trail errors removed as system is deprecated.
-        pass
-
-        # Placeholder lookup failures
-        ph_errors = session.query(
-            Placeholder.id,
-            Placeholder.path,
-            Placeholder.media_lookup_error,
-            Placeholder.updated_at,
-        ).filter(
-            Placeholder.media_lookup_error.isnot(None)
-        ).order_by(Placeholder.updated_at.desc()).limit(limit).all()
-        for p in ph_errors:
-            items.append({
-                "source": "placeholder",
-                "id": p.id,
-                "label": os.path.basename(p.path) if p.path else f"placeholder #{p.id}",
-                "error": p.media_lookup_error,
-                "time": p.updated_at.isoformat() if p.updated_at else None,
-            })
-
-        items.sort(key=lambda x: x.get("time") or "", reverse=True)
-        return items[:limit]
+        bt = _parse_activity_dt(before_time) if before_time else None
+        return _placeholder_activity_page(
+            session,
+            limit=limit,
+            before_time=bt,
+            before_id=before_id,
+        )
     finally:
         session.close()
 
@@ -3395,6 +3715,10 @@ def _build_library_payload(
 
     session = get_session()
     try:
+        try:
+            session.execute(text("SET LOCAL lock_timeout = '30s'"))
+        except Exception:
+            pass
         etag = library_etag_for_shelf(session, mt if mt else "all")
         if client_etag and client_etag == etag:
             return etag, None
@@ -4219,15 +4543,28 @@ async def integrations_test(request: Request):
     service = str(payload.get("service") or "").strip().lower()
     url = str(payload.get("url") or "").strip()
     credential = str(payload.get("credential") or "").strip()
+    credential_key = str(payload.get("credential_key") or "").strip() or None
+    instance_id = str(payload.get("instance_id") or "").strip() or None
 
     if service not in {"plex", "jellyfin", "emby", "radarr", "sonarr"}:
         return JSONResponse(content={"ok": False, "message": "unsupported service"}, status_code=400)
     if not url:
         return JSONResponse(content={"ok": False, "message": "url is required"}, status_code=400)
-    if not credential:
-        return JSONResponse(content={"ok": False, "message": "credential is required"}, status_code=400)
 
-    result = test_integration_connection(service=service, url=url, token_or_key=credential)
+    resolved, resolve_err = resolve_integration_test_credential(
+        service=service,
+        url=url,
+        credential=credential,
+        credential_key=credential_key,
+        instance_id=instance_id,
+    )
+    if resolve_err or not resolved:
+        return JSONResponse(
+            content={"ok": False, "message": resolve_err or "credential is required"},
+            status_code=400,
+        )
+
+    result = test_integration_connection(service=service, url=url, token_or_key=resolved)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
 

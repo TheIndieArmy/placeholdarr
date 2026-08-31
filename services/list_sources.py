@@ -261,7 +261,7 @@ def fetch_trakt_list(reference: str, media_type: str, limit: int = 200) -> list[
     client_id = getattr(settings, "TRAKT_CLIENT_ID", None)
     if not client_id:
         raise ListSourceError(
-            "Trakt Client ID is not configured (Settings). Creating a Trakt API app currently requires Trakt VIP."
+            "Trakt Client ID is not configured (Settings → Collection Sources). Creating a Trakt API app currently requires Trakt VIP."
         )
     user, slug = parse_trakt_reference(reference)
     limit = max(1, min(int(limit or 200), 1000))
@@ -595,7 +595,7 @@ def fetch_trakt_chart(
     client_id = getattr(settings, "TRAKT_CLIENT_ID", None)
     if not client_id:
         raise ListSourceError(
-            "Trakt Client ID is not configured (Settings). Creating a Trakt API app currently requires Trakt VIP."
+            "Trakt Client ID is not configured (Settings → Collection Sources). Creating a Trakt API app currently requires Trakt VIP."
         )
     chart = str(subtype or "trending").strip().lower()
     if chart not in TRAKT_CHART_SUBTYPES:
@@ -795,7 +795,7 @@ def fetch_tautulli(
     base = str(getattr(settings, "TAUTULLI_URL", None) or "").rstrip("/")
     api_key = str(getattr(settings, "TAUTULLI_API_KEY", None) or "").strip()
     if not base or not api_key:
-        raise ListSourceError("Tautulli URL and API key are not configured (Settings → Collections)")
+        raise ListSourceError("Tautulli URL and API key are not configured (Settings → Collection Sources)")
     stat = str(subtype or "most_popular").strip().lower()
     if stat not in TAUTULLI_STAT_SUBTYPES:
         raise ListSourceError(f"Unknown Tautulli subtype: {stat!r}")

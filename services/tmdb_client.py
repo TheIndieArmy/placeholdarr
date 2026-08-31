@@ -176,7 +176,7 @@ def _cache_set(key: str, value: Any) -> None:
 def _request(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     api_key = getattr(settings, "TMDB_API_KEY", None)
     if not api_key:
-        raise TmdbError("TMDB API key is not configured")
+        raise TmdbError("TMDB API key is not configured (Settings → Collection Sources)")
 
     params = dict(params or {})
     headers = {"Accept": "application/json"}

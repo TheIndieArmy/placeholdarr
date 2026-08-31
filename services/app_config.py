@@ -215,7 +215,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TMDB_API_KEY",
             {
-                "section": "Media Integrations",
+                "section": "Collection Sources",
                 "label": "TMDB API Key",
                 "description": (
                     "TMDB API key (v3 auth) used by the Collections builder to source trending, popular, upcoming, "
@@ -230,7 +230,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TRAKT_CLIENT_ID",
             {
-                "section": "Media Integrations",
+                "section": "Collection Sources",
                 "label": "Trakt Client ID",
                 "description": (
                     "Trakt API Client ID for Collections (public lists and charts). "
@@ -247,7 +247,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TAUTULLI_URL",
             {
-                "section": "Media Integrations",
+                "section": "Collection Sources",
                 "label": "Tautulli URL",
                 "description": (
                     "Base URL for outbound Tautulli API calls used by Collections most-popular / most-watched "
@@ -261,7 +261,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TAUTULLI_API_KEY",
             {
-                "section": "Media Integrations",
+                "section": "Collection Sources",
                 "label": "Tautulli API Key",
                 "description": (
                     "Tautulli Settings → Web Interface → API key. Required together with Tautulli URL for "
@@ -1066,6 +1066,93 @@ def _validate_value(key: str, raw_value: Any) -> Any:
 
 def _get_row(session, key: str) -> AppConfig | None:
     return session.query(AppConfig).filter(AppConfig.key == key).first()
+
+
+_MEDIA_TEST_CREDENTIAL_KEYS = frozenset({"PLEX_TOKEN", "JELLYFIN_TOKEN", "EMBY_TOKEN"})
+
+
+def _normalize_integration_url(url: str) -> str:
+    text = str(url or "").strip().rstrip("/")
+    return text.lower()
+
+
+def resolve_integration_test_credential(
+    *,
+    service: str,
+    url: str,
+    credential: str,
+    credential_key: str | None = None,
+    instance_id: str | None = None,
+    session=None,
+) -> tuple[str | None, str | None]:
+    """Resolve a connection-test credential, falling back to saved secrets when blank.
+
+    Returns ``(credential, error_message)``. When ``error_message`` is set, the
+    caller should reject the request.
+    """
+    provided = str(credential or "").strip()
+    if provided:
+        return provided, None
+
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        service_key = str(service or "").strip().lower()
+        cred_key = str(credential_key or "").strip()
+        if cred_key:
+            if cred_key not in _MEDIA_TEST_CREDENTIAL_KEYS:
+                return None, "unsupported credential_key"
+            expected = {
+                "PLEX_TOKEN": "plex",
+                "JELLYFIN_TOKEN": "jellyfin",
+                "EMBY_TOKEN": "emby",
+            }.get(cred_key)
+            if expected and service_key != expected:
+                return None, "credential_key does not match service"
+            row = _get_row(session, cred_key)
+            saved = str(row.value or "").strip() if row else ""
+            if saved:
+                return saved, None
+            return None, "credential is required (no saved token)"
+
+        if service_key in {"radarr", "sonarr"}:
+            row = _get_row(session, "ARR_INSTANCES_JSON")
+            raw = str(row.value or "").strip() if row else ""
+            if not raw:
+                return None, "credential is required (no saved ARR instances)"
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                return None, "credential is required (invalid saved ARR instances)"
+            if not isinstance(payload, list):
+                return None, "credential is required (invalid saved ARR instances)"
+            want_id = str(instance_id or "").strip().lower()
+            want_url = _normalize_integration_url(url)
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                arr_type = str(item.get("arr_type") or item.get("type") or "").strip().lower()
+                if arr_type != service_key:
+                    continue
+                item_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
+                item_url = _normalize_integration_url(str(item.get("url") or ""))
+                matched = False
+                if want_id and item_id and want_id == item_id:
+                    matched = True
+                elif want_url and item_url and want_url == item_url:
+                    matched = True
+                if not matched:
+                    continue
+                saved = str(item.get("api_key") or item.get("apikey") or "").strip()
+                if saved:
+                    return saved, None
+                return None, "credential is required (no saved API key for this instance)"
+            return None, "credential is required (no matching saved ARR instance)"
+
+        return None, "credential is required"
+    finally:
+        if owns_session:
+            session.close()
 
 
 def _set_runtime_value(key: str, value: Any) -> None:

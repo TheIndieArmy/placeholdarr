@@ -464,20 +464,21 @@ def _field_values_differ(current: Any, incoming: Any) -> bool:
 def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
     instance_key = str(fields.get('instance_key') or '').strip().lower()
     instance_id = str(fields.get('instance_id') or '').strip().lower()
-    existing = (
-        session.query(Movie)
-        .filter(
-            and_(
-                Movie.tmdbid == fields['tmdbid'],
-                or_(
-                    Movie.instance_key == instance_key,
-                    # Legacy fallback while older rows may still carry instance_id-only identity.
-                    Movie.instance_id == instance_id,
-                ),
+    with session.no_autoflush:
+        existing = (
+            session.query(Movie)
+            .filter(
+                and_(
+                    Movie.tmdbid == fields['tmdbid'],
+                    or_(
+                        Movie.instance_key == instance_key,
+                        # Legacy fallback while older rows may still carry instance_id-only identity.
+                        Movie.instance_id == instance_id,
+                    ),
+                )
             )
+            .first()
         )
-        .first()
-    )
     if existing:
         changed = False
         for key, value in fields.items():
@@ -496,20 +497,21 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
 def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
     instance_key = str(fields.get('instance_key') or '').strip().lower()
     instance_id = str(fields.get('instance_id') or '').strip().lower()
-    existing = (
-        session.query(Series)
-        .filter(
-            and_(
-                Series.tvdbid == fields['tvdbid'],
-                or_(
-                    Series.instance_key == instance_key,
-                    # Legacy fallback while older rows may still carry instance_id-only identity.
-                    Series.instance_id == instance_id,
-                ),
+    with session.no_autoflush:
+        existing = (
+            session.query(Series)
+            .filter(
+                and_(
+                    Series.tvdbid == fields['tvdbid'],
+                    or_(
+                        Series.instance_key == instance_key,
+                        # Legacy fallback while older rows may still carry instance_id-only identity.
+                        Series.instance_id == instance_id,
+                    ),
+                )
             )
+            .first()
         )
-        .first()
-    )
     if existing:
         changed = False
         for key, value in fields.items():
@@ -531,11 +533,12 @@ def _upsert_season(session, series: Series, season_number: int):
         getattr(series, 'placeholder_folder', None) or _tv_library_root(series_role != 'primary'),
         f"Season {season_number:02d}" if season_number > 0 else "Season 00",
     )
-    season = (
-        session.query(Season)
-        .filter(and_(Season.series_id == series.id, Season.season_number == season_number))
-        .first()
-    )
+    with session.no_autoflush:
+        season = (
+            session.query(Season)
+            .filter(and_(Season.series_id == series.id, Season.season_number == season_number))
+            .first()
+        )
     if season:
         season.title = f"{series.title} S{season_number:02d}" if season_number > 0 else f"{series.title} Specials"
         season.year = series.year
@@ -561,16 +564,17 @@ def _upsert_season(session, series: Series, season_number: int):
 
 
 def _upsert_episode(session, fields: Dict) -> Tuple[Any, bool, bool]:
-    existing = (
-        session.query(Episode)
-        .filter(
-            and_(
-                Episode.season_id == fields['season_id'],
-                Episode.episode_number == fields['episode_number'],
+    with session.no_autoflush:
+        existing = (
+            session.query(Episode)
+            .filter(
+                and_(
+                    Episode.season_id == fields['season_id'],
+                    Episode.episode_number == fields['episode_number'],
+                )
             )
+            .first()
         )
-        .first()
-    )
     if existing:
         changed = False
         for key, value in fields.items():
@@ -619,7 +623,6 @@ def run_full_sync(
     run_template_backfill: bool = False,
 ):
     """Source-of-truth full sync for ARR -> DB materialization."""
-    _ = batch_size  # reserved for future chunking without changing public API
     started_at = datetime.now(timezone.utc)
     stats = {
         'movies_seen': 0,
@@ -656,6 +659,8 @@ def run_full_sync(
                         stats['movies_created'] += 1
                     else:
                         stats['movies_updated'] += 1
+                    if not dry_run and batch_size > 0 and stats['movies_seen'] % batch_size == 0:
+                        session.commit()
 
                 if not dry_run and seen_tmdbids:
                     marked_movies = (
@@ -681,6 +686,24 @@ def run_full_sync(
                     if not s_fields['tvdbid']:
                         continue
 
+                    sonarr_series_id = series_entry.get('id')
+                    episodes = fetch_sonarr_episodes(sonarr_series_id, base_url, api_key) if sonarr_series_id else []
+                    prepared_episodes: List[Tuple[Dict[str, Any], Dict[str, Any], Any]] = []
+                    total_episodes_in_series = len(episodes)
+                    series_title = str(s_fields.get('title') or series_entry.get('title') or 'series')
+                    if total_episodes_in_series > 0:
+                        logger.info(
+                            f"Enriching {total_episodes_in_series} episodes for '{series_title}'...",
+                            extra={'emoji_type': 'info'},
+                        )
+                    for ep in episodes:
+                        sonarr_ep_id = ep.get('id')
+                        # Fetch detailed episode payload to capture thumbnails and extended metadata (episodes in bulk omit images)
+                        detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key) if sonarr_ep_id else None
+                        ep_effective = detailed_ep if detailed_ep else ep
+                        episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+                        prepared_episodes.append((ep, ep_effective, episode_file))
+
                     seen_tvdbids.add(s_fields['tvdbid'])
                     stats['series_seen'] += 1
                     series_row, created, _ = _upsert_series(session, s_fields)
@@ -696,30 +719,16 @@ def run_full_sync(
                             extra={'emoji_type': 'info'},
                         )
 
-                    sonarr_series_id = series_entry.get('id')
-                    episodes = fetch_sonarr_episodes(sonarr_series_id, base_url, api_key) if sonarr_series_id else []
                     season_rows_by_number: Dict[int, Season] = {}
                     season_rollups: Dict[int, Dict[str, int | bool | str | None]] = {}
                     season_overview_by_number: Dict[int, str] = {}
-                    total_episodes_in_series = len(episodes)
-                    if total_episodes_in_series > 0:
-                        logger.info(
-                            f"Enriching {total_episodes_in_series} episodes for '{series_row.title}'...",
-                            extra={'emoji_type': 'info'},
-                        )
-                    for ep in episodes:
+                    for ep, ep_effective, episode_file in prepared_episodes:
                         season_number = int(ep.get('seasonNumber') or 0)
                         season_row, season_created = _upsert_season(session, series_row, season_number)
                         season_rows_by_number[season_number] = season_row
                         if season_created:
                             stats['seasons_created'] += 1
 
-                        sonarr_ep_id = ep.get('id')
-                        # Fetch detailed episode payload to capture thumbnails and extended metadata (episodes in bulk omit images)
-                        detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key) if sonarr_ep_id else None
-                        ep_effective = detailed_ep if detailed_ep else ep
-
-                        episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
                         ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
                         overview = str(ep.get('overview') or '').strip()
@@ -757,6 +766,9 @@ def run_full_sync(
                             season_row.sonarr_season_overview = season_overview_by_number[season_number]
                         season_row.is_deleted = False
                         session.add(season_row)
+
+                    if not dry_run:
+                        session.commit()
 
                 if not dry_run and seen_tvdbids:
                     deleted_series_rows = (

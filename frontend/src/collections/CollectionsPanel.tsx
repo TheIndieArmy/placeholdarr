@@ -49,6 +49,8 @@ export function CollectionsPanel(props: {
   onEnsureLibrary: () => void;
   /** Navigate to Settings → Media Integrations (Plex). */
   onOpenPlexSettings?: () => void;
+  /** Navigate to Settings → Collection Sources (TMDB / Trakt / Tautulli APIs). */
+  onOpenCollectionSources?: () => void;
   /** True while the recipe editor has unsaved edits (for sidebar leave prompts). */
   onDraftDirty?: (dirty: boolean) => void;
 }) {
@@ -607,8 +609,24 @@ export function CollectionsPanel(props: {
       {plexBanner}
       {!tmdbConfigured ? (
         <div className="mb-4 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-2.5 text-[14px] text-yellow-300">
-          No TMDB API key configured. TMDB sources (Trending, Popular, Discover, person pages…) are disabled — add a
-          key under Settings → Media Integrations to enable them. Catalog, MDBList, StevenLu, and AniList still work.
+          <p>
+            No TMDB API key configured. TMDB sources (Trending, Popular, Discover, person pages…) are disabled — add a
+            key under{" "}
+            <span className="font-semibold text-yellow-200">Settings → Collection Sources</span> to enable them.
+            Catalog, MDBList, StevenLu, and AniList still work.
+          </p>
+          {props.onOpenCollectionSources ? (
+            <button
+              type="button"
+              onClick={props.onOpenCollectionSources}
+              className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                settings
+              </span>
+              Open Collection Sources
+            </button>
+          ) : null}
         </div>
       ) : null}
       {ioMessage ? (
