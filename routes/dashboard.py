@@ -3363,6 +3363,7 @@ def _movie_arr_instance_links_from_db(session, anchor: Movie) -> list[dict[str, 
                 "movie_id": m.id,
                 "has_file": bool(m.has_file),
                 "has_placeholder": bool(m.has_placeholder),
+                "monitored": bool(getattr(m, "radarr_monitored", False)),
                 "_instance_key": ikey,
                 "_instance_id": iid,
             }
@@ -3404,6 +3405,7 @@ def _movie_arr_instance_links(session, anchor: Movie) -> list[dict[str, Any]]:
                     "present": False,
                     "has_file": False,
                     "has_placeholder": False,
+                    "monitored": False,
                 }
             )
     return _append_local_rows_missing_from_slot_merge(merged, raw, "movie_id")
@@ -3458,6 +3460,7 @@ def _series_arr_instance_links_from_db(session, anchor: Series) -> list[dict[str
                 "episode_files": int(st["episode_files"]),
                 "episode_placeholders": int(st["episode_placeholders"]),
                 "episode_total": int(st["episode_total"]),
+                "monitored": bool(getattr(s, "sonarr_monitored", False)),
                 "_instance_key": ikey,
                 "_instance_id": iid,
             }
@@ -3500,6 +3503,7 @@ def _series_arr_instance_links(session, anchor: Series) -> list[dict[str, Any]]:
                     "episode_files": 0,
                     "episode_placeholders": 0,
                     "episode_total": 0,
+                    "monitored": False,
                 }
             )
     return _append_local_rows_missing_from_slot_merge(merged, raw, "series_id")
@@ -4019,6 +4023,275 @@ async def library(
     return payload
 
 
+def _youtube_trailer_url(raw: Any) -> str | None:
+    """Radarr stores youTubeTrailerId as a bare id; expose a watch URL for the UI."""
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    if value.lower().startswith("http://") or value.lower().startswith("https://"):
+        return value
+    if re.fullmatch(r"[\w-]{6,20}", value):
+        return f"https://www.youtube.com/watch?v={value}"
+    return None
+
+
+def _format_rating_display_value(source: str, value: str | None) -> str:
+    """Round 0–10 style scores (TMDB/Trakt/IMDB) to one decimal; leave % scores alone."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    key = str(source or "").strip().lower()
+    if key not in ("tmdb", "themoviedb", "trakt", "imdb"):
+        return raw
+    try:
+        num = float(raw)
+    except (TypeError, ValueError):
+        return raw
+    return f"{round(num, 1):.1f}"
+
+
+def _ratings_display(ratings: Any) -> list[dict[str, Any]]:
+    """Normalize ARR ratings JSON into UI-friendly entries."""
+    from services.placeholders import _ratings_entries
+
+    out: list[dict[str, Any]] = []
+    for name, value, votes, is_default in _ratings_entries(ratings):
+        source = "tmdb" if name in ("tmdb", "themoviedb") else name
+        out.append(
+            {
+                "source": source,
+                "value": _format_rating_display_value(source, value),
+                "votes": votes,
+                "is_default": bool(is_default),
+            }
+        )
+    return out
+
+
+def _people_display(raw: Any, *, cap: int) -> list[dict[str, Any]]:
+    people: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return people
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            role = str(item.get("character") or item.get("role") or "").strip() or None
+        else:
+            name = str(item or "").strip()
+            role = None
+        if not name:
+            continue
+        people.append({"name": name, "role": role})
+        if len(people) >= cap:
+            break
+    return people
+
+
+def _collection_fields(collection: Any) -> tuple[str | None, int | None]:
+    if not isinstance(collection, dict):
+        return (None, None)
+    title = str(collection.get("title") or collection.get("name") or "").strip() or None
+    tmdb_raw = collection.get("tmdbId") or collection.get("tmdb_id") or collection.get("id")
+    try:
+        tmdb_id = int(tmdb_raw) if tmdb_raw is not None and str(tmdb_raw).strip() else None
+    except (TypeError, ValueError):
+        tmdb_id = None
+    if tmdb_id is not None and tmdb_id <= 0:
+        tmdb_id = None
+    return (title, tmdb_id)
+
+
+def _movie_collection_status(movie: Movie) -> str:
+    if bool(getattr(movie, "has_file", False)):
+        return "downloaded"
+    if bool(getattr(movie, "has_placeholder", False)):
+        return "placeholder"
+    return "missing"
+
+
+def _tmdb_poster_url(poster_path: Any) -> str | None:
+    path = str(poster_path or "").strip()
+    if not path:
+        return None
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"https://image.tmdb.org/t/p/w185{path}"
+
+
+def _pick_collection_library_row(prev: Movie | None, candidate: Movie, anchor: Movie) -> Movie:
+    if prev is None:
+        return candidate
+    if int(candidate.id) == int(anchor.id):
+        return candidate
+    if int(prev.id) == int(anchor.id):
+        return prev
+    if bool(candidate.has_file) and not bool(prev.has_file):
+        return candidate
+    return prev
+
+
+def _movie_collection_members(session, anchor: Movie) -> tuple[list[dict[str, Any]], int]:
+    title, collection_tmdb_id = _collection_fields(getattr(anchor, "radarr_collection", None))
+    if not title and not collection_tmdb_id:
+        return ([], 0)
+
+    tmdb_parts: list[dict[str, Any]] = []
+    if collection_tmdb_id is not None:
+        try:
+            from services import tmdb_client
+
+            if tmdb_client.tmdb_configured():
+                tmdb_parts = tmdb_client.fetch_collection(str(collection_tmdb_id), "movie")
+        except Exception:
+            tmdb_parts = []
+
+    part_tmdb_ids = [int(p["tmdb_id"]) for p in tmdb_parts if p.get("tmdb_id") is not None]
+    needle = (title or "").strip().lower()
+    siblings: list[Movie] = []
+
+    if part_tmdb_ids:
+        siblings.extend(
+            session.query(Movie)
+            .filter(Movie.is_deleted == False, Movie.tmdbid.in_(part_tmdb_ids))
+            .all()
+        )
+    else:
+        for m in (
+            session.query(Movie)
+            .filter(Movie.is_deleted == False)
+            .order_by(Movie.year.asc(), Movie.title.asc())
+            .all()
+        ):
+            mt, mid = _collection_fields(getattr(m, "radarr_collection", None))
+            if collection_tmdb_id is not None and mid == collection_tmdb_id:
+                siblings.append(m)
+            elif collection_tmdb_id is None and mt and mt.strip().lower() == needle:
+                siblings.append(m)
+
+    by_tmdb: dict[int, Movie] = {}
+    by_id_only: dict[int, Movie] = {}
+    for m in siblings:
+        if m.tmdbid:
+            tid = int(m.tmdbid)
+            by_tmdb[tid] = _pick_collection_library_row(by_tmdb.get(tid), m, anchor)
+        else:
+            by_id_only[int(m.id)] = _pick_collection_library_row(by_id_only.get(int(m.id)), m, anchor)
+
+    members: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+
+    def _append_library_member(m: Movie) -> None:
+        mid = int(m.id)
+        if mid in seen_ids:
+            return
+        seen_ids.add(mid)
+        members.append(
+            {
+                "id": mid,
+                "tmdbid": int(m.tmdbid) if m.tmdbid else None,
+                "title": m.title,
+                "year": m.year,
+                "poster_url": m.remote_poster,
+                "status": _movie_collection_status(m),
+                "is_current": mid == int(anchor.id),
+            }
+        )
+
+    if tmdb_parts:
+        for part in tmdb_parts:
+            tid = int(part["tmdb_id"])
+            lib = by_tmdb.get(tid)
+            if lib is not None:
+                _append_library_member(lib)
+            else:
+                members.append(
+                    {
+                        "id": None,
+                        "tmdbid": tid,
+                        "title": str(part.get("title") or "").strip() or f"TMDB {tid}",
+                        "year": part.get("year"),
+                        "poster_url": _tmdb_poster_url(part.get("poster_path")),
+                        "status": "not_in_library",
+                        "is_current": bool(anchor.tmdbid and int(anchor.tmdbid) == tid),
+                    }
+                )
+        for m in list(by_tmdb.values()) + list(by_id_only.values()):
+            _append_library_member(m)
+        collection_total = len(tmdb_parts)
+    else:
+        rows = list(by_tmdb.values()) + list(by_id_only.values())
+        rows.sort(key=lambda m: (m.year or 0, str(m.title or "").lower(), m.id))
+        for m in rows:
+            _append_library_member(m)
+        collection_total = len(members)
+
+    if not any(mem.get("is_current") for mem in members):
+        if anchor.tmdbid is not None:
+            for mem in members:
+                if mem.get("tmdbid") == int(anchor.tmdbid):
+                    mem["is_current"] = True
+                    break
+        else:
+            for mem in members:
+                if mem.get("id") == int(anchor.id):
+                    mem["is_current"] = True
+                    break
+
+    members.sort(
+        key=lambda mem: (
+            mem.get("year") or 0,
+            str(mem.get("title") or "").lower(),
+            mem.get("id") or 0,
+            mem.get("tmdbid") or 0,
+        )
+    )
+    return (members, collection_total)
+
+
+def _placeholder_display_status_for_movie(session, movie_id: int) -> str | None:
+    row = (
+        session.query(Placeholder)
+        .filter(Placeholder.movie_id == int(movie_id))
+        .order_by(Placeholder.has_placeholder.desc(), Placeholder.updated_at.desc(), Placeholder.id.desc())
+        .first()
+    )
+    if not row:
+        return None
+    return str(getattr(row, "display_status", None) or "").strip() or None
+
+
+def _placeholder_display_status_for_episode(session, episode_id: int) -> str | None:
+    row = (
+        session.query(Placeholder)
+        .filter(Placeholder.episode_id == int(episode_id))
+        .order_by(Placeholder.has_placeholder.desc(), Placeholder.updated_at.desc(), Placeholder.id.desc())
+        .first()
+    )
+    if not row:
+        return None
+    return str(getattr(row, "display_status", None) or "").strip() or None
+
+
+def _episode_display_status_map(session, episode_ids: list[int]) -> dict[int, str | None]:
+    if not episode_ids:
+        return {}
+    rows = (
+        session.query(Placeholder)
+        .filter(Placeholder.episode_id.in_([int(x) for x in episode_ids]))
+        .order_by(Placeholder.has_placeholder.desc(), Placeholder.updated_at.desc(), Placeholder.id.desc())
+        .all()
+    )
+    out: dict[int, str | None] = {}
+    for row in rows:
+        eid = int(getattr(row, "episode_id", 0) or 0)
+        if not eid or eid in out:
+            continue
+        out[eid] = str(getattr(row, "display_status", None) or "").strip() or None
+    return out
+
+
 @router.get("/api/detail/movie/{movie_id}")
 async def movie_detail(movie_id: int):
     """Return full detail for a single movie."""
@@ -4035,6 +4308,8 @@ async def movie_detail(movie_id: int):
             payload=movie.radarr_payload_raw if isinstance(movie.radarr_payload_raw, dict) else None,
         )
         instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
+        collection_title, collection_tmdb_id = _collection_fields(movie.radarr_collection)
+        collection_members, collection_total = _movie_collection_members(session, movie)
         return {
             "ok": True,
             "type": "movie",
@@ -4049,7 +4324,15 @@ async def movie_detail(movie_id: int):
             "genres": movie.radarr_genres or [],
             "studio": movie.radarr_studio,
             "ratings": movie.radarr_ratings or {},
+            "ratings_display": _ratings_display(movie.radarr_ratings),
             "collection": movie.radarr_collection,
+            "collection_title": collection_title,
+            "collection_tmdb_id": collection_tmdb_id,
+            "collection_members": collection_members,
+            "collection_total": collection_total,
+            "actors": _people_display(movie.radarr_actors, cap=8),
+            "directors": _people_display(movie.radarr_directors, cap=4),
+            "trailer_url": _youtube_trailer_url(movie.radarr_trailer),
             "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": movie.instance_key,
             "instance_id": (getattr(movie, "instance_id", None) or instance_meta.get("instance_id") or None),
@@ -4058,10 +4341,16 @@ async def movie_detail(movie_id: int):
             "imdbid": movie.imdbid,
             "tmdbid": movie.tmdbid,
             "status": movie.status,
+            "display_status": _placeholder_display_status_for_movie(session, int(movie.id)),
             "determination": movie.determination,
             "has_file": bool(movie.has_file),
             "has_placeholder": bool(movie.has_placeholder),
             "placeholder_filepath": movie.placeholder_filepath,
+            "file_path": movie.radarr_filepath,
+            "file_size_bytes": movie.moviefile_size,
+            "library_path": movie.radarrpath,
+            "radarr_id": movie.radarrid,
+            "last_found_in_arr": _iso(movie.last_found_in_radarr),
             "radarr_quality": movie.radarr_quality,
             "radarr_monitored": bool(movie.radarr_monitored),
             "radarr_release_status": movie.radarr_release_status,
@@ -4080,6 +4369,8 @@ async def movie_detail(movie_id: int):
 @router.get("/api/detail/series/{series_id}")
 async def series_detail(series_id: int):
     """Return full detail for a series, including all seasons and their episodes."""
+    from services.library_future_semantics import episode_row_is_future_outside_lookahead
+
     session = get_session()
     try:
         series = session.query(Series).filter(Series.id == series_id, Series.is_deleted == False).first()
@@ -4099,7 +4390,8 @@ async def series_detail(series_id: int):
             .order_by(Season.season_number.asc())
             .all()
         )
-        seasons_out = []
+        all_episode_ids: list[int] = []
+        season_episode_lists: list[tuple[Season, list[Episode]]] = []
         for season in seasons_raw:
             episodes_raw = (
                 session.query(Episode)
@@ -4107,9 +4399,24 @@ async def series_detail(series_id: int):
                 .order_by(Episode.episode_number.asc())
                 .all()
             )
+            season_episode_lists.append((season, episodes_raw))
+            all_episode_ids.extend(int(e.id) for e in episodes_raw)
+        ep_display = _episode_display_status_map(session, all_episode_ids)
+
+        seasons_out = []
+        for season, episodes_raw in season_episode_lists:
             ep_total = len(episodes_raw)
             ep_files = sum(1 for e in episodes_raw if e.has_file)
             ep_placeholders = sum(1 for e in episodes_raw if e.has_placeholder)
+            ep_future = 0
+            ep_missing = 0
+            for e in episodes_raw:
+                if bool(e.has_file) or bool(e.has_placeholder):
+                    continue
+                if episode_row_is_future_outside_lookahead(e, int(season.season_number or 0)):
+                    ep_future += 1
+                else:
+                    ep_missing += 1
             episodes_out = [
                 {
                     "id": ep.id,
@@ -4122,9 +4429,12 @@ async def series_detail(series_id: int):
                     "has_placeholder": bool(ep.has_placeholder),
                     "determination": ep.determination,
                     "status": ep.status,
+                    "display_status": ep_display.get(int(ep.id)),
                     "sonarr_quality": ep.sonarr_quality,
                     "sonarr_monitored": bool(ep.sonarr_monitored),
                     "placeholder_filepath": ep.placeholder_filepath,
+                    "file_size_bytes": ep.episodefile_size,
+                    "runtime": ep.sonarr_runtime,
                 }
                 for ep in episodes_raw
             ]
@@ -4137,8 +4447,15 @@ async def series_detail(series_id: int):
                 "episode_total": ep_total,
                 "episode_files": ep_files,
                 "episode_placeholders": ep_placeholders,
+                "episode_missing": ep_missing,
+                "episode_future": ep_future,
+                "monitored": bool(season.sonarr_monitored),
+                "poster_url": season.remote_poster,
                 "episodes": episodes_out,
             })
+
+        stats = _episode_stats_for_series(session, int(series.id))
+        last_aired_map = series_last_aired_map(session, [int(series.id)])
         return {
             "ok": True,
             "type": "series",
@@ -4153,6 +4470,8 @@ async def series_detail(series_id: int):
             "genres": series.sonarr_genres or [],
             "network": series.sonarr_network,
             "ratings": series.sonarr_ratings or {},
+            "ratings_display": _ratings_display(series.sonarr_ratings),
+            "actors": _people_display(series.sonarr_actors, cap=8),
             "is_4k": _legacy_is_4k(instance_meta),
             "instance_key": series.instance_key,
             "instance_id": (getattr(series, "instance_id", None) or instance_meta.get("instance_id") or None),
@@ -4160,10 +4479,19 @@ async def series_detail(series_id: int):
             "arr_link": arr_link,
             "imdbid": series.imdbid,
             "tvdbid": series.tvdbid,
+            "tmdb_id": series.sonarr_tmdbid,
             "status": series.status,
             "sonarr_status": series.sonarr_status,
             "sonarr_monitored": bool(series.sonarr_monitored),
             "first_aired": _iso(series.sonarr_first_aired),
+            "last_aired_date": _iso(last_aired_map.get(int(series.id))),
+            "episode_stats": {
+                "total": int(stats.get("episode_total", 0) or 0),
+                "files": int(stats.get("episode_files", 0) or 0),
+                "placeholders": int(stats.get("episode_placeholders", 0) or 0),
+                "future": int(stats.get("episode_future", 0) or 0),
+                "missing": int(stats.get("episode_missing", 0) or 0),
+            },
             "updated_at": _iso(series.updated_at),
             "created_at": _iso(series.created_at),
             "seasons": seasons_out,

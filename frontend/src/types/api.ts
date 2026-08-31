@@ -216,10 +216,37 @@ export interface ArrInstanceOpenLink {
   has_placeholder?: boolean;
   /** When false, this ARR instance does not have this title/show; UI shows "-" for the status line. */
   present?: boolean;
+  /** Monitored flag for this title on this ARR instance (when known). */
+  monitored?: boolean;
   episode_files?: number;
   episode_placeholders?: number;
   /** Episodes tracked for this show on this Sonarr instance (for ``files/total`` on series detail). */
   episode_total?: number;
+}
+
+export interface DetailRatingDisplay {
+  source: string;
+  value: string;
+  votes?: string | null;
+  is_default?: boolean;
+}
+
+export interface DetailActorDisplay {
+  name: string;
+  role?: string | null;
+}
+
+export interface DetailCollectionMember {
+  /** Placeholdarr movie id when this title is in the catalog; null for TMDB-only. */
+  id?: number | null;
+  tmdbid?: number | null;
+  title: string;
+  year?: number | null;
+  poster_url?: string | null;
+  /** downloaded | placeholder | missing | not_in_library */
+  status: "downloaded" | "placeholder" | "missing" | "not_in_library";
+  /** Highlight the title currently being viewed. */
+  is_current?: boolean;
 }
 
 export interface MovieDetailResponse {
@@ -236,7 +263,15 @@ export interface MovieDetailResponse {
   genres?: string[] | null;
   studio?: string | null;
   ratings?: Record<string, unknown> | null;
+  ratings_display?: DetailRatingDisplay[];
   collection?: Record<string, unknown> | null;
+  collection_title?: string | null;
+  collection_tmdb_id?: number | null;
+  collection_members?: DetailCollectionMember[];
+  collection_total?: number | null;
+  actors?: DetailActorDisplay[];
+  directors?: DetailActorDisplay[];
+  trailer_url?: string | null;
   is_4k: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
@@ -247,10 +282,17 @@ export interface MovieDetailResponse {
   imdbid?: string | null;
   tmdbid?: number | null;
   status?: string | null;
+  /** Placeholder display status (REQUEST, SEARCHING, …) — not legacy movie.status. */
+  display_status?: string | null;
   determination?: string | null;
   has_file: boolean;
   has_placeholder: boolean;
   placeholder_filepath?: string | null;
+  file_path?: string | null;
+  file_size_bytes?: number | null;
+  library_path?: string | null;
+  radarr_id?: number | null;
+  last_found_in_arr?: string | null;
   radarr_quality?: string | null;
   radarr_monitored?: boolean;
   radarr_release_status?: string | null;
@@ -273,9 +315,12 @@ export interface SeriesEpisodeDetail {
   has_placeholder: boolean;
   determination?: string | null;
   status?: string | null;
+  display_status?: string | null;
   sonarr_quality?: string | null;
   sonarr_monitored?: boolean;
   placeholder_filepath?: string | null;
+  file_size_bytes?: number | null;
+  runtime?: number | null;
 }
 
 export interface SeriesSeasonDetail {
@@ -287,6 +332,10 @@ export interface SeriesSeasonDetail {
   episode_total: number;
   episode_files: number;
   episode_placeholders: number;
+  episode_missing?: number;
+  episode_future?: number;
+  monitored?: boolean;
+  poster_url?: string | null;
   episodes: SeriesEpisodeDetail[];
 }
 
@@ -303,7 +352,10 @@ export interface SeriesDetailResponse {
   certification?: string | null;
   genres?: string[] | null;
   network?: string | null;
+  network_logo_url?: string | null;
   ratings?: Record<string, unknown> | null;
+  ratings_display?: DetailRatingDisplay[];
+  actors?: DetailActorDisplay[];
   is_4k: boolean;
   instance_key?: string | null;
   instance_id?: string | null;
@@ -313,10 +365,19 @@ export interface SeriesDetailResponse {
   arr_instance_links?: ArrInstanceOpenLink[];
   imdbid?: string | null;
   tvdbid?: number | null;
+  tmdb_id?: number | null;
   status?: string | null;
   sonarr_status?: string | null;
   sonarr_monitored?: boolean;
   first_aired?: string | null;
+  last_aired_date?: string | null;
+  episode_stats?: {
+    total: number;
+    files: number;
+    placeholders: number;
+    future: number;
+    missing: number;
+  };
   updated_at?: string | null;
   created_at?: string | null;
   seasons: SeriesSeasonDetail[];
