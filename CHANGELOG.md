@@ -36,6 +36,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Detail Arr tiles (light)**: Placeholdarr / Radarr / Sonarr status cards use light surfaces and dark text like score cards; icon wells stay dark for contrast.
 - **Detail Arr tile titles**: Instance names reserve two lines so status labels align across the row.
 - **Yellow accent buttons**: Active pills and primary actions on brand yellow use dark slate text (`--brand-fg-on-accent`) across library, settings, collections, modals, and onboarding.
+- **What's new modal**: Notices group under version headers; Got it stays pinned at the top; informational releases (no action required) no longer block startup.
 
 ### Fixed
 

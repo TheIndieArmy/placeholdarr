@@ -27,7 +27,7 @@ import {
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
-import { dismissWhatsNew, getWhatsNew, type WhatsNewNotice } from "./api/whatsNew";
+import { dismissWhatsNew, getWhatsNew, groupWhatsNewByVersion, type WhatsNewNotice } from "./api/whatsNew";
 import { AuthGate } from "./auth/AuthGate";
 import embyIcon from "./assets/services/emby.svg";
 import jellyfinIcon from "./assets/services/jellyfin.svg";
@@ -2711,24 +2711,9 @@ export function App() {
 
         {whatsNewNotices.length > 0 ? (
           <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
-            <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-5">
-              <p className="text-[13px] font-headline uppercase tracking-widest text-slate-400">What&apos;s new</p>
-              {whatsNewNotices.map((notice) => (
-                <div key={notice.id} className="space-y-2">
-                  <h3 className="text-[20px] font-headline font-bold text-white">{notice.title}</h3>
-                  <p className="text-[16px] text-slate-300 leading-relaxed whitespace-pre-wrap">{notice.body}</p>
-                  {notice.cta_path && notice.cta_label ? (
-                    <button
-                      type="button"
-                      className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
-                      onClick={() => tryNavigate(notice.cta_path as string)}
-                    >
-                      {notice.cta_label}
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-              <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <div className="w-full max-w-lg max-h-[min(90vh,720px)] flex flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl">
+              <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[#424753]/40 bg-[#171c22] px-6 py-4">
+                <p className="text-[13px] font-headline uppercase tracking-widest text-slate-400">What&apos;s new</p>
                 <button
                   type="button"
                   disabled={whatsNewBusy}
@@ -2753,6 +2738,32 @@ export function App() {
                 >
                   Got it
                 </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 space-y-6">
+                {groupWhatsNewByVersion(whatsNewNotices).map((group) => (
+                  <section key={group.version} className="space-y-4">
+                    <h2 className="text-[13px] font-headline uppercase tracking-widest text-slate-400 border-b border-[#424753]/35 pb-2">
+                      {group.version}
+                    </h2>
+                    <div className="space-y-5">
+                      {group.notices.map((notice) => (
+                        <div key={notice.id} className="space-y-2">
+                          <h3 className="text-[20px] font-headline font-bold text-white">{notice.title}</h3>
+                          <p className="text-[16px] text-slate-300 leading-relaxed whitespace-pre-wrap">{notice.body}</p>
+                          {notice.cta_path && notice.cta_label ? (
+                            <button
+                              type="button"
+                              className="text-[14px] font-headline uppercase tracking-wider text-slate-200 underline decoration-slate-500 underline-offset-4 hover:text-white"
+                              onClick={() => tryNavigate(notice.cta_path as string)}
+                            >
+                              {notice.cta_label}
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ))}
               </div>
             </div>
           </div>
