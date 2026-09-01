@@ -84,7 +84,7 @@ export function detailStatusChipClass(isLight: boolean, kind: "file" | "placehol
 export function formatRatingLabel(source: string | null | undefined): string {
   const key = String(source || "").trim().toLowerCase();
   if (!key) return "Rating";
-  if (key === "rottentomatoes" || key === "rotten_tomatoes" || key === "rotten tomatoes") return "RT";
+  if (key === "rottentomatoes" || key === "rotten_tomatoes" || key === "rotten tomatoes") return "Rotten Tomatoes";
   if (key === "metacritic") return "Metacritic";
   if (key === "themoviedb" || key === "tmdb") return "TMDB";
   if (key === "imdb") return "IMDB";

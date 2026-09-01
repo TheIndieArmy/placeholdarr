@@ -37,11 +37,33 @@ def get_configured_webhook_instances() -> dict[str, bool]:
             if av:
                 configured[av] = ok
 
+    # Native/Tautulli ingest follows the saved per-player notifier so leftover
+    # agents still posting here are ignored when Tracearr is selected.
+    tautulli_ok = (
+        settings.tautulli_playback_configured()
+        if hasattr(settings, "tautulli_playback_configured")
+        else bool(getattr(settings, "ENABLE_PLEX", False))
+    )
+    jellyfin_ok = (
+        settings.jellyfin_native_playback_configured()
+        if hasattr(settings, "jellyfin_native_playback_configured")
+        else bool(getattr(settings, "ENABLE_JELLYFIN", False))
+    )
+    emby_ok = (
+        settings.emby_native_playback_configured()
+        if hasattr(settings, "emby_native_playback_configured")
+        else bool(getattr(settings, "ENABLE_EMBY", False))
+    )
     configured.update(
         {
-            settings.TAUTULLI_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_PLEX', False)),
-            settings.JELLYFIN_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_JELLYFIN', False)),
-            settings.EMBY_INSTANCE_KEY: bool(getattr(settings, 'ENABLE_EMBY', False)),
+            settings.TAUTULLI_INSTANCE_KEY: tautulli_ok,
+            settings.JELLYFIN_INSTANCE_KEY: jellyfin_ok,
+            settings.EMBY_INSTANCE_KEY: emby_ok,
+            getattr(settings, "TRACEARR_INSTANCE_KEY", "tracearr"): bool(
+                settings.tracearr_playback_configured()
+                if hasattr(settings, "tracearr_playback_configured")
+                else False
+            ),
         }
     )
     return configured
@@ -229,12 +251,18 @@ def handle_webhook(
     """Persist webhook payload durably and enqueue a worker job.
     
     Args:
-        payload: webhook payload from ARR/Tautulli
-        instance: instance identifier (e.g. 'radarr_std', 'radarr_4k', 'sonarr_std', 'tautulli')
+        payload: webhook payload from ARR/Tautulli/Tracearr
+        instance: instance identifier (e.g. 'radarr_std', 'tautulli', 'tracearr')
     
     Returns:
         dict with status ('accepted' or 'rejected'), event_log_id (if accepted), and reason (if rejected)
     """
+    if isinstance(payload, dict):
+        from services.tracearr_playback import adapt_tracearr_webhook_payload, is_tracearr_instance
+
+        if is_tracearr_instance(instance, getattr(settings, "TRACEARR_INSTANCE_KEY", "tracearr")):
+            payload = adapt_tracearr_webhook_payload(payload)
+
     session = get_session()
     try:
         ok, reason, event_type, event_meta = validate_webhook_payload(payload, instance)

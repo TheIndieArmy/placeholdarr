@@ -134,7 +134,7 @@ export const ARR_WEBHOOK_SERVICES: WebhookServiceGroup = {
 export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
   title: "Playback Source Integrations (Optional)",
   description:
-    "Placeholdarr can track playback from Tautulli, Jellyfin, or Emby so placeholder search starts when someone hits play.",
+    "Placeholdarr can track playback from Tautulli, Jellyfin, Emby, or Tracearr so placeholder search starts when someone hits play.",
   services: [
     {
       id: "tautulli",
@@ -197,6 +197,32 @@ export const PLAYBACK_WEBHOOK_SERVICES: WebhookServiceGroup = {
         "Requires Emby server webhook plugin configuration",
         "Use the fixed instance key 'emby' (not derived from server name)",
         "Playback Started is required; Placeholdarr only processes start events",
+      ],
+    },
+    {
+      id: "tracearr",
+      name: "Tracearr",
+      color: "#18d1e7",
+      icon: "●",
+      description: "Multi-server playback monitor (Plex, Jellyfin, Emby)",
+      urlTemplate: "http://{host}:{port}/webhook?instance=tracearr",
+      triggers: [
+        {
+          event: "stream_started",
+          displayName: "Stream Started",
+          description: "User begins playing media (via Tracearr Automations → Send Notification)",
+          required: true,
+        },
+      ],
+      notes: [
+        "Add a “JSON webhook” destination in Tracearr Settings → Notifications (paste the Placeholdarr URL)",
+        "Manage → Automations → New automation → “Start from scratch”",
+        "When… choose “A stream is first seen”; do not use A stream starts; leave And only if… empty",
+        "Then do… add “Send Notification” → pick that destination",
+        "Destinations no longer pick stream events themselves; routing is via Automations",
+        "When a player is set to Tracearr, Placeholdarr ignores leftover Tautulli/native webhooks for that player",
+        "One Tracearr URL covers every Placeholdarr player set to Tracearr",
+        "Use the fixed instance key 'tracearr'",
       ],
     },
   ],

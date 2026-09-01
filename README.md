@@ -2,7 +2,7 @@
 
 **Placeholdarr** keeps titles visible in Plex\*, Jellyfin, or Emby without requiring everything to stay downloaded. It is AI-developed, maintained by TheIndieArmy, and inspired by [Infinite Plex Library](https://github.com/arjanterheegde/infiniteplexlibrary) and [Chronicle](https://github.com/iwouldratherbeatthebeach/chronicle).
 
-\***Placeholdarr** with **Plex** needs **Tautulli** so playback can trigger placeholder search.
+\***Placeholdarr** with **Plex** needs **Tautulli** or **Tracearr** so playback can trigger placeholder search.
 
 ## Overview
 

@@ -616,6 +616,14 @@ async def webhook(request: Request):
         if route_err:
             raise HTTPException(status_code=400, detail=route_err)
 
+        from core.config import settings as _settings
+        from services.tracearr_playback import adapt_tracearr_webhook_payload, is_tracearr_instance
+
+        if isinstance(payload, dict) and is_tracearr_instance(
+            canonical_instance, getattr(_settings, "TRACEARR_INSTANCE_KEY", "tracearr")
+        ):
+            payload = adapt_tracearr_webhook_payload(payload)
+
         ok, reason, event_type, _event_meta = validate_webhook_payload(payload, canonical_instance)
         if not ok:
             logger.warning(
