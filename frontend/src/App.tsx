@@ -430,6 +430,9 @@ const SETTINGS_UI_HIDDEN_FIELD_KEYS = new Set<string>([
   "WORKER_COUNT",
   "RADARR_SHARED_PLACEHOLDER_CLEANUP",
   "SONARR_SHARED_PLACEHOLDER_CLEANUP",
+  "PLEX_PLAYBACK_NOTIFIER",
+  "JELLYFIN_PLAYBACK_NOTIFIER",
+  "EMBY_PLAYBACK_NOTIFIER",
 ]);
 
 const ARR_CONFIGURATION_KEYS = new Set<string>([
@@ -5747,6 +5750,7 @@ function SettingsPanel(props: {
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
   const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
   const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<MediaCardId | null>(null);
+  const [mediaRemoveConfirmId, setMediaRemoveConfirmId] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const mediaPanelCancelRef = useRef<() => void>(() => {});
@@ -6250,14 +6254,11 @@ function SettingsPanel(props: {
                                       </button>
                                     ) : null}
                                     <p className="text-center text-[12px] text-slate-500">
-                                      Playback: {mediaCardPlaybackSourceLabel(card.id)}
+                                      Playback: {mediaCardPlaybackNotifierLabel(card.id, props.values)}
                                     </p>
                                     <button
                                       type="button"
-                                      onClick={() => {
-                                        clearMediaCardConnection(card, props.onValueChange);
-                                        setMediaPanel((p) => (p === card.id ? null : p));
-                                      }}
+                                      onClick={() => setMediaRemoveConfirmId(card.id)}
                                       className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
                                     >
                                       Remove connection
@@ -6589,10 +6590,35 @@ function SettingsPanel(props: {
       <PlaybackWebhookSetupModal
         cardId={playbackWebhookDialog}
         values={props.values}
+        onValueChange={props.onValueChange}
+        onPersistNotifier={props.onPartialPersist}
         onClose={() => setPlaybackWebhookDialog(null)}
         accent={accent}
         displayOrigin={resolveWebhookDisplayOrigin(props.values)}
         webhookApiKey={resolveWebhookApiKey(props.values)}
+      />
+    ) : null}
+    {mediaRemoveConfirmId ? (
+      <ConfirmModal
+        title={`Remove ${ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaRemoveConfirmId)?.title ?? "media"} connection?`}
+        message={mediaCardRemoveConnectionMessage(
+          ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaRemoveConfirmId)?.title ?? "This media player",
+        )}
+        confirmLabel="Remove"
+        cancelLabel="Cancel"
+        accentHex={accent.hex}
+        themeMode={props.themeMode}
+        onCancel={() => setMediaRemoveConfirmId(null)}
+        onConfirm={() => {
+          const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaRemoveConfirmId);
+          if (!card) {
+            setMediaRemoveConfirmId(null);
+            return;
+          }
+          clearMediaCardConnection(card, props.onValueChange);
+          setMediaPanel((p) => (p === card.id ? null : p));
+          setMediaRemoveConfirmId(null);
+        }}
       />
     ) : null}
     </>
@@ -7856,20 +7882,26 @@ const ONBOARDING_MEDIA_CARDS = [
     id: "plex" as const,
     title: "Plex",
     enabledKey: "ENABLE_PLEX",
-    note: "Playback needs Tautulli so Placeholdarr hears when someone hits play.",
+    note: "Playback needs Tautulli or Tracearr so Placeholdarr hears when someone hits play.",
     keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
+    notifierKey: "PLEX_PLAYBACK_NOTIFIER",
+    nativeNotifier: "tautulli" as const,
   },
   {
     id: "jellyfin" as const,
     title: "Jellyfin",
     enabledKey: "ENABLE_JELLYFIN",
     keys: ["JELLYFIN_URL", "JELLYFIN_TOKEN", "JELLYFIN_INSTANCE_KEY"],
+    notifierKey: "JELLYFIN_PLAYBACK_NOTIFIER",
+    nativeNotifier: "native" as const,
   },
   {
     id: "emby" as const,
     title: "Emby",
     enabledKey: "ENABLE_EMBY",
     keys: ["EMBY_URL", "EMBY_TOKEN", "EMBY_INSTANCE_KEY"],
+    notifierKey: "EMBY_PLAYBACK_NOTIFIER",
+    nativeNotifier: "native" as const,
   },
 ];
 
@@ -7964,19 +7996,23 @@ const JELLYFIN_WEBHOOK_PAYLOAD_TEMPLATE = `{
   "NotificationType": "{{NotificationType}}"
 }`;
 
-type PlaybackWebhookServiceId = "tautulli" | "jellyfin" | "emby";
+type PlaybackWebhookServiceId = "tautulli" | "jellyfin" | "emby" | "tracearr";
 type MediaCardId = (typeof ONBOARDING_MEDIA_CARDS)[number]["id"];
 
 function mediaCardPlaybackWebhookConfig(cardId: MediaCardId): {
-  serviceId: PlaybackWebhookServiceId;
+  serviceId: Exclude<PlaybackWebhookServiceId, "tracearr">;
   instanceKeyField: string;
   defaultKey: string;
+  notifierKey: string;
+  nativeNotifier: string;
 } | null {
   if (cardId === "plex") {
     return {
       serviceId: "tautulli",
       instanceKeyField: "TAUTULLI_INSTANCE_KEY",
       defaultKey: "tautulli",
+      notifierKey: "PLEX_PLAYBACK_NOTIFIER",
+      nativeNotifier: "tautulli",
     };
   }
   if (cardId === "jellyfin") {
@@ -7984,6 +8020,8 @@ function mediaCardPlaybackWebhookConfig(cardId: MediaCardId): {
       serviceId: "jellyfin",
       instanceKeyField: "JELLYFIN_INSTANCE_KEY",
       defaultKey: "jellyfin",
+      notifierKey: "JELLYFIN_PLAYBACK_NOTIFIER",
+      nativeNotifier: "native",
     };
   }
   if (cardId === "emby") {
@@ -7991,15 +8029,39 @@ function mediaCardPlaybackWebhookConfig(cardId: MediaCardId): {
       serviceId: "emby",
       instanceKeyField: "EMBY_INSTANCE_KEY",
       defaultKey: "emby",
+      notifierKey: "EMBY_PLAYBACK_NOTIFIER",
+      nativeNotifier: "native",
     };
   }
   return null;
 }
 
-function mediaCardPlaybackSourceLabel(cardId: MediaCardId): string {
+function mediaCardPlaybackNotifierValue(cardId: MediaCardId, values: FieldValueMap): "native" | "tautulli" | "tracearr" {
+  const cfg = mediaCardPlaybackWebhookConfig(cardId);
+  if (!cfg) return "native";
+  const raw = String(values[cfg.notifierKey] ?? "").trim().toLowerCase();
+  if (raw === "tracearr") return "tracearr";
+  if (cardId === "plex") return "tautulli";
+  return "native";
+}
+
+function mediaCardPlaybackNotifierLabel(cardId: MediaCardId, values: FieldValueMap): string {
+  const notifier = mediaCardPlaybackNotifierValue(cardId, values);
+  if (notifier === "tracearr") return "Tracearr";
   if (cardId === "plex") return "Tautulli";
   if (cardId === "jellyfin") return "Jellyfin webhook";
   return "Emby webhook";
+}
+
+function playersWithSavedTracearrNotifier(values: FieldValueMap): (typeof ONBOARDING_MEDIA_CARDS)[number][] {
+  return ONBOARDING_MEDIA_CARDS.filter((card) => {
+    if (!mediaCardHasStoredConnection(card, values)) return false;
+    return mediaCardPlaybackNotifierValue(card.id, values) === "tracearr";
+  });
+}
+
+function anyPlayerHasSavedTracearrNotifier(values: FieldValueMap): boolean {
+  return playersWithSavedTracearrNotifier(values).length > 0;
 }
 
 function collectWebhookDestinations(values: FieldValueMap): { id: string; label: string; url: string }[] {
@@ -8016,10 +8078,22 @@ function collectWebhookDestinations(values: FieldValueMap): { id: string; label:
       url: urls.primary,
     });
   }
+  let tracearrListed = false;
   for (const card of ONBOARDING_MEDIA_CARDS) {
     const cfg = mediaCardPlaybackWebhookConfig(card.id);
     if (!cfg || !mediaCardHasStoredConnection(card, values)) continue;
     if (!Boolean(values[card.enabledKey])) continue;
+    const notifier = mediaCardPlaybackNotifierValue(card.id, values);
+    if (notifier === "tracearr") {
+      if (tracearrListed) continue;
+      tracearrListed = true;
+      rows.push({
+        id: "pb-tracearr",
+        label: "Tracearr",
+        url: appendWebhookApiKey(`${origin}/webhook?instance=tracearr`, apiKey),
+      });
+      continue;
+    }
     const instanceParam = String(values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
     const name = cfg.serviceId === "tautulli" ? "Tautulli (Plex)" : cfg.serviceId === "jellyfin" ? "Jellyfin" : "Emby";
     rows.push({
@@ -8125,17 +8199,103 @@ function MaskedWebhookUrlField(props: {
   );
 }
 
+function SetupOptionLabel(props: { children: ReactNode }) {
+  /** Inline chip for UI labels the user must find/click in another app. */
+  return (
+    <span className="mx-0.5 inline-flex max-w-full items-center rounded-md border border-[#5a6578]/55 bg-[#0a0d11] px-1.5 py-0.5 align-baseline text-[13px] font-semibold leading-snug text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      {props.children}
+    </span>
+  );
+}
+
+function TracearrSetupIntro(props: { cardTitle: string; selectionMatchesSaved: boolean }) {
+  return (
+    <p className="text-[16px] text-slate-300">
+      Tracearr uses one webhook for every media player in Placeholdarr (Tracearr v2.2.4 or newer). In Tracearr, your stream automation should apply to every server you use, not one server only.
+      {props.selectionMatchesSaved
+        ? ` Tracearr is saved for ${props.cardTitle}.`
+        : " If you already added this webhook URL and automation in Tracearr, select Tracearr and click Save. If you have not set up Tracearr yet, follow the steps below."}
+    </p>
+  );
+}
+
+function TracearrAutomationStepsList(props: {
+  cardTitle: string;
+  tracearrWebhookUrl: string;
+  selectionMatchesSaved: boolean;
+  includePlaceholdarrStep: boolean;
+  webhookInSteps: boolean;
+}) {
+  return (
+    <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
+      <li>
+        In Tracearr, open Settings → Notifications and add a
+        <SetupOptionLabel>JSON webhook</SetupOptionLabel>
+        destination.
+      </li>
+      {props.webhookInSteps ? (
+        <li>
+          <span className="text-[12px] font-headline uppercase tracking-wider text-slate-500">Webhook URL</span>
+          <MaskedWebhookUrlField url={props.tracearrWebhookUrl} ariaLabel="Copy Tracearr webhook URL" />
+        </li>
+      ) : null}
+      <li>
+        Open Manage → Automations → New automation, then choose
+        <SetupOptionLabel>Start from scratch</SetupOptionLabel>
+        (build it step by step).
+      </li>
+      <li>
+        Under
+        <SetupOptionLabel>When…</SetupOptionLabel>
+        , choose
+        <SetupOptionLabel>A stream is first seen</SetupOptionLabel>
+        . Do not use A stream starts. Leave
+        <SetupOptionLabel>And only if…</SetupOptionLabel>
+        empty.
+      </li>
+      <li>
+        Under
+        <SetupOptionLabel>Then do…</SetupOptionLabel>
+        , add
+        <SetupOptionLabel>Send Notification</SetupOptionLabel>
+        and pick that Placeholdarr destination. In the automation scope, apply to every server you use, not one server only. Save and leave the automation active.
+      </li>
+      {props.includePlaceholdarrStep ? (
+        <li>
+          {props.selectionMatchesSaved
+            ? `Tracearr is saved for ${props.cardTitle} playback.`
+            : `Keep Tracearr selected and click Save so Placeholdarr listens for ${props.cardTitle} playback.`}
+        </li>
+      ) : null}
+    </ol>
+  );
+}
+
 function PlaybackWebhookSetupModal(props: {
   cardId: MediaCardId;
   values: FieldValueMap;
+  onValueChange: (key: string, value: unknown) => void;
   onClose: () => void;
+  onPersistNotifier?: (partial: Record<string, unknown>) => Promise<void>;
   accent: { hex: string };
   displayOrigin: string;
   webhookApiKey: string;
 }) {
   const cfg = mediaCardPlaybackWebhookConfig(props.cardId);
   const cardTitle = ONBOARDING_MEDIA_CARDS.find((c) => c.id === props.cardId)?.title ?? props.cardId;
+  const initialNotifier = mediaCardPlaybackNotifierValue(props.cardId, props.values);
+  const [notifier, setNotifier] = useState<"native" | "tautulli" | "tracearr">(initialNotifier);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [showFullTracearrSteps, setShowFullTracearrSteps] = useState(false);
   const [apiKey, setApiKey] = useState(() => String(props.webhookApiKey || "").trim());
+  const savedNotifier = mediaCardPlaybackNotifierValue(props.cardId, props.values);
+
+  useEffect(() => {
+    setNotifier(savedNotifier);
+    setError("");
+    setShowFullTracearrSteps(false);
+  }, [props.cardId, savedNotifier]);
 
   useEffect(() => {
     const fromProps = String(props.webhookApiKey || "").trim();
@@ -8160,24 +8320,126 @@ function PlaybackWebhookSetupModal(props: {
 
   if (!cfg) return null;
 
+  const useTracearr = notifier === "tracearr";
   const nativeServiceId = cfg.serviceId;
   const nativeInstanceParam = String(props.values[cfg.instanceKeyField] ?? "").trim() || cfg.defaultKey;
   const nativeWebhookUrl = appendWebhookApiKey(
     `${props.displayOrigin}/webhook?instance=${encodeURIComponent(nativeInstanceParam)}`,
     apiKey,
   );
+  const tracearrWebhookUrl = appendWebhookApiKey(
+    `${props.displayOrigin}/webhook?instance=tracearr`,
+    apiKey,
+  );
   const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === nativeServiceId);
   const nativeName = svcMeta?.name ?? nativeServiceId;
+  const tracearrAlreadyInUse = anyPlayerHasSavedTracearrNotifier(props.values);
+  const nativeOptionValue = props.cardId === "plex" ? "tautulli" : "native";
+  const nativeOptionLabel =
+    props.cardId === "plex" ? "Tautulli" : props.cardId === "jellyfin" ? "Jellyfin webhook" : "Emby webhook";
+  const selectionMatchesSaved = notifier === savedNotifier;
+
+  async function handleSave() {
+    if (!cfg || selectionMatchesSaved) return;
+    const nextValue = useTracearr ? "tracearr" : cfg.nativeNotifier;
+    setBusy(true);
+    setError("");
+    try {
+      props.onValueChange(cfg.notifierKey, nextValue);
+      if (props.onPersistNotifier) {
+        await props.onPersistNotifier({ [cfg.notifierKey]: nextValue });
+      }
+      props.onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-[#0f1419]/85 backdrop-blur-sm p-6">
-      <div className="w-full max-w-lg max-h-[min(90vh,720px)] overflow-y-auto rounded-2xl border border-[#424753]/40 bg-[#171c22] p-6 shadow-2xl space-y-4">
+      <div className="flex w-full max-w-lg max-h-[min(90vh,720px)] flex-col overflow-hidden rounded-2xl border border-[#424753]/40 bg-[#171c22] shadow-2xl">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
         <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
         <p className="text-[16px] text-slate-300">
-          Point {mediaCardPlaybackSourceLabel(props.cardId)} at Placeholdarr so placeholder search starts when someone hits play.
+          Choose how Placeholdarr hears when someone hits play on {cardTitle}.
         </p>
 
-        {nativeServiceId === "tautulli" ? (
+        <fieldset className="space-y-2">
+          <legend className="text-[12px] font-headline uppercase tracking-wider text-slate-500">How we hear about playback</legend>
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[#424753]/40 bg-[#0a0d11]/60 px-3 py-3 hover:border-[#424753]/70">
+            <input
+              type="radio"
+              className="mt-1"
+              name={`playback-notifier-${props.cardId}`}
+              checked={!useTracearr}
+              onChange={() => setNotifier(nativeOptionValue)}
+            />
+            <span>
+              <span className="block text-[15px] font-semibold text-white">{nativeOptionLabel}</span>
+              <span className="block text-[13px] text-slate-400">
+                {props.cardId === "plex"
+                  ? "Tautulli POSTs playback start to Placeholdarr."
+                  : `${cardTitle} sends playback start directly to Placeholdarr.`}
+              </span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[#424753]/40 bg-[#0a0d11]/60 px-3 py-3 hover:border-[#424753]/70">
+            <input
+              type="radio"
+              className="mt-1"
+              name={`playback-notifier-${props.cardId}`}
+              checked={useTracearr}
+              onChange={() => setNotifier("tracearr")}
+            />
+            <span>
+              <span className="block text-[15px] font-semibold text-white">Tracearr</span>
+              <span className="block text-[13px] text-slate-400">
+                Tracearr monitors {cardTitle} and notifies Placeholdarr via an Automations → Send Notification webhook (one URL for every player on Tracearr).
+              </span>
+            </span>
+          </label>
+        </fieldset>
+
+        {useTracearr ? (
+          tracearrAlreadyInUse ? (
+            <div className="space-y-3">
+              <TracearrSetupIntro cardTitle={cardTitle} selectionMatchesSaved={selectionMatchesSaved} />
+              <div>
+                <div className="text-[12px] font-headline uppercase tracking-wider text-slate-500">Webhook URL</div>
+                <MaskedWebhookUrlField url={tracearrWebhookUrl} ariaLabel="Copy Tracearr webhook URL" />
+              </div>
+              <button
+                type="button"
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
+                onClick={() => setShowFullTracearrSteps((open) => !open)}
+              >
+                {showFullTracearrSteps ? "Hide Tracearr setup steps" : "Show Tracearr setup steps"}
+              </button>
+              {showFullTracearrSteps ? (
+                <TracearrAutomationStepsList
+                  cardTitle={cardTitle}
+                  tracearrWebhookUrl={tracearrWebhookUrl}
+                  selectionMatchesSaved={selectionMatchesSaved}
+                  includePlaceholdarrStep={!selectionMatchesSaved}
+                  webhookInSteps={false}
+                />
+              ) : null}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <TracearrSetupIntro cardTitle={cardTitle} selectionMatchesSaved={selectionMatchesSaved} />
+              <TracearrAutomationStepsList
+                cardTitle={cardTitle}
+                tracearrWebhookUrl={tracearrWebhookUrl}
+                selectionMatchesSaved={selectionMatchesSaved}
+                includePlaceholdarrStep={true}
+                webhookInSteps={true}
+              />
+            </div>
+          )
+        ) : nativeServiceId === "tautulli" ? (
           <ol className="ui-field-description space-y-2 list-decimal list-inside text-[16px] text-slate-300">
             <li>Open Tautulli and go to Settings → Notification Agents.</li>
             <li>Create a new Webhook notification agent.</li>
@@ -8211,7 +8473,7 @@ function PlaybackWebhookSetupModal(props: {
           </ol>
         )}
 
-        {nativeServiceId === "tautulli" || nativeServiceId === "jellyfin" ? (
+        {!useTracearr && (nativeServiceId === "tautulli" || nativeServiceId === "jellyfin") ? (
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <div className="text-[12px] font-headline uppercase tracking-wider text-slate-500">JSON payload template</div>
@@ -8227,14 +8489,35 @@ function PlaybackWebhookSetupModal(props: {
           </div>
         ) : null}
 
-        <div className="flex justify-end pt-2">
+        {!useTracearr && selectionMatchesSaved ? (
+          <p className="text-[16px] text-slate-300">
+            {nativeOptionLabel} is saved for {cardTitle} playback.
+          </p>
+        ) : null}
+
+        {error ? <p className="text-[14px] text-red-400">{error}</p> : null}
+        </div>
+
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-[#424753]/40 px-6 py-4">
           <button
             type="button"
-            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
-            style={accentFilledStyle(props.accent.hex)}
-            onClick={() => props.onClose()}
+            className="text-[14px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
+            onClick={props.onClose}
           >
-            Done
+            Close
+          </button>
+          <button
+            type="button"
+            disabled={busy || selectionMatchesSaved}
+            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider disabled:cursor-not-allowed ${
+              selectionMatchesSaved && !busy
+                ? "border border-[#424753]/50 bg-[#252e3a]/50 text-slate-500"
+                : `${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-60`
+            }`}
+            style={selectionMatchesSaved && !busy ? undefined : accentFilledStyle(props.accent.hex)}
+            onClick={() => void handleSave()}
+          >
+            {busy ? "Saving…" : "Save"}
           </button>
         </div>
       </div>
@@ -8276,6 +8559,10 @@ function clearMediaCardConnection(
   for (const key of card.keys) {
     onValueChange(key, "");
   }
+}
+
+function mediaCardRemoveConnectionMessage(cardTitle: string): string {
+  return `This clears the ${cardTitle} URL, credentials, and related settings on this card. You can connect again later from Configure.`;
 }
 
 function snapshotMediaCardValues(
@@ -8717,6 +9004,7 @@ function OnboardingWizard(props: {
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
   const [mediaFooterTestBusy, setMediaFooterTestBusy] = useState(false);
   const [playbackWebhookDialog, setPlaybackWebhookDialog] = useState<MediaCardId | null>(null);
+  const [mediaRemoveConfirmId, setMediaRemoveConfirmId] = useState<MediaCardId | null>(null);
   const mediaPanelOpenedViaAddRef = useRef(false);
   const mediaPanelSnapshotRef = useRef<Record<string, unknown>>({});
   const { handleValueChange: handleWizardValueChange, effectiveSnapshot: wizardLookaheadSnapshot } =
@@ -9174,14 +9462,11 @@ function OnboardingWizard(props: {
                                 </button>
                               ) : null}
                               <p className="text-center text-[12px] text-slate-500">
-                                Playback: {mediaCardPlaybackSourceLabel(card.id)}
+                                Playback: {mediaCardPlaybackNotifierLabel(card.id, props.values)}
                               </p>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  clearMediaCardConnection(card, props.onChange);
-                                  setMediaPanel((p) => (p === card.id ? null : p));
-                                }}
+                                onClick={() => setMediaRemoveConfirmId(card.id)}
                                 className="text-center text-[13px] font-medium text-slate-500 underline-offset-2 transition hover:text-red-300 hover:underline"
                               >
                                 Remove connection
@@ -9572,10 +9857,34 @@ function OnboardingWizard(props: {
         <PlaybackWebhookSetupModal
           cardId={playbackWebhookDialog}
           values={props.values}
+          onValueChange={props.onChange}
           onClose={() => setPlaybackWebhookDialog(null)}
           accent={accent}
           displayOrigin={resolveWebhookDisplayOrigin(props.values)}
           webhookApiKey={resolveWebhookApiKey(props.values)}
+        />
+      ) : null}
+      {mediaRemoveConfirmId ? (
+        <ConfirmModal
+          title={`Remove ${ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaRemoveConfirmId)?.title ?? "media"} connection?`}
+          message={mediaCardRemoveConnectionMessage(
+            ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaRemoveConfirmId)?.title ?? "This media player",
+          )}
+          confirmLabel="Remove"
+          cancelLabel="Cancel"
+          accentHex={accent.hex}
+          themeMode={wizardUiTheme}
+          onCancel={() => setMediaRemoveConfirmId(null)}
+          onConfirm={() => {
+            const card = ONBOARDING_MEDIA_CARDS.find((c) => c.id === mediaRemoveConfirmId);
+            if (!card) {
+              setMediaRemoveConfirmId(null);
+              return;
+            }
+            clearMediaCardConnection(card, props.onChange);
+            setMediaPanel((p) => (p === card.id ? null : p));
+            setMediaRemoveConfirmId(null);
+          }}
         />
       ) : null}
     </>

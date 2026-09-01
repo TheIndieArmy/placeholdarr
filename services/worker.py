@@ -532,9 +532,9 @@ def _process_webhook_event(session, job: Job):
                 extra={"emoji_type": "success"},
             )
             handled = True
-        elif event_type in ("movie_grab", "episode_grab"):
+        elif event_type in ("movie_grab", "episode_grab", "webhook_ignored"):
             logger.info(
-                f"Ignored ARR grab notification (informational) event_log_id={event.id} type={event_type} instance={instance or 'unknown'}",
+                f"Ignored informational webhook event_log_id={event.id} type={event_type} instance={instance or 'unknown'}",
                 extra={"emoji_type": "info"},
             )
             handled = True

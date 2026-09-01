@@ -171,6 +171,11 @@ class Settings(BaseSettings):
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
     EMBY_INSTANCE_KEY: str = os.getenv("EMBY_INSTANCE_KEY", "emby").split('#')[0].strip().lower()
+    TRACEARR_INSTANCE_KEY: str = os.getenv("TRACEARR_INSTANCE_KEY", "tracearr").split('#')[0].strip().lower()
+    # Per-player playback notifier: native/Tautulli vs shared Tracearr webhook
+    PLEX_PLAYBACK_NOTIFIER: str = "tautulli"
+    JELLYFIN_PLAYBACK_NOTIFIER: str = "native"
+    EMBY_PLAYBACK_NOTIFIER: str = "native"
     # Optional override for the URL displayed in webhook setup instructions.
     # Set when Placeholdarr is reachable from ARR/Tautulli/etc. at a different
     # address than the dashboard origin — e.g. an internal Docker/Kubernetes
@@ -647,8 +652,38 @@ class Settings(BaseSettings):
         return tuple(str(item.get('instance_key', '')).lower() for item in self.configured_arr_instances if str(item.get('arr_type', '')).lower() == 'sonarr')
 
     @property
-    def playback_source_instance_keys(self) -> tuple[str, str, str]:
-        return (self.TAUTULLI_INSTANCE_KEY, self.JELLYFIN_INSTANCE_KEY, self.EMBY_INSTANCE_KEY)
+    def playback_source_instance_keys(self) -> tuple[str, ...]:
+        return (
+            self.TAUTULLI_INSTANCE_KEY,
+            self.JELLYFIN_INSTANCE_KEY,
+            self.EMBY_INSTANCE_KEY,
+            self.TRACEARR_INSTANCE_KEY,
+        )
+
+    def _playback_notifier(self, key: str) -> str:
+        return str(getattr(self, key, "") or "").strip().lower()
+
+    def tautulli_playback_configured(self) -> bool:
+        """True when Plex is enabled and Tautulli is the chosen playback notifier."""
+        return bool(self.ENABLE_PLEX) and self._playback_notifier("PLEX_PLAYBACK_NOTIFIER") == "tautulli"
+
+    def jellyfin_native_playback_configured(self) -> bool:
+        """True when Jellyfin is enabled and native webhook (not Tracearr) is the notifier."""
+        return bool(self.ENABLE_JELLYFIN) and self._playback_notifier("JELLYFIN_PLAYBACK_NOTIFIER") != "tracearr"
+
+    def emby_native_playback_configured(self) -> bool:
+        """True when Emby is enabled and native webhook (not Tracearr) is the notifier."""
+        return bool(self.ENABLE_EMBY) and self._playback_notifier("EMBY_PLAYBACK_NOTIFIER") != "tracearr"
+
+    def tracearr_playback_configured(self) -> bool:
+        """True when any enabled media player uses Tracearr as its playback notifier."""
+        if self.ENABLE_PLEX and self._playback_notifier("PLEX_PLAYBACK_NOTIFIER") == "tracearr":
+            return True
+        if self.ENABLE_JELLYFIN and self._playback_notifier("JELLYFIN_PLAYBACK_NOTIFIER") == "tracearr":
+            return True
+        if self.ENABLE_EMBY and self._playback_notifier("EMBY_PLAYBACK_NOTIFIER") == "tracearr":
+            return True
+        return False
 
     @property
     def allowed_webhook_instance_keys(self) -> tuple[str, ...]:
@@ -666,6 +701,7 @@ class Settings(BaseSettings):
                 self.TAUTULLI_INSTANCE_KEY,
                 self.JELLYFIN_INSTANCE_KEY,
                 self.EMBY_INSTANCE_KEY,
+                self.TRACEARR_INSTANCE_KEY,
             ]
         )
         deduped: list[str] = []

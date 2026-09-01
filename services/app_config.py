@@ -147,6 +147,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "PLEX_PLAYBACK_NOTIFIER",
+            {
+                "section": "Media Integrations",
+                "label": "Plex playback notifier",
+                "description": "How Placeholdarr hears about Plex playback: Tautulli webhook or Tracearr JSON webhook.",
+                "type": "choice",
+                "options": [
+                    {"value": "tautulli", "label": "Tautulli"},
+                    {"value": "tracearr", "label": "Tracearr"},
+                ],
+                "required": True,
+                "restart_required": False,
+            },
+        ),
+        (
             "ENABLE_JELLYFIN",
             {
                 "section": "Media Integrations",
@@ -180,6 +195,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "JELLYFIN_PLAYBACK_NOTIFIER",
+            {
+                "section": "Media Integrations",
+                "label": "Jellyfin playback notifier",
+                "description": "How Placeholdarr hears about Jellyfin playback: Jellyfin webhook plugin or Tracearr JSON webhook.",
+                "type": "choice",
+                "options": [
+                    {"value": "native", "label": "Jellyfin webhook"},
+                    {"value": "tracearr", "label": "Tracearr"},
+                ],
+                "required": True,
+                "restart_required": False,
+            },
+        ),
+        (
             "ENABLE_EMBY",
             {
                 "section": "Media Integrations",
@@ -209,6 +239,21 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "string",
                 "required": False,
                 "secret": True,
+                "restart_required": False,
+            },
+        ),
+        (
+            "EMBY_PLAYBACK_NOTIFIER",
+            {
+                "section": "Media Integrations",
+                "label": "Emby playback notifier",
+                "description": "How Placeholdarr hears about Emby playback: Emby webhook notifications or Tracearr JSON webhook.",
+                "type": "choice",
+                "options": [
+                    {"value": "native", "label": "Emby webhook"},
+                    {"value": "tracearr", "label": "Tracearr"},
+                ],
+                "required": True,
                 "restart_required": False,
             },
         ),

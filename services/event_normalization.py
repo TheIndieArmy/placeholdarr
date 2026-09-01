@@ -13,7 +13,20 @@ CANONICAL_EVENT_ALIASES: dict[str, tuple[str, ...]] = {
     "episode_file_deleted": ("episodefiledelete",),
     "movie_deleted": ("moviedelete",),
     "series_deleted": ("seriesdelete",),
-    "playback_start": ("playback.start", "playbackstart"),
+    "playback_start": ("playback.start", "playbackstart", "stream_started"),
+    "webhook_ignored": (
+        "stream_stopped",
+        "violation_detected",
+        "server_down",
+        "server_up",
+        "plugin_update_available",
+        "server_update_available",
+        "tracearr_update_available",
+        "media_added",
+        "media_upgraded",
+        "new_device",
+        "trust_score_changed",
+    ),
 }
 
 

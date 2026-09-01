@@ -1,0 +1,18 @@
+---
+description: Do not use em dashes in user-facing copy
+globs: CHANGELOG.md, frontend/src/**/*.{tsx,ts}, services/whats_new.py, services/app_config.py, frontend/src/webhookConfig.ts
+alwaysApply: true
+---
+
+# No em dashes in user-facing copy
+
+Do not use the em dash character (`—`, U+2014) in text users read: UI strings, What's New notices, settings descriptions, webhook setup copy, CHANGELOG bullets, PR/release notes, and commit messages.
+
+Use instead:
+- A period and a new sentence
+- A semicolon
+- A colon before a list or explanation
+- Parentheses for short asides
+- A hyphen only inside compound words (e.g. `pre-1.0`), not as punctuation between clauses
+
+The bare `—` placeholder for empty table cells in the UI is fine when it marks missing data, not prose.

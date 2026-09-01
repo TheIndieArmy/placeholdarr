@@ -7,6 +7,32 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.22] - 2026-08-31
+
+### Summary
+
+- **Tracearr playback**: Accept Tracearr JSON webhooks (`instance=tracearr`) for stream start on Plex, Jellyfin, and Emby.
+- **Per-player playback notifier**: Each media player chooses Tautulli/native webhook or Tracearr.
+- **Playback setup modal**: Media cards open a chooser plus setup steps (Settings and onboarding).
+- **Tracearr Automations setup**: Instructions use Manage → Automations → Start from scratch, When “A stream is first seen”, Then Send Notification.
+- **Plex playback copy**: Playback needs Tautulli or Tracearr (not Tautulli only).
+
+### Added
+
+- **Tracearr playback ingest**: `POST /webhook?instance=tracearr` accepts Tracearr `stream_started` JSON (IDs + subtitle S/E) and drives placeholder search. Requires Tracearr v2.2.4+.
+- **Tracearr Automations setup**: Playback setup (Settings and onboarding): JSON destination, Start from scratch, When “A stream is first seen”, Then “Send Notification”.
+- **Tracearr setup intro**: One shared message (one webhook for every player); full steps on first Tracearr player, shortened path with expandable steps when Tracearr is already saved on any player.
+- **Per-player playback notifier**: Settings keys `PLEX_PLAYBACK_NOTIFIER`, `JELLYFIN_PLAYBACK_NOTIFIER`, and `EMBY_PLAYBACK_NOTIFIER` (defaults keep Tautulli/native).
+- **Playback setup modal**: Per-player native vs Tracearr chooser with shared Tracearr URL instructions.
+
+### Changed
+
+- **Plex media card copy**: Playback needs Tautulli or Tracearr; card action is Playback setup (not Webhook URL).
+- **Security webhook destinations**: Lists Tracearr once when any player uses it; native URLs only for players on native/Tautulli.
+- **Playback setup modal**: Save is disabled when the selected notifier already matches settings; Close dismisses without saving.
+- **Media Integrations cards**: Remove connection asks for confirmation before clearing URL and credentials (Settings and onboarding).
+- **Playback notifier gating**: When a player is set to Tracearr, leftover Tautulli/native webhooks for that player are ignored.
+
 ## [0.9.21] - 2026-08-31
 
 ### Summary
@@ -25,7 +51,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Detail API**: Movie and series detail payloads add ratings_display, actors, display_status, paths, episode_stats, season fields, per-instance monitored, and collection_members (DB siblings).
 - **Collection strip**: Movie detail shows franchise members from the library plus TMDB-only titles when a Collection Sources key is set (downloaded / placeholder / missing / not in library).
 - **Collection strip links**: Library siblings open their movie detail pages; titles not in the catalog open TMDB.
-- **Detail ratings**: Scores sit in a mini-card row with IMDb / TMDB / RT / Metacritic / Trakt icons; TMDB/Trakt/IMDB values round to one decimal; Rotten Tomatoes label shortens to RT.
+- **Detail ratings**: Scores sit in a mini-card row with IMDb / TMDB / Rotten Tomatoes / Metacritic / Trakt icons; TMDB/Trakt/IMDB values round to one decimal.
 - **Library sort (Movies)**: **Year (newest/oldest)** matches *arr-style year + title ordering; **Theatrical**, **Digital**, and **Physical** release date sorts.
 - **Library sort (TV)**: **Premiere** and **Last aired** (episodes on or before today) newest/oldest options.
 

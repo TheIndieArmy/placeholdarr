@@ -90,6 +90,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_label="Open Movies",
         cta_path="/library",
     ),
+    WhatsNewNotice(
+        id="tracearr-playback-0-9-22",
+        since_version="0.9.22",
+        title="Tracearr playback support",
+        body=(
+            "Placeholdarr can now hear playback from Tracearr on Plex, Jellyfin, and Emby (Tracearr v2.2.4 or newer). "
+            "Each media player chooses its own notifier: Tautulli or Tracearr for Plex, native webhook "
+            "or Tracearr for Jellyfin and Emby. Tracearr uses one JSON webhook URL for every player. "
+            "Open Playback setup on a media card in Settings → Media Integrations to choose Tracearr "
+            "and follow the setup steps (or select Tracearr and Save if Tracearr is already configured). "
+            "When a player is set to Tracearr, leftover Tautulli or native webhooks for that player are ignored."
+        ),
+        cta_label="Open Media Integrations",
+        cta_path="/settings/media-integrations",
+        requires_ack=True,
+    ),
 )
 
 
