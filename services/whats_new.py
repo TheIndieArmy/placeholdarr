@@ -98,6 +98,8 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
             "Placeholdarr can now hear playback from Tracearr on Plex, Jellyfin, and Emby (Tracearr v2.2.4 or newer). "
             "Each media player chooses its own notifier: Tautulli or Tracearr for Plex, native webhook "
             "or Tracearr for Jellyfin and Emby. Tracearr uses one JSON webhook URL for every player. "
+            "On Jellyfin and Emby, Tracearr SSE on the media server is required so short placeholder plays are not missed between poll cycles. "
+            "Combined with Tracearr, Emby users hear playback without Emby Premiere, which native Emby webhooks require. "
             "Open Playback setup on a media card in Settings → Media Integrations to choose Tracearr "
             "and follow the setup steps (or select Tracearr and Save if Tracearr is already configured). "
             "When a player is set to Tracearr, leftover Tautulli or native webhooks for that player are ignored."

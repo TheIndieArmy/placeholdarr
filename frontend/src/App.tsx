@@ -8208,22 +8208,38 @@ function SetupOptionLabel(props: { children: ReactNode }) {
   );
 }
 
-function TracearrSetupIntro(props: { cardTitle: string; selectionMatchesSaved: boolean }) {
+function TracearrSetupIntro(props: {
+  cardId: MediaCardId;
+  cardTitle: string;
+  selectionMatchesSaved: boolean;
+  needsSsePlugin: boolean;
+}) {
   return (
-    <p className="text-[16px] text-slate-300">
-      Tracearr uses one webhook for every media player in Placeholdarr (Tracearr v2.2.4 or newer). In Tracearr, your stream automation should apply to every server you use, not one server only.
-      {props.selectionMatchesSaved
-        ? ` Tracearr is saved for ${props.cardTitle}.`
-        : " If you already added this webhook URL and automation in Tracearr, select Tracearr and click Save. If you have not set up Tracearr yet, follow the steps below."}
-    </p>
+    <div className="space-y-2 text-[16px] text-slate-300">
+      <p>
+        Tracearr uses one webhook for every media player in Placeholdarr (Tracearr v2.2.4 or newer). On stream automations, keep
+        <SetupOptionLabel>Who this applies to</SetupOptionLabel>
+        on
+        <SetupOptionLabel>Everyone</SetupOptionLabel>
+        so every server is covered.
+        {props.selectionMatchesSaved
+          ? ` Tracearr is saved for ${props.cardTitle}.`
+          : " If you already added this webhook URL and automation in Tracearr, select Tracearr and click Save. If you have not set up Tracearr yet, follow the steps below."}
+      </p>
+      {props.needsSsePlugin ? (
+        <p>
+          Tracearr SSE on {props.cardTitle} is required. Without it, Tracearr polls for sessions and can miss short placeholder plays that finish between polls.
+          {props.cardId === "emby"
+            ? " Combined with Tracearr, Emby users hear playback without Emby Premiere, which native Emby webhooks require."
+            : null}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
 function TracearrAutomationStepsList(props: {
-  cardTitle: string;
   tracearrWebhookUrl: string;
-  selectionMatchesSaved: boolean;
-  includePlaceholdarrStep: boolean;
   webhookInSteps: boolean;
 }) {
   return (
@@ -8231,7 +8247,9 @@ function TracearrAutomationStepsList(props: {
       <li>
         In Tracearr, open Settings → Notifications and add a
         <SetupOptionLabel>JSON webhook</SetupOptionLabel>
-        destination.
+        destination
+        {props.webhookInSteps ? ", then paste the Webhook URL from the next step" : " using the Webhook URL above"}
+        .
       </li>
       {props.webhookInSteps ? (
         <li>
@@ -8240,7 +8258,7 @@ function TracearrAutomationStepsList(props: {
         </li>
       ) : null}
       <li>
-        Open Manage → Automations → New automation, then choose
+        Open Automations → New automation, then choose
         <SetupOptionLabel>Start from scratch</SetupOptionLabel>
         (build it step by step).
       </li>
@@ -8249,7 +8267,11 @@ function TracearrAutomationStepsList(props: {
         <SetupOptionLabel>When…</SetupOptionLabel>
         , choose
         <SetupOptionLabel>A stream is first seen</SetupOptionLabel>
-        . Do not use A stream starts. Leave
+        . Leave
+        <SetupOptionLabel>Who this applies to</SetupOptionLabel>
+        on
+        <SetupOptionLabel>Everyone</SetupOptionLabel>
+        . Leave
         <SetupOptionLabel>And only if…</SetupOptionLabel>
         empty.
       </li>
@@ -8258,15 +8280,8 @@ function TracearrAutomationStepsList(props: {
         <SetupOptionLabel>Then do…</SetupOptionLabel>
         , add
         <SetupOptionLabel>Send Notification</SetupOptionLabel>
-        and pick that Placeholdarr destination. In the automation scope, apply to every server you use, not one server only. Save and leave the automation active.
+        and pick the Placeholdarr destination from step 1. Save and leave the automation active.
       </li>
-      {props.includePlaceholdarrStep ? (
-        <li>
-          {props.selectionMatchesSaved
-            ? `Tracearr is saved for ${props.cardTitle} playback.`
-            : `Keep Tracearr selected and click Save so Placeholdarr listens for ${props.cardTitle} playback.`}
-        </li>
-      ) : null}
     </ol>
   );
 }
@@ -8334,6 +8349,7 @@ function PlaybackWebhookSetupModal(props: {
   const svcMeta = PLAYBACK_WEBHOOK_SERVICES.services.find((s) => s.id === nativeServiceId);
   const nativeName = svcMeta?.name ?? nativeServiceId;
   const tracearrAlreadyInUse = anyPlayerHasSavedTracearrNotifier(props.values);
+  const needsTracearrSsePlugin = props.cardId === "jellyfin" || props.cardId === "emby";
   const nativeOptionValue = props.cardId === "plex" ? "tautulli" : "native";
   const nativeOptionLabel =
     props.cardId === "plex" ? "Tautulli" : props.cardId === "jellyfin" ? "Jellyfin webhook" : "Emby webhook";
@@ -8396,7 +8412,11 @@ function PlaybackWebhookSetupModal(props: {
             <span>
               <span className="block text-[15px] font-semibold text-white">Tracearr</span>
               <span className="block text-[13px] text-slate-400">
-                Tracearr monitors {cardTitle} and notifies Placeholdarr via an Automations → Send Notification webhook (one URL for every player on Tracearr).
+                {props.cardId === "plex"
+                  ? "Tracearr monitors Plex and notifies Placeholdarr via an Automations → Send Notification webhook (one URL for every player on Tracearr)."
+                  : props.cardId === "emby"
+                    ? "Tracearr monitors Emby via Automations. Tracearr SSE on Emby is required. Combined with Tracearr, Emby users hear playback without Emby Premiere."
+                    : `Tracearr monitors ${cardTitle} via Automations. Tracearr SSE on ${cardTitle} is required so short placeholder plays are not missed between poll cycles.`}
               </span>
             </span>
           </label>
@@ -8405,7 +8425,12 @@ function PlaybackWebhookSetupModal(props: {
         {useTracearr ? (
           tracearrAlreadyInUse ? (
             <div className="space-y-3">
-              <TracearrSetupIntro cardTitle={cardTitle} selectionMatchesSaved={selectionMatchesSaved} />
+              <TracearrSetupIntro
+                cardId={props.cardId}
+                cardTitle={cardTitle}
+                selectionMatchesSaved={selectionMatchesSaved}
+                needsSsePlugin={needsTracearrSsePlugin}
+              />
               <div>
                 <div className="text-[12px] font-headline uppercase tracking-wider text-slate-500">Webhook URL</div>
                 <MaskedWebhookUrlField url={tracearrWebhookUrl} ariaLabel="Copy Tracearr webhook URL" />
@@ -8419,22 +8444,21 @@ function PlaybackWebhookSetupModal(props: {
               </button>
               {showFullTracearrSteps ? (
                 <TracearrAutomationStepsList
-                  cardTitle={cardTitle}
                   tracearrWebhookUrl={tracearrWebhookUrl}
-                  selectionMatchesSaved={selectionMatchesSaved}
-                  includePlaceholdarrStep={!selectionMatchesSaved}
                   webhookInSteps={false}
                 />
               ) : null}
             </div>
           ) : (
             <div className="space-y-3">
-              <TracearrSetupIntro cardTitle={cardTitle} selectionMatchesSaved={selectionMatchesSaved} />
-              <TracearrAutomationStepsList
+              <TracearrSetupIntro
+                cardId={props.cardId}
                 cardTitle={cardTitle}
-                tracearrWebhookUrl={tracearrWebhookUrl}
                 selectionMatchesSaved={selectionMatchesSaved}
-                includePlaceholdarrStep={true}
+                needsSsePlugin={needsTracearrSsePlugin}
+              />
+              <TracearrAutomationStepsList
+                tracearrWebhookUrl={tracearrWebhookUrl}
                 webhookInSteps={true}
               />
             </div>

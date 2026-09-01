@@ -13,8 +13,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Tracearr playback**: Accept Tracearr JSON webhooks (`instance=tracearr`) for stream start on Plex, Jellyfin, and Emby.
 - **Per-player playback notifier**: Each media player chooses Tautulli/native webhook or Tracearr.
+- **Tracearr on Emby**: Combined with Tracearr, Emby users hear playback without Emby Premiere (native Emby webhooks require Premiere).
+- **Tracearr Jellyfin/Emby SSE**: Tracearr SSE on the media server is required so short placeholder plays are not missed between poll cycles.
 - **Playback setup modal**: Media cards open a chooser plus setup steps (Settings and onboarding).
-- **Tracearr Automations setup**: Instructions use Manage → Automations → Start from scratch, When “A stream is first seen”, Then Send Notification.
+- **Tracearr Automations setup**: Instructions use Automations → Start from scratch, When “A stream is first seen”, Then Send Notification.
 - **Plex playback copy**: Playback needs Tautulli or Tracearr (not Tautulli only).
 
 ### Added
@@ -32,6 +34,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Playback setup modal**: Save is disabled when the selected notifier already matches settings; Close dismisses without saving.
 - **Media Integrations cards**: Remove connection asks for confirmation before clearing URL and credentials (Settings and onboarding).
 - **Playback notifier gating**: When a player is set to Tracearr, leftover Tautulli/native webhooks for that player are ignored.
+- **Tracearr setup (Jellyfin/Emby)**: Copy states Tracearr SSE on the media server is required.
+- **Tracearr setup (Emby)**: Copy notes combined with Tracearr, Emby users hear playback without Emby Premiere.
+- **Tracearr webhook notes**: Document Jellyfin/Emby SSE requirement and Emby without Premiere.
 
 ## [0.9.21] - 2026-08-31
 
