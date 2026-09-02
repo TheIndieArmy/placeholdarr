@@ -7,6 +7,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Playback future-episode suppress**: "Do not search future episodes on playback" now skips any episode whose air date is still in the future, instead of only episodes beyond the calendar lookahead window.
+
 ## [0.9.22] - 2026-08-31
 
 ### Summary
