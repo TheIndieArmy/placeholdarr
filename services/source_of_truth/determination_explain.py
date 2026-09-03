@@ -107,11 +107,11 @@ def _explain_deciding_step_key(
     pinned = bool(getattr(entity, "force_placeholder", False))
     blocked = bool(getattr(entity, "block_placeholder", False))
     if pinned and (has_file or is_deleted) and final == DETERMINATION_NOT_NEEDED:
-        return "force_placeholder"
+        return "placeholder_policy"
     if blocked and (has_file or is_deleted) and final == DETERMINATION_NOT_NEEDED:
-        return "block_placeholder"
+        return "placeholder_policy"
     if blocked and final in (DETERMINATION_NOT_NEEDED, DETERMINATION_OBSOLETE):
-        return "block_placeholder"
+        return "placeholder_policy"
     return _deciding_step_key(steps, final)
 
 
@@ -309,57 +309,7 @@ def _apply_modifier_step(
     return _step(key, label, "pass", detail="Did not change the outcome.")
 
 
-def _block_placeholder_step(
-    *,
-    entity,
-    before: str,
-    after: str,
-    has_file: bool,
-    is_deleted: bool,
-    has_placeholder: bool,
-) -> dict[str, Any]:
-    blocked = bool(getattr(entity, "block_placeholder", False))
-    if not blocked:
-        return _step(
-            "block_placeholder",
-            "Never placeholder",
-            "skip",
-            detail="Never is off.",
-        )
-    if has_file or is_deleted:
-        return _step(
-            "block_placeholder",
-            "Never placeholder",
-            "applied",
-            detail=(
-                "Never is set on this title. A real file is on disk or the title was removed, "
-                "so placeholders are not created or removed."
-            ),
-            outcome=before,
-        )
-    if before != after:
-        detail = (
-            f"Never set determination to {_format_determination_label(after)}."
-            if after != DETERMINATION_OBSOLETE
-            else "Never marks the existing placeholder obsolete so reconcile can remove it."
-        )
-        return _step(
-            "block_placeholder",
-            "Never placeholder",
-            "applied",
-            detail=detail,
-            outcome=after,
-        )
-    return _step(
-        "block_placeholder",
-        "Never placeholder",
-        "pass",
-        detail="Never is on; placeholders are already blocked for this title.",
-        outcome=after,
-    )
-
-
-def _force_placeholder_step(
+def _placeholder_policy_step(
     *,
     entity,
     before: str,
@@ -368,46 +318,81 @@ def _force_placeholder_step(
     is_deleted: bool,
     sibling_would_suppress: bool,
 ) -> dict[str, Any]:
-    forced = bool(getattr(entity, "force_placeholder", False))
-    if not forced:
+    """One Why? step for the Auto / Never / Pinned chip (not two flag rows)."""
+    from services.source_of_truth.placeholder_policy import policy_from_entity
+
+    policy = policy_from_entity(entity)
+    if policy == "auto":
         return _step(
-            "force_placeholder",
-            "Placeholder pin",
+            "placeholder_policy",
+            "Placeholder policy",
             "skip",
-            detail="Pin is off (Auto).",
+            detail="Policy is Auto: follow Placeholdarr settings.",
+        )
+    if policy == "never":
+        if has_file or is_deleted:
+            return _step(
+                "placeholder_policy",
+                "Placeholder policy",
+                "applied",
+                detail=(
+                    "Policy is Never. A real file is on disk or the title was removed, "
+                    "so placeholders are not created or removed."
+                ),
+                outcome=before,
+            )
+        if before != after:
+            detail = (
+                f"Policy is Never. Set determination to {_format_determination_label(after)}."
+                if after != DETERMINATION_OBSOLETE
+                else "Policy is Never. Marks the existing placeholder obsolete so it can be removed."
+            )
+            return _step(
+                "placeholder_policy",
+                "Placeholder policy",
+                "applied",
+                detail=detail,
+                outcome=after,
+            )
+        return _step(
+            "placeholder_policy",
+            "Placeholder policy",
+            "pass",
+            detail="Policy is Never. Placeholders are already blocked for this title.",
+            outcome=after,
         )
     if has_file or is_deleted:
         return _step(
-            "force_placeholder",
-            "Placeholder pin",
+            "placeholder_policy",
+            "Placeholder policy",
             "applied",
             detail=_pin_blocked_by_file_detail(is_deleted),
             outcome=before,
         )
     if sibling_would_suppress and not bool(getattr(entity, "force_placeholder_despite_sibling", False)):
         return _step(
-            "force_placeholder",
-            "Placeholder pin",
+            "placeholder_policy",
+            "Placeholder policy",
             "skip",
             detail=(
-                "Pin is set, but shared-instance sibling has a file and "
-                "override sibling suppression is off."
+                "Policy is Pinned, but a shared-instance sibling has a file and "
+                "Shared Placeholder Cleanup is on."
             ),
             outcome=before,
         )
     if before != after:
         return _step(
-            "force_placeholder",
-            "Placeholder pin",
+            "placeholder_policy",
+            "Placeholder policy",
             "applied",
-            detail=f"Pin set determination to {_format_determination_label(after)}.",
+            detail=f"Policy is Pinned. Set determination to {_format_determination_label(after)}.",
             outcome=after,
         )
     return _step(
-        "force_placeholder",
-        "Placeholder pin",
+        "placeholder_policy",
+        "Placeholder policy",
         "pass",
-        detail="Pin is on; determination already needed a placeholder.",
+        detail="Policy is Pinned. Determination already needed a placeholder.",
         outcome=after,
     )
 
@@ -570,18 +555,6 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
         has_file=has_file,
         is_deleted=is_deleted,
     )
-    steps.append(
-        _block_placeholder_step(
-            entity=movie,
-            before=before,
-            after=base,
-            has_file=has_file,
-            is_deleted=is_deleted,
-            has_placeholder=has_placeholder,
-        )
-    )
-
-    before = base
     base = _apply_force_placeholder(
         base=base,
         entity=movie,
@@ -591,7 +564,7 @@ def explain_movie_determination(session, movie: Movie) -> dict[str, Any]:
         sibling_would_suppress=sibling_block,
     )
     steps.append(
-        _force_placeholder_step(
+        _placeholder_policy_step(
             entity=movie,
             before=before,
             after=base,
@@ -681,7 +654,7 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
                 "episode_specials",
                 "Specials policy",
                 "applied",
-                detail="Season 0 specials are excluded by settings, but pin is on.",
+                detail="Season 0 specials are excluded by settings, but policy is Pinned.",
             )
         )
     else:
@@ -861,18 +834,6 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         has_file=has_file,
         is_deleted=is_deleted,
     )
-    steps.append(
-        _block_placeholder_step(
-            entity=episode,
-            before=before,
-            after=base,
-            has_file=has_file,
-            is_deleted=is_deleted,
-            has_placeholder=has_placeholder,
-        )
-    )
-
-    before = base
     base = _apply_force_placeholder(
         base=base,
         entity=episode,
@@ -882,7 +843,7 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         sibling_would_suppress=sibling_block,
     )
     steps.append(
-        _force_placeholder_step(
+        _placeholder_policy_step(
             entity=episode,
             before=before,
             after=base,

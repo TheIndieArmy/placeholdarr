@@ -22,7 +22,6 @@ from services.source_of_truth.arr_api import (
     fetch_radarr_movie,
     fetch_sonarr_episodes,
     fetch_sonarr_series_item,
-    fetch_sonarr_episode_item,
 )
 from services.source_of_truth.arr_share_guard import expand_determination_entity_ids
 from services.source_of_truth.determiner import (
@@ -44,6 +43,7 @@ from services.source_of_truth.sync_runner import (
     _episode_fields,
     _movie_fields,
     _resolve_episode_file_payload,
+    _resolve_episode_sync_payload,
     _series_fields,
     _upsert_episode,
     _upsert_movie,
@@ -263,14 +263,10 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
                 stats["seasons_upserted"] += 1
 
             sonarr_ep_id = ep.get("id")
-            # Fetch detailed episode payload to capture thumbnails/runtime (bulk /episode omits them)
-            if sonarr_ep_id:
-                detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
-                if detailed_ep:
-                    ep = detailed_ep
+            ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
 
-            episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
-            ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
+            episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
+            ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
 
             overview = str(ep.get("overview") or "").strip()
             if overview and season_number not in season_overview_by_number:

@@ -574,6 +574,10 @@ class Series(Base):
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'))
     # Last time this season metadata was observed in Sonarr
     last_found_in_sonarr = Column(DateTime(timezone=True), nullable=True)
+    # Series gate: Never/Pinned lock season and episode chips without rewriting their flags
+    force_placeholder = Column(Boolean, nullable=False, default=False)
+    force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)
+    block_placeholder = Column(Boolean, nullable=False, default=False)
 
     subflows = relationship('SubFlow', back_populates='series')
     season = relationship('Season', back_populates='series')
@@ -627,6 +631,10 @@ class Season(Base):
     is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'), onupdate=func.now())
+    # Season stamp: Never/Pinned bulk-writes episode flags (when the series is Auto)
+    force_placeholder = Column(Boolean, nullable=False, default=False)
+    force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)
+    block_placeholder = Column(Boolean, nullable=False, default=False)
 
     subflows = relationship('SubFlow', back_populates='season')
     series = relationship('Series', back_populates='season')

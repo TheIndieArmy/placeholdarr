@@ -29,6 +29,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy.orm.attributes import flag_modified
+
 from core.config import settings
 from core.logger import logger, start_verbose_stall_heartbeat
 from services.media_servers.refresh import (
@@ -57,6 +59,29 @@ KIND_DELAYED_FINAL = "delayed_final"
 # we don't loop forever on a configuration issue.
 _MAX_REENQUEUE_ATTEMPTS = 5
 
+# Path-batch refresh kinds that should merge into one pending job instead of fanning out.
+_COALESCE_KINDS = frozenset({KIND_DELAYED_FINAL, KIND_OVERLAP_PATH_BATCH})
+
+
+def _coalesce_group_id(kind: str) -> str:
+    return f"media_refresh:{kind}"
+
+
+def _merge_path_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    for key in ("created_paths", "delete_paths"):
+        old_paths = merged.get(key) or []
+        new_paths = incoming.get(key) or []
+        if not isinstance(old_paths, list):
+            old_paths = list(old_paths) if old_paths else []
+        if not isinstance(new_paths, list):
+            new_paths = list(new_paths) if new_paths else []
+        merged[key] = sorted(set(str(p) for p in old_paths if p) | set(str(p) for p in new_paths if p))
+    for flag in ("has_movies", "has_episodes", "include_plex", "include_jellyfin", "include_emby"):
+        merged[flag] = bool(merged.get(flag)) or bool(incoming.get(flag))
+    merged["kind"] = str(incoming.get("kind") or existing.get("kind") or "")
+    return merged
+
 
 def use_job_driven_refresh() -> bool:
     return bool(getattr(settings, "USE_JOB_DRIVEN_REFRESH", True))
@@ -70,11 +95,16 @@ def enqueue_media_refresh_job(
     delay_seconds: float = 0.0,
     group_id: str | None = None,
     max_attempts: int = 5,
+    coalesce: bool | None = None,
 ) -> Job:
     """Add a media_refresh Job to the session. Caller is responsible for committing.
 
     Mirrors the contract of `threading.Timer(delay_seconds, fn).start()` — the
     callers pass the same delay (5, 20) currently in use.
+
+    When ``coalesce`` is true (default for delayed_final and overlap_path_batch),
+    an existing PENDING job with the same group_id has paths merged and run_after
+    pushed later so one refresh covers the combined path set.
     """
     job_payload: dict[str, Any] = {"kind": str(kind)}
     if payload:
@@ -86,13 +116,47 @@ def enqueue_media_refresh_job(
     from services.source_of_truth.job_priority import default_priority_for
 
     run_after = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(delay_seconds)))
+    should_coalesce = coalesce if coalesce is not None else kind in _COALESCE_KINDS
+    resolved_group_id = group_id
+    if should_coalesce:
+        resolved_group_id = group_id or _coalesce_group_id(kind)
+        existing = (
+            session.query(Job)
+            .filter(
+                Job.job_type == MEDIA_REFRESH_JOB_TYPE,
+                Job.status == "PENDING",
+                Job.group_id == resolved_group_id,
+            )
+            .order_by(Job.id.desc())
+            .first()
+        )
+        if existing is not None:
+            old_payload = dict(existing.payload or {})
+            if str(old_payload.get("kind") or "") != str(kind):
+                old_payload = {}
+            merged_payload = _merge_path_payload(old_payload, job_payload)
+            existing.payload = merged_payload
+            flag_modified(existing, "payload")
+            prev_run_after = existing.run_after
+            if prev_run_after is None or prev_run_after < run_after:
+                existing.run_after = run_after
+            existing.updated_at = datetime.now(timezone.utc)
+            session.add(existing)
+            logger.info(
+                f"media_refresh coalesced kind={kind} group_id={resolved_group_id} "
+                f"created_paths={len(merged_payload.get('created_paths') or [])} "
+                f"delete_paths={len(merged_payload.get('delete_paths') or [])}",
+                extra={"emoji_type": "info"},
+            )
+            return existing
+
     job = Job(
         job_type=MEDIA_REFRESH_JOB_TYPE,
         payload=job_payload,
         status="PENDING",
         run_after=run_after,
         max_attempts=int(max_attempts),
-        group_id=group_id,
+        group_id=resolved_group_id,
         priority=default_priority_for(MEDIA_REFRESH_JOB_TYPE),
     )
     session.add(job)

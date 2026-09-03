@@ -9,8 +9,16 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Changed
 
+- **ARR HTTP cache**: Cap size with LRU eviction (512 entries); phase logs report entry count.
+- **Determination pass**: Episode full scan runs in 2000-row chunks with commit/expunge; progress logs rows/sec.
+- **Placeholder reconcile**: Stream active placeholder rows; chunk movie/episode link updates.
+- **Placeholder reconcile cursor**: Validate pass uses ID-chunked queries instead of server-side cursors so mid-pass commits are safe.
+- **Sonarr episode sync**: Bulk `/episode?seriesId=` requests use `includeEpisodeFile` and `includeImages` (one call per series); per-id GET only when still art is missing.
+- **media_refresh coalesce**: Merge pending delayed_final and overlap_path_batch jobs into one path batch.
+- **Phase metric logs**: RSS, ARR cache size, elapsed_s, and rows/sec at phase start/end.
 - **Lookahead Season mode copy**: Settings and onboarding now say the next season is monitored and searched when you play the last episode of a season.
-- **Determination explain**: When a title is pinned but a real file is on disk, summary and the pin step explain that calendar, monitored, and sibling rules would be overridden, but no placeholder is needed.
+- **Determination explain**: When a title is pinned but a real file is on disk, summary and the policy step explain that calendar, monitored, and sibling rules would be overridden, but no placeholder is needed.
+- **Determination explain (policy)**: Why? uses one Placeholder policy step (Auto / Never / Pinned) instead of separate Never and Pin rows.
 - **Placeholder policy cycle**: Movie meta strip and episode rows use Auto / Never / Pinned; save after a short pause; sync immediately; no confirm modals.
 - **Placeholder policy feedback**: Episodes show Creating… / Removing… on the status chip; movies show the same text beside the pin.
 - **Pinned / Never apply**: Create or remove the placeholder immediately from the stated policy (no full Arr reconcile). Auto still runs a full title sync.

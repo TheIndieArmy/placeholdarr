@@ -19,6 +19,7 @@ from services.source_of_truth.arr_api import (
     fetch_sonarr_series_item,
     fetch_sonarr_episode_item,
 )
+from services.source_of_truth.phase_metrics import log_phase_boundary
 
 
 def _extract_year(value, fallback: int = 0) -> int:
@@ -157,6 +158,24 @@ def _resolve_episode_file_payload(entry: Dict, base_url: str, api_key: str) -> D
         if isinstance(fetched, dict):
             return fetched
     return ep_file if isinstance(ep_file, dict) else {}
+
+
+def _resolve_episode_sync_payload(ep: Dict, base_url: str, api_key: str) -> Dict:
+    """Use bulk /episode rows from fetch_sonarr_episodes (includeImages + includeEpisodeFile).
+
+    Per-id GET is a last resort when still art is missing (older Sonarr or cache miss).
+    Episode file paths are resolved in _resolve_episode_file_payload (embedded object or /episodefile).
+    """
+    if not isinstance(ep, dict):
+        return ep
+    if _extract_image_url(ep, ('screenshot', 'still', 'cover')):
+        return ep
+    sonarr_ep_id = ep.get('id')
+    if sonarr_ep_id:
+        detailed = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
+        if isinstance(detailed, dict):
+            return detailed
+    return ep
 
 
 def _derive_movie_arr_status(entry: Dict) -> str | None:
@@ -693,14 +712,11 @@ def run_full_sync(
                     series_title = str(s_fields.get('title') or series_entry.get('title') or 'series')
                     if total_episodes_in_series > 0:
                         logger.info(
-                            f"Enriching {total_episodes_in_series} episodes for '{series_title}'...",
+                            f"Syncing {total_episodes_in_series} episodes for '{series_title}'...",
                             extra={'emoji_type': 'info'},
                         )
                     for ep in episodes:
-                        sonarr_ep_id = ep.get('id')
-                        # Fetch detailed episode payload to capture thumbnails and extended metadata (episodes in bulk omit images)
-                        detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key) if sonarr_ep_id else None
-                        ep_effective = detailed_ep if detailed_ep else ep
+                        ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
                         episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
                         prepared_episodes.append((ep, ep_effective, episode_file))
 
@@ -811,6 +827,17 @@ def run_full_sync(
 
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         stats['duration_seconds'] = round(elapsed, 2)
+        log_phase_boundary(
+            "arr_full_sync",
+            event="end",
+            elapsed_s=elapsed,
+            rows=int(stats.get("episodes_seen") or 0) + int(stats.get("movies_seen") or 0),
+            extra={
+                "instance_key": str(instance_key or ""),
+                "episodes_seen": int(stats.get("episodes_seen") or 0),
+                "movies_seen": int(stats.get("movies_seen") or 0),
+            },
+        )
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
         # If the user saved Status Message changes with "Next full sync", materialize them
         # now so existing placeholders pick up the new templates.
@@ -1055,10 +1082,7 @@ def sync_sonarr_series_specials_season0_backfill(
                     stats["seasons_created"] += 1
 
                 sonarr_ep_id = ep.get("id")
-                detailed_ep = (
-                    fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key) if sonarr_ep_id else None
-                )
-                ep_effective = detailed_ep if detailed_ep else ep
+                ep_effective = _resolve_episode_sync_payload(ep, base_url, api_key)
 
                 episode_file = _resolve_episode_file_payload(ep_effective, base_url, api_key)
                 ep_fields = _episode_fields(series_row, season_row, ep_effective, episode_file)
@@ -1276,12 +1300,9 @@ def sync_sonarr_series_by_ids(
                 if season_created:
                     stats['seasons_created'] += 1
 
-                # Fetch detailed episode payload to capture thumbnails/meta (bulk /episode omits them)
+                # Use bulk row when sufficient; detail GET only for missing episodeFile embed.
                 sonarr_ep_id = ep.get('id')
-                if sonarr_ep_id:
-                    detailed_ep = fetch_sonarr_episode_item(int(sonarr_ep_id), url=base_url, api_key=api_key)
-                    if detailed_ep:
-                        ep = detailed_ep
+                ep = _resolve_episode_sync_payload(ep, base_url, api_key)
 
                 episode_file = _resolve_episode_file_payload(ep, base_url, api_key)
                 ep_fields = _episode_fields(series_row, season_row, ep, episode_file)
