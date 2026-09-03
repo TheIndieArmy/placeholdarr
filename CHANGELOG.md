@@ -22,7 +22,8 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Placeholder policy cycle**: Movie meta strip and episode rows use Auto / Never / Pinned; save after a short pause; sync immediately; no confirm modals.
 - **Placeholder policy feedback**: Episodes show Creating… / Removing… on the status chip; movies show the same text beside the pin.
 - **Pinned / Never apply**: Create or remove the placeholder immediately from the stated policy (no full Arr reconcile). Auto still runs a full title sync.
-- **Placeholder policy chip**: Stays clickable during apply so the latest cycle wins.
+- **Pinned placeholder status**: Pinned titles show Coming Soon countdowns outside the calendar window; missing dates show TBD/TBA (e.g. Theatrical TBD).
+- **Pinned status refresh**: Saving pin on an existing placeholder updates status immediately; calendar phase includes pinned rows for daily countdown updates.
 
 ### Fixed
 

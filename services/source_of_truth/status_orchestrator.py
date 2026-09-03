@@ -24,6 +24,11 @@ from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from services.source_of_truth.calendar_phase import (
+    _compute_calendar_decision,
+    _placeholder_force_pinned,
+    _preferred_movie_release_date,
+)
 from services.source_of_truth.status_intent import StatusIntent, StatusSource, DisplayStatus
 from services.postgres.models import Placeholder, Movie, Series, Season, Episode, EventLog
 from services.postgres.db import get_session
@@ -116,28 +121,27 @@ class StatusOrchestrator:
 
         This keeps event-driven materialization aligned with calendar-phase logic so
         newly created future items are not stuck as REQUEST until a later calendar pass.
+        Pinned placeholders bypass the calendar lookahead window and show countdown
+        or TBD/TBA labels like in-window calendar sync items.
         """
-        lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
+        snap_lookahead = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
         placeholders_enabled = bool(settings.coming_soon_placeholders_enabled)
         countdown_enabled = bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True))
         now_date = datetime.now(timezone.utc).date()
+        force_pinned = _placeholder_force_pinned(session, placeholder)
 
         media_type = None
         target_date = None
         has_file = False
+        release_type = None
+        release_type_preferred = False
 
         if getattr(placeholder, "movie_id", None):
             movie = session.get(Movie, int(placeholder.movie_id))
             if movie:
                 media_type = "movie"
                 has_file = bool(getattr(movie, "has_file", False))
-                preferred = str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas").strip()
-                release_map = {
-                    "inCinemas": "theater_release_date",
-                    "digitalRelease": "digital_release_date",
-                    "physicalRelease": "physical_release_date",
-                }
-                target_date = getattr(movie, release_map.get(preferred, "theater_release_date"), None)
+                target_date, release_type, release_type_preferred = _preferred_movie_release_date(movie)
 
         elif getattr(placeholder, "episode_id", None):
             episode = session.get(Episode, int(placeholder.episode_id))
@@ -153,93 +157,36 @@ class StatusOrchestrator:
                 {"event_type": "creation", "reason": "unlinked_placeholder"},
             )
 
-        if has_file:
-            return (
-                DisplayStatus.AVAILABLE.value,
-                "Media file is available",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": None},
-            )
-
-        if not target_date:
-            return (
-                DisplayStatus.REQUEST.value,
-                "No release date available",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": None},
-            )
-
-        # Ensure target_date is a date object (not datetime) for safe subtraction
-        if hasattr(target_date, "date") and not isinstance(target_date, date):
+        if target_date is not None and hasattr(target_date, "date") and not isinstance(target_date, date):
             target_date = target_date.date()
 
-        days_until = (target_date - now_date).days
+        decision = _compute_calendar_decision(
+            target_date=target_date,
+            has_file=has_file,
+            media_type=media_type,
+            lookahead_days=snap_lookahead,
+            countdown_enabled=countdown_enabled,
+            placeholders_enabled=placeholders_enabled,
+            now_date=now_date,
+            release_type=release_type,
+            release_type_preferred=release_type_preferred,
+            force_pinned=force_pinned,
+        )
         logger.debug(
             f"Computing initial creation status for Placeholder[{placeholder.id}]: "
-            f"target_date={target_date} ({type(target_date)}), "
-            f"now_date={now_date} ({type(now_date)}), "
-            f"days_until={days_until}, "
-            f"lookahead_days={lookahead_days}, "
-            f"placeholders_enabled={placeholders_enabled}"
-        )
-        if not placeholders_enabled:
-            return (
-                DisplayStatus.REQUEST.value,
-                "Calendar placeholders disabled",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
-            )
-
-        if lookahead_days == 0:
-            return (
-                DisplayStatus.REQUEST.value,
-                "Calendar lookahead disabled",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
-            )
-
-        if days_until < 0:
-            return (
-                DisplayStatus.REQUEST.value,
-                "Release date passed; waiting for import",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
-            )
-
-        if lookahead_days > 0 and days_until > lookahead_days:
-            return (
-                DisplayStatus.REQUEST.value,
-                f"Outside lookahead window ({lookahead_days} days)",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
-            )
-
-        if not countdown_enabled:
-            label = "Airing soon" if media_type == "episode" else "Coming Soon"
-            return (
-                DisplayStatus.COMING_SOON.value,
-                label,
-                {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
-            )
-
-        if days_until == 0:
-            return (
-                DisplayStatus.COMING_SOON_TODAY.value,
-                "Airing today" if media_type == "episode" else "Coming Soon (Today)",
-                {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
-            )
-        if days_until <= 6:
-            status = DisplayStatus.COMING_SOON_1.value
-        elif days_until <= 13:
-            status = DisplayStatus.COMING_SOON_7.value
-        elif days_until <= 29:
-            status = DisplayStatus.COMING_SOON_14.value
-        else:
-            status = DisplayStatus.COMING_SOON_30.value
-
-        reason = "Airing in 1 day" if media_type == "episode" and days_until == 1 else (
-            f"Airing in {days_until} days" if media_type == "episode" else (
-                "Coming Soon (1 day)" if days_until == 1 else f"Coming Soon ({days_until} days)"
-            )
+            f"target_date={target_date}, now_date={now_date}, "
+            f"days_until={decision.days_until}, force_pinned={force_pinned}, "
+            f"status={decision.status}, reason={decision.reason!r}"
         )
         return (
-            status,
-            reason,
-            {"event_type": "creation", "media_type": media_type, "days_until_release": days_until},
+            decision.status,
+            decision.reason,
+            {
+                "event_type": "creation",
+                "media_type": media_type,
+                "days_until_release": decision.days_until,
+                "force_pinned": force_pinned,
+            },
         )
     
     # =========================================================================

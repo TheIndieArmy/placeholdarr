@@ -515,6 +515,34 @@ def _build_registry() -> tuple[MessageKey, ...]:
             sample_context={},
         )
     )
+    keys.append(
+        MessageKey(
+            key="calendar.movie.tba",
+            label="Movie release date TBD (pinned)",
+            default="{ReleaseLabel} TBD",
+            group="Calendar Coming Soon",
+            subgroup="Movie",
+            tooltip=(
+                "Shown for pinned movies when the preferred release type has no date yet. "
+                "{ReleaseLabel} resolves to Theatrical / Digital / Physical from your movie date type setting."
+            ),
+            allowed_tokens=cal_movie_tokens,
+            sample_context={"ReleaseLabel": "Theatrical"},
+            alt_defaults={"no_release_type": "TBD"},
+        )
+    )
+    keys.append(
+        MessageKey(
+            key="calendar.tv.tba",
+            label="TV air date TBD (pinned)",
+            default="TBA",
+            group="Calendar Coming Soon",
+            subgroup="TV",
+            tooltip="Shown for pinned episodes when Sonarr has no air date yet.",
+            allowed_tokens=cal_tv_tokens,
+            sample_context={},
+        )
+    )
 
     # --- Queue monitor ---
     queue_tokens = ("Sep", "Progress") + _MEDIA_TOKENS + _EPISODE_TOKENS

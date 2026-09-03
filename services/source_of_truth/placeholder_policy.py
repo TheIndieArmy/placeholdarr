@@ -152,6 +152,10 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
             }
         session.commit()
         session.refresh(movie)
+        from services.source_of_truth.calendar_phase import refresh_pinned_entity_calendar_status
+
+        refresh_pinned_entity_calendar_status(session, movie)
+        session.commit()
         return {
             "ok": True,
             "action": out.get("action") or "noop",
@@ -207,6 +211,10 @@ def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
             }
         session.commit()
         session.refresh(episode)
+        from services.source_of_truth.calendar_phase import refresh_pinned_entity_calendar_status
+
+        refresh_pinned_entity_calendar_status(session, episode)
+        session.commit()
         return {
             "ok": True,
             "action": out.get("action") or "noop",

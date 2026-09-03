@@ -15,7 +15,6 @@ from services.placeholders import ensure_placeholder_file, resolve_calendar_vari
 from services.postgres.db import get_session
 from services.postgres.models import Episode, Movie, Placeholder
 from services.source_of_truth.status_intent import DisplayStatus, StatusIntent, StatusSource
-from services.source_of_truth.status_orchestrator import StatusOrchestrator
 
 
 @dataclass
@@ -62,6 +61,15 @@ def _preferred_movie_release_date(movie: Movie) -> tuple[date | None, str | None
     return (None, preferred, True)
 
 
+def _pinned_tba_reason(*, media_type: str, release_type: str | None) -> str:
+    """User-facing TBD/TBA label for pinned placeholders with no release/air date."""
+    if media_type == "movie":
+        release_label = _release_type_label(release_type) if release_type else ""
+        cal_ctx = {"ReleaseLabel": release_label} if release_label else {}
+        return render_message("calendar.movie.tba", cal_ctx)
+    return render_message("calendar.tv.tba", {})
+
+
 def _compute_calendar_decision(
     *,
     target_date: date | None,
@@ -73,6 +81,7 @@ def _compute_calendar_decision(
     now_date: date,
     release_type: str | None = None,
     release_type_preferred: bool = False,
+    force_pinned: bool = False,
 ) -> CalendarDecision:
     release_label = _release_type_label(release_type) if media_type == "movie" else ""
 
@@ -90,6 +99,14 @@ def _compute_calendar_decision(
         )
 
     if not target_date:
+        if force_pinned:
+            return CalendarDecision(
+                status=DisplayStatus.COMING_SOON.value,
+                reason=_pinned_tba_reason(media_type=media_type, release_type=release_type),
+                days_until=None,
+                release_type=release_type,
+                release_type_preferred=release_type_preferred,
+            )
         # TBA is only used in infinite lookahead mode; strict lookahead treats unknown as out-of-window.
         reason = "No release date available"
         if media_type == "movie" and release_type:
@@ -107,7 +124,7 @@ def _compute_calendar_decision(
 
     days_until = (target_date - now_date).days
 
-    if not placeholders_enabled:
+    if not placeholders_enabled and not force_pinned:
         return CalendarDecision(
             status=DisplayStatus.REQUEST.value,
             reason="Calendar placeholders disabled",
@@ -116,7 +133,7 @@ def _compute_calendar_decision(
             release_type_preferred=release_type_preferred,
         )
 
-    if lookahead_disabled:
+    if lookahead_disabled and not force_pinned:
         return CalendarDecision(
             status=DisplayStatus.REQUEST.value,
             reason="Calendar lookahead disabled",
@@ -138,7 +155,12 @@ def _compute_calendar_decision(
             release_type_preferred=release_type_preferred,
         )
 
-    if not infinite_lookahead and lookahead_days > 0 and days_until > lookahead_days:
+    if (
+        not force_pinned
+        and not infinite_lookahead
+        and lookahead_days > 0
+        and days_until > lookahead_days
+    ):
         return CalendarDecision(
             status=DisplayStatus.REQUEST.value,
             reason=f"Outside lookahead window ({lookahead_days} days)",
@@ -263,6 +285,157 @@ def _dummy_variant_for_status(status: str | None) -> str:
     return "coming_soon" if _is_coming_soon_status(status) else "request"
 
 
+def _calendar_settings_snapshot(*, now_date: date | None = None) -> dict[str, Any]:
+    """Shared calendar settings used by status, calendar phase, and materializer."""
+    resolved_now = now_date or datetime.now(timezone.utc).date()
+    return {
+        "lookahead_days": int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30),
+        "placeholders_enabled": bool(settings.coming_soon_placeholders_enabled),
+        "countdown_enabled": bool(getattr(settings, "ENABLE_COMING_SOON_COUNTDOWN", True)),
+        "now_date": resolved_now,
+    }
+
+
+def _placeholder_force_pinned(session, placeholder: Placeholder) -> bool:
+    """True when the linked movie or episode has force_placeholder set."""
+    movie_id = getattr(placeholder, "movie_id", None)
+    if movie_id is not None:
+        movie = session.get(Movie, int(movie_id))
+        return bool(movie and getattr(movie, "force_placeholder", False))
+    episode_id = getattr(placeholder, "episode_id", None)
+    if episode_id is not None:
+        episode = session.get(Episode, int(episode_id))
+        return bool(episode and getattr(episode, "force_placeholder", False))
+    return False
+
+
+def compute_calendar_decision_for_movie(movie: Movie, *, now_date: date | None = None) -> CalendarDecision:
+    """Calendar status decision for a movie row (used by materializer dummy variant selection)."""
+    snap = _calendar_settings_snapshot(now_date=now_date)
+    target_date, release_type, is_preferred = _preferred_movie_release_date(movie)
+    return _compute_calendar_decision(
+        target_date=target_date,
+        has_file=bool(getattr(movie, "has_file", False)),
+        media_type="movie",
+        lookahead_days=snap["lookahead_days"],
+        countdown_enabled=snap["countdown_enabled"],
+        placeholders_enabled=snap["placeholders_enabled"],
+        now_date=snap["now_date"],
+        release_type=release_type,
+        release_type_preferred=is_preferred,
+        force_pinned=bool(getattr(movie, "force_placeholder", False)),
+    )
+
+
+def compute_calendar_decision_for_episode(episode: Episode, *, now_date: date | None = None) -> CalendarDecision:
+    """Calendar status decision for an episode row (used by materializer dummy variant selection)."""
+    snap = _calendar_settings_snapshot(now_date=now_date)
+    return _compute_calendar_decision(
+        target_date=getattr(episode, "air_date", None),
+        has_file=bool(getattr(episode, "has_file", False)),
+        media_type="episode",
+        lookahead_days=snap["lookahead_days"],
+        countdown_enabled=snap["countdown_enabled"],
+        placeholders_enabled=snap["placeholders_enabled"],
+        now_date=snap["now_date"],
+        release_type=None,
+        release_type_preferred=False,
+        force_pinned=bool(getattr(episode, "force_placeholder", False)),
+    )
+
+
+def compute_dummy_variant_for_movie(movie: Movie, *, now_date: date | None = None) -> str:
+    decision = compute_calendar_decision_for_movie(movie, now_date=now_date)
+    return _dummy_variant_for_status(decision.status)
+
+
+def compute_dummy_variant_for_episode(episode: Episode, *, now_date: date | None = None) -> str:
+    decision = compute_calendar_decision_for_episode(episode, now_date=now_date)
+    return _dummy_variant_for_status(decision.status)
+
+
+def refresh_placeholder_calendar_status(session, placeholder: Placeholder) -> bool:
+    """Recompute calendar status for one on-disk placeholder (e.g. after pin apply)."""
+    if not bool(getattr(placeholder, "has_placeholder", False)):
+        return False
+
+    media_type, target_date, has_file, release_type, release_type_preferred = _placeholder_target(
+        session, placeholder
+    )
+    if not media_type:
+        return False
+
+    snap = _calendar_settings_snapshot()
+    force_pinned = _placeholder_force_pinned(session, placeholder)
+    decision = _compute_calendar_decision(
+        target_date=target_date,
+        has_file=has_file,
+        media_type=media_type,
+        lookahead_days=snap["lookahead_days"],
+        countdown_enabled=snap["countdown_enabled"],
+        placeholders_enabled=snap["placeholders_enabled"],
+        now_date=snap["now_date"],
+        release_type=release_type,
+        release_type_preferred=release_type_preferred,
+        force_pinned=force_pinned,
+    )
+
+    current_status = str(getattr(placeholder, "display_status", "") or "")
+    current_reason = _normalize_reason(getattr(placeholder, "display_reason", None))
+    desired_reason = _normalize_reason(decision.reason)
+    if current_status == decision.status and current_reason == desired_reason:
+        return False
+
+    from services.source_of_truth.status_orchestrator import StatusOrchestrator
+
+    orchestrator = StatusOrchestrator(session=session)
+    intent = StatusIntent(
+        placeholder_id=int(placeholder.id),
+        new_status=decision.status,
+        reason=decision.reason,
+        source=StatusSource.CALENDAR_RELEASE_WINDOW,
+        trigger_nfo_refresh=True,
+        metadata={
+            "days_until_release": decision.days_until,
+            "media_type": media_type,
+            "target_date": str(target_date) if target_date else None,
+            "force_pinned": force_pinned,
+        },
+    )
+    orchestrator.apply_and_project_statuses([intent])
+
+    desired_variant = _dummy_variant_for_status(decision.status)
+    try:
+        _switch_placeholder_dummy_variant(
+            placeholder,
+            desired_variant,
+            _calendar_variant_settings_fingerprint(),
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Calendar variant switch failed placeholder_id={placeholder.id}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+    return True
+
+
+def refresh_pinned_entity_calendar_status(session, entity: Movie | Episode) -> bool:
+    """Refresh calendar status when a pinned title already has an on-disk placeholder."""
+    if not bool(getattr(entity, "force_placeholder", False)):
+        return False
+    if not bool(getattr(entity, "has_placeholder", False)):
+        return False
+    q = session.query(Placeholder).filter(Placeholder.has_placeholder == True)  # noqa: E712
+    if isinstance(entity, Movie):
+        q = q.filter(Placeholder.movie_id == int(entity.id))
+    else:
+        q = q.filter(Placeholder.episode_id == int(entity.id))
+    placeholder = q.order_by(Placeholder.id.desc()).first()
+    if not placeholder:
+        return False
+    return refresh_placeholder_calendar_status(session, placeholder)
+
+
 def _normalize_reason(value: str | None) -> str:
     return str(value or "").strip()
 
@@ -317,7 +490,7 @@ def _switch_placeholder_dummy_variant(
 
 
 def _query_placeholders_for_calendar_phase(session, win_start: date, win_end: date):
-    """Placeholders to evaluate: coming-soon rows, TBA (no date), or date in [win_start, win_end].
+    """Placeholders to evaluate: coming-soon rows, TBA (no date), date in window, or pinned.
 
     Skips rows with no movie/episode link (same as the per-row target resolver).
     """
@@ -336,6 +509,14 @@ def _query_placeholders_for_calendar_phase(session, win_start: date, win_end: da
             Episode.air_date.between(win_start, win_end),
         ),
     )
+    pinned_movie = and_(
+        Placeholder.movie_id.isnot(None),
+        Movie.force_placeholder == True,  # noqa: E712
+    )
+    pinned_episode = and_(
+        Placeholder.episode_id.isnot(None),
+        Episode.force_placeholder == True,  # noqa: E712
+    )
     return (
         session.query(Placeholder)
         .outerjoin(Movie, Placeholder.movie_id == Movie.id)
@@ -347,6 +528,8 @@ def _query_placeholders_for_calendar_phase(session, win_start: date, win_end: da
                 Placeholder.display_status.in_(_COMING_SOON_STATUS_VALUES),
                 in_window_movie,
                 in_window_episode,
+                pinned_movie,
+                pinned_episode,
             )
         )
     )
@@ -521,6 +704,7 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
                 if not media_type:
                     continue
 
+                force_pinned = _placeholder_force_pinned(session, placeholder)
                 decision = _compute_calendar_decision(
                     target_date=target_date,
                     has_file=has_file,
@@ -531,6 +715,7 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
                     now_date=now_date,
                     release_type=release_type,
                     release_type_preferred=release_type_preferred,
+                    force_pinned=force_pinned,
                 )
 
                 desired_variant = _dummy_variant_for_status(decision.status)
@@ -573,6 +758,8 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
 
             chunk_applied = 0
             if chunk_intents:
+                from services.source_of_truth.status_orchestrator import StatusOrchestrator
+
                 orchestrator = StatusOrchestrator(session=session)
                 chunk_applied = int(orchestrator.apply_and_project_statuses(chunk_intents) or 0)
 
