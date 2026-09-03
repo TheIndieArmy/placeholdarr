@@ -5,6 +5,8 @@ import { DetailFactCard, DetailFactRow } from "./DetailFactCard";
 import { DetailHero } from "./DetailHero";
 import { DetailMetaStrip } from "./DetailMetaStrip";
 import { MovieFileStateSection } from "./FileStateSections";
+import { DeterminationWhyLink } from "./DeterminationWhyLink";
+import { PlaceholderPolicyCycle } from "./PlaceholderPolicyCycle";
 import {
   formatDeterminationLabel,
   formatDisplayStatusLabel,
@@ -19,6 +21,7 @@ export function MovieDetailView(props: {
   brand: Brand;
   themeMode: ThemeMode;
   accent: { hex: string; icon: string; label: string };
+  onPolicyApplied?: () => void;
 }) {
   const payload = props.payload;
   const isLight = props.themeMode === "light";
@@ -54,6 +57,21 @@ export function MovieDetailView(props: {
           tmdbid={payload.tmdbid}
           accentHex={props.accent.hex}
           themeMode={props.themeMode}
+          policyControl={
+            <PlaceholderPolicyCycle
+              mediaType="movie"
+              entityId={payload.id}
+              placeholderPolicy={payload.placeholder_policy}
+              forcePlaceholder={payload.force_placeholder}
+              blockPlaceholder={payload.block_placeholder}
+              hasPlaceholder={payload.has_placeholder}
+              hasFile={payload.has_file}
+              accentHex={props.accent.hex}
+              themeMode={props.themeMode}
+              showInlineProgress
+              onApplied={props.onPolicyApplied}
+            />
+          }
         />
 
         <MovieFileStateSection
@@ -117,7 +135,19 @@ export function MovieDetailView(props: {
                 <DetailFactRow label="Radarr ID" value={payload.radarr_id != null ? String(payload.radarr_id) : null} themeMode={props.themeMode} />
               </DetailFactCard>
               <DetailFactCard title="Placeholdarr" themeMode={props.themeMode}>
-                <DetailFactRow label="Determination" value={formatDeterminationLabel(payload.determination)} themeMode={props.themeMode} />
+                <DetailFactRow
+                  label="Determination"
+                  value={formatDeterminationLabel(payload.determination)}
+                  themeMode={props.themeMode}
+                  action={
+                    <DeterminationWhyLink
+                      mediaType="movie"
+                      entityId={payload.id}
+                      determination={payload.determination}
+                      themeMode={props.themeMode}
+                    />
+                  }
+                />
                 <DetailFactRow label="Status" value={formatDisplayStatusLabel(payload.display_status)} themeMode={props.themeMode} />
                 <DetailFactRow label="Placeholder path" value={payload.placeholder_filepath} themeMode={props.themeMode} />
                 <DetailFactRow label="Last search" value={payload.last_search} themeMode={props.themeMode} />

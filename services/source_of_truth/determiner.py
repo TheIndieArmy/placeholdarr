@@ -229,6 +229,60 @@ def _apply_sibling_placeholder_suppression(
     return DETERMINATION_NOT_NEEDED
 
 
+def _sibling_would_suppress_creation(
+    *,
+    arr_type: str,
+    has_file: bool,
+    is_deleted: bool,
+    sibling_has_file: bool,
+) -> bool:
+    """True when shared-instance mode would suppress placeholder creation for this row."""
+    if not shared_placeholder_suppresses_creation(arr_type):
+        return False
+    if has_file or is_deleted or not sibling_has_file:
+        return False
+    return True
+
+
+def _apply_block_placeholder(
+    *,
+    base: str,
+    entity,
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+) -> str:
+    """User never pin: block placeholder unless file exists or title removed."""
+    if not bool(getattr(entity, "block_placeholder", False)):
+        return base
+    if has_file or is_deleted:
+        return base
+    if has_placeholder:
+        return DETERMINATION_OBSOLETE
+    return DETERMINATION_NOT_NEEDED
+
+
+def _apply_force_placeholder(
+    *,
+    base: str,
+    entity,
+    has_placeholder: bool,
+    has_file: bool,
+    is_deleted: bool,
+    sibling_would_suppress: bool,
+) -> str:
+    """User pin: force needs/exists unless file exists, deleted, or sibling blocks without override."""
+    if not bool(getattr(entity, "force_placeholder", False)):
+        return base
+    if has_file or is_deleted:
+        return base
+    if sibling_would_suppress and not bool(getattr(entity, "force_placeholder_despite_sibling", False)):
+        return base
+    if has_placeholder:
+        return DETERMINATION_EXISTS
+    return DETERMINATION_NEEDS
+
+
 def _resolve_movie_determination(
     session,
     movie: Movie,
@@ -263,13 +317,34 @@ def _resolve_movie_determination(
         is_deleted=is_deleted,
         movie_id=int(movie.id) if getattr(movie, "id", None) is not None else None,
     )
+    sibling_has_file = sibling_movie_has_file(session, movie)
     base = _apply_sibling_placeholder_suppression(
         arr_type="radarr",
         base=base,
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
-        sibling_has_file=sibling_movie_has_file(session, movie),
+        sibling_has_file=sibling_has_file,
+    )
+    base = _apply_block_placeholder(
+        base=base,
+        entity=movie,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+    )
+    base = _apply_force_placeholder(
+        base=base,
+        entity=movie,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_would_suppress=_sibling_would_suppress_creation(
+            arr_type="radarr",
+            has_file=has_file,
+            is_deleted=is_deleted,
+            sibling_has_file=sibling_has_file,
+        ),
     )
     return base, False
 
@@ -329,13 +404,34 @@ def _resolve_episode_determination(
         episode_id=int(episode.id) if getattr(episode, "id", None) is not None else None,
         series_monitored=series_monitored,
     )
+    sibling_has_file = sibling_episode_has_file(session, episode)
     base = _apply_sibling_placeholder_suppression(
         arr_type="sonarr",
         base=base,
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
-        sibling_has_file=sibling_episode_has_file(session, episode),
+        sibling_has_file=sibling_has_file,
+    )
+    base = _apply_block_placeholder(
+        base=base,
+        entity=episode,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+    )
+    base = _apply_force_placeholder(
+        base=base,
+        entity=episode,
+        has_placeholder=has_placeholder,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_would_suppress=_sibling_would_suppress_creation(
+            arr_type="sonarr",
+            has_file=has_file,
+            is_deleted=is_deleted,
+            sibling_has_file=sibling_has_file,
+        ),
     )
     return base, False
 
@@ -895,8 +991,9 @@ def run_determination_pass() -> dict:
             episode_meta = episode_order_meta_by_id.get(int(episode.id)) if getattr(episode, "id", None) is not None else None
             season_number = int(episode_meta[1]) if episode_meta is not None else -1
             # Treat season 0 episodes as not_needed when specials are disabled
+            # (unless the user forced a placeholder for this episode).
             if not include_specials:
-                if season_number == 0:
+                if season_number == 0 and not bool(getattr(episode, "force_placeholder", False)):
                     value = DETERMINATION_NOT_NEEDED
                     stats[value] += 1
                     if getattr(episode, 'determination', None) != value:
@@ -1190,7 +1287,7 @@ def run_determination_for_entities_in_session(
         episode_meta = episode_order_meta_by_id.get(int(episode.id)) if getattr(episode, "id", None) is not None else None
         season_number = int(episode_meta[1]) if episode_meta is not None else -1
         if not include_specials:
-            if season_number == 0:
+            if season_number == 0 and not bool(getattr(episode, "force_placeholder", False)):
                 value = DETERMINATION_NOT_NEEDED
                 stats[value] += 1
                 if getattr(episode, 'determination', None) != value:

@@ -658,6 +658,8 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
 
             movie.has_placeholder = False
             movie.placeholder_filepath = None
+            movie.determination = DETERMINATION_NOT_NEEDED
+            movie.determination_updated_at = func.now()
             movie.updated_at = func.now()
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
             session.add(movie)
@@ -782,6 +784,8 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
 
             episode.has_placeholder = False
             episode.placeholder_filepath = None
+            episode.determination = DETERMINATION_NOT_NEEDED
+            episode.determination_updated_at = func.now()
             episode.updated_at = func.now()
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
             session.add(episode)

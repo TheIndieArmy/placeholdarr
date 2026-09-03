@@ -88,6 +88,12 @@ class Movie(Base):
     # persisted canonical determination (one of: obsolete_placeholder, not_needed, placeholder_exists, needs_placeholder)
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # User pin: create placeholder despite calendar/monitored/specials policy (ignored when has_file/deleted)
+    force_placeholder = Column(Boolean, nullable=False, default=False)
+    # When shared-instance sibling has a file, also override sibling suppression
+    force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)
+    # User block: never create a placeholder (ignored when has_file/deleted)
+    block_placeholder = Column(Boolean, nullable=False, default=False)
     # Creation timestamp (DB authoritative). Set once at INSERT and do not change.
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     # Last time this row was updated by the application/DB
@@ -683,6 +689,12 @@ class Episode(Base):
     is_deleted = Column(Boolean, default=False)
     determination = Column(String, nullable=True)
     determination_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # User pin: create placeholder despite calendar/monitored/specials policy (ignored when has_file/deleted)
+    force_placeholder = Column(Boolean, nullable=False, default=False)
+    # When shared-instance sibling has a file, also override sibling suppression
+    force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)
+    # User block: never create a placeholder (ignored when has_file/deleted)
+    block_placeholder = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     updated_at = Column(DateTime(timezone=True), server_default=text('now()'), onupdate=func.now())
     # Last time this episode was observed in Sonarr

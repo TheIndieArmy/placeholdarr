@@ -7,6 +7,26 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lookahead Season mode copy**: Settings and onboarding now say the next season is monitored and searched when you play the last episode of a season.
+- **Determination explain**: When a title is pinned but a real file is on disk, summary and the pin step explain that calendar, monitored, and sibling rules would be overridden, but no placeholder is needed.
+- **Placeholder policy cycle**: Movie meta strip and episode rows use Auto / Never / Pinned; save after a short pause; sync immediately; no confirm modals.
+- **Placeholder policy feedback**: Episodes show Creating… / Removing… on the status chip; movies show the same text beside the pin.
+- **Pinned / Never apply**: Create or remove the placeholder immediately from the stated policy (no full Arr reconcile). Auto still runs a full title sync.
+- **Placeholder policy chip**: Stays clickable during apply so the latest cycle wins.
+
+### Fixed
+
+- **Obsolete settle**: After a placeholder is removed, determination settles to `not needed` instead of staying on `obsolete placeholder`.
+
+### Added
+
+- **Never placeholder**: Block placeholder creation per title; existing placeholders can be removed on sync.
+- **Pinned placeholder**: Pin movies and episodes to create a placeholder despite calendar/monitored/specials rules. Does not create a placeholder when a real file exists.
+- **Pinned vs shared instances**: Multi-instance sibling behavior follows Shared Placeholder Cleanup settings (no per-title override in the UI).
+- **Determination explain**: "Why?" on movie detail and episode rows opens a step-by-step audit of placeholder determination.
+
 ### Fixed
 
 - **Playback future-episode suppress**: "Do not search future episodes on playback" now skips any episode whose air date is still in the future, instead of only episodes beyond the calendar lookahead window.

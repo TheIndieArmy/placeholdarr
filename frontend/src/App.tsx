@@ -5248,8 +5248,8 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
         </li>
         <li>
           <span className="font-medium text-slate-200">Season</span>
-          {" — "}Only the played episode&apos;s season is monitored and searched. When you finish a season, Placeholdarr
-          automatically monitors and searches the next one.
+          {" — "}Only the played episode&apos;s season is monitored and searched. When you play the last episode of a
+          season, Placeholdarr automatically monitors and searches the next one.
         </li>
         <li>
           <span className="font-medium text-slate-200">Episode</span>

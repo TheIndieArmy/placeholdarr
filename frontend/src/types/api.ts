@@ -285,6 +285,10 @@ export interface MovieDetailResponse {
   /** Placeholder display status (REQUEST, SEARCHING, …) — not legacy movie.status. */
   display_status?: string | null;
   determination?: string | null;
+  placeholder_policy?: "auto" | "never" | "pinned";
+  force_placeholder?: boolean;
+  block_placeholder?: boolean;
+  force_placeholder_despite_sibling?: boolean;
   has_file: boolean;
   has_placeholder: boolean;
   placeholder_filepath?: string | null;
@@ -314,6 +318,10 @@ export interface SeriesEpisodeDetail {
   has_file: boolean;
   has_placeholder: boolean;
   determination?: string | null;
+  placeholder_policy?: "auto" | "never" | "pinned";
+  force_placeholder?: boolean;
+  block_placeholder?: boolean;
+  force_placeholder_despite_sibling?: boolean;
   status?: string | null;
   display_status?: string | null;
   sonarr_quality?: string | null;
@@ -835,6 +843,72 @@ export interface CollectionBuilderMeta {
   /** Tags from configured *arr instances for arr_tag sources. */
   arr_tags?: { instance_key: string; instance_label: string; tag_id: number; label: string }[];
   tautulli_configured?: boolean;
+}
+
+export interface DeterminationExplainStep {
+  key: string;
+  label: string;
+  status: "pass" | "fail" | "skip" | "applied";
+  detail?: string | null;
+  outcome?: string | null;
+}
+
+export interface DeterminationExplainResponse {
+  ok: true;
+  media_type: "movie" | "episode";
+  title: string;
+  determination: string;
+  deciding_step_key: string;
+  summary?: string | null;
+  steps: DeterminationExplainStep[];
+}
+
+export interface ForcePlaceholderPreviewResponse {
+  ok: true;
+  media_type: "movie" | "episode";
+  title: string;
+  placeholder_policy?: "auto" | "never" | "pinned";
+  force_placeholder: boolean;
+  block_placeholder?: boolean;
+  force_placeholder_despite_sibling: boolean;
+  can_force: boolean;
+  block_message?: string | null;
+  has_file: boolean;
+  has_placeholder?: boolean;
+  is_deleted: boolean;
+  blocking_reasons: string[];
+  sibling_has_file: boolean;
+  shared_suppression_enabled: boolean;
+  sibling_option_available: boolean;
+  sibling_would_suppress: boolean;
+}
+
+export type PlaceholderPolicyPreviewResponse = ForcePlaceholderPreviewResponse;
+
+export interface PlaceholderPolicySetResponse {
+  ok: boolean;
+  placeholder_policy?: "auto" | "never" | "pinned";
+  force_placeholder?: boolean;
+  block_placeholder?: boolean;
+  force_placeholder_despite_sibling?: boolean;
+  has_file?: boolean;
+  has_placeholder?: boolean;
+  action?: string | null;
+  job_id?: number | null;
+  followup_job_id?: number | null;
+  step_label?: string;
+  reused?: boolean;
+  message?: string;
+}
+
+export interface ForcePlaceholderSetResponse {
+  ok: boolean;
+  force_placeholder?: boolean;
+  force_placeholder_despite_sibling?: boolean;
+  job_id?: number;
+  step_label?: string;
+  reused?: boolean;
+  message?: string;
 }
 
 export type CollectionExplainStatus = "pass" | "fail" | "skip";
