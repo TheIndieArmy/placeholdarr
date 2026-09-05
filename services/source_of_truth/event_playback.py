@@ -4,7 +4,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, func, or_, text
+from sqlalchemy import and_, or_, text
 
 from core.config import settings
 from core.logger import logger
@@ -907,6 +907,58 @@ def _episode_lookahead() -> int:
         return 5
 
 
+def _forward_episode_window(
+    scoped_query,
+    *,
+    season_number: int,
+    episode_number: int,
+    lookahead: int,
+) -> list[Episode]:
+    """Next ``lookahead`` episodes in airing order from the played episode (may cross seasons)."""
+    return (
+        scoped_query
+        .filter(
+            or_(
+                Season.season_number > int(season_number),
+                and_(Season.season_number == int(season_number), Episode.episode_number >= int(episode_number)),
+            )
+        )
+        .order_by(Season.season_number.asc(), Episode.episode_number.asc())
+        .limit(int(lookahead))
+        .all()
+    )
+
+
+def _series_last_episode(scoped_query):
+    """Last episode Placeholdarr stores for the series (respects scoped_query specials filter)."""
+    return (
+        scoped_query
+        .order_by(Season.season_number.desc(), Episode.episode_number.desc())
+        .first()
+    )
+
+
+def _window_includes_later_season(window: list[Episode], season_number: int) -> bool:
+    return any(
+        int(getattr(getattr(ep, 'season', None), 'season_number', 0) or 0) > int(season_number)
+        for ep in window
+    )
+
+
+def _window_reaches_series_end(window: list[Episode], last_episode: Episode | None) -> bool:
+    if not window or not last_episode:
+        return False
+    final_window_episode = window[-1]
+    final_target_season = final_window_episode.season.season_number if final_window_episode.season else 0
+    final_target_episode = int(final_window_episode.episode_number or 0)
+    max_season = last_episode.season.season_number if last_episode.season else 0
+    max_episode = int(last_episode.episode_number or 0)
+    return bool(
+        final_target_season > max_season
+        or (final_target_season == max_season and final_target_episode >= max_episode)
+    )
+
+
 def _collect_episode_targets(session, series_row: Series, season_number: int | None, episode_number: int | None) -> tuple[list[Episode], dict[str, Any]]:
     mode = _play_mode()
     include_specials = bool(getattr(settings, 'INCLUDE_SPECIALS', False))
@@ -951,20 +1003,16 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
         )
         targets.extend(season_targets)
 
-        max_in_season = None
         if episode_number is not None:
-            max_in_season = (
-                session.query(Episode)
-                .join(Season, Episode.season_id == Season.id)
-                .filter(
-                    Season.series_id == series_row.id,
-                    Season.season_number == season_number,
-                    Episode.is_deleted == False,  # noqa: E712
-                )
-                .order_by(Episode.episode_number.desc())
-                .first()
+            window = _forward_episode_window(
+                scoped_query,
+                season_number=int(season_number),
+                episode_number=int(episode_number),
+                lookahead=lookahead,
             )
-            if max_in_season and int(episode_number) >= int(max_in_season.episode_number or 0):
+            metadata['window_size'] = len(window)
+
+            if _window_includes_later_season(window, int(season_number)):
                 next_targets = (
                     scoped_query
                     .filter(
@@ -977,20 +1025,10 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
                 targets.extend(next_targets)
                 metadata['season_boundary_next_included'] = True
 
-        # Match Episode-mode behavior: when the user reaches the end of the highest season Placeholdarr
-        # stores, mark the whole series monitored in Sonarr so newly-added future seasons/episodes are picked up.
-        max_season_q = session.query(func.max(Season.season_number)).filter(Season.series_id == series_row.id)
-        if not include_specials:
-            max_season_q = max_season_q.filter(Season.season_number > 0)
-        max_season_num = max_season_q.scalar()
-        if (
-            episode_number is not None
-            and max_in_season is not None
-            and max_season_num is not None
-            and int(season_number) == int(max_season_num)
-            and int(episode_number) >= int(max_in_season.episode_number or 0)
-        ):
-            metadata['reached_end'] = True
+            # Match Episode-mode behavior: when the lookahead window reaches the end of known
+            # episodes, mark the whole series monitored in Sonarr for newly-added seasons.
+            last_episode = _series_last_episode(scoped_query)
+            metadata['reached_end'] = _window_reaches_series_end(window, last_episode)
 
         metadata['scope'] = 'season'
         return targets, metadata
@@ -998,41 +1036,16 @@ def _collect_episode_targets(session, series_row: Series, season_number: int | N
     if episode_number is None:
         return [], {'mode': mode, 'reason': 'missing_episode_number'}
 
-    window = (
-        scoped_query
-        .filter(
-            or_(
-                Season.season_number > int(season_number),
-                and_(Season.season_number == int(season_number), Episode.episode_number >= int(episode_number)),
-            )
-        )
-        .order_by(Season.season_number.asc(), Episode.episode_number.asc())
-        .limit(int(lookahead))
-        .all()
+    window = _forward_episode_window(
+        scoped_query,
+        season_number=int(season_number),
+        episode_number=int(episode_number),
+        lookahead=lookahead,
     )
     targets.extend([ep for ep in window if not bool(getattr(ep, 'has_file', False))])
 
-    last_episode = (
-        session.query(Episode)
-        .join(Season, Episode.season_id == Season.id)
-        .filter(
-            Season.series_id == series_row.id,
-            Episode.is_deleted == False,  # noqa: E712
-            (Season.season_number > 0) if not include_specials else True,
-        )
-        .order_by(Season.season_number.desc(), Episode.episode_number.desc())
-        .first()
-    )
-    if window and last_episode:
-        final_window_episode = window[-1]
-        final_target_season = final_window_episode.season.season_number if final_window_episode.season else 0
-        final_target_episode = int(final_window_episode.episode_number or 0)
-        max_season = last_episode.season.season_number if last_episode.season else 0
-        max_episode = int(last_episode.episode_number or 0)
-        metadata['reached_end'] = bool(
-            final_target_season > max_season
-            or (final_target_season == max_season and final_target_episode >= max_episode)
-        )
+    last_episode = _series_last_episode(scoped_query)
+    metadata['reached_end'] = _window_reaches_series_end(window, last_episode)
     metadata['window_size'] = len(window)
     metadata['target_count'] = len(targets)
 

@@ -524,7 +524,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "Lookahead",
                 "label": "Lookahead range",
-                "description": "In Episode mode, how many upcoming episodes without files to include forward from the played episode.",
+                "description": "",
                 "type": "int",
                 "min": 1,
                 "restart_required": False,
