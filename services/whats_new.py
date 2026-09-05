@@ -108,6 +108,26 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/media-integrations",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="placeholder-policy-0-9-23",
+        since_version="0.9.23",
+        title="Pin to Always/Never placeholder; Season search uses Lookahead",
+        body=(
+            "Movies and episodes now support Auto, Never, and Pinned placeholder policy from library detail. "
+            "Pinned keeps a placeholder even when calendar or monitored rules would skip the title; "
+            "Never blocks creation and can remove an existing placeholder. "
+            "Changes apply immediately after you save (Creating… / Removing… feedback on the row). "
+            "Open Why? on any title for a step-by-step determination audit showing why it does or does not have a placeholder.\n\n"
+            "Pinned placeholders show Coming Soon countdowns outside the calendar window. "
+            "When the preferred release or air date is still unknown, status shows TBD/TBA "
+            "(for example, Theatrical TBD for movies). Calendar tasks keep countdown text updated.\n\n"
+            "Season search mode now uses Lookahead range too: the current season is always included, "
+            "and the next season is monitored and searched when its first episode enters your configured window."
+        ),
+        cta_label="Open Movies",
+        cta_path="/library",
+        requires_ack=True,
+    ),
 )
 
 

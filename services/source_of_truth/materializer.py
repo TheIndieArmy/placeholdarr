@@ -8,6 +8,10 @@ from typing import Any
 
 from sqlalchemy import func, or_
 
+from services.source_of_truth.calendar_phase import (
+    compute_dummy_variant_for_episode,
+    compute_dummy_variant_for_movie,
+)
 from core.config import settings
 from core.logger import logger, start_verbose_stall_heartbeat
 from services.media_servers.refresh import refresh_all_path_batches_with_section_fallback, refresh_selected_sections
@@ -232,40 +236,12 @@ def _target_refresh_section_ids(*, has_movies: bool, has_episodes: bool) -> list
 
 def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
     """Return 'coming_soon' or 'request' for dummy file selection at episode creation time."""
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-    if not settings.coming_soon_placeholders_enabled:
-        return "request"
-    if lookahead_days <= 0:
-        return "request"
-    air_date = getattr(episode, "air_date", None)
-    if not air_date:
-        return "request"
-    days_until = (air_date - datetime.now(timezone.utc).date()).days
-    if days_until < 0 or days_until > lookahead_days:
-        return "request"
-    return "coming_soon"
+    return compute_dummy_variant_for_episode(episode)
 
 
 def _compute_initial_dummy_variant_for_movie(movie: Movie) -> str:
     """Return 'coming_soon' or 'request' for dummy file selection at movie creation time."""
-    lookahead_days = int(getattr(settings, "CALENDAR_LOOKAHEAD_DAYS", 30) or 30)
-    if not settings.coming_soon_placeholders_enabled:
-        return "request"
-    if lookahead_days <= 0:
-        return "request"
-    preferred = str(getattr(settings, "PREFERRED_MOVIE_DATE_TYPE", "inCinemas") or "inCinemas").strip()
-    release_map = {
-        "inCinemas": "theater_release_date",
-        "digitalRelease": "digital_release_date",
-        "physicalRelease": "physical_release_date",
-    }
-    release_date = getattr(movie, release_map.get(preferred, "theater_release_date"), None)
-    if not release_date:
-        return "request"
-    days_until = (release_date - datetime.now(timezone.utc).date()).days
-    if days_until < 0 or days_until > lookahead_days:
-        return "request"
-    return "coming_soon"
+    return compute_dummy_variant_for_movie(movie)
 
 
 def _dummy_file_path_for_variant(variant: str) -> str:
@@ -658,6 +634,8 @@ def apply_movie_materialization(movie_id: int, session=None, activity_reason: st
 
             movie.has_placeholder = False
             movie.placeholder_filepath = None
+            movie.determination = DETERMINATION_NOT_NEEDED
+            movie.determination_updated_at = func.now()
             movie.updated_at = func.now()
             _sync_content_placeholder_status(session, movie_id=movie.id, episode_id=None)
             session.add(movie)
@@ -782,6 +760,8 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
 
             episode.has_placeholder = False
             episode.placeholder_filepath = None
+            episode.determination = DETERMINATION_NOT_NEEDED
+            episode.determination_updated_at = func.now()
             episode.updated_at = func.now()
             _sync_content_placeholder_status(session, movie_id=None, episode_id=episode.id)
             session.add(episode)

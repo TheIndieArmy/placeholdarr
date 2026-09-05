@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   getMovieDetail,
@@ -52,9 +52,8 @@ export function DetailRoutePage(props: {
     window.scrollTo(0, 0);
   }, [loading, props.scrollContainerRef]);
 
-  useEffect(() => {
-    let stopped = false;
-    async function load() {
+  const reloadDetail = useCallback(
+    async (opts?: { silent?: boolean }) => {
       if (!entityType || !itemId) return;
       const numericId = Number(itemId);
       if (!Number.isFinite(numericId) || numericId <= 0) {
@@ -63,43 +62,53 @@ export function DetailRoutePage(props: {
         setError("Invalid library item");
         return;
       }
-      setLoading(true);
+      if (!opts?.silent) {
+        setLoading(true);
+      }
       setError(null);
       try {
         if (entityType === "movie") {
           const result = await getMovieDetail(numericId);
-          if (result.ok && !stopped) {
+          if (result.ok) {
             setPayload(result);
-          } else if (!stopped && !result.ok) {
+          } else {
             const msg = (result as { message?: unknown }).message;
             setError(typeof msg === "string" && msg.trim() ? msg : "Movie not found");
-          } else if (!stopped) {
-            setError("Movie not found");
           }
         } else if (entityType === "series") {
           const result = await getSeriesDetail(numericId);
-          if (result.ok && result.type === "series" && !stopped) {
+          if (result.ok && result.type === "series") {
             setPayload(result);
-          } else if (!stopped && !result.ok) {
+          } else if (!result.ok) {
             const msg = (result as { message?: unknown }).message;
             setError(typeof msg === "string" && msg.trim() ? msg : "Series not found");
-          } else if (!stopped) {
+          } else {
             setError("Series not found");
           }
-        } else if (!stopped) {
+        } else {
           setError("Unsupported detail type");
         }
       } catch (err) {
-        if (!stopped) setError(err instanceof Error ? err.message : "Failed to load detail");
+        setError(err instanceof Error ? err.message : "Failed to load detail");
       } finally {
-        if (!stopped) setLoading(false);
+        if (!opts?.silent) {
+          setLoading(false);
+        }
       }
-    }
-    void load();
+    },
+    [entityType, itemId],
+  );
+
+  useEffect(() => {
+    let stopped = false;
+    void (async () => {
+      if (stopped) return;
+      await reloadDetail();
+    })();
     return () => {
       stopped = true;
     };
-  }, [entityType, itemId]);
+  }, [reloadDetail]);
 
   return (
     <div className={`min-h-screen ${isLight ? "bg-[#eef3f8]" : "bg-[#0f1419]"}`}>
@@ -150,6 +159,9 @@ export function DetailRoutePage(props: {
             brand={props.brand}
             themeMode={props.themeMode}
             accent={accent}
+            onPolicyApplied={() => {
+              void reloadDetail({ silent: true });
+            }}
           />
           <div className="px-6 md:px-10 lg:px-12 pb-10 -mt-2">
             <LibraryReconcileControl
@@ -166,6 +178,9 @@ export function DetailRoutePage(props: {
             brand={props.brand}
             themeMode={props.themeMode}
             accent={accent}
+            onPolicyApplied={() => {
+              void reloadDetail({ silent: true });
+            }}
           />
           <div className="px-6 md:px-10 lg:px-12 pb-10 -mt-2">
             <LibraryReconcileControl

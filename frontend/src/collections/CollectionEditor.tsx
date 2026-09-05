@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ThemeMode } from "../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../brandAccentUi";
+import { ExplainStatusIcon } from "../components/explain/ExplainStatusIcon";
 import {
   checkCollectionTitleConflicts,
   explainCollectionItem,
@@ -769,28 +770,6 @@ function ExplainTreeNodeView(props: { node: CollectionExplainNode }) {
         ))}
       </div>
     </div>
-  );
-}
-
-function ExplainStatusIcon(props: { status: "pass" | "fail" | "skip" }) {
-  if (props.status === "pass") {
-    return (
-      <span className="material-symbols-outlined text-emerald-400" style={{ fontSize: 16 }}>
-        check_circle
-      </span>
-    );
-  }
-  if (props.status === "fail") {
-    return (
-      <span className="material-symbols-outlined text-red-400" style={{ fontSize: 16 }}>
-        cancel
-      </span>
-    );
-  }
-  return (
-    <span className="material-symbols-outlined text-slate-600" style={{ fontSize: 16 }}>
-      radio_button_unchecked
-    </span>
   );
 }
 

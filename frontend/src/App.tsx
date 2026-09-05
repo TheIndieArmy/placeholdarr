@@ -5248,8 +5248,10 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
         </li>
         <li>
           <span className="font-medium text-slate-200">Season</span>
-          {" — "}Only the played episode&apos;s season is monitored and searched. When you finish a season, Placeholdarr
-          automatically monitors and searches the next one.
+          {" — "}Missing episodes in the played season are always monitored and searched. When the first episode of the
+          next season enters your configured{" "}
+          <span className="font-medium text-slate-200">Lookahead Range</span>, Placeholdarr monitors and searches that
+          next season too.
         </li>
         <li>
           <span className="font-medium text-slate-200">Episode</span>
@@ -5258,12 +5260,13 @@ function LookaheadSectionIntro(props: { variant: LookaheadIntroVariant; embedded
         </li>
       </ul>
       <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        Regardless of which mode you choose, Placeholdarr will monitor the full series once you&apos;re approaching the
-        end of available content, ensuring Sonarr can pick up new episodes as they air.
+        Regardless of which mode you choose, Placeholdarr will monitor the full series once your lookahead window reaches
+        the end of available content, ensuring Sonarr can pick up new episodes as they air.
       </p>
       <p className="ui-field-description mt-3 text-slate-400 leading-relaxed">
-        <span className="font-medium text-slate-200">Lookahead Range</span> sets how many episodes ahead of the one you
-        just watched Placeholdarr will monitor and search in Episode mode.
+        <span className="font-medium text-slate-200">Lookahead Range</span> applies to Episode and Season modes. In
+        Episode mode it sets how many episodes forward from the one you played are included. In Season mode it sets how
+        many episodes ahead before the next season is included.
       </p>
     </div>
   );
@@ -5396,6 +5399,32 @@ function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean 
         </div>
       </div>
     </details>
+  );
+}
+
+/** Lookahead range: copy lives here; `EPISODES_LOOKAHEAD.description` in app_config is intentionally empty. */
+function EpisodesLookaheadDescription(props: { spacing: "settings" | "wizard"; tvPlayMode: string }) {
+  const top = props.spacing === "settings" ? "mt-1" : "mb-2";
+  const mode = String(props.tvPlayMode ?? "episode").trim().toLowerCase();
+  if (mode === "season") {
+    return (
+      <p className={`ui-field-description leading-relaxed ${top}`}>
+        In Season mode, how many episodes ahead of the one you played before Placeholdarr monitors and searches the next
+        season. Missing episodes in the current season are always included.
+      </p>
+    );
+  }
+  if (mode === "series") {
+    return (
+      <p className={`ui-field-description leading-relaxed ${top}`}>
+        Lookahead range applies to Episode and Season search modes. Series mode monitors the full show.
+      </p>
+    );
+  }
+  return (
+    <p className={`ui-field-description leading-relaxed ${top}`}>
+      In Episode mode, how many upcoming episodes without files to include forward from the played episode.
+    </p>
   );
 }
 
@@ -5918,7 +5947,7 @@ function SettingsPanel(props: {
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
-    const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
+    const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
     const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
     const isNested = settingsFieldIsNested(field);
@@ -5947,6 +5976,8 @@ function SettingsPanel(props: {
                 <PlaceholderPosterOverlayDescription spacing="settings" />
               ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
                 <ComingSoonCountdownDescription spacing="settings" />
+              ) : field.key === "EPISODES_LOOKAHEAD" ? (
+                <EpisodesLookaheadDescription spacing="settings" tvPlayMode={tvPlayMode} />
               ) : field.description && !isPlexSectionIdField(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
@@ -9178,7 +9209,7 @@ function OnboardingWizard(props: {
     const statusUpdatesOff = String(props.values.PLACEHOLDER_STATUS_UPDATES ?? "").toUpperCase() === "OFF";
     const projectionFieldLocked = field.key === "PLACEHOLDER_STATUS_PROJECTION_MODE" && statusUpdatesOff;
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
-    const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode !== "episode";
+    const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
     const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
     const isNested = settingsFieldIsNested(field);
@@ -9198,6 +9229,8 @@ function OnboardingWizard(props: {
             <PlaceholderPosterOverlayDescription spacing="wizard" />
           ) : field.key === "ENABLE_COMING_SOON_COUNTDOWN" ? (
             <ComingSoonCountdownDescription spacing="wizard" />
+          ) : field.key === "EPISODES_LOOKAHEAD" ? (
+            <EpisodesLookaheadDescription spacing="wizard" tvPlayMode={tvPlayMode} />
           ) : field.description ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}

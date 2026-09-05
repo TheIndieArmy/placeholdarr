@@ -7,6 +7,49 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.23] - 2026-09-04
+
+### Summary
+
+- **Placeholder policy**: Auto, Never, and Pinned on movies and episodes; save applies immediately with Creating… / Removing… feedback.
+- **Determination explain**: Why? on movie detail and episode rows opens a step-by-step placeholder audit.
+- **Pinned Coming Soon**: Pinned titles show countdowns outside the calendar window; missing dates show TBD/TBA; calendar phase keeps days updated.
+- **Full sync performance**: Bounded ARR cache, chunked determination and reconcile, bulk Sonarr episode sync, and phase RSS/timing logs.
+- **Season mode lookahead**: Lookahead range triggers next-season monitor and search when the first next-season episode enters the window.
+- **Playback future episodes**: Suppress-on-playback skips any not-yet-aired episode, not only titles outside calendar lookahead.
+
+### Added
+
+- **Never placeholder**: Block placeholder creation per title; existing placeholders can be removed on sync.
+- **Pinned placeholder**: Pin movies and episodes to create a placeholder despite calendar/monitored/specials rules. Does not create a placeholder when a real file exists.
+- **Pinned vs shared instances**: Multi-instance sibling behavior follows Shared Placeholder Cleanup settings (no per-title override in the UI).
+- **Determination explain**: "Why?" on movie detail and episode rows opens a step-by-step audit of placeholder determination.
+- **What's new (0.9.23)**: Startup ack notice for placeholder policy, pinned Coming Soon/TBD, and Season mode lookahead.
+
+### Changed
+
+- **ARR HTTP cache**: Cap size with LRU eviction (512 entries); phase logs report entry count.
+- **Determination pass**: Episode full scan runs in 2000-row chunks with commit/expunge; progress logs rows/sec.
+- **Placeholder reconcile**: Stream active placeholder rows; chunk movie/episode link updates.
+- **Placeholder reconcile cursor**: Validate pass uses ID-chunked queries instead of server-side cursors so mid-pass commits are safe.
+- **Sonarr episode sync**: Bulk `/episode?seriesId=` requests use `includeEpisodeFile` and `includeImages` (one call per series); per-id GET only when still art is missing.
+- **media_refresh coalesce**: Merge pending delayed_final and overlap_path_batch jobs into one path batch.
+- **Phase metric logs**: RSS, ARR cache size, elapsed_s, and rows/sec at phase start/end.
+- **Season mode lookahead**: Lookahead range controls when the next season is monitored and searched; the current season is always included.
+- **Lookahead settings copy**: Settings and onboarding describe lookahead for Episode and Season modes.
+- **Determination explain**: When a title is pinned but a real file is on disk, summary and the policy step explain that calendar, monitored, and sibling rules would be overridden, but no placeholder is needed.
+- **Determination explain (policy)**: Why? uses one Placeholder policy step (Auto / Never / Pinned) instead of separate Never and Pin rows.
+- **Placeholder policy cycle**: Movie meta strip and episode rows use Auto / Never / Pinned; save after a short pause; sync immediately; no confirm modals.
+- **Placeholder policy feedback**: Episodes show Creating… / Removing… on the status chip; movies show the same text beside the pin.
+- **Pinned / Never apply**: Create or remove the placeholder immediately from the stated policy (no full Arr reconcile). Auto still runs a full title sync.
+- **Pinned placeholder status**: Pinned titles show Coming Soon countdowns outside the calendar window; missing dates show TBD/TBA (e.g. Theatrical TBD).
+- **Pinned status refresh**: Saving pin on an existing placeholder updates status immediately; calendar phase includes pinned rows for daily countdown updates.
+
+### Fixed
+
+- **Obsolete settle**: After a placeholder is removed, determination settles to `not needed` instead of staying on `obsolete placeholder`.
+- **Playback future-episode suppress**: "Do not search future episodes on playback" now skips any episode whose air date is still in the future, instead of only episodes beyond the calendar lookahead window.
+
 ## [0.9.22] - 2026-08-31
 
 ### Summary

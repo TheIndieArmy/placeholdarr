@@ -21,6 +21,7 @@ export function SeriesDetailView(props: {
   brand: Brand;
   themeMode: ThemeMode;
   accent: { hex: string; icon: string; label: string };
+  onPolicyApplied?: () => void;
 }) {
   const payload = props.payload;
   const isLight = props.themeMode === "light";
@@ -175,6 +176,8 @@ export function SeriesDetailView(props: {
                             key={ep.id}
                             episode={ep}
                             themeMode={props.themeMode}
+                            accentHex={props.accent.hex}
+                            onPolicyApplied={props.onPolicyApplied}
                             refreshControl={
                               <LibraryReconcileControl
                                 label="Refresh"

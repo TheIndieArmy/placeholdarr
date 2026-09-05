@@ -22,6 +22,7 @@ export function DetailFactRow(props: {
   value?: string | null;
   href?: string | null;
   themeMode: ThemeMode;
+  action?: ReactNode;
 }) {
   const isLight = props.themeMode === "light";
   const display = props.value?.trim() || "—";
@@ -32,18 +33,21 @@ export function DetailFactRow(props: {
       <span className="shrink-0 text-[12px] font-headline uppercase tracking-wider text-slate-500">
         {props.label}
       </span>
-      {props.href ? (
-        <a
-          href={props.href}
-          target="_blank"
-          rel="noreferrer"
-          className={`${valueClass} hover:underline`}
-        >
-          {display}
-        </a>
-      ) : (
-        <span className={valueClass}>{display}</span>
-      )}
+      <div className="flex items-start justify-end gap-2 min-w-0">
+        {props.href ? (
+          <a
+            href={props.href}
+            target="_blank"
+            rel="noreferrer"
+            className={`${valueClass} hover:underline`}
+          >
+            {display}
+          </a>
+        ) : (
+          <span className={valueClass}>{display}</span>
+        )}
+        {props.action}
+      </div>
     </div>
   );
 }

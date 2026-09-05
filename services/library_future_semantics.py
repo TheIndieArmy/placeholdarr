@@ -220,19 +220,18 @@ def episode_is_future_for_playback_search(
     series_max_known_order_within_horizon: tuple[int, int] | None,
     now_date: date | None = None,
 ) -> bool:
-    """True when a playback lookahead target should not be searched yet."""
+    """True when a playback lookahead target should not be searched yet.
+
+    Playback suppress treats "future" as not aired yet (air date after today), not the
+    calendar lookahead window used for library-grid Future rows.
+    """
     eff = now_date or datetime.now(timezone.utc).date()
-    lk = _lookahead_int()
     air_date = getattr(episode, "air_date", None)
 
     if air_date is not None:
-        if lk < 0:
-            return air_date > eff
-        days_until = (air_date - eff).days
-        if lk == 0:
-            return days_until > 0
-        return days_until > lk
+        return air_date > eff
 
+    lk = _lookahead_int()
     if not _placeholders_enabled() or lk < 0:
         return False
 

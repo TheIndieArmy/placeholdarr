@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+from collections import OrderedDict
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -15,8 +16,21 @@ from core.logger import logger
 
 _session = requests.Session()
 _cache_lock = threading.Lock()
-_cache = {}
+_cache: OrderedDict[str, dict] = OrderedDict()
 _DEFAULT_TTL_SECONDS = 120
+_CACHE_MAX_ENTRIES = 512
+
+
+def cache_stats() -> dict[str, int]:
+    """Return ARR HTTP cache size for phase metric logs."""
+    with _cache_lock:
+        return {"entries": len(_cache), "max_entries": _CACHE_MAX_ENTRIES}
+
+
+def clear_arr_cache() -> None:
+    """Drop all cached ARR responses (tests or manual reset)."""
+    with _cache_lock:
+        _cache.clear()
 # Bulk *arr reads (e.g. GET /api/v3/movie) can exceed 30s on large libraries over user-share I/O.
 ARR_HTTP_TIMEOUT_SECONDS = 120
 # Collections add: *arr often never finishes POST /movie/import (or /series/import)
@@ -37,13 +51,19 @@ def _cache_get(key: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS):
         if not rec:
             return None
         if (time.time() - rec['ts']) > ttl_seconds:
+            _cache.pop(key, None)
             return None
+        _cache.move_to_end(key)
         return rec['value']
 
 
 def _cache_set(key: str, value):
     with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
         _cache[key] = {'ts': time.time(), 'value': value}
+        while len(_cache) > _CACHE_MAX_ENTRIES:
+            _cache.popitem(last=False)
 
 
 def _build_endpoint(base_url: str, resource: str) -> str:
@@ -292,11 +312,18 @@ def fetch_sonarr_episodes(
         return []
 
     endpoint = _build_endpoint(url, 'episode')
-    base_params: Dict = {'apikey': api_key, 'seriesId': series_id}
+    # Sonarr defaults omit embedded episodeFile and images on list responses; single GET /episode/{id}
+    # always maps with includeEpisodeFile/includeImages true. Request both on bulk sync (one call/series).
+    base_params: Dict = {
+        'apikey': api_key,
+        'seriesId': series_id,
+        'includeEpisodeFile': 'true',
+        'includeImages': 'true',
+    }
 
     # Specials: never rely on ?seasonNumber=0 — fetch full list, filter locally.
     if season_number is not None and int(season_number) == 0:
-        cache_all_key = f'sonarr_episodes:{endpoint}:{series_id}:all'
+        cache_all_key = f'sonarr_episodes:rich:{endpoint}:{series_id}:all'
         cached_all = _cache_get(cache_all_key)
         if cached_all is not None:
             all_rows = cached_all
@@ -311,7 +338,7 @@ def fetch_sonarr_episodes(
         ]
 
     cache_scope = 'all' if season_number is None else str(int(season_number))
-    cache_key = f'sonarr_episodes:{endpoint}:{series_id}:{cache_scope}'
+    cache_key = f'sonarr_episodes:rich:{endpoint}:{series_id}:{cache_scope}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached

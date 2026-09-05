@@ -17,6 +17,11 @@ import type {
   SettingsPayload,
   SettingsStatus,
   StatsResponse,
+  DeterminationExplainResponse,
+  ForcePlaceholderPreviewResponse,
+  ForcePlaceholderSetResponse,
+  PlaceholderPolicyPreviewResponse,
+  PlaceholderPolicySetResponse,
 } from "../types/api";
 
 export function getStats(): Promise<StatsResponse> {
@@ -194,6 +199,74 @@ export function refreshSeriesPlaceholder(seriesId: number): Promise<EntityReconc
   return fetchJson<EntityReconcileStartResponse>(`/api/library/series/${seriesId}/refresh-placeholder`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
+  });
+}
+
+export function getEpisodeDeterminationExplain(episodeId: number): Promise<DeterminationExplainResponse> {
+  return fetchJson<DeterminationExplainResponse>(`/api/library/episode/${episodeId}/determination-explain`);
+}
+
+export function getMovieDeterminationExplain(movieId: number): Promise<DeterminationExplainResponse> {
+  return fetchJson<DeterminationExplainResponse>(`/api/library/movie/${movieId}/determination-explain`);
+}
+
+export function getMovieForcePlaceholderPreview(movieId: number): Promise<ForcePlaceholderPreviewResponse> {
+  return fetchJson<ForcePlaceholderPreviewResponse>(`/api/library/movie/${movieId}/force-placeholder-preview`);
+}
+
+export function getEpisodeForcePlaceholderPreview(episodeId: number): Promise<ForcePlaceholderPreviewResponse> {
+  return fetchJson<ForcePlaceholderPreviewResponse>(`/api/library/episode/${episodeId}/force-placeholder-preview`);
+}
+
+export function setMovieForcePlaceholder(
+  movieId: number,
+  body: { enabled: boolean; despite_sibling: boolean },
+): Promise<ForcePlaceholderSetResponse> {
+  return fetchJson<ForcePlaceholderSetResponse>(`/api/library/movie/${movieId}/force-placeholder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function setEpisodeForcePlaceholder(
+  episodeId: number,
+  body: { enabled: boolean; despite_sibling: boolean },
+): Promise<ForcePlaceholderSetResponse> {
+  return fetchJson<ForcePlaceholderSetResponse>(`/api/library/episode/${episodeId}/force-placeholder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function getMoviePlaceholderPolicyPreview(movieId: number): Promise<PlaceholderPolicyPreviewResponse> {
+  return fetchJson<PlaceholderPolicyPreviewResponse>(`/api/library/movie/${movieId}/placeholder-policy-preview`);
+}
+
+export function getEpisodePlaceholderPolicyPreview(episodeId: number): Promise<PlaceholderPolicyPreviewResponse> {
+  return fetchJson<PlaceholderPolicyPreviewResponse>(`/api/library/episode/${episodeId}/placeholder-policy-preview`);
+}
+
+export function setMoviePlaceholderPolicy(
+  movieId: number,
+  body: { policy: "auto" | "never" | "pinned" },
+): Promise<PlaceholderPolicySetResponse> {
+  return fetchJson<PlaceholderPolicySetResponse>(`/api/library/movie/${movieId}/placeholder-policy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function setEpisodePlaceholderPolicy(
+  episodeId: number,
+  body: { policy: "auto" | "never" | "pinned" },
+): Promise<PlaceholderPolicySetResponse> {
+  return fetchJson<PlaceholderPolicySetResponse>(`/api/library/episode/${episodeId}/placeholder-policy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
   });
 }
 

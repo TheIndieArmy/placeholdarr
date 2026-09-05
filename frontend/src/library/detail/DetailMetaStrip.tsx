@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { ThemeMode } from "../../brandTypes";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "../../brandAccentUi";
 import type { DetailRatingDisplay } from "./detailFormatters";
@@ -150,6 +150,8 @@ export function DetailMetaStrip(props: {
   tmdbTvId?: number | null;
   accentHex: string;
   themeMode: ThemeMode;
+  /** Pin control; rendered on row 2 left. */
+  policyControl?: ReactNode;
 }) {
   void props.is4k;
   void props.monitored;
@@ -186,53 +188,77 @@ export function DetailMetaStrip(props: {
   }
 
   const trailerHref = youtubeTrailerUrl(props.trailerUrl);
-  const valueClass = (soft?: boolean) =>
-    `text-[26px] sm:text-[28px] font-headline font-bold leading-none tabular-nums ${
-      soft
-        ? isLight
-          ? "text-slate-500"
-          : "text-slate-400"
-        : isLight
-          ? "text-slate-900"
-          : "text-white"
-    }`;
+  const showActionsRow = Boolean(props.policyControl) || Boolean(trailerHref);
 
   return (
     <div
       className={`rounded-xl border px-6 py-6 mb-6 ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}
     >
-      <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-5">
-        <div className="flex flex-wrap items-end gap-x-8 gap-y-5 min-w-0">
+      {/* Row 1: facts only. Scale down instead of wrapping under trailer/pin. */}
+      {facts.length ? (
+        <div
+          className="flex flex-nowrap items-end gap-x-6 sm:gap-x-8 min-w-0 overflow-hidden"
+          style={{ containerType: "inline-size" }}
+        >
           {facts.map((fact) => (
-            <div key={fact.key} className="min-w-[4.5rem]">
+            <div key={fact.key} className="min-w-0 shrink">
               {fact.logoUrl ? (
                 <img
                   src={fact.logoUrl}
                   alt={fact.value}
-                  className="h-8 w-auto max-w-[100px] object-contain object-left"
+                  className="h-7 sm:h-8 w-auto max-w-[100px] object-contain object-left"
                 />
               ) : (
-                <div className={valueClass(fact.soft)}>{fact.value}</div>
+                <div
+                  className={`font-headline font-bold leading-none tabular-nums truncate ${
+                    fact.soft
+                      ? isLight
+                        ? "text-slate-500"
+                        : "text-slate-400"
+                      : isLight
+                        ? "text-slate-900"
+                        : "text-white"
+                  }`}
+                  style={{ fontSize: "clamp(1.125rem, 2.6cqi + 0.65rem, 1.75rem)" }}
+                  title={fact.value}
+                >
+                  {fact.value}
+                </div>
               )}
-              <div className="mt-1.5 text-[13px] font-headline uppercase tracking-wider text-slate-500">
+              <div className="mt-1.5 text-[11px] sm:text-[13px] font-headline uppercase tracking-wider text-slate-500">
                 {fact.label}
               </div>
             </div>
           ))}
         </div>
-        {trailerHref ? (
-          <a
-            href={trailerHref}
-            target="_blank"
-            rel="noreferrer"
-            className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider shrink-0 ${FG_ON_ACCENT_TEXT_CLASS}`}
-            style={accentFilledStyle(props.accentHex)}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>play_circle</span>
-            Trailer
-          </a>
-        ) : null}
-      </div>
+      ) : null}
+
+      {/* Row 2: pin left, trailer right. */}
+      {showActionsRow ? (
+        <div
+          className={`flex flex-nowrap items-center justify-between gap-4 ${
+            facts.length ? "mt-5" : ""
+          }`}
+        >
+          <div className="min-w-0 shrink">{props.policyControl}</div>
+          {trailerHref ? (
+            <a
+              href={trailerHref}
+              target="_blank"
+              rel="noreferrer"
+              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-[14px] font-headline uppercase tracking-wider shrink-0 ${FG_ON_ACCENT_TEXT_CLASS}`}
+              style={accentFilledStyle(props.accentHex)}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                play_circle
+              </span>
+              Trailer
+            </a>
+          ) : (
+            <span />
+          )}
+        </div>
+      ) : null}
 
       {ratings.length ? (
         <div className={`mt-5 pt-5 border-t ${isLight ? "border-slate-200" : "border-[#424753]/40"}`}>

@@ -203,6 +203,72 @@ def _find_active_reconcile_job(session, entity_type: str, entity_id: int) -> Job
     return None
 
 
+def _find_pending_reconcile_job(session, entity_type: str, entity_id: int) -> Job | None:
+    rows = (
+        session.query(Job)
+        .filter(
+            Job.job_type == ENTITY_RECONCILE_JOB_TYPE,
+            Job.status == "PENDING",
+        )
+        .order_by(Job.id.desc())
+        .limit(50)
+        .all()
+    )
+    want_type = str(entity_type).strip().lower()
+    want_id = int(entity_id)
+    for row in rows:
+        payload = _payload_dict(row)
+        if str(payload.get("entity_type") or "").strip().lower() != want_type:
+            continue
+        try:
+            if int(payload.get("entity_id")) != want_id:
+                continue
+        except (TypeError, ValueError):
+            continue
+        return row
+    return None
+
+
+def _enqueue_followup_reconcile_if_needed(
+    session,
+    *,
+    entity_type: str,
+    entity_id: int,
+    display_title: str,
+    source: str,
+) -> int | None:
+    """Queue a follow-up reconcile when policy changes during an in-flight job."""
+    if _find_pending_reconcile_job(session, entity_type, entity_id) is not None:
+        return None
+    kind = str(entity_type).strip().lower()
+    eid = int(entity_id)
+    body: dict[str, Any] = {
+        "entity_type": kind,
+        "entity_id": eid,
+        "source": f"followup:{source}",
+        "display_title": display_title,
+        "step": STEP_QUEUED,
+        "step_label": _step_label_for(STEP_QUEUED),
+    }
+    job = Job(
+        job_type=ENTITY_RECONCILE_JOB_TYPE,
+        payload=body,
+        status="PENDING",
+        max_attempts=3,
+        priority=PRIORITY_INTERACTIVE,
+        group_id=f"entity_reconcile:{body['entity_type']}:{body['entity_id']}",
+    )
+    session.add(job)
+    session.commit()
+    _log_reconcile_info(
+        kind,
+        display_title,
+        "Queued follow-up reconcile after in-flight job",
+        job_id=int(job.id),
+    )
+    return int(job.id)
+
+
 def _episode_row_ids_for_series(session, series_id: int) -> list[int]:
     rows = (
         session.query(Episode.id)
@@ -447,10 +513,18 @@ def enqueue_entity_reconcile(
                 "Already running — reusing in-flight job",
                 job_id=int(existing.id),
             )
+            followup_job_id = _enqueue_followup_reconcile_if_needed(
+                session,
+                entity_type=kind,
+                entity_id=eid,
+                display_title=display_title,
+                source=str(source or "").strip(),
+            )
             return {
                 "ok": True,
                 "job_id": int(existing.id),
                 "reused": True,
+                "followup_job_id": followup_job_id,
                 "step": payload.get("step") or STEP_QUEUED,
                 "step_label": payload.get("step_label") or _step_label_for(STEP_QUEUED),
             }
