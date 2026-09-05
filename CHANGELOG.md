@@ -7,6 +7,25 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.23] - 2026-09-04
+
+### Summary
+
+- **Placeholder policy**: Auto, Never, and Pinned on movies and episodes; save applies immediately with Creating… / Removing… feedback.
+- **Determination explain**: Why? on movie detail and episode rows opens a step-by-step placeholder audit.
+- **Pinned Coming Soon**: Pinned titles show countdowns outside the calendar window; missing dates show TBD/TBA; calendar phase keeps days updated.
+- **Full sync performance**: Bounded ARR cache, chunked determination and reconcile, bulk Sonarr episode sync, and phase RSS/timing logs.
+- **Season mode lookahead**: Lookahead range triggers next-season monitor and search when the first next-season episode enters the window.
+- **Playback future episodes**: Suppress-on-playback skips any not-yet-aired episode, not only titles outside calendar lookahead.
+
+### Added
+
+- **Never placeholder**: Block placeholder creation per title; existing placeholders can be removed on sync.
+- **Pinned placeholder**: Pin movies and episodes to create a placeholder despite calendar/monitored/specials rules. Does not create a placeholder when a real file exists.
+- **Pinned vs shared instances**: Multi-instance sibling behavior follows Shared Placeholder Cleanup settings (no per-title override in the UI).
+- **Determination explain**: "Why?" on movie detail and episode rows opens a step-by-step audit of placeholder determination.
+- **What's new (0.9.23)**: Startup ack notice for placeholder policy, pinned Coming Soon/TBD, and Season mode lookahead.
+
 ### Changed
 
 - **ARR HTTP cache**: Cap size with LRU eviction (512 entries); phase logs report entry count.
@@ -29,16 +48,6 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Fixed
 
 - **Obsolete settle**: After a placeholder is removed, determination settles to `not needed` instead of staying on `obsolete placeholder`.
-
-### Added
-
-- **Never placeholder**: Block placeholder creation per title; existing placeholders can be removed on sync.
-- **Pinned placeholder**: Pin movies and episodes to create a placeholder despite calendar/monitored/specials rules. Does not create a placeholder when a real file exists.
-- **Pinned vs shared instances**: Multi-instance sibling behavior follows Shared Placeholder Cleanup settings (no per-title override in the UI).
-- **Determination explain**: "Why?" on movie detail and episode rows opens a step-by-step audit of placeholder determination.
-
-### Fixed
-
 - **Playback future-episode suppress**: "Do not search future episodes on playback" now skips any episode whose air date is still in the future, instead of only episodes beyond the calendar lookahead window.
 
 ## [0.9.22] - 2026-08-31

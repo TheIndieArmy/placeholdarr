@@ -3,4 +3,4 @@
 Keep this in sync with CHANGELOG.md when cutting a release.
 """
 
-APP_VERSION = "0.9.22"
+APP_VERSION = "0.9.23"
