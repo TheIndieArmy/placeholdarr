@@ -7,6 +7,40 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.24] - 2026-09-09
+
+### Summary
+
+- **Series placeholder policy**: Auto / Never / Pinned on the series detail meta strip; Never and Pinned gate season and episode chips without rewriting stored child flags.
+- **Season placeholder policy**: Auto / Never / Pinned bulk-stamp every episode in that season when the series is Auto; new synced episodes inherit Never/Pinned stamps.
+- **Unified boot sync**: One boot decision combines Startup ARR sync mode with overdue lite/full schedules (any full demand wins); the sync scheduler starts only after that finishes.
+- **Activity and pin cleanup**: Removed leftover proposed Activity helpers and unused pin preview APIs; library detail uses policy apply only.
+- **Build dependency CVEs**: postcss-selector-parser and browserslist lockfile bumps (Tailwind/PostCSS build only).
+
+### Added
+
+- **Series placeholder policy**: Auto / Never / Pinned on the series detail meta strip. Never and Pinned act as a gate: season and episode chips stay visible but locked, and stored child flags are not rewritten.
+- **Season placeholder policy**: Auto / Never / Pinned on each season row. All three bulk-stamp every episode in that season when the series is Auto; new synced episodes inherit Never/Pinned stamps.
+- **What's new (0.9.24)**: Startup ack notice for series/season placeholder policy and unified boot sync.
+
+### Changed
+
+- **Episode policy under series gate**: Episode chips are greyed and not clickable while the series is Never or Pinned (change the series chip to unlock).
+- **Effective episode policy**: Determination, Why?, specials pin bypass, and pinned Coming Soon use the series gate plus episode flags (series Never vetoes; series Pinned still honors episode Never).
+- **Season Auto stamp**: Setting a season to Auto bulk-writes Auto onto every episode in that season (same wipe as Never/Pinned), then reconciles.
+- **Activity proposed cleanup**: Removed leftover `/activity/proposed` path helpers; old proposed and Operations URLs still redirect to Placeholders or Tasks.
+- **Pin API cleanup**: Removed unused force-placeholder and placeholder-policy preview endpoints and the old pin-only set routes; library detail uses Auto / Never / Pinned policy apply only.
+- **Unified boot sync**: One boot decision combines Startup ARR sync mode with overdue lite/full schedules (any full demand wins); the sync scheduler starts only after that decision finishes.
+- **Startup sync setting copy**: Settings and onboarding describe Startup ARR sync mode as one input to boot alongside overdue schedules (Off does not ignore overdue work).
+- **Full sync subsumes lite schedule**: A successful full sync advances both full and lite next-run times.
+- **Run now conflicts**: Starting a full sync while lite is already working returns 409 (same as lite while full is working).
+
+### Fixed
+
+- **Overdue schedule clock**: A persisted next-run in the past counts as overdue for boot; it is not cleared by a recent last-run plus interval.
+- **postcss-selector-parser**: Lockfile 6.1.2 to 6.1.4 (CVE-2026-9358 / Dependabot #14). Tailwind/PostCSS build only.
+- **browserslist**: Lockfile 4.28.2 to 4.28.9 (CVE-2026-73088). Autoprefixer build only.
+
 ## [0.9.23] - 2026-09-04
 
 ### Summary

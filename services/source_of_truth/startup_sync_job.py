@@ -286,7 +286,7 @@ def process_startup_sync_runner_job(session, job: Job) -> dict[str, Any]:
                     "startup_sync_runner: first-run startup sync after onboarding",
                     extra={"emoji_type": "gear"},
                 )
-                result = run_startup_source_of_truth()
+                result = run_startup_source_of_truth(require_first_full=True)
                 logger.info(
                     f"Post-onboarding startup sync completed mode={result.get('startup_sync_mode')} "
                     f"run_ids={result.get('run_ids') or []}",
@@ -321,6 +321,12 @@ def process_startup_sync_runner_job(session, job: Job) -> dict[str, Any]:
     finally:
         stop_hb.set()
         _release_sync_gate(owner=owner)
+        try:
+            from main import ensure_sync_scheduler_started
+
+            ensure_sync_scheduler_started(reason=f"startup_sync_runner:{reason}")
+        except Exception:
+            pass
         if _opens_worker_gate(reason):
             startup_sync_complete.set()
 

@@ -355,6 +355,39 @@ def _resolve_movie_determination(
     return base, False
 
 
+def _series_policy_by_season_ids(session, season_ids: set[int]) -> dict[int, str]:
+    """Map season_id -> series placeholder policy (auto/pinned/never)."""
+    from services.source_of_truth.placeholder_policy import policy_from_entity
+
+    if not season_ids:
+        return {}
+    rows = (
+        session.query(Season.id, Series)
+        .join(Series, Season.series_id == Series.id)
+        .filter(Season.id.in_(list(season_ids)))
+        .all()
+    )
+    return {int(season_id): policy_from_entity(series) for season_id, series in rows}
+
+
+def _episode_effectively_forced(
+    episode: Episode,
+    *,
+    series_policy: str | None = None,
+) -> bool:
+    from services.source_of_truth.placeholder_policy import (
+        policy_from_entity,
+        resolve_episode_effective_policy,
+    )
+
+    series_pol = series_policy if series_policy in ("auto", "pinned", "never") else "auto"
+    effective = resolve_episode_effective_policy(
+        series_policy=series_pol,  # type: ignore[arg-type]
+        episode_policy=policy_from_entity(episode),
+    )
+    return effective == "pinned"
+
+
 def _resolve_episode_determination(
     session,
     episode: Episode,
@@ -364,7 +397,14 @@ def _resolve_episode_determination(
     now_date: date,
     episode_order_meta: tuple[int, int, int] | None = None,
     series_max_known_order_within_horizon: dict[int, tuple[int, int]] | None = None,
+    series_policy: str | None = None,
 ) -> tuple[str, bool]:
+    from services.source_of_truth.placeholder_policy import (
+        policy_flag_view,
+        policy_from_entity,
+        resolve_episode_effective_policy,
+    )
+
     target_date = getattr(episode, 'air_date', None)
     if (
         target_date is None
@@ -419,16 +459,33 @@ def _resolve_episode_determination(
         is_deleted=is_deleted,
         sibling_has_file=sibling_has_file,
     )
+    if series_policy in ("auto", "pinned", "never"):
+        series_pol = series_policy
+    else:
+        season_id = int(episode.season_id) if getattr(episode, "season_id", None) is not None else None
+        series_pol = (
+            _series_policy_by_season_ids(session, {season_id}).get(season_id, "auto")
+            if season_id is not None
+            else "auto"
+        )
+    effective = resolve_episode_effective_policy(
+        series_policy=series_pol,  # type: ignore[arg-type]
+        episode_policy=policy_from_entity(episode),
+    )
+    policy_entity = policy_flag_view(
+        effective,
+        despite_sibling=bool(getattr(episode, "force_placeholder_despite_sibling", False)),
+    )
     base = _apply_block_placeholder(
         base=base,
-        entity=episode,
+        entity=policy_entity,
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
     )
     base = _apply_force_placeholder(
         base=base,
-        entity=episode,
+        entity=policy_entity,
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
@@ -1051,6 +1108,14 @@ def run_determination_pass() -> dict:
                 )
                 if not chunk:
                     break
+                series_policy_by_season = _series_policy_by_season_ids(
+                    session,
+                    {
+                        int(ep.season_id)
+                        for ep in chunk
+                        if getattr(ep, "season_id", None) is not None
+                    },
+                )
                 for episode in chunk:
                     processed += 1
                     idx = processed
@@ -1060,8 +1125,14 @@ def run_determination_pass() -> dict:
                         else None
                     )
                     season_number = int(episode_meta[1]) if episode_meta is not None else -1
+                    season_id = int(episode.season_id) if getattr(episode, "season_id", None) is not None else None
+                    series_pol = (
+                        series_policy_by_season.get(season_id, "auto") if season_id is not None else "auto"
+                    )
                     if not include_specials:
-                        if season_number == 0 and not bool(getattr(episode, "force_placeholder", False)):
+                        if season_number == 0 and not _episode_effectively_forced(
+                            episode, series_policy=series_pol
+                        ):
                             value = DETERMINATION_NOT_NEEDED
                             stats[value] += 1
                             if getattr(episode, 'determination', None) != value:
@@ -1088,6 +1159,7 @@ def run_determination_pass() -> dict:
                         now_date=now_date,
                         episode_order_meta=episode_meta,
                         series_max_known_order_within_horizon=series_max_known_order_within_horizon,
+                        series_policy=series_pol,
                     )
                     if path_drift:
                         stats['path_drift_episodes'] += 1
@@ -1354,11 +1426,22 @@ def run_determination_for_entities_in_session(
         if prev is None or order > prev:
             series_max_known_order_within_horizon[sid] = order
 
+    series_policy_by_season = _series_policy_by_season_ids(
+        session,
+        {
+            int(ep.season_id)
+            for ep in episodes
+            if getattr(ep, "season_id", None) is not None
+        },
+    )
+
     for idx, episode in enumerate(episodes, start=1):
         episode_meta = episode_order_meta_by_id.get(int(episode.id)) if getattr(episode, "id", None) is not None else None
         season_number = int(episode_meta[1]) if episode_meta is not None else -1
+        season_id = int(episode.season_id) if getattr(episode, "season_id", None) is not None else None
+        series_pol = series_policy_by_season.get(season_id, "auto") if season_id is not None else "auto"
         if not include_specials:
-            if season_number == 0 and not bool(getattr(episode, "force_placeholder", False)):
+            if season_number == 0 and not _episode_effectively_forced(episode, series_policy=series_pol):
                 value = DETERMINATION_NOT_NEEDED
                 stats[value] += 1
                 if getattr(episode, 'determination', None) != value:
@@ -1386,6 +1469,7 @@ def run_determination_for_entities_in_session(
             now_date=now_date,
             episode_order_meta=episode_meta,
             series_max_known_order_within_horizon=series_max_known_order_within_horizon,
+            series_policy=series_pol,
         )
         if path_drift:
             stats['path_drift_episodes'] += 1

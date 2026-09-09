@@ -322,6 +322,8 @@ export interface SeriesEpisodeDetail {
   force_placeholder?: boolean;
   block_placeholder?: boolean;
   force_placeholder_despite_sibling?: boolean;
+  /** True when series Never/Pinned locks this chip (Option A). */
+  policy_locked?: boolean;
   status?: string | null;
   display_status?: string | null;
   sonarr_quality?: string | null;
@@ -344,6 +346,10 @@ export interface SeriesSeasonDetail {
   episode_future?: number;
   monitored?: boolean;
   poster_url?: string | null;
+  placeholder_policy?: "auto" | "never" | "pinned";
+  force_placeholder?: boolean;
+  block_placeholder?: boolean;
+  policy_locked?: boolean;
   episodes: SeriesEpisodeDetail[];
 }
 
@@ -377,6 +383,9 @@ export interface SeriesDetailResponse {
   status?: string | null;
   sonarr_status?: string | null;
   sonarr_monitored?: boolean;
+  placeholder_policy?: "auto" | "never" | "pinned";
+  force_placeholder?: boolean;
+  block_placeholder?: boolean;
   first_aired?: string | null;
   last_aired_date?: string | null;
   episode_stats?: {
@@ -863,28 +872,6 @@ export interface DeterminationExplainResponse {
   steps: DeterminationExplainStep[];
 }
 
-export interface ForcePlaceholderPreviewResponse {
-  ok: true;
-  media_type: "movie" | "episode";
-  title: string;
-  placeholder_policy?: "auto" | "never" | "pinned";
-  force_placeholder: boolean;
-  block_placeholder?: boolean;
-  force_placeholder_despite_sibling: boolean;
-  can_force: boolean;
-  block_message?: string | null;
-  has_file: boolean;
-  has_placeholder?: boolean;
-  is_deleted: boolean;
-  blocking_reasons: string[];
-  sibling_has_file: boolean;
-  shared_suppression_enabled: boolean;
-  sibling_option_available: boolean;
-  sibling_would_suppress: boolean;
-}
-
-export type PlaceholderPolicyPreviewResponse = ForcePlaceholderPreviewResponse;
-
 export interface PlaceholderPolicySetResponse {
   ok: boolean;
   placeholder_policy?: "auto" | "never" | "pinned";
@@ -896,16 +883,6 @@ export interface PlaceholderPolicySetResponse {
   action?: string | null;
   job_id?: number | null;
   followup_job_id?: number | null;
-  step_label?: string;
-  reused?: boolean;
-  message?: string;
-}
-
-export interface ForcePlaceholderSetResponse {
-  ok: boolean;
-  force_placeholder?: boolean;
-  force_placeholder_despite_sibling?: boolean;
-  job_id?: number;
   step_label?: string;
   reused?: boolean;
   message?: string;

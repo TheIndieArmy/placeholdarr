@@ -78,11 +78,6 @@ import { ConfirmModal } from "./ConfirmModal";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
-import {
-  ACTIVITY_PROPOSED_PREFIX,
-  ACTIVITY_PROPOSED_TASKS_PATH,
-  isActivityProposedPath,
-} from "./activity/activityProposedPaths";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
 import { TasksPanel } from "./activity/TasksPanel";
 import { useActiveSearches } from "./activity/useActiveSearches";
@@ -857,7 +852,6 @@ export function App() {
   }, []);
 
   const activitySubPage = getActivitySubPage(location.pathname);
-  const activityProposed = isActivityProposedPath(location.pathname);
 
   const {
     scheduledTasks,
@@ -1701,18 +1695,16 @@ export function App() {
       if (location.pathname === "/activity" || location.pathname === "/activity/") {
         return <Navigate to={ACTIVITY_DEFAULT_PATH} replace />;
       }
-      if (activityProposed) {
-        const proposedTasks =
-          location.pathname === ACTIVITY_PROPOSED_TASKS_PATH ||
-          location.pathname.startsWith(`${ACTIVITY_PROPOSED_TASKS_PATH}/`) ||
-          location.pathname.includes("/operations");
-        return <Navigate to={proposedTasks ? ACTIVITY_TASKS_PATH : ACTIVITY_PLACEHOLDERS_PATH} replace />;
-      }
       if (
         location.pathname === ACTIVITY_OPERATIONS_PATH ||
         location.pathname.startsWith(`${ACTIVITY_OPERATIONS_PATH}/`)
       ) {
         return <Navigate to={ACTIVITY_TASKS_PATH} replace />;
+      }
+      if (location.pathname === "/activity/proposed" || location.pathname.startsWith("/activity/proposed/")) {
+        const rest = location.pathname.replace(/\/$/, "").slice("/activity/proposed".length) || "/";
+        const toTasks = rest === "/tasks" || rest.startsWith("/tasks/") || rest === "/operations" || rest.startsWith("/operations/");
+        return <Navigate to={toTasks ? ACTIVITY_TASKS_PATH : ACTIVITY_PLACEHOLDERS_PATH} replace />;
       }
 
       const activityChrome = {
@@ -5723,28 +5715,32 @@ function StartupSyncModeDescription(props: { spacing: "settings" | "wizard" }) {
   return (
     <div className={`${top} space-y-3`}>
       <p className="ui-field-description text-slate-300 leading-relaxed">
-        Controls how Placeholdarr refreshes from Radarr and Sonarr during startup.
+        One input to the single boot sync decision, together with overdue scheduled lite and full tasks. At most one sync runs at startup.
       </p>
       <ul className="list-disc space-y-2 pl-5 text-[14px] text-slate-400 leading-relaxed">
         <li>
+          <span className="font-medium text-slate-200">Full demand wins</span>
+          {" "}
+          when a full sync is overdue, Full mode is selected, or Auto still needs a first full for an Arr instance.
+        </li>
+        <li>
           <span className="font-medium text-slate-200">Full sync</span>
           {" "}
-          will scan arrs services and Placeholdarr root folder before proceeding to add/delete placeholder files as needed.
+          scans *arr catalogs and Placeholdarr roots, then add/delete placeholders as needed.
         </li>
         <li>
           <span className="font-medium text-slate-200">Lite sync</span>
           {" "}
-          compares each configured Radarr/Sonarr catalog to the database, syncs only what changed, then runs scoped placeholder
-          work (no full library filesystem scan on startup).
+          diffs live catalogs to the database, syncs changed titles, then scoped placeholder work (no full filesystem scan).
         </li>
         <li>
-          <span className="font-medium text-slate-200">Auto</span>
+          <span className="font-medium text-slate-200">Off</span>
           {" "}
-          will run full at startup when needed (for example, after adding a new arr instance), and a lite sync at other times.
+          means do not request a sync only because the process started. Overdue schedules can still promote a full or lite run.
         </li>
       </ul>
       <p className="ui-field-description text-slate-400 leading-relaxed">
-        Placeholdarr operations are relatively quick. However, media player libraries still need to scan and update, which can take some time for large library changes.
+        Placeholdarr work is relatively quick; media players may still take time to rescan large library changes.
       </p>
       <p className="ui-field-description ui-field-description-accent3 leading-relaxed">
         A full sync will automatically start in the background at the completion of this setup.
@@ -9949,8 +9945,7 @@ function OnboardingWizard(props: {
 }
 function getActivitySubPage(pathname: string): ActivitySubPage {
   const p = pathname.replace(/\/$/, "") || "/";
-  const proposed = isActivityProposedPath(p);
-  const rest = proposed ? p.slice(ACTIVITY_PROPOSED_PREFIX.length) || "/" : p.slice("/activity".length) || "/";
+  const rest = p.slice("/activity".length) || "/";
   if (rest === "/tasks" || rest.startsWith("/tasks/")) return "tasks";
   if (rest === "/operations" || rest.startsWith("/operations/")) return "operations";
   return "placeholders";

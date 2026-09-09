@@ -350,22 +350,22 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Startup ARR sync mode",
                 # Intro copy is also structured in `frontend/src/App.tsx` (`StartupSyncModeDescription`); update both together.
                 "description": (
-                    "Controls how Placeholdarr refreshes from Radarr and Sonarr during startup. Full sync will scan arrs services "
-                    "and Placeholdarr root folder before proceeding to add/delete placeholder files as needed. Lite sync compares "
-                    "each instance's live Radarr/Sonarr catalogs to the database, runs targeted API sync only for changed titles, "
-                    "then scoped determination and placeholder materialization for touched rows (skipping a full filesystem scan). "
-                    "Auto will run full at startup when needed (for example, after adding a new arr instance), and a lite sync at other times. "
-                    "Placeholdarr operations are relatively quick. However, media player libraries still need to scan and update, "
-                    "which can take some time for large library changes. "
+                    "One input to the single boot sync decision, together with overdue scheduled lite/full tasks. "
+                    "At most one sync runs at startup: any full demand wins (overdue full, Full mode, or Auto when a first full is still needed); "
+                    "otherwise lite when overdue or when Lite/Auto requests it. "
+                    "Off means do not request a sync only because the process started; overdue schedules can still promote a full or lite run. "
+                    "Full sync scans *arr catalogs and Placeholdarr roots, then add/delete placeholders as needed. "
+                    "Lite sync diffs live catalogs to the database, syncs changed titles, then scoped determination and materialization (no full filesystem scan). "
+                    "Placeholdarr work is relatively quick; media players may still take time to rescan large library changes. "
                     "A full sync will automatically start in the background at the completion of this setup."
                 ),
                 "type": "choice",
                 "restart_required": True,
                 "options": [
-                    {"value": "auto", "label": "Auto — Full sync when needed; Lite sync all other times"},
-                    {"value": "full", "label": "Full — always full ARR sync on every startup"},
-                    {"value": "lite", "label": "Lite — catalog diff + targeted sync only"},
-                    {"value": "off", "label": "Off — skip ARR startup sync"},
+                    {"value": "auto", "label": "Auto: Full when first full is needed; otherwise request lite (overdue full still wins)"},
+                    {"value": "full", "label": "Full: always request full on every startup"},
+                    {"value": "lite", "label": "Lite: request lite (overdue full still wins)"},
+                    {"value": "off", "label": "Off: no startup request; overdue schedules still run"},
                 ],
             },
         ),

@@ -128,6 +128,22 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/library",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="series-season-policy-boot-0-9-24",
+        since_version="0.9.24",
+        title="Series and season pins; smarter startup sync",
+        body=(
+            "TV detail now has Auto / Never / Pinned on the series and on each season. "
+            "Series Never or Pinned locks season and episode chips (they stay visible but are not clickable) without wiping the choices stored underneath. "
+            "When the series is Auto, a season chip bulk-stamps every episode in that season, and new synced episodes inherit Never or Pinned season stamps.\n\n"
+            "Startup sync is one decision: your Startup ARR sync setting plus any overdue lite or full schedules. "
+            "If anything needs a full sync, Placeholdarr runs one full; otherwise it may run lite; Off skips a sync only when nothing is overdue. "
+            "Scheduled sync jobs start after that boot decision finishes so overdue work does not pile on startup."
+        ),
+        cta_label="Open TV",
+        cta_path="/library/tv",
+        requires_ack=True,
+    ),
 )
 
 

@@ -8,6 +8,7 @@ import { DetailHero } from "./DetailHero";
 import { DetailMetaStrip } from "./DetailMetaStrip";
 import { EpisodeRow } from "./EpisodeRow";
 import { SeriesFileStateSection } from "./FileStateSections";
+import { PlaceholderPolicyCycle } from "./PlaceholderPolicyCycle";
 import {
   detailMutedChipClass,
   formatMonitoredLabel,
@@ -32,6 +33,7 @@ export function SeriesDetailView(props: {
   );
   const stats = payload.episode_stats;
   const mutedChip = detailMutedChipClass(isLight);
+  const seriesGateLocked = payload.placeholder_policy === "never" || payload.placeholder_policy === "pinned";
 
   return (
     <div>
@@ -64,6 +66,21 @@ export function SeriesDetailView(props: {
           tmdbTvId={payload.tmdb_id}
           accentHex={props.accent.hex}
           themeMode={props.themeMode}
+          policyControl={
+            <PlaceholderPolicyCycle
+              mediaType="series"
+              entityId={payload.id}
+              placeholderPolicy={payload.placeholder_policy}
+              forcePlaceholder={payload.force_placeholder}
+              blockPlaceholder={payload.block_placeholder}
+              hasPlaceholder={(payload.episode_stats?.placeholders ?? 0) > 0}
+              hasFile={(payload.episode_stats?.files ?? 0) > 0 && (payload.episode_stats?.placeholders ?? 0) === 0}
+              accentHex={props.accent.hex}
+              themeMode={props.themeMode}
+              showInlineProgress
+              onApplied={props.onPolicyApplied}
+            />
+          }
         />
 
         <SeriesFileStateSection
@@ -135,25 +152,31 @@ export function SeriesDetailView(props: {
             <div className="space-y-2">
               {seasonsDesc.map((season) => {
                 const open = openSeasons.includes(season.id);
+                const seasonLocked = Boolean(season.policy_locked) || seriesGateLocked;
                 return (
                   <div
                     key={season.id}
                     className={`border rounded-xl overflow-hidden ${isLight ? "bg-white border-[#d7e2f0]" : "bg-[#171c22] border-[#424753]/40"}`}
                   >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setOpenSeasons((prev) =>
-                          prev.includes(season.id) ? prev.filter((id) => id !== season.id) : [...prev, season.id],
-                        )
-                      }
-                      className={`w-full flex items-center justify-between px-5 py-4 text-left transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-[#1e2430]/50"}`}
+                    <div
+                      className={`w-full flex items-center justify-between gap-3 px-5 py-4 text-left transition-colors ${isLight ? "hover:bg-slate-100" : "hover:bg-[#1e2430]/50"}`}
                     >
-                      <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenSeasons((prev) =>
+                            prev.includes(season.id) ? prev.filter((id) => id !== season.id) : [...prev, season.id],
+                          )
+                        }
+                        className="flex items-center gap-3 min-w-0 flex-1 text-left"
+                      >
                         {season.poster_url ? (
                           <img src={season.poster_url} alt="" className="w-10 h-10 rounded object-cover" />
                         ) : null}
-                        <span className="material-symbols-outlined text-slate-500 transition-transform" style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>
+                        <span
+                          className="material-symbols-outlined text-slate-500 transition-transform"
+                          style={{ fontSize: 18, transform: open ? "rotate(90deg)" : "rotate(0deg)" }}
+                        >
                           chevron_right
                         </span>
                         <span className={`text-[16px] font-bold font-headline ${isLight ? "text-slate-900" : "text-white"}`}>
@@ -162,13 +185,30 @@ export function SeriesDetailView(props: {
                         {season.monitored === false ? (
                           <span className="text-[10px] uppercase tracking-wider text-slate-500">Unmonitored</span>
                         ) : null}
-                      </div>
-                      <div className="flex items-center gap-2 text-[12px] font-headline uppercase tracking-wider">
+                      </button>
+                      <div className="flex items-center gap-2 text-[12px] font-headline uppercase tracking-wider flex-none">
+                        <PlaceholderPolicyCycle
+                          mediaType="season"
+                          entityId={season.id}
+                          placeholderPolicy={season.placeholder_policy}
+                          forcePlaceholder={season.force_placeholder}
+                          blockPlaceholder={season.block_placeholder}
+                          hasPlaceholder={season.episode_placeholders > 0}
+                          hasFile={season.episode_files > 0 && season.episode_placeholders === 0}
+                          locked={seasonLocked}
+                          lockedReason="Set by series. Change the series chip to unlock."
+                          accentHex={props.accent.hex}
+                          themeMode={props.themeMode}
+                          size="sm"
+                          showInlineProgress
+                          inlineProgressSide="start"
+                          onApplied={props.onPolicyApplied}
+                        />
                         <span className="text-slate-500">{season.episode_total} eps</span>
                         <span className={mutedChip}>PH {season.episode_placeholders}</span>
                         <span className={mutedChip}>DL {season.episode_files}</span>
                       </div>
-                    </button>
+                    </div>
                     {open ? (
                       <div>
                         {season.episodes.map((ep) => (

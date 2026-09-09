@@ -1,16 +1,20 @@
-"""Placeholder policy (auto / pinned / never) preview and apply for library detail UI."""
+"""Placeholder policy (auto / pinned / never) apply for library detail UI.
+
+Series = gate (locks children without rewriting their flags).
+Season = bulk stamp (writes episode flags when series is Auto).
+Episode = exceptions after a season stamp, unless the series gate is active.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from sqlalchemy import func
 
 from services.postgres.db import get_session
-from services.postgres.models import Episode, Movie
+from services.postgres.models import Episode, Movie, Season, Series
 from services.source_of_truth.arr_share_guard import (
-    shared_placeholder_suppresses_creation,
     sibling_episode_has_file,
     sibling_movie_has_file,
 )
@@ -21,21 +25,18 @@ from services.source_of_truth.determiner import (
     DETERMINATION_OBSOLETE,
     _sibling_would_suppress_creation,
 )
-from services.source_of_truth.force_placeholder import (
-    _episode_blocking_reasons,
-    _movie_blocking_reasons,
-)
 from services.source_of_truth.materializer import (
     apply_episode_materialization,
     apply_movie_materialization,
 )
 
 PlaceholderPolicy = Literal["auto", "pinned", "never"]
+PolicySource = Literal["series", "season", "episode"]
 
 _ACTIVITY_REASON = "Placeholder policy"
 
 
-def policy_from_entity(entity: Movie | Episode) -> PlaceholderPolicy:
+def policy_from_entity(entity) -> PlaceholderPolicy:
     if bool(getattr(entity, "force_placeholder", False)):
         return "pinned"
     if bool(getattr(entity, "block_placeholder", False)):
@@ -44,7 +45,7 @@ def policy_from_entity(entity: Movie | Episode) -> PlaceholderPolicy:
 
 
 def apply_placeholder_policy(
-    entity: Movie | Episode,
+    entity,
     *,
     policy: PlaceholderPolicy,
     despite_sibling: bool = False,
@@ -69,24 +70,98 @@ def apply_placeholder_policy(
         entity.block_placeholder = False
 
 
+def resolve_episode_effective_policy(
+    *,
+    series_policy: PlaceholderPolicy,
+    episode_policy: PlaceholderPolicy,
+) -> PlaceholderPolicy:
+    """Sonarr-style gate: series Never vetoes all; series Pinned honors episode Never."""
+    if series_policy == "never":
+        return "never"
+    if series_policy == "pinned":
+        return "never" if episode_policy == "never" else "pinned"
+    return episode_policy
+
+
+def series_gate_active(series) -> bool:
+    return policy_from_entity(series) != "auto"
+
+
+def episode_effective_policy(
+    *,
+    series,
+    episode,
+) -> tuple[PlaceholderPolicy, PolicySource]:
+    series_pol = policy_from_entity(series) if series is not None else "auto"
+    episode_pol = policy_from_entity(episode)
+    effective = resolve_episode_effective_policy(
+        series_policy=series_pol,
+        episode_policy=episode_pol,
+    )
+    if series_pol != "auto":
+        return effective, "series"
+    return effective, "episode"
+
+
+def policy_flag_view(
+    policy: PlaceholderPolicy,
+    *,
+    despite_sibling: bool = False,
+) -> SimpleNamespace:
+    """Synthetic entity flags for determiner/explain using an effective policy."""
+    return SimpleNamespace(
+        force_placeholder=(policy == "pinned"),
+        block_placeholder=(policy == "never"),
+        force_placeholder_despite_sibling=bool(despite_sibling) if policy == "pinned" else False,
+    )
+
+
+def load_series_for_episode(session, episode: Episode) -> tuple[Season | None, Series | None]:
+    season = session.get(Season, int(episode.season_id)) if getattr(episode, "season_id", None) else None
+    series = session.get(Series, int(season.series_id)) if season and getattr(season, "series_id", None) else None
+    return season, series
+
+
+def episode_effectively_pinned(session, episode: Episode) -> bool:
+    _, series = load_series_for_episode(session, episode)
+    effective, _ = episode_effective_policy(series=series, episode=episode)
+    return effective == "pinned"
+
+
+def stamp_season_policy_onto_new_episode(season: Season | None, series: Series | None, episode: Episode) -> None:
+    """When a season is Never/Pinned and the series gate is open, new episodes inherit the stamp."""
+    if season is None or series is None:
+        return
+    if series_gate_active(series):
+        return
+    season_pol = policy_from_entity(season)
+    if season_pol == "auto":
+        return
+    apply_placeholder_policy(episode, policy=season_pol)
+
+
 def _policy_target_determination(
     entity: Movie | Episode,
     *,
     arr_type: str,
     sibling_has_file: bool,
+    policy: PlaceholderPolicy | None = None,
 ) -> str:
     """Map pinned/never intent to a determination without full calendar rules."""
     has_placeholder = bool(getattr(entity, "has_placeholder", False))
     has_file = bool(getattr(entity, "has_file", False))
     is_deleted = bool(getattr(entity, "is_deleted", False))
-    policy = policy_from_entity(entity)
+    resolved = policy if policy is not None else policy_from_entity(entity)
 
-    if policy == "never":
+    if resolved == "never":
         if has_file or is_deleted:
             return DETERMINATION_NOT_NEEDED
         if has_placeholder:
             return DETERMINATION_OBSOLETE
         return DETERMINATION_NOT_NEEDED
+
+    if resolved != "pinned":
+        return DETERMINATION_NOT_NEEDED if (has_file or is_deleted or not has_placeholder) else DETERMINATION_EXISTS
 
     # pinned
     if has_file or is_deleted:
@@ -104,7 +179,7 @@ def _policy_target_determination(
     return DETERMINATION_NEEDS
 
 
-def _entity_state_snapshot(entity: Movie | Episode) -> dict[str, Any]:
+def _entity_state_snapshot(entity) -> dict[str, Any]:
     return {
         "placeholder_policy": policy_from_entity(entity),
         "force_placeholder": bool(getattr(entity, "force_placeholder", False)),
@@ -174,17 +249,28 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
 
 
 def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
-    """Create/remove episode placeholder from current pinned/never flags (no Arr reconcile)."""
+    """Create/remove episode placeholder from effective policy (series gate + episode flags)."""
     session = get_session()
     try:
         episode = session.query(Episode).filter(Episode.id == int(episode_id)).first()
         if not episode:
             return {"ok": False, "message": "Episode not found", "job_id": None}
+        _, series = load_series_for_episode(session, episode)
+        effective, _ = episode_effective_policy(series=series, episode=episode)
+        if effective == "auto":
+            session.commit()
+            return {
+                "ok": True,
+                "action": "noop",
+                "job_id": None,
+                **_entity_state_snapshot(episode),
+            }
         sibling_has_file = sibling_episode_has_file(session, episode)
         target = _policy_target_determination(
             episode,
             arr_type="sonarr",
             sibling_has_file=sibling_has_file,
+            policy=effective,
         )
         episode.determination = target
         episode.determination_updated_at = func.now()
@@ -232,78 +318,144 @@ def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
         session.close()
 
 
-def _base_preview(
-    *,
-    media_type: str,
-    title: str,
-    entity: Movie | Episode,
-    session,
-    arr_type: str,
-    sibling_has_file: bool,
-    blocking_reasons: list[str],
-) -> dict[str, Any]:
-    has_file = bool(getattr(entity, "has_file", False))
-    is_deleted = bool(getattr(entity, "is_deleted", False))
-    has_placeholder = bool(getattr(entity, "has_placeholder", False))
-    shared_on = shared_placeholder_suppresses_creation(arr_type)
-    policy = policy_from_entity(entity)
-    block_message = None
-    if is_deleted:
-        block_message = "This title was removed from the library. Pin cannot be applied."
+def _episode_ids_for_series(session, series_id: int) -> list[int]:
+    season_ids = [
+        int(r[0])
+        for r in session.query(Season.id)
+        .filter(Season.series_id == int(series_id), Season.is_deleted == False)  # noqa: E712
+        .all()
+    ]
+    if not season_ids:
+        return []
+    return [
+        int(r[0])
+        for r in session.query(Episode.id)
+        .filter(Episode.season_id.in_(season_ids), Episode.is_deleted == False)  # noqa: E712
+        .order_by(Episode.id.asc())
+        .all()
+    ]
+
+
+def _episode_ids_for_season(session, season_id: int) -> list[int]:
+    return [
+        int(r[0])
+        for r in session.query(Episode.id)
+        .filter(Episode.season_id == int(season_id), Episode.is_deleted == False)  # noqa: E712
+        .order_by(Episode.id.asc())
+        .all()
+    ]
+
+
+def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict[str, Any]:
+    """Apply series Never/Pinned across episodes via effective policy (no flag rewrite on children)."""
+    episode_ids: list[int] = []
+    session = get_session()
+    try:
+        series = session.query(Series).filter(Series.id == int(series_id)).first()
+        if not series:
+            return {"ok": False, "message": "Series not found", "job_id": None}
+        episode_ids = _episode_ids_for_series(session, int(series_id))
+    finally:
+        session.close()
+
+    created = 0
+    removed = 0
+    errors: list[str] = []
+    for eid in episode_ids:
+        out = apply_episode_placeholder_policy_fast(int(eid))
+        if not out.get("ok", False):
+            errors.append(str(out.get("message") or f"Episode {eid} failed"))
+            continue
+        action = str(out.get("action") or "")
+        if action in ("created", "create", "materialized"):
+            created += 1
+        elif action in ("removed", "delete", "deleted", "obsolete"):
+            removed += 1
+    if errors and created == 0 and removed == 0:
+        return {
+            "ok": False,
+            "message": errors[0],
+            "job_id": None,
+            "placeholder_policy": policy,
+            "episodes_touched": len(episode_ids),
+        }
     return {
         "ok": True,
-        "media_type": media_type,
-        "title": title,
+        "action": "series_gate",
+        "job_id": None,
         "placeholder_policy": policy,
-        "force_placeholder": bool(getattr(entity, "force_placeholder", False)),
-        "block_placeholder": bool(getattr(entity, "block_placeholder", False)),
-        "force_placeholder_despite_sibling": bool(
-            getattr(entity, "force_placeholder_despite_sibling", False)
-        ),
-        "can_force": not is_deleted,
-        "block_message": block_message,
-        "has_file": has_file,
-        "has_placeholder": has_placeholder,
-        "is_deleted": is_deleted,
-        "blocking_reasons": blocking_reasons,
-        "sibling_has_file": sibling_has_file,
-        "shared_suppression_enabled": shared_on,
-        "sibling_option_available": bool(not is_deleted and shared_on and sibling_has_file),
-        "sibling_would_suppress": _sibling_would_suppress_creation(
-            arr_type=arr_type,
-            has_file=has_file,
-            is_deleted=is_deleted,
-            sibling_has_file=sibling_has_file,
-        ),
+        "episodes_touched": len(episode_ids),
+        "created": created,
+        "removed": removed,
+        "error_count": len(errors),
     }
 
 
-def preview_movie_placeholder_policy(session, movie: Movie) -> dict[str, Any]:
-    now_date = datetime.now(timezone.utc).date()
-    sibling_has_file = sibling_movie_has_file(session, movie)
-    return _base_preview(
-        media_type="movie",
-        title=str(getattr(movie, "title", "") or "Movie"),
-        entity=movie,
-        session=session,
-        arr_type="radarr",
-        sibling_has_file=sibling_has_file,
-        blocking_reasons=_movie_blocking_reasons(session, movie, now_date=now_date),
-    )
+def apply_season_stamp_fast(season_id: int, *, policy: PlaceholderPolicy) -> dict[str, Any]:
+    """Stamp season Auto/Never/Pinned onto all episodes, then apply (Auto → per-episode reconcile)."""
+    episode_ids: list[int] = []
+    session = get_session()
+    try:
+        season = session.query(Season).filter(Season.id == int(season_id)).first()
+        if not season:
+            return {"ok": False, "message": "Season not found", "job_id": None}
+        episode_ids = _episode_ids_for_season(session, int(season_id))
+        for eid in episode_ids:
+            ep = session.get(Episode, int(eid))
+            if not ep:
+                continue
+            apply_placeholder_policy(ep, policy=policy)
+            session.add(ep)
+        session.commit()
+    except Exception as exc:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "message": str(exc), "job_id": None}
+    finally:
+        session.close()
 
+    if policy == "auto":
+        # Same bulk wipe as Never/Pinned: episodes are now Auto and need full determination.
+        return {
+            "ok": True,
+            "action": "season_stamp",
+            "job_id": None,
+            "placeholder_policy": policy,
+            "episodes_touched": len(episode_ids),
+            "needs_reconcile": True,
+            "episode_ids": episode_ids,
+        }
 
-def preview_episode_placeholder_policy(session, episode: Episode) -> dict[str, Any]:
-    now_date = datetime.now(timezone.utc).date()
-    sibling_has_file = sibling_episode_has_file(session, episode)
-    title = str(getattr(episode, "title", "") or f"Episode {getattr(episode, 'episode_number', '')}")
-    return _base_preview(
-        media_type="episode",
-        title=title,
-        entity=episode,
-        session=session,
-        arr_type="sonarr",
-        sibling_has_file=sibling_has_file,
-        blocking_reasons=_episode_blocking_reasons(session, episode, now_date=now_date),
-    )
-
-
+    created = 0
+    removed = 0
+    errors: list[str] = []
+    for eid in episode_ids:
+        out = apply_episode_placeholder_policy_fast(int(eid))
+        if not out.get("ok", False):
+            errors.append(str(out.get("message") or f"Episode {eid} failed"))
+            continue
+        action = str(out.get("action") or "")
+        if action in ("created", "create", "materialized"):
+            created += 1
+        elif action in ("removed", "delete", "deleted", "obsolete"):
+            removed += 1
+    if errors and created == 0 and removed == 0:
+        return {
+            "ok": False,
+            "message": errors[0],
+            "job_id": None,
+            "placeholder_policy": policy,
+            "episodes_touched": len(episode_ids),
+        }
+    return {
+        "ok": True,
+        "action": "season_stamp",
+        "job_id": None,
+        "placeholder_policy": policy,
+        "episodes_touched": len(episode_ids),
+        "created": created,
+        "removed": removed,
+        "error_count": len(errors),
+    }

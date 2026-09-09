@@ -91,23 +91,26 @@ def _start_interval(
         logger.exception(f"Failed to start scheduler for {label}")
 
 
-def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | None = None) -> None:
-    """Persist and apply the next run time after manual or scheduled completion."""
-    hours = _interval_hours_for(task_key)
-    if hours <= 0:
-        return
-    nxt = bump_next_run_after_run(task_key, hours, completed_at=completed_at)
+def _job_id_for(task_key: str) -> str | None:
+    if task_key == "full_sync":
+        return JOB_ID_FULL
+    if task_key == "lite_sync":
+        return JOB_ID_LITE
+    if task_key == "collections_sync":
+        return JOB_ID_COLLECTIONS
+    return None
+
+
+def _apply_next_run_to_job(
+    task_key: str,
+    nxt: datetime,
+    *,
+    hours: int,
+    log_label: str = "after completion",
+) -> None:
     if _scheduler is None:
         return
-    job_id = (
-        JOB_ID_FULL
-        if task_key == "full_sync"
-        else JOB_ID_LITE
-        if task_key == "lite_sync"
-        else JOB_ID_COLLECTIONS
-        if task_key == "collections_sync"
-        else None
-    )
+    job_id = _job_id_for(task_key)
     if not job_id:
         return
     try:
@@ -124,13 +127,30 @@ def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | 
                 next_run_time=nxt,
             )
             logger.info(
-                "Rescheduled %s after completion: next_run=%s",
+                "Rescheduled %s %s: next_run=%s",
                 task_key,
+                log_label,
                 nxt.isoformat(),
                 extra={"emoji_type": "info"},
             )
     except Exception:
         logger.exception("Failed to reschedule job %s", job_id)
+
+
+def reschedule_task_after_completion(task_key: str, *, completed_at: datetime | None = None) -> None:
+    """Persist and apply the next run time after manual or scheduled completion."""
+    hours = _interval_hours_for(task_key)
+    if hours <= 0:
+        return
+    nxt = bump_next_run_after_run(task_key, hours, completed_at=completed_at)
+    _apply_next_run_to_job(task_key, nxt, hours=hours)
+
+
+def reschedule_after_full_sync_success(*, completed_at: datetime | None = None) -> None:
+    """Full sync subsumes lite: advance both schedules from completion."""
+    reschedule_task_after_completion("full_sync", completed_at=completed_at)
+    if _interval_hours_for("lite_sync") > 0:
+        reschedule_task_after_completion("lite_sync", completed_at=completed_at)
 
 
 def _run_all_syncs_scheduled():
