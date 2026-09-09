@@ -723,9 +723,9 @@ def complete_full_sync_task_run(
 
     trigger = str(summary.get("trigger") or "").strip().lower()
     if not failed and trigger in ("scheduled", "manual"):
-        from services.source_of_truth.scheduler import reschedule_task_after_completion
+        from services.source_of_truth.scheduler import reschedule_after_full_sync_success
 
-        reschedule_task_after_completion("full_sync")
+        reschedule_after_full_sync_success()
 
 
 def reconcile_stuck_art_backfill_tasks() -> int:

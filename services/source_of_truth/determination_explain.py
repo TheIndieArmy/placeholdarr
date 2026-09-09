@@ -625,7 +625,14 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
 
     include_specials = bool(getattr(settings, "INCLUDE_SPECIALS", False))
-    forced = bool(getattr(episode, "force_placeholder", False))
+    from services.source_of_truth.placeholder_policy import (
+        episode_effective_policy,
+        policy_flag_view,
+        policy_from_entity,
+    )
+
+    effective_pol, policy_source = episode_effective_policy(series=series, episode=episode)
+    forced = effective_pol == "pinned"
     if not include_specials and season_number == 0 and not forced:
         final = DETERMINATION_NOT_NEEDED
         steps.append(
@@ -654,7 +661,7 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
                 "episode_specials",
                 "Specials policy",
                 "applied",
-                detail="Season 0 specials are excluded by settings, but policy is Pinned.",
+                detail="Season 0 specials are excluded by settings, but effective policy is Pinned.",
             )
         )
     else:
@@ -827,37 +834,45 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
         sibling_has_file=sibling_has_file,
     )
     before = base
+    policy_entity = policy_flag_view(
+        effective_pol,
+        despite_sibling=bool(getattr(episode, "force_placeholder_despite_sibling", False)),
+    )
     base = _apply_block_placeholder(
         base=base,
-        entity=episode,
+        entity=policy_entity,
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
     )
     base = _apply_force_placeholder(
         base=base,
-        entity=episode,
+        entity=policy_entity,
         has_placeholder=has_placeholder,
         has_file=has_file,
         is_deleted=is_deleted,
         sibling_would_suppress=sibling_block,
     )
-    steps.append(
-        _placeholder_policy_step(
-            entity=episode,
-            before=before,
-            after=base,
-            has_file=has_file,
-            is_deleted=is_deleted,
-            sibling_would_suppress=sibling_block,
-        )
+    policy_step = _placeholder_policy_step(
+        entity=policy_entity,
+        before=before,
+        after=base,
+        has_file=has_file,
+        is_deleted=is_deleted,
+        sibling_would_suppress=sibling_block,
     )
+    if policy_source == "series" and effective_pol != "auto":
+        series_label = policy_from_entity(series) if series is not None else "auto"
+        detail = str(policy_step.get("detail") or "")
+        gate_note = f" Series gate is {series_label.title()} (episode stored flags unchanged)."
+        policy_step["detail"] = (detail + gate_note).strip()
+    steps.append(policy_step)
 
     final = base
     deciding = _explain_deciding_step_key(
         steps,
         final,
-        episode,
+        policy_entity,
         has_file=has_file,
         is_deleted=is_deleted,
     )
@@ -874,7 +889,7 @@ def explain_episode_determination(session, episode: Episode) -> dict[str, Any]:
             final,
             deciding,
             steps,
-            episode,
+            policy_entity,
             has_file=has_file,
             is_deleted=is_deleted,
         ),

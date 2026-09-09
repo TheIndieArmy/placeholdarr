@@ -219,11 +219,10 @@ async def tasks_run(body: TaskRunRequest):
         raise HTTPException(status_code=400, detail=f"Unknown task_key: {key}")
 
     if key == "full_sync":
-        existing = get_working_run("full_sync")
-        if existing:
+        if get_working_run("full_sync") or get_working_run("lite_sync"):
             raise HTTPException(
                 status_code=409,
-                detail=f"Task already running: full_sync (run id {existing.id})",
+                detail="Task already running: lite or full sync in progress",
             )
     elif key == "lite_sync":
         if get_working_run("lite_sync") or get_working_run("full_sync"):

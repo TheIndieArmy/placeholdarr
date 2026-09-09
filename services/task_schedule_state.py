@@ -16,7 +16,8 @@ _TASK_KEYS = {
     "collections_sync": "SCHEDULED_TASK_NEXT_RUN_COLLECTIONS_SYNC",
 }
 
-_CATCH_UP_MINUTES = 2
+CATCH_UP_MINUTES = 2
+_CATCH_UP_MINUTES = CATCH_UP_MINUTES  # backwards-compatible alias
 
 
 def _utc_now() -> datetime:
@@ -81,14 +82,20 @@ def persist_next_run(task_key: str, next_run: datetime) -> None:
         session.close()
 
 
-def resolve_next_run_time(task_key: str, interval_hours: int) -> datetime:
-    """Next fire time: persisted future time, else last completion + interval, else catch-up soon."""
-    now = _utc_now()
-    safe_hours = max(1, int(interval_hours or 1))
+def is_task_overdue(task_key: str, interval_hours: int, *, now: datetime | None = None) -> bool:
+    """True when the schedule is enabled and due.
 
+    A persisted next-run in the past means overdue (do not let a recent last-run
+    + interval hide a missed schedule clock). With no persisted next-run, fall
+    back to last finished + interval.
+    """
+    if int(interval_hours or 0) <= 0:
+        return False
+    when = now or _utc_now()
+    safe_hours = max(1, int(interval_hours))
     persisted = get_persisted_next_run(task_key)
-    if persisted and persisted > now:
-        return persisted
+    if persisted is not None:
+        return persisted <= when
 
     last = latest_finished_run(task_key)
     if last and last.ended_at:
@@ -96,17 +103,38 @@ def resolve_next_run_time(task_key: str, interval_hours: int) -> datetime:
         if ended.tzinfo is None:
             ended = ended.replace(tzinfo=timezone.utc)
         candidate = ended.astimezone(timezone.utc) + timedelta(hours=safe_hours)
-        if candidate > now:
-            persist_next_run(task_key, candidate)
-            return candidate
+        return candidate <= when
+    # Enabled schedule with no history and no persisted next-run: treat as due.
+    return True
 
-    if persisted and persisted <= now:
+
+def resolve_next_run_time(task_key: str, interval_hours: int) -> datetime:
+    """Next fire time: persisted future time, else last completion + interval, else catch-up soon."""
+    now = _utc_now()
+    safe_hours = max(1, int(interval_hours or 1))
+    key = str(task_key).strip().lower()
+
+    persisted = get_persisted_next_run(key)
+    if persisted and persisted > now:
+        return persisted
+    # Persisted but past: catch up soon (do not rewrite from last-run + interval).
+    if persisted is not None and persisted <= now:
         catch_up = now + timedelta(minutes=_CATCH_UP_MINUTES)
-        persist_next_run(task_key, catch_up)
+        persist_next_run(key, catch_up)
         return catch_up
 
+    last = latest_finished_run(key)
+    if last and last.ended_at:
+        ended = last.ended_at
+        if ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        candidate = ended.astimezone(timezone.utc) + timedelta(hours=safe_hours)
+        if candidate > now:
+            persist_next_run(key, candidate)
+            return candidate
+
     catch_up = now + timedelta(minutes=_CATCH_UP_MINUTES)
-    persist_next_run(task_key, catch_up)
+    persist_next_run(key, catch_up)
     return catch_up
 
 

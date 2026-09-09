@@ -234,9 +234,9 @@ def _target_refresh_section_ids(*, has_movies: bool, has_episodes: bool) -> list
     return sorted(set(section_ids))
 
 
-def _compute_initial_dummy_variant_for_episode(episode: Episode) -> str:
+def _compute_initial_dummy_variant_for_episode(episode: Episode, session=None) -> str:
     """Return 'coming_soon' or 'request' for dummy file selection at episode creation time."""
-    return compute_dummy_variant_for_episode(episode)
+    return compute_dummy_variant_for_episode(episode, session=session)
 
 
 def _compute_initial_dummy_variant_for_movie(movie: Movie) -> str:
@@ -683,7 +683,7 @@ def apply_episode_materialization(episode_id: int, session=None, activity_reason
         determination = getattr(episode, "determination", None)
         if determination == DETERMINATION_NEEDS:
             target_path = getattr(episode, "placeholder_filepath", None) or episode_placeholder_path(episode, season, series)
-            _initial_variant = _compute_initial_dummy_variant_for_episode(episode)
+            _initial_variant = _compute_initial_dummy_variant_for_episode(episode, session=session)
             created = ensure_placeholder_file(target_path, dummy_file_path=_dummy_file_path_for_variant(_initial_variant))
             nfo_written = ensure_episode_nfo(target_path, episode, season, series)
             # ensure series-level tvshow.nfo is present as well

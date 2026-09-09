@@ -297,7 +297,7 @@ def _calendar_settings_snapshot(*, now_date: date | None = None) -> dict[str, An
 
 
 def _placeholder_force_pinned(session, placeholder: Placeholder) -> bool:
-    """True when the linked movie or episode has force_placeholder set."""
+    """True when the linked movie/episode is effectively pinned (series gate counts)."""
     movie_id = getattr(placeholder, "movie_id", None)
     if movie_id is not None:
         movie = session.get(Movie, int(movie_id))
@@ -305,7 +305,11 @@ def _placeholder_force_pinned(session, placeholder: Placeholder) -> bool:
     episode_id = getattr(placeholder, "episode_id", None)
     if episode_id is not None:
         episode = session.get(Episode, int(episode_id))
-        return bool(episode and getattr(episode, "force_placeholder", False))
+        if not episode:
+            return False
+        from services.source_of_truth.placeholder_policy import episode_effectively_pinned
+
+        return episode_effectively_pinned(session, episode)
     return False
 
 
@@ -327,9 +331,19 @@ def compute_calendar_decision_for_movie(movie: Movie, *, now_date: date | None =
     )
 
 
-def compute_calendar_decision_for_episode(episode: Episode, *, now_date: date | None = None) -> CalendarDecision:
+def compute_calendar_decision_for_episode(
+    episode: Episode,
+    *,
+    now_date: date | None = None,
+    session=None,
+) -> CalendarDecision:
     """Calendar status decision for an episode row (used by materializer dummy variant selection)."""
     snap = _calendar_settings_snapshot(now_date=now_date)
+    force_pinned = bool(getattr(episode, "force_placeholder", False))
+    if session is not None:
+        from services.source_of_truth.placeholder_policy import episode_effectively_pinned
+
+        force_pinned = episode_effectively_pinned(session, episode)
     return _compute_calendar_decision(
         target_date=getattr(episode, "air_date", None),
         has_file=bool(getattr(episode, "has_file", False)),
@@ -340,7 +354,7 @@ def compute_calendar_decision_for_episode(episode: Episode, *, now_date: date | 
         now_date=snap["now_date"],
         release_type=None,
         release_type_preferred=False,
-        force_pinned=bool(getattr(episode, "force_placeholder", False)),
+        force_pinned=force_pinned,
     )
 
 
@@ -349,8 +363,13 @@ def compute_dummy_variant_for_movie(movie: Movie, *, now_date: date | None = Non
     return _dummy_variant_for_status(decision.status)
 
 
-def compute_dummy_variant_for_episode(episode: Episode, *, now_date: date | None = None) -> str:
-    decision = compute_calendar_decision_for_episode(episode, now_date=now_date)
+def compute_dummy_variant_for_episode(
+    episode: Episode,
+    *,
+    now_date: date | None = None,
+    session=None,
+) -> str:
+    decision = compute_calendar_decision_for_episode(episode, now_date=now_date, session=session)
     return _dummy_variant_for_status(decision.status)
 
 

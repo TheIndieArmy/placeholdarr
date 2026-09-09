@@ -34,6 +34,22 @@ from sqlalchemy import inspect
 
 _runtime_services_lock = threading.Lock()
 _runtime_services_started = False
+_sync_scheduler_lock = threading.Lock()
+_sync_scheduler_started = False
+
+
+def ensure_sync_scheduler_started(reason: str = "") -> None:
+    """Register APScheduler sync jobs once (after boot sync decision finishes)."""
+    global _sync_scheduler_started
+    with _sync_scheduler_lock:
+        if _sync_scheduler_started:
+            return
+        schedule_all_syncs()
+        _sync_scheduler_started = True
+        logger.info(
+            f"Sync scheduler started (reason={reason or 'unspecified'})",
+            extra={"emoji_type": "success"},
+        )
 
 
 def _onboarding_is_complete() -> bool:
@@ -80,8 +96,16 @@ def _ensure_core_tables(engine) -> bool:
     return False
 
 
-def start_runtime_background_services(reason: str = 'startup') -> bool:
-    """Start schedulers/workers/queue monitor once per process."""
+def start_runtime_background_services(
+    reason: str = "startup",
+    *,
+    start_sync_scheduler: bool = False,
+) -> bool:
+    """Start workers/notifier/queue monitor once per process.
+
+    Sync interval jobs are deferred by default until ``ensure_sync_scheduler_started``
+    so boot sync can finish first without racing overdue catch-up.
+    """
     global _runtime_services_started
     with _runtime_services_lock:
         if _runtime_services_started:
@@ -89,6 +113,8 @@ def start_runtime_background_services(reason: str = 'startup') -> bool:
                 f"Runtime background services already running; skipping duplicate start (reason={reason})",
                 extra={'emoji_type': 'info'},
             )
+            if start_sync_scheduler:
+                ensure_sync_scheduler_started(reason=f"{reason}:ensure_scheduler")
             return False
 
         # Start the shared Postgres LISTEN/NOTIFY listener BEFORE workers so
@@ -102,9 +128,6 @@ def start_runtime_background_services(reason: str = 'startup') -> bool:
                 f'Failed to start shared notifier (NOTIFY/LISTEN); falling back to safety-poll mode: {e}',
                 extra={'emoji_type': 'error'},
             )
-
-        # --- Schedule all Radarr/Sonarr syncs (startup and cron) ---
-        schedule_all_syncs()
 
         # Start worker loops from the main process for deterministic behavior.
         try:
@@ -130,6 +153,8 @@ def start_runtime_background_services(reason: str = 'startup') -> bool:
             f"Runtime background services started (reason={reason})",
             extra={'emoji_type': 'success'},
         )
+        if start_sync_scheduler:
+            ensure_sync_scheduler_started(reason=reason)
         return True
 
 # Ensure project root is first on sys.path so local 'services' package is resolved before any installed package named 'services'
@@ -460,6 +485,13 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f'Startup source-of-truth failed: {e}', extra={'emoji_type': 'error'})
             finally:
+                try:
+                    ensure_sync_scheduler_started(reason="after_boot_sync")
+                except Exception as sched_exc:
+                    logger.error(
+                        f"Failed to start sync scheduler after boot sync: {sched_exc}",
+                        extra={"emoji_type": "error"},
+                    )
                 startup_sync_complete.set()
 
         threading.Thread(target=_run_startup_sync, name='startup-sync', daemon=True).start()

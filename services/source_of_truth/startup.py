@@ -989,32 +989,18 @@ def _run_startup_lite_snapshot_for_instances(
         session.close()
 
 
-def _resolve_startup_sync_mode(instances: list[dict]) -> str:
-    mode = str(getattr(settings, 'STARTUP_SYNC_MODE', 'auto') or 'auto').strip().lower()
-    if mode in ('off', 'full', 'lite'):
-        return mode
+def _resolve_startup_sync_mode(
+    instances: list[dict],
+    *,
+    require_first_full: bool = False,
+) -> str:
+    from services.source_of_truth.boot_sync import resolve_boot_sync_mode
 
-    if mode != 'auto':
-        logger.warning(
-            f"Unknown STARTUP_SYNC_MODE={mode!r}; defaulting to auto",
-            extra={'emoji_type': 'warning'},
-        )
-
-    if not instances:
-        return 'off'
-
-    session = get_session()
-    try:
-        for instance in instances:
-            row = session.query(ArrState).filter(ArrState.instance_key == instance['instance_key']).first()
-            if not row or row.first_full_sync_completed_at is None:
-                return 'full'
-    finally:
-        session.close()
-    return 'lite'
+    mode, _detail = resolve_boot_sync_mode(instances, require_first_full=require_first_full)
+    return mode
 
 
-def run_startup_source_of_truth() -> dict:
+def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
     """Execute configured startup fullsyncs, filesystem scan, determine, and materialize."""
     settings.REFRESH_TRIGGER_SUPPRESSED = True
     try:
@@ -1039,14 +1025,28 @@ def run_startup_source_of_truth() -> dict:
             )
 
         from services.startup_sync_activity import record_startup_sync_progress
+        from services.source_of_truth.boot_sync import resolve_boot_sync_mode
 
         run_ids: list[str] = []
         instances = _configured_arr_instances()
-        selected_mode = _resolve_startup_sync_mode(instances)
+        selected_mode, boot_decision = resolve_boot_sync_mode(
+            instances,
+            require_first_full=require_first_full,
+        )
         startup_sync_stats: dict = {}
         determination_stats: dict = {}
         materialization_stats: dict = {}
         startup_task_run_id: int | None = None
+
+        if selected_mode == "off":
+            return {
+                "ran": False,
+                "startup_sync_mode": "off",
+                "boot_decision": boot_decision,
+                "skipped": True,
+                "reason": "boot_chose_off",
+            }
+
         if selected_mode in ("full", "lite"):
             from services.task_run_history import begin_task_run
 
@@ -1316,6 +1316,7 @@ def run_startup_source_of_truth() -> dict:
         result = {
             'ran': True,
             'startup_sync_mode': selected_mode,
+            'boot_decision': boot_decision,
             'fullsync_ran': selected_mode == 'full' and bool(run_ids),
             'startup_sync': startup_sync_stats,
             'run_ids': run_ids,
@@ -1353,6 +1354,16 @@ def run_startup_source_of_truth() -> dict:
             from services.task_run_history import finish_task_run
 
             finish_task_run(startup_task_run_id, status="done", summary=result)
+        # Advance schedules so boot catch-up does not re-fire after a successful startup.
+        # Startup full subsumes lite; startup lite only bumps lite (leave overdue full).
+        if selected_mode == "full":
+            from services.source_of_truth.scheduler import reschedule_after_full_sync_success
+
+            reschedule_after_full_sync_success()
+        elif selected_mode == "lite":
+            from services.source_of_truth.scheduler import reschedule_task_after_completion
+
+            reschedule_task_after_completion("lite_sync")
         return result
     except Exception as exc:
         try:

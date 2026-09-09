@@ -106,7 +106,7 @@ def _launch_post_onboarding_startup_sync() -> None:
     def _runner() -> None:
         from services.startup_gate import startup_sync_complete
         try:
-            from main import start_runtime_background_services
+            from main import ensure_sync_scheduler_started, start_runtime_background_services
             from services.source_of_truth.startup import run_startup_source_of_truth
 
             start_runtime_background_services(reason='post_onboarding_completion')
@@ -115,7 +115,7 @@ def _launch_post_onboarding_startup_sync() -> None:
                 "Launching first-run startup sync after onboarding completion",
                 extra={"emoji_type": "gear"},
             )
-            result = run_startup_source_of_truth()
+            result = run_startup_source_of_truth(require_first_full=True)
             logger.info(
                 "Post-onboarding startup sync completed"
                 f" mode={result.get('startup_sync_mode')}"
@@ -125,6 +125,10 @@ def _launch_post_onboarding_startup_sync() -> None:
         except Exception as exc:
             logger.error(f"Post-onboarding startup sync failed: {exc}", extra={"emoji_type": "error"})
         finally:
+            try:
+                ensure_sync_scheduler_started(reason="after_post_onboarding_thread")
+            except Exception:
+                pass
             startup_sync_complete.set()
 
     threading.Thread(target=_runner, name="post-onboarding-startup-sync", daemon=True).start()
@@ -4396,6 +4400,10 @@ async def series_detail(series_id: int):
             payload=series.sonarr_payload_raw if isinstance(series.sonarr_payload_raw, dict) else None,
         )
         instance_meta = _arr_instance_meta(series.instance_key, getattr(series, "instance_id", None))
+        from services.source_of_truth.placeholder_policy import policy_from_entity, series_gate_active
+
+        series_policy = policy_from_entity(series)
+        series_gate = series_gate_active(series)
         seasons_raw = (
             session.query(Season)
             .filter(Season.series_id == series_id, Season.is_deleted == False)
@@ -4452,6 +4460,7 @@ async def series_detail(series_id: int):
                     "force_placeholder_despite_sibling": bool(
                         getattr(ep, "force_placeholder_despite_sibling", False)
                     ),
+                    "policy_locked": series_gate,
                     "status": ep.status,
                     "display_status": ep_display.get(int(ep.id)),
                     "sonarr_quality": ep.sonarr_quality,
@@ -4475,6 +4484,16 @@ async def series_detail(series_id: int):
                 "episode_future": ep_future,
                 "monitored": bool(season.sonarr_monitored),
                 "poster_url": season.remote_poster,
+                "placeholder_policy": (
+                    "pinned"
+                    if bool(getattr(season, "force_placeholder", False))
+                    else "never"
+                    if bool(getattr(season, "block_placeholder", False))
+                    else "auto"
+                ),
+                "force_placeholder": bool(getattr(season, "force_placeholder", False)),
+                "block_placeholder": bool(getattr(season, "block_placeholder", False)),
+                "policy_locked": series_gate,
                 "episodes": episodes_out,
             })
 
@@ -4507,6 +4526,9 @@ async def series_detail(series_id: int):
             "status": series.status,
             "sonarr_status": series.sonarr_status,
             "sonarr_monitored": bool(series.sonarr_monitored),
+            "placeholder_policy": series_policy,
+            "force_placeholder": bool(getattr(series, "force_placeholder", False)),
+            "block_placeholder": bool(getattr(series, "block_placeholder", False)),
             "first_aired": _iso(series.sonarr_first_aired),
             "last_aired_date": _iso(last_aired_map.get(int(series.id))),
             "episode_stats": {
@@ -4663,148 +4685,6 @@ async def episode_determination_explain(episode_id: int):
         session.close()
 
 
-@router.get("/api/library/movie/{movie_id}/force-placeholder-preview")
-async def movie_force_placeholder_preview(movie_id: int):
-    from services.source_of_truth.force_placeholder import preview_movie_force_placeholder
-
-    session = get_session()
-    try:
-        movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
-        if not movie:
-            return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-        return preview_movie_force_placeholder(session, movie)
-    finally:
-        session.close()
-
-
-@router.get("/api/library/episode/{episode_id}/force-placeholder-preview")
-async def episode_force_placeholder_preview(episode_id: int):
-    from services.source_of_truth.force_placeholder import preview_episode_force_placeholder
-
-    session = get_session()
-    try:
-        episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
-        if not episode:
-            return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
-        return preview_episode_force_placeholder(session, episode)
-    finally:
-        session.close()
-
-
-@router.post("/api/library/movie/{movie_id}/force-placeholder")
-async def movie_force_placeholder_set(movie_id: int, request: Request):
-    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
-    from services.source_of_truth.force_placeholder import apply_force_placeholder_flags
-
-    payload = await request.json()
-    enabled = bool(payload.get("enabled"))
-    despite_sibling = bool(payload.get("despite_sibling"))
-
-    session = get_session()
-    try:
-        movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
-        if not movie:
-            return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-        if enabled and bool(movie.is_deleted):
-            return JSONResponse(
-                {"ok": False, "message": "Cannot pin a placeholder for a removed title."},
-                status_code=400,
-            )
-        apply_force_placeholder_flags(movie, enabled=enabled, despite_sibling=despite_sibling)
-        session.add(movie)
-        session.commit()
-        force_placeholder = bool(movie.force_placeholder)
-        despite = bool(movie.force_placeholder_despite_sibling)
-    finally:
-        session.close()
-
-    out = enqueue_entity_reconcile(
-        entity_type="movie",
-        entity_id=int(movie_id),
-        source=f"library_movie_force:{movie_id}",
-    )
-    return {
-        "ok": bool(out.get("ok", True)),
-        "force_placeholder": force_placeholder,
-        "force_placeholder_despite_sibling": despite,
-        "job_id": out.get("job_id"),
-        "step_label": out.get("step_label"),
-        "reused": bool(out.get("reused")),
-        "message": out.get("message"),
-    }
-
-
-@router.post("/api/library/episode/{episode_id}/force-placeholder")
-async def episode_force_placeholder_set(episode_id: int, request: Request):
-    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
-    from services.source_of_truth.force_placeholder import apply_force_placeholder_flags
-
-    payload = await request.json()
-    enabled = bool(payload.get("enabled"))
-    despite_sibling = bool(payload.get("despite_sibling"))
-
-    session = get_session()
-    try:
-        episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
-        if not episode:
-            return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
-        if enabled and bool(episode.is_deleted):
-            return JSONResponse(
-                {"ok": False, "message": "Cannot pin a placeholder for a removed episode."},
-                status_code=400,
-            )
-        apply_force_placeholder_flags(episode, enabled=enabled, despite_sibling=despite_sibling)
-        session.add(episode)
-        session.commit()
-        force_placeholder = bool(episode.force_placeholder)
-        despite = bool(episode.force_placeholder_despite_sibling)
-    finally:
-        session.close()
-
-    out = enqueue_entity_reconcile(
-        entity_type="episode",
-        entity_id=int(episode_id),
-        source=f"library_episode_force:{episode_id}",
-    )
-    return {
-        "ok": bool(out.get("ok", True)),
-        "force_placeholder": force_placeholder,
-        "force_placeholder_despite_sibling": despite,
-        "job_id": out.get("job_id"),
-        "step_label": out.get("step_label"),
-        "reused": bool(out.get("reused")),
-        "message": out.get("message"),
-    }
-
-
-@router.get("/api/library/movie/{movie_id}/placeholder-policy-preview")
-async def movie_placeholder_policy_preview(movie_id: int):
-    from services.source_of_truth.placeholder_policy import preview_movie_placeholder_policy
-
-    session = get_session()
-    try:
-        movie = session.query(Movie).filter(Movie.id == int(movie_id), Movie.is_deleted == False).first()  # noqa: E712
-        if not movie:
-            return JSONResponse({"ok": False, "message": "Movie not found"}, status_code=404)
-        return preview_movie_placeholder_policy(session, movie)
-    finally:
-        session.close()
-
-
-@router.get("/api/library/episode/{episode_id}/placeholder-policy-preview")
-async def episode_placeholder_policy_preview(episode_id: int):
-    from services.source_of_truth.placeholder_policy import preview_episode_placeholder_policy
-
-    session = get_session()
-    try:
-        episode = session.query(Episode).filter(Episode.id == int(episode_id), Episode.is_deleted == False).first()  # noqa: E712
-        if not episode:
-            return JSONResponse({"ok": False, "message": "Episode not found"}, status_code=404)
-        return preview_episode_placeholder_policy(session, episode)
-    finally:
-        session.close()
-
-
 def _placeholder_policy_snapshot(entity) -> dict:
     """Capture policy flags while the session is still open (expire_on_commit)."""
     from services.source_of_truth.placeholder_policy import policy_from_entity
@@ -4884,6 +4764,8 @@ async def episode_placeholder_policy_set(episode_id: int, request: Request):
     from services.source_of_truth.placeholder_policy import (
         apply_episode_placeholder_policy_fast,
         apply_placeholder_policy,
+        load_series_for_episode,
+        series_gate_active,
     )
 
     payload = await request.json()
@@ -4899,6 +4781,15 @@ async def episode_placeholder_policy_set(episode_id: int, request: Request):
         if bool(episode.is_deleted) and policy != "auto":
             return JSONResponse(
                 {"ok": False, "message": "Cannot set placeholder policy for a removed episode."},
+                status_code=400,
+            )
+        _, series = load_series_for_episode(session, episode)
+        if series is not None and series_gate_active(series):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "Series policy locks episode chips. Change the series Auto / Never / Pinned chip first.",
+                },
                 status_code=400,
             )
         apply_placeholder_policy(episode, policy=policy)
@@ -4922,6 +4813,114 @@ async def episode_placeholder_policy_set(episode_id: int, request: Request):
             {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
             status_code=500,
         )
+    return _placeholder_policy_set_response(snapshot, fast)
+
+
+@router.post("/api/library/series/{series_id}/placeholder-policy")
+async def series_placeholder_policy_set(series_id: int, request: Request):
+    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
+    from services.source_of_truth.placeholder_policy import (
+        apply_placeholder_policy,
+        apply_series_gate_fast,
+    )
+
+    payload = await request.json()
+    policy = str(payload.get("policy") or "auto").strip().lower()
+    if policy not in ("auto", "pinned", "never"):
+        return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
+
+    session = get_session()
+    try:
+        series = session.query(Series).filter(Series.id == int(series_id), Series.is_deleted == False).first()  # noqa: E712
+        if not series:
+            return JSONResponse({"ok": False, "message": "Series not found"}, status_code=404)
+        if bool(series.is_deleted) and policy != "auto":
+            return JSONResponse(
+                {"ok": False, "message": "Cannot set placeholder policy for a removed series."},
+                status_code=400,
+            )
+        apply_placeholder_policy(series, policy=policy)
+        session.add(series)
+        session.commit()
+        snapshot = _placeholder_policy_snapshot(series)
+    finally:
+        session.close()
+
+    if policy == "auto":
+        out = enqueue_entity_reconcile(
+            entity_type="series",
+            entity_id=int(series_id),
+            source=f"library_series_policy:{series_id}",
+        )
+        return _placeholder_policy_set_response(snapshot, out)
+
+    fast = apply_series_gate_fast(int(series_id), policy=policy)
+    if not fast.get("ok", False):
+        return JSONResponse(
+            {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
+            status_code=500,
+        )
+    return _placeholder_policy_set_response(snapshot, fast)
+
+
+@router.post("/api/library/season/{season_id}/placeholder-policy")
+async def season_placeholder_policy_set(season_id: int, request: Request):
+    from services.source_of_truth.entity_reconcile import enqueue_entity_reconcile
+    from services.source_of_truth.placeholder_policy import (
+        apply_placeholder_policy,
+        apply_season_stamp_fast,
+        series_gate_active,
+    )
+
+    payload = await request.json()
+    policy = str(payload.get("policy") or "auto").strip().lower()
+    if policy not in ("auto", "pinned", "never"):
+        return JSONResponse({"ok": False, "message": "Invalid placeholder policy."}, status_code=400)
+
+    series_id_for_reconcile: int | None = None
+    session = get_session()
+    try:
+        season = session.query(Season).filter(Season.id == int(season_id), Season.is_deleted == False).first()  # noqa: E712
+        if not season:
+            return JSONResponse({"ok": False, "message": "Season not found"}, status_code=404)
+        series = session.query(Series).filter(Series.id == int(season.series_id)).first() if season.series_id else None
+        if series is not None and series_gate_active(series):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "Series policy locks season chips. Change the series Auto / Never / Pinned chip first.",
+                },
+                status_code=400,
+            )
+        if bool(getattr(season, "is_deleted", False)) and policy != "auto":
+            return JSONResponse(
+                {"ok": False, "message": "Cannot set placeholder policy for a removed season."},
+                status_code=400,
+            )
+        if season.series_id is not None:
+            series_id_for_reconcile = int(season.series_id)
+        apply_placeholder_policy(season, policy=policy)
+        session.add(season)
+        session.commit()
+        snapshot = _placeholder_policy_snapshot(season)
+    finally:
+        session.close()
+
+    fast = apply_season_stamp_fast(int(season_id), policy=policy)
+    if not fast.get("ok", False):
+        return JSONResponse(
+            {"ok": False, "message": fast.get("message") or "Placeholder update failed", **snapshot},
+            status_code=500,
+        )
+
+    if policy == "auto" and series_id_for_reconcile is not None:
+        out = enqueue_entity_reconcile(
+            entity_type="series",
+            entity_id=int(series_id_for_reconcile),
+            source=f"library_season_policy:{season_id}",
+        )
+        return _placeholder_policy_set_response(snapshot, {**fast, **out})
+
     return _placeholder_policy_set_response(snapshot, fast)
 
 

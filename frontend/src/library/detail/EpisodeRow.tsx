@@ -81,6 +81,8 @@ export function EpisodeRow(props: {
               blockPlaceholder={ep.block_placeholder}
               hasPlaceholder={ep.has_placeholder}
               hasFile={ep.has_file}
+              locked={Boolean(ep.policy_locked)}
+              lockedReason="Set by series. Change the series chip to unlock."
               accentHex={props.accentHex}
               themeMode={props.themeMode}
               size="sm"

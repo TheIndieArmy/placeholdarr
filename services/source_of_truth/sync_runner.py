@@ -609,6 +609,22 @@ def _upsert_episode(session, fields: Dict) -> Tuple[Any, bool, bool]:
     return created, True, True
 
 
+def _inherit_season_policy_if_created(
+    session,
+    *,
+    series: Series,
+    season: Season,
+    episode: Episode,
+    created: bool,
+) -> None:
+    if not created:
+        return
+    from services.source_of_truth.placeholder_policy import stamp_season_policy_onto_new_episode
+
+    stamp_season_policy_onto_new_episode(season, series, episode)
+    session.add(episode)
+
+
 def _iter_arr_endpoints(types: Tuple[str, ...], is_4k: bool, instance_key: str | None = None) -> Iterable[Tuple[str, str, str, bool, str]]:
     """Yield (content_type, url, api_key, is_4k, instance_key) tuples for configured ARR instances."""
     requested_key = str(instance_key or '').strip().lower()
@@ -763,7 +779,14 @@ def run_full_sync(
                             rollup['status'] = ep_fields.get('sonarr_status')
 
                         stats['episodes_seen'] += 1
-                        _, ep_created, _ = _upsert_episode(session, ep_fields)
+                        ep_row, ep_created, _ = _upsert_episode(session, ep_fields)
+                        _inherit_season_policy_if_created(
+                            session,
+                            series=series_row,
+                            season=season_row,
+                            episode=ep_row,
+                            created=ep_created,
+                        )
                         if ep_created:
                             stats['episodes_created'] += 1
                         else:
@@ -1104,6 +1127,13 @@ def sync_sonarr_series_specials_season0_backfill(
 
                 stats["episodes_seen"] += 1
                 ep_row, ep_created, ep_changed = _upsert_episode(session, ep_fields)
+                _inherit_season_policy_if_created(
+                    session,
+                    series=series_row,
+                    season=season_row,
+                    episode=ep_row,
+                    created=ep_created,
+                )
                 if ep_created:
                     stats["episodes_created"] += 1
                 else:
@@ -1324,6 +1354,13 @@ def sync_sonarr_series_by_ids(
 
                 stats['episodes_seen'] += 1
                 ep_row, ep_created, ep_changed = _upsert_episode(session, ep_fields)
+                _inherit_season_policy_if_created(
+                    session,
+                    series=series_row,
+                    season=season_row,
+                    episode=ep_row,
+                    created=ep_created,
+                )
                 if ep_created:
                     stats['episodes_created'] += 1
                 else:
