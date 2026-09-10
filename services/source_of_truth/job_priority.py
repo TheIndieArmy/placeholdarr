@@ -33,6 +33,7 @@ _PRIORITY_BY_TYPE: dict[str, int] = {
     "queue_monitor": PRIORITY_SEMI_INTERACTIVE,
     "entity_materialization": PRIORITY_BACKGROUND_LIGHT,
     "import_grace": PRIORITY_BACKGROUND_LIGHT,
+    "poster_language_resolve": PRIORITY_BACKGROUND_LIGHT,
     "media_refresh": PRIORITY_BACKGROUND,
     "startup_sync_runner": PRIORITY_BACKGROUND,
     "full_sync": PRIORITY_BACKGROUND,

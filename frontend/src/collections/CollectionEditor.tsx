@@ -1876,7 +1876,7 @@ export function CollectionEditor(props: {
                 options={(regionMeta?.genres ?? []).map((g) => ({ key: String(g.id), label: g.name }))}
                 selected={(block.genre_ids ?? []).map(String)}
                 accentHex={accentHex}
-                emptyHint={props.tmdbConfigured ? "Loading genres…" : "Configure a TMDB API key in Settings → Collection Sources"}
+                emptyHint={props.tmdbConfigured ? "Loading genres…" : "Configure a TMDB API key in Settings → Optional APIs"}
                 onToggle={(key) => {
                   const id = Number(key);
                   const current = block.genre_ids ?? [];
@@ -1943,7 +1943,7 @@ export function CollectionEditor(props: {
                 options={(regionMeta?.providers ?? []).slice(0, 60).map((p) => ({ key: String(p.id), label: p.name }))}
                 selected={(block.provider_ids ?? []).map(String)}
                 accentHex={accentHex}
-                emptyHint={props.tmdbConfigured ? "Loading providers…" : "Configure a TMDB API key in Settings → Collection Sources"}
+                emptyHint={props.tmdbConfigured ? "Loading providers…" : "Configure a TMDB API key in Settings → Optional APIs"}
                 onToggle={(key) => {
                   const id = Number(key);
                   const current = block.provider_ids ?? [];
@@ -2733,9 +2733,9 @@ export function CollectionEditor(props: {
                 icon: SOURCE_META[type].icon,
                 description:
                   requires === "trakt" && !props.traktConfigured
-                    ? "Add a Trakt Client ID in Settings → Collection Sources (creating an API app requires Trakt VIP)"
+                    ? "Add a Trakt Client ID in Settings → Optional APIs (creating an API app requires Trakt VIP)"
                     : requires === "tautulli" && !tautulliOk
-                      ? "Add Tautulli URL + API key in Settings → Collection Sources to enable"
+                      ? "Add Tautulli URL + API key in Settings → Optional APIs to enable"
                       : movieOnly && sectionType !== "movie"
                         ? "Movie libraries only"
                         : needsArr

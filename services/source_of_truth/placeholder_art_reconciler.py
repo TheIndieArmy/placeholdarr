@@ -167,6 +167,25 @@ def _art_refresh_completion_scan_if_last_batch(
     except Exception:
         pass
 
+    # Bust Placeholdarr UI poster URLs / shelf cache after on-disk art rewrite completes.
+    try:
+        from services.library_poster_paths import invalidate_library_poster_cache
+        from services.postgres.db import get_session
+        from services.series_episode_stats_hooks import bump_library_versions_after_bulk
+
+        invalidate_library_poster_cache()
+        bump_session = get_session()
+        try:
+            bump_library_versions_after_bulk(bump_session, movies=True, series=True)
+            bump_session.commit()
+        finally:
+            bump_session.close()
+    except Exception as exc:
+        logger.warning(
+            f"{log_prefix} UI library cache bust failed run_id={run_id}: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+
     # Mark the full-sync task DONE before Plex/JF/Emby refresh so the Tasks UI does not
     # sit on WORKING for tens of minutes while library scans run.
     if task_run_id:

@@ -124,8 +124,10 @@ def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
 
 
 def _season_poster_source(season: Any, series: Any) -> tuple[str, str]:
-    season_url = _normalize_art_url(getattr(season, "remote_poster", None))
-    series_url = _normalize_art_url(getattr(series, "remote_poster", None))
+    from services.poster_language import effective_poster_url
+
+    season_url = _normalize_art_url(effective_poster_url(season))
+    series_url = _normalize_art_url(effective_poster_url(series))
     if season_url:
         return season_url, "season"
     if series_url:
@@ -435,48 +437,81 @@ def _resolve_series_folder(series: Any, media_path: str | None = None) -> str | 
     return None
 
 
+def _note_local_poster_changed(kind: str, entity: Any) -> None:
+    """Bump list ``?v=`` (entity.updated_at) and drop the in-memory path memo after on-disk art changes."""
+    try:
+        from datetime import datetime, timezone
+
+        entity.updated_at = datetime.now(timezone.utc)
+    except Exception:
+        pass
+    try:
+        from services.library_poster_paths import invalidate_library_poster_cache
+
+        item_id = getattr(entity, "id", None)
+        if item_id is not None:
+            invalidate_library_poster_cache(kind, int(item_id))
+    except Exception:
+        pass
+
+
 def ensure_library_grid_poster_for_movie(movie: Any, media_path: str) -> bool:
     """Ensure ``poster-grid.jpg`` exists for dashboard library (server-side catalog download)."""
+    from services.poster_language import effective_poster_url, ensure_localized_poster_current
+
+    ensure_localized_poster_current(movie)
     folder = os.path.dirname(os.path.abspath(media_path))
     poster_path = os.path.join(folder, POSTER_JPEG)
     resolved = resolve_library_grid_poster_path(
         poster_path,
         meta_key="poster",
-        catalog_poster_url=getattr(movie, "remote_poster", None),
+        catalog_poster_url=effective_poster_url(movie),
     )
     return bool(resolved and os.path.isfile(resolved))
 
 
 def ensure_library_grid_poster_for_series(series: Any, series_folder: str) -> bool:
+    from services.poster_language import effective_poster_url, ensure_localized_poster_current
+
+    ensure_localized_poster_current(series)
     poster_path = os.path.join(os.path.abspath(series_folder), POSTER_JPEG)
     if not os.path.isfile(poster_path):
         return False
     resolved = resolve_library_grid_poster_path(
         poster_path,
         meta_key="series_poster",
-        catalog_poster_url=getattr(series, "remote_poster", None),
+        catalog_poster_url=effective_poster_url(series),
     )
     return bool(resolved and os.path.isfile(resolved))
 
 
 def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     """Write movie poster.jpg (overlay or raw)."""
+    from services.poster_language import effective_poster_url, ensure_localized_poster_current
+
+    ensure_localized_poster_current(movie)
     result = ArtResult()
     mode = poster_overlay_mode()
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
-    url = getattr(movie, "remote_poster", None)
+    url = effective_poster_url(movie)
     if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="poster"):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
         result.art_counts["movie"] = 1
     if ensure_library_grid_poster_for_movie(movie, media_path):
         result.wrote_any = True
+    if result.wrote_any:
+        _note_local_poster_changed("movie", movie)
     return result
 
 
 def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult:
     """Write seasonNN-poster.jpg at the series root."""
+    from services.poster_language import ensure_localized_poster_current
+
+    ensure_localized_poster_current(series)
+    ensure_localized_poster_current(season, series=series)
     result = ArtResult()
     if not series_folder:
         return result
@@ -506,6 +541,9 @@ def ensure_series_art(
     seasons: list[Any] | None = None,
 ) -> ArtResult:
     """Write series poster/folder.jpg and all season posters for a show."""
+    from services.poster_language import effective_poster_url, ensure_localized_poster_current
+
+    ensure_localized_poster_current(series)
     result = ArtResult()
     folder = series_folder or _resolve_series_folder(series)
     if not folder:
@@ -513,7 +551,7 @@ def ensure_series_art(
     mode = poster_overlay_mode()
     folder = os.path.abspath(folder)
     out_path = os.path.join(folder, POSTER_JPEG)
-    url = _normalize_art_url(getattr(series, "remote_poster", None))
+    url = _normalize_art_url(effective_poster_url(series))
     kind = "series" if url else "none"
     if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="series_poster", source_kind=kind):
         result.local_art.poster = POSTER_JPEG
@@ -540,6 +578,8 @@ def ensure_series_art(
             result.merge_counts(one)
     if ensure_library_grid_poster_for_series(series, folder):
         result.wrote_any = True
+    if result.wrote_any:
+        _note_local_poster_changed("series", series)
     return result
 
 

@@ -288,6 +288,18 @@ class Settings(BaseSettings):
     PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
         os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
     )
+    # Preferred TMDB poster language (ISO 639-1). Requires ENABLE_PREFERRED_POSTER_LANGUAGE.
+    ENABLE_PREFERRED_POSTER_LANGUAGE: bool = (
+        os.getenv("ENABLE_PREFERRED_POSTER_LANGUAGE", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    PREFERRED_POSTER_LANGUAGE: str = (
+        os.getenv("PREFERRED_POSTER_LANGUAGE", "en").split("#")[0].strip().lower() or "en"
+    )
+    PREFER_ORIGINAL_POSTER_LANGUAGE: bool = (
+        os.getenv("PREFER_ORIGINAL_POSTER_LANGUAGE", "false").split("#")[0].strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
     # Calendar-based status update settings
     # CALENDAR_LOOKAHEAD_DAYS: how many days into the future to create/show "Coming Soon" placeholders

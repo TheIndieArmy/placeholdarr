@@ -31,8 +31,33 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
 ART_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_POSTER_OVERLAY_MODE",
+        "ENABLE_PREFERRED_POSTER_LANGUAGE",
+        "PREFERRED_POSTER_LANGUAGE",
+        "PREFER_ORIGINAL_POSTER_LANGUAGE",
     }
 )
+
+_POSTER_LANGUAGE_OPTIONS = [
+    {"value": "en", "label": "English (en)"},
+    {"value": "de", "label": "German (de)"},
+    {"value": "fr", "label": "French (fr)"},
+    {"value": "es", "label": "Spanish (es)"},
+    {"value": "it", "label": "Italian (it)"},
+    {"value": "pt", "label": "Portuguese (pt)"},
+    {"value": "ja", "label": "Japanese (ja)"},
+    {"value": "ko", "label": "Korean (ko)"},
+    {"value": "zh", "label": "Chinese (zh)"},
+    {"value": "ru", "label": "Russian (ru)"},
+    {"value": "nl", "label": "Dutch (nl)"},
+    {"value": "pl", "label": "Polish (pl)"},
+    {"value": "sv", "label": "Swedish (sv)"},
+    {"value": "da", "label": "Danish (da)"},
+    {"value": "no", "label": "Norwegian (no)"},
+    {"value": "fi", "label": "Finnish (fi)"},
+    {"value": "tr", "label": "Turkish (tr)"},
+    {"value": "ar", "label": "Arabic (ar)"},
+    {"value": "hi", "label": "Hindi (hi)"},
+]
 
 # Keys removed from SETTINGS_SCHEMA but still accepted on save (no-op) for older clients / partial payloads.
 REMOVED_SETTINGS_KEYS_IGNORED_ON_SAVE = frozenset(
@@ -260,11 +285,12 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TMDB_API_KEY",
             {
-                "section": "Collection Sources",
+                "section": "Optional APIs",
                 "label": "TMDB API Key",
                 "description": (
-                    "TMDB API key (v3 auth) used by the Collections builder to source trending, popular, upcoming, "
-                    "and discover lists. Get a free key at themoviedb.org. Optional; only needed for TMDB-based collection sources."
+                    "TMDB API key (v3 auth) for preferred poster language and Collections list sources "
+                    "(trending, popular, upcoming, discover). Get a free key at themoviedb.org. "
+                    "Optional; needed for language posters and TMDB-based collection sources."
                 ),
                 "type": "string",
                 "required": False,
@@ -275,7 +301,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TRAKT_CLIENT_ID",
             {
-                "section": "Collection Sources",
+                "section": "Optional APIs",
                 "label": "Trakt Client ID",
                 "description": (
                     "Trakt API Client ID for Collections (public lists and charts). "
@@ -292,7 +318,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TAUTULLI_URL",
             {
-                "section": "Collection Sources",
+                "section": "Optional APIs",
                 "label": "Tautulli URL",
                 "description": (
                     "Base URL for outbound Tautulli API calls used by Collections most-popular / most-watched "
@@ -306,7 +332,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
         (
             "TAUTULLI_API_KEY",
             {
-                "section": "Collection Sources",
+                "section": "Optional APIs",
                 "label": "Tautulli API Key",
                 "description": (
                     "Tautulli Settings → Web Interface → API key. Required together with Tautulli URL for "
@@ -659,6 +685,44 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
                     {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
                 ],
+            },
+        ),
+        (
+            "ENABLE_PREFERRED_POSTER_LANGUAGE",
+            {
+                "section": "Status Updates",
+                "label": "Use preferred poster language",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+            },
+        ),
+        (
+            "PREFER_ORIGINAL_POSTER_LANGUAGE",
+            {
+                "section": "Status Updates",
+                "label": "Prefer original language poster",
+                "description": "",
+                "type": "bool",
+                "restart_required": False,
+                "default": False,
+                "depends_on": "ENABLE_PREFERRED_POSTER_LANGUAGE",
+                "nested": True,
+            },
+        ),
+        (
+            "PREFERRED_POSTER_LANGUAGE",
+            {
+                "section": "Status Updates",
+                "label": "Preferred poster language",
+                "description": "",
+                "type": "choice",
+                "restart_required": False,
+                "default": "en",
+                "options": list(_POSTER_LANGUAGE_OPTIONS),
+                "depends_on": "ENABLE_PREFERRED_POSTER_LANGUAGE",
+                "nested": True,
             },
         ),
         (
@@ -1761,17 +1825,63 @@ def save_settings(
         _set_runtime_value("PLACEHOLDER_CREATE_NFO", True)
         backfill_summary: dict[str, Any] | None = None
         art_backfill_summary: dict[str, Any] | None = None
+        if (
+            "ENABLE_PREFERRED_POSTER_LANGUAGE" in art_backfill_keys_changed
+            or "PREFERRED_POSTER_LANGUAGE" in art_backfill_keys_changed
+            or "PREFER_ORIGINAL_POSTER_LANGUAGE" in art_backfill_keys_changed
+        ):
+            try:
+                from services.poster_language import clear_stale_localized_posters
+
+                clear_stale_localized_posters(session)
+                session.commit()
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to clear stale localized posters after language change: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
         if (nfo_backfill_keys_changed or art_backfill_keys_changed) and apply_scope:
             from services.source_of_truth.placeholder_refresh import execute_placeholder_refresh_apply_scope
 
+            # Poster language must apply to existing placeholders too; never leave them on a stale language.
+            language_keys_changed = bool(
+                {
+                    "ENABLE_PREFERRED_POSTER_LANGUAGE",
+                    "PREFERRED_POSTER_LANGUAGE",
+                    "PREFER_ORIGINAL_POSTER_LANGUAGE",
+                }.intersection(art_backfill_keys_changed)
+            )
+            effective_scope = str(apply_scope)
+            if language_keys_changed and effective_scope == "future":
+                effective_scope = "next_full_sync"
+
             refresh_out = execute_placeholder_refresh_apply_scope(
-                apply_scope=str(apply_scope),
+                apply_scope=effective_scope,
                 metadata=bool(nfo_backfill_keys_changed),
                 art=bool(art_backfill_keys_changed),
                 templates=False,
                 source="settings_save",
-                task_run_trigger="settings_change" if str(apply_scope) == "now" else None,
+                task_run_trigger="settings_change" if effective_scope == "now" else None,
             )
+            if (
+                language_keys_changed
+                and effective_scope == "now"
+            ):
+                try:
+                    from services.source_of_truth.poster_language_job import (
+                        enqueue_poster_language_resolve_stale,
+                    )
+
+                    enqueue_poster_language_resolve_stale(source="settings_save:poster_language")
+                except Exception as lang_exc:
+                    logger.warning(
+                        f"Poster language resolve enqueue after settings save failed: {lang_exc}",
+                        extra={"emoji_type": "warning"},
+                    )
             if isinstance(refresh_out.get("nfo_backfill"), dict):
                 backfill_summary = dict(refresh_out["nfo_backfill"])
             else:
@@ -1790,7 +1900,7 @@ def save_settings(
                     "pending": bool(refresh_out.get("pending")),
                 }
             logger.info(
-                f"Placeholder refresh after settings save scope={apply_scope} "
+                f"Placeholder refresh after settings save scope={effective_scope} "
                 f"metadata_keys={nfo_backfill_keys_changed} art_keys={art_backfill_keys_changed}",
                 extra={"emoji_type": "processing"},
             )

@@ -22,6 +22,7 @@ from services.collections import collection_sets as sets_mod
 from services.media_servers import plex_collections
 from services.postgres.db import session_scope
 from services.postgres.models import CollectionRecipe, Episode, Movie, Season, Series
+from services.poster_language import effective_poster_url
 
 SOURCE_TYPES = (
     "catalog",
@@ -1794,7 +1795,7 @@ def _row_summary(
         "year": row.year,
         "tmdb_id": int(row.tmdbid if section_type == "movie" else (row.sonarr_tmdbid or 0)) or None,
         "tvdb_id": int(getattr(row, "tvdbid", 0) or 0) or None,
-        "poster": row.remote_poster,
+        "poster": effective_poster_url(row),
         "has_file": has_file,
         "has_placeholder": has_placeholder,
         "file_state": state,

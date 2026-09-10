@@ -188,7 +188,7 @@ const SETTINGS_SECTION_ORDER = [
   "Security",
   "Media Integrations",
   "ARR Integrations",
-  "Collection Sources",
+  "Optional APIs",
   "Paths",
   "Library sync",
   "Calendar",
@@ -200,7 +200,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Security: "shield_lock",
   "Media Integrations": "hub",
   "ARR Integrations": "dns",
-  "Collection Sources": "playlist_play",
+  "Optional APIs": "key",
   Paths: "folder",
   "Library sync": "sync",
   Calendar: "calendar_month",
@@ -212,7 +212,7 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Security: "security",
   "Media Integrations": "media-integrations",
   "ARR Integrations": "arr-integrations",
-  "Collection Sources": "collection-sources",
+  "Optional APIs": "optional-apis",
   Paths: "paths",
   "Library sync": "library-sync",
   Calendar: "calendar",
@@ -238,6 +238,31 @@ function settingsFieldInteractionDisabled(field: SettingsField, values: Record<s
 
 function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
   return settingsFieldInteractionDisabled(field, values);
+}
+
+function isPosterLanguageGateKey(key: string): boolean {
+  return key === "ENABLE_PREFERRED_POSTER_LANGUAGE";
+}
+
+function isPosterLanguageDetailKey(key: string): boolean {
+  return key === "PREFER_ORIGINAL_POSTER_LANGUAGE" || key === "PREFERRED_POSTER_LANGUAGE";
+}
+
+function isPosterLanguageFieldKey(key: string): boolean {
+  return isPosterLanguageGateKey(key) || isPosterLanguageDetailKey(key);
+}
+
+function tmdbApiKeyConfiguredFromSettings(
+  payload: SettingsPayload | null | undefined,
+  values: Record<string, unknown>,
+): boolean {
+  if (String(values.TMDB_API_KEY ?? "").trim()) return true;
+  for (const section of payload?.sections || []) {
+    for (const field of section.fields || []) {
+      if (field.key === "TMDB_API_KEY" && field.has_saved_value) return true;
+    }
+  }
+  return false;
 }
 
 function isLookaheadFilterFieldKey(key: string): boolean {
@@ -329,6 +354,8 @@ const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
 function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (!slug.trim()) return undefined;
   if (slug === "status-messages") return "Status Updates";
+  // Former Collection Sources URL (bookmarks / old CTAs).
+  if (slug === "collection-sources") return "Optional APIs";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -389,6 +416,9 @@ const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
 ] as const;
 
 const POSTER_OVERLAY_PREVIEW_TMDB_ID = 1226863;
@@ -813,6 +843,7 @@ export function App() {
   }, []);
 
   const refreshLibraryShelvesRef = useRef<(options?: { force?: boolean }) => Promise<void>>(async () => {});
+  const invalidateLibraryShelvesRef = useRef<() => void>(() => {});
   const refreshTasksRef = useRef<() => Promise<void>>(async () => {});
 
   const { eventsConnected } = useDashboardEvents({
@@ -825,8 +856,9 @@ export function App() {
       setSetupStatus((prev) => (prev ? { ...prev, startup_sync_complete: value } : prev));
     },
     onLibraryVersion: () => {
+      invalidateLibraryShelvesRef.current();
       if (currentTabRef.current === "library") {
-        void refreshLibraryShelvesRef.current();
+        void refreshLibraryShelvesRef.current({ force: true });
       }
     },
     onTaskRunsVersion: () => {
@@ -858,6 +890,10 @@ export function App() {
   useEffect(() => {
     refreshLibraryShelvesRef.current = refreshLibraryShelves;
   }, [refreshLibraryShelves]);
+
+  useEffect(() => {
+    invalidateLibraryShelvesRef.current = invalidateLibraryShelves;
+  }, [invalidateLibraryShelves]);
 
   const invalidateLibraryAfterCatalogChange = useCallback(() => {
     invalidateLibraryShelves();
@@ -1417,6 +1453,10 @@ export function App() {
       return;
     }
     const slug = location.pathname.split("/")[2] || "";
+    if (slug === "collection-sources") {
+      navigate("/settings/optional-apis", { replace: true });
+      return;
+    }
     const matched = resolveSettingsSectionFromSlug(slug);
     if (!matched) {
       navigate(firstSettingsPath, { replace: true });
@@ -1812,7 +1852,7 @@ export function App() {
           libraryLoading={libraryLoading}
           onEnsureLibrary={ensureLibraryLoaded}
           onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
-          onOpenCollectionSources={() => tryNavigate("/settings/collection-sources")}
+          onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onDraftDirty={setCollectionsDraftDirty}
         />
       );
@@ -1887,6 +1927,7 @@ export function App() {
           authStatus={authStatus}
           integrationsStatus={integrationsStatus}
           onIntegrationsStatusRefresh={refreshIntegrationsStatus}
+          onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -1913,17 +1954,26 @@ export function App() {
             }
             const statusKeysChanged =
               hasUnsavedChanges && statusUpdateSettingsChanged(baselineValues, fieldValues);
+            const posterLanguageChanged =
+              hasUnsavedChanges && posterLanguageSettingsChanged(baselineValues, fieldValues);
             const messagesDirty = statusMessagesMeta.dirty;
             const needsBackfillPrompt = statusKeysChanged || messagesDirty;
             let applyScope: NfoBackfillApplyScope | undefined;
             try {
               if (needsBackfillPrompt) {
                 const modalCopy =
-                  statusKeysChanged && messagesDirty
+                  posterLanguageChanged && !messagesDirty
+                    ? {
+                        title: "Apply poster language to existing placeholders",
+                        description:
+                          "Language settings apply to the whole library, including placeholders already on disk. Choose when to refresh their art.",
+                      }
+                    : statusKeysChanged && messagesDirty
                     ? {
                         title: "Apply changes to existing placeholders",
-                        description:
-                          "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
+                        description: posterLanguageChanged
+                          ? "Choose when status display, poster language, overlays, and message template updates should affect placeholders already on disk."
+                          : "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
                       }
                     : statusKeysChanged
                       ? {
@@ -2588,10 +2638,14 @@ export function App() {
             </div>
           ) : null}
 
-          {/* Content */}
+          {/* Content — Settings owns its own scroll so the Save header can stay pinned */}
           <main
             ref={(el) => { contentScrollRef.current = el; }}
-            className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : ""}`}
+            className={`flex-1 min-h-0 ${
+              currentTab === "settings"
+                ? "flex flex-col overflow-hidden p-0"
+                : "overflow-y-auto p-6"
+            } ${isStudioGlass ? "bg-transparent" : ""}`}
             style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
           >
             {showReconnectPanel ? (
@@ -5432,6 +5486,22 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
   );
 }
 
+/** Shared copy for preferred poster language (shown once above the master gate). */
+function PosterLanguageSettingsDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-2" : "mb-2";
+  return (
+    <div className={top}>
+      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
+      <p className={`ui-field-description leading-relaxed ${props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"}`}>
+        By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable this to
+        fetch posters from TMDB in the language you choose below; sync and art refresh take longer. If that language is
+        not available, Placeholdarr keeps the Arr poster and checks again on every full sync or art refresh. When
+        saving, you can refresh now or wait for the next full sync.
+      </p>
+    </div>
+  );
+}
+
 function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
@@ -5885,6 +5955,7 @@ function SettingsPanel(props: {
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
   onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
+  onOpenOptionalApis?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
@@ -6068,16 +6139,48 @@ function SettingsPanel(props: {
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const tmdbConfigured = tmdbApiKeyConfiguredFromSettings(props.payload, props.values);
+    const posterLangFeatureOn = Boolean(props.values.ENABLE_PREFERRED_POSTER_LANGUAGE);
+    const tmdbKeyMissing =
+      (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
+      !tmdbConfigured;
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
 
     return (
       <div
         key={field.key}
         className={`${isNested ? "pl-10 pr-6 py-4 ml-6 border-l border-[#424753]/40" : "px-6 py-5"} ${rowMuted ? "opacity-50" : ""}`}
       >
-        <div className="flex items-start gap-3 mb-2">
+        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <PosterLanguageSettingsDescription spacing="settings" />
+        ) : null}
+        {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <div className="mt-2 space-y-2">
+            <p className="ui-field-description leading-relaxed text-yellow-300/90">
+              Needs a TMDB API key before preferred poster language can be enabled. Without one, Placeholdarr keeps
+              using Radarr/Sonarr posters.
+            </p>
+            {props.onOpenOptionalApis ? (
+              <button
+                type="button"
+                onClick={() => props.onOpenOptionalApis?.()}
+                className="inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                  settings
+                </span>
+                Open Optional APIs
+              </button>
+            ) : (
+              <p className="ui-field-description text-yellow-200/80">
+                Add a key under Settings → Optional APIs.
+              </p>
+            )}
+          </div>
+        ) : null}
+        <div className={`flex items-start gap-3 mb-2 ${field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? "mt-4" : ""}`}>
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[16px] font-semibold text-white font-headline">{field.label}</span>
@@ -6107,7 +6210,7 @@ function SettingsPanel(props: {
                   </p>
                   {field.description ? <p className="ui-field-description mt-1">{field.description}</p> : null}
                 </>
-              ) : field.description && !isPlexSectionIdField(field.key) ? (
+              ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
             {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
@@ -6216,9 +6319,9 @@ function SettingsPanel(props: {
 
   return (
     <>
-    <div>
-      {/* Page title row */}
-      <div className="flex justify-between items-center mb-6">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Pinned title/save bar — sibling scroll body below (not sticky inside padded main) */}
+      <div className="flex shrink-0 items-center justify-between border-b border-[#424753]/30 bg-[#12161c] px-6 py-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: accent.hex }} />
@@ -6256,6 +6359,7 @@ function SettingsPanel(props: {
         </div>
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto p-6">
       <div className="w-full min-w-0">
         {/* Active section fields */}
         <div className="w-full min-w-0">
@@ -6726,21 +6830,63 @@ function SettingsPanel(props: {
                 </>
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
-              ) : active.name === "Collection Sources" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: (
-                    <p className="ui-field-description">
-                      Optional API credentials for Collections list sources (TMDB, Trakt, Tautulli stats). Separate from
-                      media player connections and playback webhooks.
-                    </p>
-                  ),
-                })
+              ) : active.name === "Optional APIs" ? (
+                (() => {
+                  const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
+                  const groups: Array<{ title: string; blurb: string; keys: string[] }> = [
+                    {
+                      title: "TMDB",
+                      blurb:
+                        "Preferred poster language and Collections list sources (trending, popular, upcoming, discover).",
+                      keys: ["TMDB_API_KEY"],
+                    },
+                    {
+                      title: "Trakt",
+                      blurb: "Collections public lists and charts. Creating a Trakt API app currently requires Trakt VIP.",
+                      keys: ["TRAKT_CLIENT_ID"],
+                    },
+                    {
+                      title: "Tautulli",
+                      blurb:
+                        "Collections most-popular / most-watched sources. Separate from playback webhooks.",
+                      keys: ["TAUTULLI_URL", "TAUTULLI_API_KEY"],
+                    },
+                  ];
+                  return (
+                    <div className="space-y-5 px-6 py-5">
+                      <p className="ui-field-description">
+                        Optional credentials for preferred poster language (TMDB) and Collections list sources (TMDB,
+                        Trakt, Tautulli). Separate from media player connections and playback webhooks.
+                      </p>
+                      {groups.map((group) => {
+                        const groupFields = group.keys
+                          .map((key) => fieldByKey.get(key))
+                          .filter(Boolean) as SettingsField[];
+                        if (!groupFields.length) return null;
+                        return (
+                          <div key={group.title} className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
+                            <div className="border-b border-[#424753]/30 px-6 py-4">
+                              <h3 className="text-[15px] font-headline font-bold uppercase tracking-wide text-white">
+                                {group.title}
+                              </h3>
+                              <p className="ui-field-description mt-1">{group.blurb}</p>
+                            </div>
+                            <div className="divide-y divide-[#424753]/20">
+                              {groupFields.map((field) => renderStandardField(field))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
               ) : (
                 renderOnboardingStyleSectionRows(active.fields)
               )}
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
     {mediaPanel && props.activeSection === "Media Integrations" ? (() => {
@@ -6858,10 +7004,23 @@ const NFO_BACKFILL_SETTING_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
+] as const;
+
+const POSTER_LANGUAGE_SETTING_KEYS = [
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
 ] as const;
 
 function statusUpdateSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
   return NFO_BACKFILL_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
+}
+
+function posterLanguageSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return POSTER_LANGUAGE_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
 }
 
 const STATUS_MESSAGE_GROUP_ORDER = [
@@ -7747,6 +7906,20 @@ function NfoBackfillApplyScopeModal(props: {
   const [scope, setScope] = useState<ApplyScope>("next_full_sync");
   const count = props.placeholderCount;
   const countLabel = count === 1 ? "1 placeholder" : `${count.toLocaleString()} placeholders`;
+  const options: Array<{ value: ApplyScope; title: string; body: string }> = [
+    {
+      value: "now",
+      title: "Apply now",
+      body: `Apply these changes to ${countLabel} immediately. Best when the library is small or you want to see updates right away.`,
+    },
+    {
+      value: "next_full_sync",
+      title: "Next full sync (recommended)",
+      body: props.alreadyPending
+        ? "Already queued. Saving here will keep the next full sync as the apply point."
+        : "Defer applying these changes to the next scheduled or manual full sync. Spreads media-server load and avoids a sudden refresh storm.",
+    },
+  ];
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
@@ -7761,29 +7934,11 @@ function NfoBackfillApplyScopeModal(props: {
           </h3>
           <p className="ui-field-description mt-1">
             {props.description ??
-              "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates."}
+              "Choose when these updates should affect existing placeholders. New placeholders always use the saved settings."}
           </p>
         </div>
         <div className="px-5 py-4 space-y-3">
-          {([
-            {
-              value: "now" as ApplyScope,
-              title: "Apply now",
-              body: `Rewrite NFOs and refresh player metadata for ${countLabel} immediately. Best when the library is small or you want to see changes right away.`,
-            },
-            {
-              value: "next_full_sync" as ApplyScope,
-              title: "Next full sync (recommended)",
-              body: props.alreadyPending
-                ? "Already queued. Saving here will keep the next full sync as the apply point."
-                : "Defer the rewrite to the next scheduled or manual full sync. Spreads media-server load and avoids a sudden refresh storm.",
-            },
-            {
-              value: "future" as ApplyScope,
-              title: "Future only",
-              body: "Don't touch existing placeholders. The new templates apply naturally as items move through their stages.",
-            },
-          ]).map((opt) => {
+          {options.map((opt) => {
             const selected = scope === opt.value;
             return (
               <button
@@ -9368,15 +9523,35 @@ function OnboardingWizard(props: {
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const tmdbConfigured = tmdbApiKeyConfiguredFromSettings(props.payload, props.values);
+    const posterLangFeatureOn = Boolean(props.values.ENABLE_PREFERRED_POSTER_LANGUAGE);
+    const tmdbKeyMissing =
+      (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
+      !tmdbConfigured;
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
     return (
       <div
         key={field.key}
         className={`${isNested ? "pl-8 ml-4 border-l border-[#424753]/40" : ""} ${rowMuted ? "opacity-50" : ""}`}
       >
-        <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>
+        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <PosterLanguageSettingsDescription spacing="wizard" />
+        ) : null}
+        {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <p className="ui-field-description mb-2 leading-relaxed text-yellow-300/90">
+            Needs a TMDB API key (add it under Optional APIs in Settings after setup). Without one,
+            Placeholdarr keeps using Radarr/Sonarr posters.
+          </p>
+        ) : null}
+        <label
+          className={`block text-[16px] font-semibold text-white font-headline mb-1 ${
+            field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? "mt-3" : ""
+          }`}
+        >
+          {field.label}
+        </label>
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
           (field.key === "STARTUP_SYNC_MODE" ? (
             <StartupSyncModeDescription spacing="wizard" />
@@ -9398,7 +9573,7 @@ function OnboardingWizard(props: {
               </p>
               {field.description ? <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p> : null}
             </>
-          ) : field.description ? (
+          ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
         {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
