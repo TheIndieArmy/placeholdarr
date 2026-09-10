@@ -5486,16 +5486,19 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
   );
 }
 
-/** Shared copy for preferred poster language (shown once above the master gate). */
+/** Shared copy for TMDB poster language (shown once above the master gate). */
 function PosterLanguageSettingsDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-2" : "mb-2";
   return (
     <div className={top}>
       <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
       <p className={`ui-field-description leading-relaxed ${props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"}`}>
-        By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable this to
-        fetch posters from TMDB in the language you choose below; sync and art refresh take longer. If that language is
-        not available, Placeholdarr keeps the Arr poster and checks again on every full sync or art refresh. When
+        By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable Fetch
+        from TMDB to look up posters by language; sync and art refresh take longer.
+      </p>
+      <p className={`ui-field-description leading-relaxed mt-2 ${props.spacing === "wizard" ? "mb-0" : ""}`}>
+        Lookup order: each title&apos;s original language (if Original language first is on), then Language below, then
+        the Arr poster if neither is available. Placeholdarr checks again on every full sync or art refresh. When
         saving, you can refresh now or wait for the next full sync.
       </p>
     </div>
@@ -6159,8 +6162,8 @@ function SettingsPanel(props: {
         {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
           <div className="mt-2 space-y-2">
             <p className="ui-field-description leading-relaxed text-yellow-300/90">
-              Needs a TMDB API key before preferred poster language can be enabled. Without one, Placeholdarr keeps
-              using Radarr/Sonarr posters.
+              Needs a TMDB API key before Fetch from TMDB can be enabled. Without one, Placeholdarr keeps using
+              Radarr/Sonarr posters.
             </p>
             {props.onOpenOptionalApis ? (
               <button
@@ -6837,7 +6840,7 @@ function SettingsPanel(props: {
                     {
                       title: "TMDB",
                       blurb:
-                        "Preferred poster language and Collections list sources (trending, popular, upcoming, discover).",
+                        "TMDB poster language and Collections list sources (trending, popular, upcoming, discover).",
                       keys: ["TMDB_API_KEY"],
                     },
                     {
@@ -6855,7 +6858,7 @@ function SettingsPanel(props: {
                   return (
                     <div className="space-y-5 px-6 py-5">
                       <p className="ui-field-description">
-                        Optional credentials for preferred poster language (TMDB) and Collections list sources (TMDB,
+                        Optional credentials for TMDB poster language and Collections list sources (TMDB,
                         Trakt, Tautulli). Separate from media player connections and playback webhooks.
                       </p>
                       {groups.map((group) => {

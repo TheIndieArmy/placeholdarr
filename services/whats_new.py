@@ -165,14 +165,13 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
     WhatsNewNotice(
         id="preferred-poster-language-0-9-26",
         since_version="0.9.26",
-        title="Preferred poster language",
+        title="Poster language",
         body=(
-            "You can now prefer posters in a specific language for Placeholdarr and your placeholders in Plex, "
+            "You can now choose TMDB poster languages for Placeholdarr and your placeholders in Plex, "
             "Jellyfin, or Emby.\n\n"
-            "Leave it off to keep the Radarr/Sonarr posters you already get from sync. Turn it on when you want "
-            "TMDB art in your preferred language, or each title's original language first (great for anime and "
-            "foreign titles). If TMDB does not have that language yet, Placeholdarr keeps the Arr poster and tries "
-            "again later. Episode stills are unchanged.\n\n"
+            "Leave Fetch from TMDB off to keep the Radarr/Sonarr posters you already get from sync. Turn it on to "
+            "look up TMDB art: optionally Original language first (great for anime and foreign titles), then your "
+            "selected Language, then the Arr poster if neither is available. Episode stills are unchanged.\n\n"
             "This needs a TMDB API key under Optional APIs."
         ),
         cta_label="Open Status Updates",
