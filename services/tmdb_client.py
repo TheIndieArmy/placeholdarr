@@ -176,7 +176,7 @@ def _cache_set(key: str, value: Any) -> None:
 def _request(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     api_key = getattr(settings, "TMDB_API_KEY", None)
     if not api_key:
-        raise TmdbError("TMDB API key is not configured (Settings → Collection Sources)")
+        raise TmdbError("TMDB API key is not configured (Settings → Optional APIs)")
 
     params = dict(params or {})
     headers = {"Accept": "application/json"}
@@ -561,3 +561,150 @@ def verify_api_key() -> bool:
     except TmdbError as exc:
         logger.warning(f"TMDB key verification failed: {exc}", extra={"emoji_type": "warning"})
         return False
+
+
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/original"
+_IMAGES_CACHE_TTL_SECONDS = 3600.0
+
+
+def tmdb_poster_cdn_url(file_path: str | None) -> str | None:
+    path = str(file_path or "").strip()
+    if not path:
+        return None
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{TMDB_IMAGE_BASE}{path}"
+
+
+def _poster_lang_key(iso_639_1: Any) -> str:
+    raw = str(iso_639_1 or "").strip().lower()
+    return raw if raw else "null"
+
+
+def _dedupe_langs(langs: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in langs:
+        lang = str(raw or "").strip().lower()
+        if not lang or lang == "null" or lang in seen:
+            continue
+        seen.add(lang)
+        ordered.append(lang)
+    return ordered
+
+
+def include_image_language_param(sought_languages: list[str]) -> str:
+    """Build TMDB include_image_language for exact sought codes only (no en/null padding)."""
+    ordered = _dedupe_langs(sought_languages)
+    return ",".join(ordered) if ordered else "en"
+
+
+def pick_exact_poster_from_images(
+    images_payload: dict[str, Any] | None,
+    *,
+    sought_languages: list[str],
+) -> tuple[str | None, str | None]:
+    """Return ``(file_path, matched_iso_639_1)`` for the first exact sought-language hit.
+
+    Does not fall back to English, null-language, or arbitrary posters.
+    """
+    posters = (images_payload or {}).get("posters") if isinstance(images_payload, dict) else None
+    if not isinstance(posters, list) or not posters:
+        return None, None
+    order = _dedupe_langs(sought_languages)
+    if not order:
+        return None, None
+    by_lang: dict[str, list[dict[str, Any]]] = {}
+    for entry in posters:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("file_path") or "").strip()
+        if not path:
+            continue
+        key = _poster_lang_key(entry.get("iso_639_1"))
+        if key == "null":
+            continue
+        by_lang.setdefault(key, []).append(entry)
+    for lang in order:
+        candidates = by_lang.get(lang) or []
+        if not candidates:
+            continue
+        path = str(candidates[0].get("file_path") or "").strip() or None
+        if path:
+            return path, lang
+    return None, None
+
+
+def fetch_movie_original_language(tmdb_id: int) -> str | None:
+    tid = int(tmdb_id)
+    cache_key = f"/movie/{tid}?fields=original_language"
+    cached = _cache_get(cache_key, _IMAGES_CACHE_TTL_SECONDS)
+    if cached is not None:
+        text = str(cached).strip().lower()
+        return text or None
+    data = _request(f"/movie/{tid}")
+    lang = str((data or {}).get("original_language") or "").strip().lower() or None
+    _cache_set(cache_key, lang or "")
+    return lang
+
+
+def fetch_tv_original_language(tmdb_id: int) -> str | None:
+    tid = int(tmdb_id)
+    cache_key = f"/tv/{tid}?fields=original_language"
+    cached = _cache_get(cache_key, _IMAGES_CACHE_TTL_SECONDS)
+    if cached is not None:
+        text = str(cached).strip().lower()
+        return text or None
+    data = _request(f"/tv/{tid}")
+    lang = str((data or {}).get("original_language") or "").strip().lower() or None
+    _cache_set(cache_key, lang or "")
+    return lang
+
+
+def fetch_movie_images(tmdb_id: int, *, sought_languages: list[str] | None = None, preferred_language: str = "en") -> dict[str, Any]:
+    tid = int(tmdb_id)
+    langs = list(sought_languages) if sought_languages is not None else [preferred_language]
+    include = include_image_language_param(langs)
+    params = {"include_image_language": include}
+    cache_key = _cache_key(f"/movie/{tid}/images", params)
+    cached = _cache_get(cache_key, _IMAGES_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/movie/{tid}/images", params)
+    _cache_set(cache_key, data)
+    return data
+
+
+def fetch_tv_images(tmdb_id: int, *, sought_languages: list[str] | None = None, preferred_language: str = "en") -> dict[str, Any]:
+    tid = int(tmdb_id)
+    langs = list(sought_languages) if sought_languages is not None else [preferred_language]
+    include = include_image_language_param(langs)
+    params = {"include_image_language": include}
+    cache_key = _cache_key(f"/tv/{tid}/images", params)
+    cached = _cache_get(cache_key, _IMAGES_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/tv/{tid}/images", params)
+    _cache_set(cache_key, data)
+    return data
+
+
+def fetch_tv_season_images(
+    tmdb_id: int,
+    season_number: int,
+    *,
+    sought_languages: list[str] | None = None,
+    preferred_language: str = "en",
+) -> dict[str, Any]:
+    tid = int(tmdb_id)
+    sn = int(season_number)
+    langs = list(sought_languages) if sought_languages is not None else [preferred_language]
+    include = include_image_language_param(langs)
+    params = {"include_image_language": include}
+    cache_key = _cache_key(f"/tv/{tid}/season/{sn}/images", params)
+    cached = _cache_get(cache_key, _IMAGES_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    data = _request(f"/tv/{tid}/season/{sn}/images", params)
+    _cache_set(cache_key, data)
+    return data

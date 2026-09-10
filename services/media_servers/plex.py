@@ -449,6 +449,13 @@ def refresh_plex_section_ids(
                 f"Plex section refresh failed for section_id={section_id}: {e}",
                 extra={"emoji_type": "warning"},
             )
+            try:
+                from services.integration_status import is_connectivity_exception, mark_media_connectivity_failure
+
+                if is_connectivity_exception(e):
+                    mark_media_connectivity_failure("plex", message=str(e) or type(e).__name__)
+            except Exception:
+                pass
             failed += 1
 
     return {"refreshed": refreshed, "failed": failed}

@@ -301,6 +301,13 @@ def refresh_jellyfin_sections(has_movies: bool, has_episodes: bool) -> dict[str,
                 f"Jellyfin section refresh failed for root={root}: {e}",
                 extra={"emoji_type": "warning"},
             )
+            try:
+                from services.integration_status import is_connectivity_exception, mark_media_connectivity_failure
+
+                if is_connectivity_exception(e):
+                    mark_media_connectivity_failure("jellyfin", message=str(e) or type(e).__name__)
+            except Exception:
+                pass
 
     return {"refreshed": refreshed, "failed": failed}
 

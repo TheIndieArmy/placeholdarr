@@ -81,6 +81,34 @@ def _default_sonarr_endpoint() -> tuple[str, str]:
     return settings.resolve_arr_endpoint("sonarr", role="primary")
 
 
+def _mark_arr_request_connectivity_failure(
+    *,
+    url: str,
+    params: Optional[dict] = None,
+    api_key: Optional[str] = None,
+    status_code: int | None = None,
+    message: str,
+) -> None:
+    try:
+        from services.integration_status import (
+            is_connectivity_http_status,
+            mark_arr_connectivity_failure,
+        )
+
+        if status_code is not None and not is_connectivity_http_status(status_code):
+            return
+        key_from_params = ""
+        if isinstance(params, dict):
+            key_from_params = str(params.get("apikey") or "").strip()
+        mark_arr_connectivity_failure(
+            message=message,
+            base_url=url,
+            api_key=str(api_key or key_from_params or ""),
+        )
+    except Exception:
+        pass
+
+
 def _get_json(url: str, params: dict, timeout: int = ARR_HTTP_TIMEOUT_SECONDS):
     safe_url = url
     try:
@@ -99,6 +127,34 @@ def _get_json(url: str, params: dict, timeout: int = ARR_HTTP_TIMEOUT_SECONDS):
         logger.error(
             f'ARR request failed url={safe_url} status={status_code} reason={reason}',
             extra={'emoji_type': 'error'},
+        )
+        _mark_arr_request_connectivity_failure(
+            url=url,
+            params=params,
+            status_code=int(status_code) if status_code else None,
+            message=f"HTTP {status_code} {reason or ''}".strip(),
+        )
+        return None
+    except Timeout as e:
+        logger.error(
+            f'ARR request timed out url={safe_url} timeout={timeout}s error_type={type(e).__name__}',
+            extra={'emoji_type': 'error'},
+        )
+        _mark_arr_request_connectivity_failure(
+            url=url,
+            params=params,
+            message=f"Timed out after {timeout}s",
+        )
+        return None
+    except RequestException as e:
+        logger.error(
+            f'ARR request failed url={safe_url} error_type={type(e).__name__}',
+            extra={'emoji_type': 'error'},
+        )
+        _mark_arr_request_connectivity_failure(
+            url=url,
+            params=params,
+            message=str(e) or type(e).__name__,
         )
         return None
 
@@ -156,6 +212,13 @@ def _request_json(
                 "message": f"HTTP {status_code} {reason or ''}".strip(),
             }
         )
+        _mark_arr_request_connectivity_failure(
+            url=url,
+            params=params,
+            api_key=api_key,
+            status_code=int(status_code) if status_code else None,
+            message=f"HTTP {status_code} {reason or ''}".strip(),
+        )
         return None
     except Timeout as e:
         logger.warning(
@@ -171,6 +234,12 @@ def _request_json(
                 "message": f"did not respond within {timeout}s; it may still add the title(s)",
             }
         )
+        _mark_arr_request_connectivity_failure(
+            url=url,
+            params=params,
+            api_key=api_key,
+            message=f"Timed out after {timeout}s",
+        )
         return None
     except RequestException as e:
         logger.error(
@@ -179,6 +248,12 @@ def _request_json(
         )
         _last_write_error.clear()
         _last_write_error.update({"timed_out": False, "status_code": None, "message": str(e) or type(e).__name__})
+        _mark_arr_request_connectivity_failure(
+            url=url,
+            params=params,
+            api_key=api_key,
+            message=str(e) or type(e).__name__,
+        )
         return None
     except Exception as e:
         logger.error(

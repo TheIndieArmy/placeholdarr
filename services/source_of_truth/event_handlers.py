@@ -40,7 +40,9 @@ from services.source_of_truth.import_grace import (
     schedule_movie_import_grace,
 )
 from services.source_of_truth.sync_runner import (
+    _apply_season_remote_posters,
     _episode_fields,
+    _fill_missing_series_art,
     _movie_fields,
     _resolve_episode_file_payload,
     _resolve_episode_sync_payload,
@@ -317,6 +319,39 @@ def process_series_add_event(payload: dict[str, Any], instance: str | None = Non
             season_row.is_deleted = False
             session.add(season_row)
 
+        _apply_season_remote_posters(season_rows_by_number, series_entry)
+        try:
+            art_fields = {
+                "remote_poster": getattr(series_row, "remote_poster", None),
+                "remote_fanart": getattr(series_row, "remote_fanart", None),
+                "remote_banner": getattr(series_row, "remote_banner", None),
+                "sonarr_payload_raw": getattr(series_row, "sonarr_payload_raw", None),
+            }
+            filled = _fill_missing_series_art(art_fields, series_entry, base_url, api_key)
+            if filled.get("remote_poster"):
+                series_row.remote_poster = filled["remote_poster"]
+            if filled.get("remote_fanart"):
+                series_row.remote_fanart = filled["remote_fanart"]
+            if filled.get("remote_banner"):
+                series_row.remote_banner = filled["remote_banner"]
+            session.add(series_row)
+        except Exception as art_exc:
+            logger.debug(
+                f"Series add fill-missing art skipped: {art_exc}",
+                extra={"emoji_type": "debug"},
+            )
+
+        from services.poster_language import (
+            resolve_localized_poster_for_season,
+            resolve_localized_poster_for_series,
+        )
+
+        resolve_localized_poster_for_series(series_row, persist=False)
+        session.add(series_row)
+        for season_row in season_rows_by_number.values():
+            resolve_localized_poster_for_season(season_row, series_row, persist=False)
+            session.add(season_row)
+
         missing_episode_ids = [
             int(ep.id) for ep in missing_placeholder_episode_rows if getattr(ep, "id", None)
         ]
@@ -435,6 +470,11 @@ def process_movie_add_event(payload: dict[str, Any], instance: str | None = None
 
         movie_row, _, _ = _upsert_movie(session, fields)
         movie_row.last_found_in_radarr = datetime.now(timezone.utc)
+
+        from services.poster_language import resolve_localized_poster_for_movie
+
+        resolve_localized_poster_for_movie(movie_row, persist=False)
+        session.add(movie_row)
 
         # Event-scoped FS truth check: if users manually removed placeholder files
         # out-of-band, clear stale DB placeholder flags for this movie before determination.

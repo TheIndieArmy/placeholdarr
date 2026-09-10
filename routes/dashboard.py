@@ -48,6 +48,7 @@ from services.postgres.models import (
 from services.library_catalog_version import get_library_versions, library_etag_for_shelf
 from services.library_poster_paths import library_poster_cache_token, load_library_poster_path
 from services.library_future_semantics import movie_row_is_future_outside_lookahead
+from services.poster_language import effective_poster_url
 from services.series_episode_stats import series_episode_counts_map, series_last_aired_map, series_stats_dict_from_row
 from services.source_of_truth.status_intent import StatusSource
 from services.source_of_truth.sync_runner import _extract_date
@@ -3590,14 +3591,18 @@ def _local_poster_file_for_movie(movie: Movie, *, try_catalog_download: bool = F
 
     candidate = _movie_poster_jpeg_path(movie)
     if candidate:
+        from services.poster_language import effective_poster_url
+
         return resolve_library_grid_poster_path(
             candidate,
             meta_key="poster",
-            catalog_poster_url=getattr(movie, "remote_poster", None),
+            catalog_poster_url=effective_poster_url(movie),
         )
     if not try_catalog_download:
         return None
-    remote = getattr(movie, "remote_poster", None)
+    from services.poster_language import effective_poster_url
+
+    remote = effective_poster_url(movie)
     fp = str(getattr(movie, "placeholder_filepath", "") or "").strip()
     if not remote or not fp:
         return None
@@ -3618,6 +3623,7 @@ def _local_poster_file_for_series(series: Series, *, try_catalog_download: bool 
         resolve_library_grid_poster_path,
         write_library_grid_poster,
     )
+    from services.poster_language import effective_poster_url
 
     folder = str(getattr(series, "placeholder_folder", "") or "").strip()
     if not folder:
@@ -3628,14 +3634,14 @@ def _local_poster_file_for_series(series: Series, *, try_catalog_download: bool 
         return resolve_library_grid_poster_path(
             candidate,
             meta_key="series_poster",
-            catalog_poster_url=getattr(series, "remote_poster", None),
+            catalog_poster_url=effective_poster_url(series),
         )
     if not try_catalog_download:
         return None
     grid = os.path.join(folder_abs, POSTER_GRID_JPEG)
     if os.path.isfile(grid):
         return grid
-    remote = getattr(series, "remote_poster", None)
+    remote = effective_poster_url(series)
     if remote and write_library_grid_poster(folder_abs, remote) and os.path.isfile(grid):
         return grid
     return None
@@ -3815,7 +3821,7 @@ def _build_library_payload(
                     "movie",
                     int(movie.id),
                     movie,
-                    movie.remote_poster,
+                    effective_poster_url(movie),
                     summary=summary,
                     use_local_poster_api=bool(movie.has_placeholder),
                 ),
@@ -3902,7 +3908,7 @@ def _build_library_payload(
                     "series",
                     int(series.id),
                     series,
-                    series.remote_poster,
+                    effective_poster_url(series),
                     summary=summary,
                     use_local_poster_api=bool(series_folder),
                 ),
@@ -4249,7 +4255,7 @@ def _movie_collection_members(session, anchor: Movie) -> tuple[list[dict[str, An
                 "tmdbid": int(m.tmdbid) if m.tmdbid else None,
                 "title": m.title,
                 "year": m.year,
-                "poster_url": m.remote_poster,
+                "poster_url": effective_poster_url(m),
                 "status": _movie_collection_status(m),
                 "is_current": mid == int(anchor.id),
             }
@@ -4381,7 +4387,7 @@ async def movie_detail(movie_id: int):
             "title": movie.title,
             "year": movie.year,
             "overview": movie.radarr_overview,
-            "poster_url": movie.remote_poster,
+            "poster_url": effective_poster_url(movie),
             "backdrop_url": movie.remote_fanart,
             "runtime": movie.radarr_runtime,
             "certification": movie.radarr_certification,
@@ -4566,7 +4572,7 @@ async def series_detail(series_id: int):
                 "episode_missing": ep_missing,
                 "episode_future": ep_future,
                 "monitored": bool(season.sonarr_monitored),
-                "poster_url": season.remote_poster,
+                "poster_url": effective_poster_url(season),
                 "placeholder_policy": (
                     "pinned"
                     if bool(getattr(season, "force_placeholder", False))
@@ -4589,7 +4595,7 @@ async def series_detail(series_id: int):
             "title": series.title,
             "year": series.year,
             "overview": series.sonarr_series_overview,
-            "poster_url": series.remote_poster,
+            "poster_url": effective_poster_url(series),
             "backdrop_url": series.remote_fanart or series.remote_banner,
             "runtime": series.sonarr_runtime,
             "certification": series.sonarr_certification,
@@ -5396,8 +5402,44 @@ async def integrations_test(request: Request):
         )
 
     result = test_integration_connection(service=service, url=url, token_or_key=resolved)
+    try:
+        from services.integration_status import record_arr_status, record_media_status
+
+        ok = bool(result.get("ok"))
+        message = str(result.get("message") or "")
+        if service in {"plex", "jellyfin", "emby"}:
+            record_media_status(service, ok=ok, message=message, source="test")
+        elif service in {"radarr", "sonarr"}:
+            iid = str(instance_id or "").strip().lower()
+            label = ""
+            instance_key = ""
+            if iid:
+                for item in getattr(settings, "configured_arr_instances", []) or []:
+                    if str(item.get("instance_id") or "").strip().lower() == iid:
+                        label = str(item.get("label") or "")
+                        instance_key = str(item.get("instance_key") or "")
+                        break
+            if iid:
+                record_arr_status(
+                    instance_id=iid,
+                    arr_type=service,
+                    instance_key=instance_key,
+                    label=label,
+                    ok=ok,
+                    message=message,
+                    source="test",
+                )
+    except Exception:
+        pass
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
+
+
+@router.get("/api/integrations/status")
+async def integrations_status():
+    from services.integration_status import get_integration_status
+
+    return JSONResponse(content=get_integration_status())
 
 
 @router.get("/api/logs")

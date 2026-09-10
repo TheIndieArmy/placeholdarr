@@ -131,7 +131,9 @@ def load_library_poster_path(kind: str, item_id: int) -> tuple[str | None, str |
                 has_placeholder=bool(getattr(movie, "has_placeholder", False)),
                 movie=movie,
             )
-            remote = str(getattr(movie, "remote_poster", "") or "").strip() or None
+            from services.poster_language import effective_poster_url
+
+            remote = effective_poster_url(movie)
         elif normalized == "series":
             series = (
                 session.query(Series)
@@ -141,7 +143,9 @@ def load_library_poster_path(kind: str, item_id: int) -> tuple[str | None, str |
             if not series:
                 return None, None
             path = grid_poster_path_for_series(placeholder_folder=getattr(series, "placeholder_folder", None))
-            remote = str(getattr(series, "remote_poster", "") or "").strip() or None
+            from services.poster_language import effective_poster_url
+
+            remote = effective_poster_url(series)
         else:
             return None, None
     finally:

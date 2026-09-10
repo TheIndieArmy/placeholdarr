@@ -54,8 +54,12 @@ def backfill_library_grid_posters(*, batch_size: int = _BATCH_SIZE) -> int:
                 continue
             if ensure_library_grid_poster_for_movie(movie, fp):
                 written += 1
-            elif write_library_grid_poster(folder, getattr(movie, "remote_poster", None)):
-                written += 1
+            else:
+                from services.poster_language import effective_poster_url, ensure_localized_poster_current
+
+                ensure_localized_poster_current(movie)
+                if write_library_grid_poster(folder, effective_poster_url(movie)):
+                    written += 1
             if written % batch_size == 0:
                 time.sleep(_BATCH_SLEEP_S)
 
@@ -72,8 +76,12 @@ def backfill_library_grid_posters(*, batch_size: int = _BATCH_SIZE) -> int:
                 continue
             if ensure_library_grid_poster_for_series(series, folder):
                 written += 1
-            elif write_library_grid_poster(folder, getattr(series, "remote_poster", None)):
-                written += 1
+            else:
+                from services.poster_language import effective_poster_url, ensure_localized_poster_current
+
+                ensure_localized_poster_current(series)
+                if write_library_grid_poster(folder, effective_poster_url(series)):
+                    written += 1
             if written % batch_size == 0:
                 time.sleep(_BATCH_SLEEP_S)
     except Exception as exc:

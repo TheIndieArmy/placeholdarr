@@ -344,6 +344,18 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
                 reason="enqueue_failed",
             )
 
+        try:
+            from services.source_of_truth.poster_language_job import enqueue_poster_language_resolve_stale
+
+            result["poster_language_resolve"] = enqueue_poster_language_resolve_stale(
+                source=f"full_sync:{trigger}"
+            )
+        except Exception as lang_exc:
+            logger.warning(
+                f"Full sync poster language resolve enqueue failed: {lang_exc}",
+                extra={"emoji_type": "warning"},
+            )
+
         phase_list = phases_from_summary(_load_summary(task_run_id)) or phase_list
         if follow_ups_started:
             refresh_full_sync_task_progress(task_run_id, phases=phase_list, overall_status="WORKING")
@@ -520,6 +532,16 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
                 result["placeholder_art_refresh"] = enqueue_placeholder_art_refresh(ph_ids)
         except Exception as art_exc:
             logger.warning(f"Lite sync art refresh enqueue failed: {art_exc}", extra={"emoji_type": "warning"})
+
+        try:
+            from services.source_of_truth.poster_language_job import enqueue_poster_language_resolve_stale
+
+            result["poster_language_resolve"] = enqueue_poster_language_resolve_stale(source=f"lite_sync:{trigger}")
+        except Exception as lang_exc:
+            logger.warning(
+                f"Lite sync poster language resolve enqueue failed: {lang_exc}",
+                extra={"emoji_type": "warning"},
+            )
 
         if own_run:
             finish_task_run(task_run_id, status="done", summary=result)

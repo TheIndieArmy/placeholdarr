@@ -50,6 +50,9 @@ class Movie(Base):
     imdbid = Column(String, nullable=True)
     # Remote poster URL reported by Radarr (useful for NFO/poster downloads)
     remote_poster = Column(String, nullable=True)
+    # TMDB language-resolved poster (preferred → en → null); Arr remote_poster stays the fast path
+    localized_poster = Column(String, nullable=True)
+    localized_poster_lang = Column(String(8), nullable=True)
     remote_fanart = Column(String, nullable=True)
     radarr_runtime = Column(Integer, nullable=True)
     radarr_certification = Column(String, nullable=True)
@@ -549,6 +552,9 @@ class Series(Base):
     imdbid = Column(String, nullable=True)
     # Remote poster URL reported by Sonarr (useful for NFO/poster downloads)
     remote_poster = Column(String, nullable=True)
+    # TMDB language-resolved poster (preferred → en → null); Arr remote_poster stays the fast path
+    localized_poster = Column(String, nullable=True)
+    localized_poster_lang = Column(String(8), nullable=True)
     remote_fanart = Column(String, nullable=True)
     remote_banner = Column(String, nullable=True)
     sonarr_runtime = Column(Integer, nullable=True)
@@ -620,6 +626,8 @@ class Season(Base):
     sonarr_season_overview = Column(String, nullable=True)
     # Remote season poster URL from Sonarr (seasons[].images when includeSeasonImages is set)
     remote_poster = Column(String, nullable=True)
+    localized_poster = Column(String, nullable=True)
+    localized_poster_lang = Column(String(8), nullable=True)
     # Aggregate per-season file info
     has_files = Column(Boolean, default=False)
     seasonfile_count = Column(BigInteger, nullable=True)

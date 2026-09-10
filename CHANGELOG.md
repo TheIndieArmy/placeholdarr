@@ -7,6 +7,43 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.26] - 2026-09-10
+
+### Summary
+
+- **Use preferred poster language**: Opt-in gate; off keeps Arr posters for faster sync and art refresh.
+- **Preferred poster language**: Fixed TMDB language for library and placeholder posters; exact match only, Arr fallback when missing.
+- **Prefer original language poster**: Optional try of each title's TMDB original language before Preferred.
+- **Localized poster stamps**: `localized_poster` beside Arr `remote_poster` when an exact sought-language hit exists.
+- **Poster language backfill**: Setting changes clear stamps and refresh existing art now or at next full sync.
+- **Optional APIs**: Collection Sources renamed; TMDB also powers preferred poster language.
+- **Integration connection status**: Red ! on Media / ARR settings when a connection fails until Test succeeds.
+- **Apply to existing placeholders**: Apply now or Next full sync only (Future only removed).
+- **Library posters after art refresh**: Shelf cache and poster ``?v=`` bust when art backfill finishes.
+- **Secondary Arr / ARR nav**: Multi-instance controls stay unlocked when a second Arr is saved; ARR Integrations section follows the URL.
+
+### Added
+
+- **Use preferred poster language**: Opt-in Status Updates / Look and feel gate; off keeps Radarr/Sonarr posters for faster sync and art refresh.
+- **Preferred poster language**: When the gate is on, picks a fixed TMDB poster language; only an exact language match is stored, otherwise Arr stays the fallback so full sync can retry empties later.
+- **Prefer original language poster**: Optional toggle (when the gate is on) tries each title's TMDB original language first, then Preferred poster language.
+- **Localized poster resolve**: Movie/series/season store `localized_poster` beside Arr `remote_poster` when an exact sought-language hit exists; art download and overlays use that URL when present.
+- **Poster language backfill**: Changing the gate or language settings clears stamps and refreshes existing placeholder art now or at next full sync; full/lite sync enqueue resolve for empty catalog stamps.
+- **Series add season posters**: Series add applies Sonarr season images and resolves preferred language before materialization.
+- **Integration connection status**: Media and ARR connectivity failures (startup, runtime, or Test) show a red circle ! on Settings / Media / ARR nav and on the failing cards until a successful Test clears them.
+- **What's new (0.9.26)**: Startup ack notice for preferred poster language (TMDB key under Optional APIs).
+
+### Changed
+
+- **Optional APIs**: Settings → Collection Sources is renamed; TMDB covers preferred poster language as well as Collections lists, with Trakt and Tautulli grouped under the same page.
+- **Apply to existing placeholders**: Save prompt offers Apply now or Next full sync only; Future only is removed so existing placeholders stay aligned with the new settings.
+
+### Fixed
+
+- **Library posters after art refresh**: Art backfill completion busts poster path memo and shelf versions; art writes bump list ``?v=`` so the UI reloads new language posters instead of keeping cached images.
+- **Secondary Arr settings unlock**: Shared cleanup / search / playback multi-instance controls stay available when a second Radarr or Sonarr is already saved (no re-Test required each session).
+- **ARR Integrations navigation**: Leaving ARR Integrations follows the URL immediately (section no longer stuck until refresh).
+
 ## [0.9.25] - 2026-09-09
 
 ### Summary

@@ -502,40 +502,49 @@ async def lifespan(app: FastAPI):
     else:
         logger.error("Unable to initialize DB", extra={'emoji_type': 'error'})
 
-    # Webhook Check Loop (asyncio is imported at module level — do not re-import here:
-    # a nested ``import asyncio`` would shadow the module name for all of ``lifespan``
-    # and break earlier ``asyncio.create_task`` calls with UnboundLocalError.)
-    # Use the new integrations checker if available; do not fall back to archived code
+    # Integration connection checks (Media + ARR). Results feed Settings badges.
+    # Nested ``import asyncio`` would shadow the module name for all of ``lifespan``.
     try:
-        from services.integrations import check_all_arr_webhooks
+        from services.integration_status import refresh_integration_connection_status
     except Exception:
-        check_all_arr_webhooks = None
-        logger.debug('services.integrations.check_all_arr_webhooks not available; skipping webhook loop', extra={'emoji_type': 'debug'})
+        refresh_integration_connection_status = None
+        logger.debug(
+            "services.integration_status.refresh_integration_connection_status not available; skipping connection checks",
+            extra={"emoji_type": "debug"},
+        )
 
-    async def arr_webhook_check_loop():
+    async def integration_connection_check_loop():
         max_attempts = 10
         interval = 60
         for attempt in range(max_attempts):
-            all_configured = check_all_arr_webhooks()
-            if all_configured:
-                # Calendar sync is not yet implemented; break silently once webhooks are confirmed.
+            try:
+                status = await asyncio.to_thread(refresh_integration_connection_status)
+            except Exception as exc:
+                logger.warning(
+                    f"Integration connection check failed: {exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                status = {}
+            arr = status.get("arr") or {}
+            if arr and any(bool(item.get("ok")) for item in arr.values()):
                 break
-
             if attempt == 0:
                 from core.config import settings
-                arrs_configured = bool(getattr(settings, 'configured_arr_instances', []) or [])
-                if not arrs_configured:
-                    logger.warning("No *arr services configured in .env", extra={'emoji_type': 'warning'})
 
+                arrs_configured = bool(getattr(settings, "configured_arr_instances", []) or [])
+                if not arrs_configured:
+                    logger.warning("No *arr services configured", extra={"emoji_type": "warning"})
             await asyncio.sleep(interval)
         else:
-            logger.warning("Timed out waiting for *arr webhooks. Calendar sync will not start.", extra={'emoji_type': 'warning'})
+            logger.warning(
+                "Timed out waiting for a reachable *arr instance during startup connection checks.",
+                extra={"emoji_type": "warning"},
+            )
 
-    # Only start the webhook check loop if we have a checker available; otherwise log and skip
-    if check_all_arr_webhooks:
-        asyncio.create_task(arr_webhook_check_loop())
+    if refresh_integration_connection_status:
+        asyncio.create_task(integration_connection_check_loop())
     else:
-        logger.debug('No webhook checker available (services_old.integrations missing); skipping arr webhook loop', extra={'emoji_type': 'debug'})
+        logger.debug("No integration connection checker available; skipping", extra={"emoji_type": "debug"})
     logger.info(
         'Lifespan startup complete — HTTP and /api routes are ready. '
         '(Worker threads may still log "holding: waiting for startup sync" until the background sync thread finishes; '

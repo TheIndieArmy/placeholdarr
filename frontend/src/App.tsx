@@ -16,6 +16,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } fr
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
+  getIntegrationsStatus,
   getMovieDetail,
   getSeriesDetail,
   getSettingsCurrent,
@@ -24,6 +25,7 @@ import {
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
+import type { IntegrationsStatusResponse } from "./types/api";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
@@ -186,7 +188,7 @@ const SETTINGS_SECTION_ORDER = [
   "Security",
   "Media Integrations",
   "ARR Integrations",
-  "Collection Sources",
+  "Optional APIs",
   "Paths",
   "Library sync",
   "Calendar",
@@ -198,7 +200,7 @@ const SETTINGS_SECTION_ICONS: Record<string, string> = {
   Security: "shield_lock",
   "Media Integrations": "hub",
   "ARR Integrations": "dns",
-  "Collection Sources": "playlist_play",
+  "Optional APIs": "key",
   Paths: "folder",
   "Library sync": "sync",
   Calendar: "calendar_month",
@@ -210,7 +212,7 @@ const SETTINGS_SECTION_SLUGS: Record<string, string> = {
   Security: "security",
   "Media Integrations": "media-integrations",
   "ARR Integrations": "arr-integrations",
-  "Collection Sources": "collection-sources",
+  "Optional APIs": "optional-apis",
   Paths: "paths",
   "Library sync": "library-sync",
   Calendar: "calendar",
@@ -236,6 +238,31 @@ function settingsFieldInteractionDisabled(field: SettingsField, values: Record<s
 
 function settingsFieldParentDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
   return settingsFieldInteractionDisabled(field, values);
+}
+
+function isPosterLanguageGateKey(key: string): boolean {
+  return key === "ENABLE_PREFERRED_POSTER_LANGUAGE";
+}
+
+function isPosterLanguageDetailKey(key: string): boolean {
+  return key === "PREFER_ORIGINAL_POSTER_LANGUAGE" || key === "PREFERRED_POSTER_LANGUAGE";
+}
+
+function isPosterLanguageFieldKey(key: string): boolean {
+  return isPosterLanguageGateKey(key) || isPosterLanguageDetailKey(key);
+}
+
+function tmdbApiKeyConfiguredFromSettings(
+  payload: SettingsPayload | null | undefined,
+  values: Record<string, unknown>,
+): boolean {
+  if (String(values.TMDB_API_KEY ?? "").trim()) return true;
+  for (const section of payload?.sections || []) {
+    for (const field of section.fields || []) {
+      if (field.key === "TMDB_API_KEY" && field.has_saved_value) return true;
+    }
+  }
+  return false;
 }
 
 function isLookaheadFilterFieldKey(key: string): boolean {
@@ -327,6 +354,8 @@ const VIRTUAL_SETTINGS_SECTIONS = new Set<string>();
 function resolveSettingsSectionFromSlug(slug: string): string | undefined {
   if (!slug.trim()) return undefined;
   if (slug === "status-messages") return "Status Updates";
+  // Former Collection Sources URL (bookmarks / old CTAs).
+  if (slug === "collection-sources") return "Optional APIs";
   return SETTINGS_SECTION_ORDER.find((name) => SETTINGS_SECTION_SLUGS[name] === slug);
 }
 const BEHAVIOR_WIZARD_SECTIONS = [
@@ -355,6 +384,22 @@ const UI_SECTION_FRAME_CLASS =
 const UI_INTEGRATION_CARD_SURFACE_CLASS =
   "rounded-2xl border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15 backdrop-blur-md transition hover:shadow-[0_0_36px_-14px_color-mix(in_srgb,var(--brand-accent-3)_28%,transparent)]";
 
+/** Red circle with ! for sticky Media/ARR connectivity failures (nav + cards). */
+function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) {
+  const size = props.size ?? "md";
+  const dim = size === "sm" ? "h-4 w-4 text-[10px]" : "h-5 w-5 text-[11px]";
+  return (
+    <span
+      className={`inline-flex ${dim} shrink-0 items-center justify-center rounded-full bg-red-600 font-bold leading-none`}
+      style={{ color: "#ffffff" }}
+      title={props.title || "Connection problem"}
+      aria-label={props.title || "Connection problem"}
+    >
+      !
+    </span>
+  );
+}
+
 /** Wizard stacked section bodies (bottom margin between sections). */
 const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
 
@@ -371,6 +416,9 @@ const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
 ] as const;
 
 const POSTER_OVERLAY_PREVIEW_TMDB_ID = 1226863;
@@ -724,11 +772,11 @@ export function App() {
   useEffect(() => {
     settingsPayloadRef.current = settingsPayload;
   }, [settingsPayload]);
-  const [activeSettingsSection, setActiveSettingsSection] = useState("Media Integrations");
   const [fieldValues, setFieldValues] = useState<FieldValueMap>({});
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
   const [settingsFeedback, setSettingsFeedback] = useState("");
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
+  const [integrationsStatus, setIntegrationsStatus] = useState<IntegrationsStatusResponse | null>(null);
   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
   const statusMessagesSaveRef = useRef<((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null>(null);
@@ -795,6 +843,7 @@ export function App() {
   }, []);
 
   const refreshLibraryShelvesRef = useRef<(options?: { force?: boolean }) => Promise<void>>(async () => {});
+  const invalidateLibraryShelvesRef = useRef<() => void>(() => {});
   const refreshTasksRef = useRef<() => Promise<void>>(async () => {});
 
   const { eventsConnected } = useDashboardEvents({
@@ -807,8 +856,9 @@ export function App() {
       setSetupStatus((prev) => (prev ? { ...prev, startup_sync_complete: value } : prev));
     },
     onLibraryVersion: () => {
+      invalidateLibraryShelvesRef.current();
       if (currentTabRef.current === "library") {
-        void refreshLibraryShelvesRef.current();
+        void refreshLibraryShelvesRef.current({ force: true });
       }
     },
     onTaskRunsVersion: () => {
@@ -840,6 +890,10 @@ export function App() {
   useEffect(() => {
     refreshLibraryShelvesRef.current = refreshLibraryShelves;
   }, [refreshLibraryShelves]);
+
+  useEffect(() => {
+    invalidateLibraryShelvesRef.current = invalidateLibraryShelves;
+  }, [invalidateLibraryShelves]);
 
   const invalidateLibraryAfterCatalogChange = useCallback(() => {
     invalidateLibraryShelves();
@@ -942,9 +996,39 @@ export function App() {
   }, [settingsPayload]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
+  /** Single source of truth for which Settings pane is shown (must track the URL, not a separate useState). */
+  const activeSettingsSection = useMemo(() => {
+    if (currentTab !== "settings") return firstSettingsSection;
+    const slug = location.pathname.split("/")[2] || "";
+    return resolveSettingsSectionFromSlug(slug) ?? firstSettingsSection;
+  }, [currentTab, firstSettingsSection, location.pathname]);
   const homeRedirectPath =
     setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
+
+  const refreshIntegrationsStatus = useCallback(async () => {
+    try {
+      const status = await getIntegrationsStatus();
+      setIntegrationsStatus(status);
+    } catch {
+      /* Keep last known status; transient API errors should not clear badges. */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!authReady || setupStatus?.setup_complete !== true) return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      void refreshIntegrationsStatus();
+    };
+    tick();
+    const id = window.setInterval(tick, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [authReady, setupStatus?.setup_complete, refreshIntegrationsStatus]);
 
   useEffect(() => {
     if (!authReady || whatsNewDismissedRef.current) return;
@@ -1369,23 +1453,22 @@ export function App() {
       return;
     }
     const slug = location.pathname.split("/")[2] || "";
+    if (slug === "collection-sources") {
+      navigate("/settings/optional-apis", { replace: true });
+      return;
+    }
     const matched = resolveSettingsSectionFromSlug(slug);
     if (!matched) {
       navigate(firstSettingsPath, { replace: true });
       return;
     }
-    if (VIRTUAL_SETTINGS_SECTIONS.has(matched)) {
-      if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
-      return;
-    }
+    if (VIRTUAL_SETTINGS_SECTIONS.has(matched)) return;
     if (!settingsPayload) return;
     const apiSections = settingsPayload.sections ?? [];
     if (!apiSections.some((s) => s.name === matched)) {
       navigate(firstSettingsPath, { replace: true });
-      return;
     }
-    if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
-  }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
+  }, [currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
   const activeShelfCache =
     libraryShelfKey === "movies" ? libraryCache.movies : libraryShelfKey === "tv" ? libraryCache.tv : undefined;
@@ -1458,16 +1541,7 @@ export function App() {
     setBaselineValues(nextValues);
 
     // Must match `settingsSectionNames`: include any virtual tabs not returned by `/api/settings/current`.
-    const apiSectionsForNav = payload.sections ?? [];
-    const sections = SETTINGS_SECTION_ORDER.filter(
-      (name) => VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSectionsForNav.some((s) => s.name === name),
-    );
-    if (sections.length > 0 && !sections.includes(activeSettingsSection)) {
-      const slug = location.pathname.split("/")[2] || "";
-      const slugMatch = resolveSettingsSectionFromSlug(slug);
-      const matched = slugMatch && sections.includes(slugMatch) ? slugMatch : sections[0];
-      setActiveSettingsSection(matched);
-    }
+    // Active section follows the URL; invalid slugs are redirected by the settings-route effect.
   }
 
   const prevPreviewRouteRef = useRef<boolean | null>(null);
@@ -1778,7 +1852,7 @@ export function App() {
           libraryLoading={libraryLoading}
           onEnsureLibrary={ensureLibraryLoaded}
           onOpenPlexSettings={() => tryNavigate("/settings/media-integrations")}
-          onOpenCollectionSources={() => tryNavigate("/settings/collection-sources")}
+          onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onDraftDirty={setCollectionsDraftDirty}
         />
       );
@@ -1851,6 +1925,9 @@ export function App() {
           brand={brand}
           themeMode={themeMode}
           authStatus={authStatus}
+          integrationsStatus={integrationsStatus}
+          onIntegrationsStatusRefresh={refreshIntegrationsStatus}
+          onOpenOptionalApis={() => tryNavigate("/settings/optional-apis")}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -1877,17 +1954,26 @@ export function App() {
             }
             const statusKeysChanged =
               hasUnsavedChanges && statusUpdateSettingsChanged(baselineValues, fieldValues);
+            const posterLanguageChanged =
+              hasUnsavedChanges && posterLanguageSettingsChanged(baselineValues, fieldValues);
             const messagesDirty = statusMessagesMeta.dirty;
             const needsBackfillPrompt = statusKeysChanged || messagesDirty;
             let applyScope: NfoBackfillApplyScope | undefined;
             try {
               if (needsBackfillPrompt) {
                 const modalCopy =
-                  statusKeysChanged && messagesDirty
+                  posterLanguageChanged && !messagesDirty
+                    ? {
+                        title: "Apply poster language to existing placeholders",
+                        description:
+                          "Language settings apply to the whole library, including placeholders already on disk. Choose when to refresh their art.",
+                      }
+                    : statusKeysChanged && messagesDirty
                     ? {
                         title: "Apply changes to existing placeholders",
-                        description:
-                          "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
+                        description: posterLanguageChanged
+                          ? "Choose when status display, poster language, overlays, and message template updates should affect placeholders already on disk."
+                          : "Choose when status display, poster overlays, and message template updates should affect placeholders already on disk.",
                       }
                     : statusKeysChanged
                       ? {
@@ -2295,12 +2381,14 @@ export function App() {
                     { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
                     { icon: "terminal", label: "Logs", path: "/logs", beta: false },
                     { icon: "settings", label: "Settings", path: "/settings", beta: false },
-                  ].map(({ icon, label, path, beta }) =>
-                    isActive(path) ? (
+                  ].map(({ icon, label, path, beta }) => {
+                    const settingsFail = path === "/settings" && Boolean(integrationsStatus?.settings_has_failure);
+                    return isActive(path) ? (
                       <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass}>
                         <span className="material-symbols-outlined">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>
+                          {settingsFail ? <IntegrationFailureBadge title="Media or ARR connection problem" /> : null}
                           {beta ? (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
                               Beta
@@ -2313,6 +2401,7 @@ export function App() {
                         <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>
+                          {settingsFail ? <IntegrationFailureBadge title="Media or ARR connection problem" /> : null}
                           {beta ? (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
                               Beta
@@ -2320,8 +2409,8 @@ export function App() {
                           ) : null}
                         </span>
                       </button>
-                    ),
-                  )}
+                    );
+                  })}
                 </>
               );
             })()}
@@ -2330,25 +2419,38 @@ export function App() {
                 {settingsSectionNames.map((name) => {
                   const subPath = `/settings/${SETTINGS_SECTION_SLUGS[name] ?? ""}`;
                   const isSubActive = location.pathname === subPath;
+                  const sectionFail =
+                    (name === "Media Integrations" && Boolean(integrationsStatus?.media_has_failure)) ||
+                    (name === "ARR Integrations" && Boolean(integrationsStatus?.arr_has_failure));
+                  const subBase =
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
+                  const subActiveClass = isStudioGlass
+                    ? "bg-[#1e2430] text-slate-100"
+                    : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
+                  const subInactiveClass = isStudioGlass
+                    ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
                   return (
                     <button
                       key={name}
                       type="button"
                       onClick={() => tryNavigate(subPath)}
-                      className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ${
-                        isStudioGlass
-                          ? isSubActive
-                            ? "bg-[#1e2430] text-slate-100"
-                            : "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
-                          : isSubActive
-                            ? "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]"
-                            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                      }`}
+                      className={`${subBase}${isSubActive ? subActiveClass : subInactiveClass}`}
                     >
                       <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
                         {SETTINGS_SECTION_ICONS[name] || "settings"}
                       </span>
                       <span className="truncate">{name}</span>
+                      {sectionFail ? (
+                        <IntegrationFailureBadge
+                          size="sm"
+                          title={
+                            name === "Media Integrations"
+                              ? "Media connection problem"
+                              : "ARR connection problem"
+                          }
+                        />
+                      ) : null}
                     </button>
                   );
                 })}
@@ -2536,10 +2638,14 @@ export function App() {
             </div>
           ) : null}
 
-          {/* Content */}
+          {/* Content — Settings owns its own scroll so the Save header can stay pinned */}
           <main
             ref={(el) => { contentScrollRef.current = el; }}
-            className={`flex-1 overflow-y-auto p-6 ${isStudioGlass ? "bg-transparent" : ""}`}
+            className={`flex-1 min-h-0 ${
+              currentTab === "settings"
+                ? "flex flex-col overflow-hidden p-0"
+                : "overflow-y-auto p-6"
+            } ${isStudioGlass ? "bg-transparent" : ""}`}
             style={!isStudioGlass ? { backgroundColor: studioLightChrome.main } : undefined}
           >
             {showReconnectPanel ? (
@@ -3849,6 +3955,16 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
   );
 }
 
+function arrSecondaryPersistedWithCredentials(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
+  const instances = parseArrInstancesFromValues(values).filter((row) => row.arr_type === arrType);
+  const second = instances[1];
+  if (!second) return false;
+  return (
+    String(second.url || "").trim().length > 0 &&
+    (String(second.api_key || "").trim().length > 0 || Boolean(second.api_key_saved))
+  );
+}
+
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
 const PLAYBACK_MODE_VALUES = new Set(["match", "primary", "secondary", "both"]);
 const SHARED_PLACEHOLDER_CLEANUP_VALUES = new Set(["protect_siblings", "any_instance_has_file"]);
@@ -4036,6 +4152,8 @@ function ArrInstancesEditor(props: {
   accent: BrandAccent;
   onPrimaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
   onSecondaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
+  integrationsStatus?: IntegrationsStatusResponse | null;
+  onIntegrationsStatusRefresh?: () => Promise<void> | void;
   /** "slots" = Overseerr-style dashed placeholders + slide-over editor (onboarding). */
   layout?: "cards" | "slots";
 }) {
@@ -4100,10 +4218,24 @@ function ArrInstancesEditor(props: {
   const [slotPanelTestPassed, setSlotPanelTestPassed] = useState(false);
 
   useEffect(() => {
-    props.onValueChange("WIZARD_RADARR_SECONDARY_ENABLED", secondaryEnabled.radarr);
-    props.onValueChange("WIZARD_SONARR_SECONDARY_ENABLED", secondaryEnabled.sonarr);
-  }, [props, secondaryEnabled]);
-
+    const rad = Boolean(secondaryEnabled.radarr);
+    const son = Boolean(secondaryEnabled.sonarr);
+    if (Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED) !== rad) {
+      props.onValueChange("WIZARD_RADARR_SECONDARY_ENABLED", rad);
+    }
+    if (Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED) !== son) {
+      props.onValueChange("WIZARD_SONARR_SECONDARY_ENABLED", son);
+    }
+    // Only re-sync when the secondary toggles change (or the stored wizard flags drift).
+    // Do not depend on the whole `props` object: parent re-renders would rewrite flags every frame
+    // and can starve Settings section switches while ARR Integrations is open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onValueChange identity changes every render
+  }, [
+    secondaryEnabled.radarr,
+    secondaryEnabled.sonarr,
+    props.values.WIZARD_RADARR_SECONDARY_ENABLED,
+    props.values.WIZARD_SONARR_SECONDARY_ENABLED,
+  ]);
 
   function update(next: ArrInstanceDraft[]) {
     const radarr = next.filter((item) => item.arr_type === "radarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
@@ -4235,6 +4367,7 @@ function ArrInstancesEditor(props: {
       };
     }
     setTestState((prev) => ({ ...prev, [item.id]: result }));
+    void props.onIntegrationsStatusRefresh?.();
     if (slotIndex === 0 && primaryEnabled[arrType]) {
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: Boolean(result.ok) }));
       props.onPrimaryTestStatusChange?.(arrType, Boolean(result.ok));
@@ -4635,9 +4768,25 @@ function ArrInstancesEditor(props: {
                     ) : (
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
-                          <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
+                            {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  props.integrationsStatus.arr[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.message ||
+                                  "Connection failed. Open Configure and Test to clear."
+                                }
+                              />
+                            ) : null}
+                          </div>
                           <div className="truncate font-mono text-[13px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
-                          {testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
+                          {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
+                            <div className="mt-1 text-[14px] text-red-300">
+                              {props.integrationsStatus.arr[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.message ||
+                                "Connection failed. Open Configure and Test to clear."}
+                            </div>
+                          ) : testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
                             <div className="mt-1 text-[14px] text-red-400">{testState[primaryItem.id].message}</div>
                           ) : null}
                         </div>
@@ -4720,9 +4869,25 @@ function ArrInstancesEditor(props: {
                     ) : (
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
-                          <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
+                            {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  props.integrationsStatus.arr[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.message ||
+                                  "Connection failed. Open Configure and Test to clear."
+                                }
+                              />
+                            ) : null}
+                          </div>
                           <div className="truncate font-mono text-[13px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
-                          {testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
+                          {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
+                            <div className="mt-1 text-[14px] text-red-300">
+                              {props.integrationsStatus.arr[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.message ||
+                                "Connection failed. Open Configure and Test to clear."}
+                            </div>
+                          ) : testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
                             <div className="mt-1 text-[14px] text-red-400">{testState[secondaryItem.id].message}</div>
                           ) : null}
                         </div>
@@ -5321,6 +5486,22 @@ function LookAndFeelSectionIntro(props: { embedded?: boolean }) {
   );
 }
 
+/** Shared copy for preferred poster language (shown once above the master gate). */
+function PosterLanguageSettingsDescription(props: { spacing: "settings" | "wizard" }) {
+  const top = props.spacing === "settings" ? "mt-2" : "mb-2";
+  return (
+    <div className={top}>
+      <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500">Poster language</div>
+      <p className={`ui-field-description leading-relaxed ${props.spacing === "settings" ? "mt-1" : "mt-1 mb-0"}`}>
+        By default (disabled), Placeholdarr uses poster data already captured during Radarr/Sonarr syncs. Enable this to
+        fetch posters from TMDB in the language you choose below; sync and art refresh take longer. If that language is
+        not available, Placeholdarr keeps the Arr poster and checks again on every full sync or art refresh. When
+        saving, you can refresh now or wait for the next full sync.
+      </p>
+    </div>
+  );
+}
+
 function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wizard" }) {
   const top = props.spacing === "settings" ? "mt-1" : "mb-2";
   return (
@@ -5765,6 +5946,8 @@ function SettingsPanel(props: {
   brand: Brand;
   themeMode: ThemeMode;
   authStatus: AuthStatus | null;
+  integrationsStatus?: IntegrationsStatusResponse | null;
+  onIntegrationsStatusRefresh?: () => Promise<void> | void;
   onLogout: () => Promise<void>;
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
@@ -5772,6 +5955,7 @@ function SettingsPanel(props: {
   registerStatusMessagesSaveFlow: (fn: ((preselectedScope?: ApplyScope) => Promise<void>) | null) => void;
   onTestConnection: (input: { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; urlKey: string; credentialKey: string }) => Promise<{ ok: boolean; message: string }>;
   onPartialPersist?: (partial: Record<string, unknown>) => Promise<void>;
+  onOpenOptionalApis?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
@@ -5796,8 +5980,12 @@ function SettingsPanel(props: {
   const arrInstances = parseArrInstancesFromValues(props.values);
   const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
   const hasSonarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
-  const canUseRadarrSecondaryBehavior = hasRadarrSecondaryConfigured && arrSecondaryTestStatus.radarr;
-  const canUseSonarrSecondaryBehavior = hasSonarrSecondaryConfigured && arrSecondaryTestStatus.sonarr;
+  const canUseRadarrSecondaryBehavior =
+    hasRadarrSecondaryConfigured &&
+    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
+  const canUseSonarrSecondaryBehavior =
+    hasSonarrSecondaryConfigured &&
+    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
   const unlockedSettingsSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
     canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
@@ -5869,6 +6057,7 @@ function SettingsPanel(props: {
         credentialKey: target.credentialKey,
       });
       setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      void props.onIntegrationsStatusRefresh?.();
       return result;
     } catch (err) {
       const result = {
@@ -5876,6 +6065,7 @@ function SettingsPanel(props: {
         message: err instanceof Error ? err.message : String(err),
       };
       setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      void props.onIntegrationsStatusRefresh?.();
       return result;
     }
   }
@@ -5949,16 +6139,48 @@ function SettingsPanel(props: {
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const tmdbConfigured = tmdbApiKeyConfiguredFromSettings(props.payload, props.values);
+    const posterLangFeatureOn = Boolean(props.values.ENABLE_PREFERRED_POSTER_LANGUAGE);
+    const tmdbKeyMissing =
+      (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
+      !tmdbConfigured;
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
 
     return (
       <div
         key={field.key}
         className={`${isNested ? "pl-10 pr-6 py-4 ml-6 border-l border-[#424753]/40" : "px-6 py-5"} ${rowMuted ? "opacity-50" : ""}`}
       >
-        <div className="flex items-start gap-3 mb-2">
+        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <PosterLanguageSettingsDescription spacing="settings" />
+        ) : null}
+        {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <div className="mt-2 space-y-2">
+            <p className="ui-field-description leading-relaxed text-yellow-300/90">
+              Needs a TMDB API key before preferred poster language can be enabled. Without one, Placeholdarr keeps
+              using Radarr/Sonarr posters.
+            </p>
+            {props.onOpenOptionalApis ? (
+              <button
+                type="button"
+                onClick={() => props.onOpenOptionalApis?.()}
+                className="inline-flex items-center gap-1.5 rounded-md border border-yellow-500/40 bg-yellow-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-yellow-100 hover:bg-yellow-500/25 transition-colors"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                  settings
+                </span>
+                Open Optional APIs
+              </button>
+            ) : (
+              <p className="ui-field-description text-yellow-200/80">
+                Add a key under Settings → Optional APIs.
+              </p>
+            )}
+          </div>
+        ) : null}
+        <div className={`flex items-start gap-3 mb-2 ${field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? "mt-4" : ""}`}>
           <div className="flex-1">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[16px] font-semibold text-white font-headline">{field.label}</span>
@@ -5988,7 +6210,7 @@ function SettingsPanel(props: {
                   </p>
                   {field.description ? <p className="ui-field-description mt-1">{field.description}</p> : null}
                 </>
-              ) : field.description && !isPlexSectionIdField(field.key) ? (
+              ) : field.description && !isPlexSectionIdField(field.key) && !isPosterLanguageFieldKey(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
             {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
@@ -6097,9 +6319,9 @@ function SettingsPanel(props: {
 
   return (
     <>
-    <div>
-      {/* Page title row */}
-      <div className="flex justify-between items-center mb-6">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Pinned title/save bar — sibling scroll body below (not sticky inside padded main) */}
+      <div className="flex shrink-0 items-center justify-between border-b border-[#424753]/30 bg-[#12161c] px-6 py-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: accent.hex }} />
@@ -6137,6 +6359,7 @@ function SettingsPanel(props: {
         </div>
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto p-6">
       <div className="w-full min-w-0">
         {/* Active section fields */}
         <div className="w-full min-w-0">
@@ -6206,7 +6429,18 @@ function SettingsPanel(props: {
                                   </div>
                                 )}
                               </div>
-                              <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                              <h4 className="mt-5 flex w-full items-center justify-center gap-2 text-center text-[20px] font-bold tracking-tight text-white font-headline">
+                                <span>{card.title}</span>
+                                {props.integrationsStatus?.media?.[card.id]?.ok === false ? (
+                                  <IntegrationFailureBadge
+                                    size="sm"
+                                    title={
+                                      props.integrationsStatus?.media?.[card.id]?.message ||
+                                      "Connection failed. Open Configure and Test to clear."
+                                    }
+                                  />
+                                ) : null}
+                              </h4>
                               {card.id === "plex" ? (
                                 <PlexLibraryTipsDisclosure
                                   className="mt-3 w-full"
@@ -6263,6 +6497,10 @@ function SettingsPanel(props: {
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {!enabled ? (
                                       <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                                    ) : (props.integrationsStatus?.media?.[card.id]?.ok === false) ? (
+                                      <p className="text-red-300">
+                                        {props.integrationsStatus?.media?.[card.id]?.message || "Connection failed. Open Configure and Test to clear."}
+                                      </p>
                                     ) : urlTest && !urlTest.ok ? (
                                       <p className="text-red-400">{urlTest.message}</p>
                                     ) : !mediaDetailsComplete ? (
@@ -6352,6 +6590,8 @@ function SettingsPanel(props: {
                       values={props.values}
                       onValueChange={props.onValueChange}
                       accent={accent}
+                      integrationsStatus={props.integrationsStatus}
+                      onIntegrationsStatusRefresh={props.onIntegrationsStatusRefresh}
                       onSecondaryTestStatusChange={(arrType, ok) => {
                         setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                       }}
@@ -6590,21 +6830,63 @@ function SettingsPanel(props: {
                 </>
               ) : active.name === "Library sync" ? (
                 renderOnboardingStyleSectionRows(active.fields)
-              ) : active.name === "Collection Sources" ? (
-                renderOnboardingStyleSectionRows(active.fields, {
-                  intro: (
-                    <p className="ui-field-description">
-                      Optional API credentials for Collections list sources (TMDB, Trakt, Tautulli stats). Separate from
-                      media player connections and playback webhooks.
-                    </p>
-                  ),
-                })
+              ) : active.name === "Optional APIs" ? (
+                (() => {
+                  const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
+                  const groups: Array<{ title: string; blurb: string; keys: string[] }> = [
+                    {
+                      title: "TMDB",
+                      blurb:
+                        "Preferred poster language and Collections list sources (trending, popular, upcoming, discover).",
+                      keys: ["TMDB_API_KEY"],
+                    },
+                    {
+                      title: "Trakt",
+                      blurb: "Collections public lists and charts. Creating a Trakt API app currently requires Trakt VIP.",
+                      keys: ["TRAKT_CLIENT_ID"],
+                    },
+                    {
+                      title: "Tautulli",
+                      blurb:
+                        "Collections most-popular / most-watched sources. Separate from playback webhooks.",
+                      keys: ["TAUTULLI_URL", "TAUTULLI_API_KEY"],
+                    },
+                  ];
+                  return (
+                    <div className="space-y-5 px-6 py-5">
+                      <p className="ui-field-description">
+                        Optional credentials for preferred poster language (TMDB) and Collections list sources (TMDB,
+                        Trakt, Tautulli). Separate from media player connections and playback webhooks.
+                      </p>
+                      {groups.map((group) => {
+                        const groupFields = group.keys
+                          .map((key) => fieldByKey.get(key))
+                          .filter(Boolean) as SettingsField[];
+                        if (!groupFields.length) return null;
+                        return (
+                          <div key={group.title} className={`${UI_SECTION_FRAME_CLASS} overflow-hidden`}>
+                            <div className="border-b border-[#424753]/30 px-6 py-4">
+                              <h3 className="text-[15px] font-headline font-bold uppercase tracking-wide text-white">
+                                {group.title}
+                              </h3>
+                              <p className="ui-field-description mt-1">{group.blurb}</p>
+                            </div>
+                            <div className="divide-y divide-[#424753]/20">
+                              {groupFields.map((field) => renderStandardField(field))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
               ) : (
                 renderOnboardingStyleSectionRows(active.fields)
               )}
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
     {mediaPanel && props.activeSection === "Media Integrations" ? (() => {
@@ -6722,10 +7004,23 @@ const NFO_BACKFILL_SETTING_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
+] as const;
+
+const POSTER_LANGUAGE_SETTING_KEYS = [
+  "ENABLE_PREFERRED_POSTER_LANGUAGE",
+  "PREFERRED_POSTER_LANGUAGE",
+  "PREFER_ORIGINAL_POSTER_LANGUAGE",
 ] as const;
 
 function statusUpdateSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
   return NFO_BACKFILL_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
+}
+
+function posterLanguageSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return POSTER_LANGUAGE_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
 }
 
 const STATUS_MESSAGE_GROUP_ORDER = [
@@ -7611,6 +7906,20 @@ function NfoBackfillApplyScopeModal(props: {
   const [scope, setScope] = useState<ApplyScope>("next_full_sync");
   const count = props.placeholderCount;
   const countLabel = count === 1 ? "1 placeholder" : `${count.toLocaleString()} placeholders`;
+  const options: Array<{ value: ApplyScope; title: string; body: string }> = [
+    {
+      value: "now",
+      title: "Apply now",
+      body: `Apply these changes to ${countLabel} immediately. Best when the library is small or you want to see updates right away.`,
+    },
+    {
+      value: "next_full_sync",
+      title: "Next full sync (recommended)",
+      body: props.alreadyPending
+        ? "Already queued. Saving here will keep the next full sync as the apply point."
+        : "Defer applying these changes to the next scheduled or manual full sync. Spreads media-server load and avoids a sudden refresh storm.",
+    },
+  ];
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
@@ -7625,29 +7934,11 @@ function NfoBackfillApplyScopeModal(props: {
           </h3>
           <p className="ui-field-description mt-1">
             {props.description ??
-              "Choose when these template updates should affect existing placeholders. New placeholders always use the saved templates."}
+              "Choose when these updates should affect existing placeholders. New placeholders always use the saved settings."}
           </p>
         </div>
         <div className="px-5 py-4 space-y-3">
-          {([
-            {
-              value: "now" as ApplyScope,
-              title: "Apply now",
-              body: `Rewrite NFOs and refresh player metadata for ${countLabel} immediately. Best when the library is small or you want to see changes right away.`,
-            },
-            {
-              value: "next_full_sync" as ApplyScope,
-              title: "Next full sync (recommended)",
-              body: props.alreadyPending
-                ? "Already queued. Saving here will keep the next full sync as the apply point."
-                : "Defer the rewrite to the next scheduled or manual full sync. Spreads media-server load and avoids a sudden refresh storm.",
-            },
-            {
-              value: "future" as ApplyScope,
-              title: "Future only",
-              body: "Don't touch existing placeholders. The new templates apply naturally as items move through their stages.",
-            },
-          ]).map((opt) => {
+          {options.map((opt) => {
             const selected = scope === opt.value;
             return (
               <button
@@ -9044,8 +9335,12 @@ function OnboardingWizard(props: {
   const hasSonarrSecondary = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
   const uiHasRadarrSecondary = hasRadarrSecondary || Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED);
   const uiHasSonarrSecondary = hasSonarrSecondary || Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED);
-  const canUseRadarrSecondaryBehavior = uiHasRadarrSecondary && arrSecondaryTestStatus.radarr;
-  const canUseSonarrSecondaryBehavior = uiHasSonarrSecondary && arrSecondaryTestStatus.sonarr;
+  const canUseRadarrSecondaryBehavior =
+    uiHasRadarrSecondary &&
+    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
+  const canUseSonarrSecondaryBehavior =
+    uiHasSonarrSecondary &&
+    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
   const allSettingsFieldsByKey = useMemo(() => {
@@ -9228,15 +9523,35 @@ function OnboardingWizard(props: {
     const tvPlayMode = String(props.values.TV_PLAY_MODE ?? "episode").trim().toLowerCase();
     const lookaheadRangeLocked = field.key === "EPISODES_LOOKAHEAD" && tvPlayMode === "series";
     const parentDisabled = settingsFieldParentDisabled(field, props.values);
-    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const tmdbConfigured = tmdbApiKeyConfiguredFromSettings(props.payload, props.values);
+    const posterLangFeatureOn = Boolean(props.values.ENABLE_PREFERRED_POSTER_LANGUAGE);
+    const tmdbKeyMissing =
+      (isPosterLanguageGateKey(field.key) || (isPosterLanguageDetailKey(field.key) && posterLangFeatureOn)) &&
+      !tmdbConfigured;
+    const rowMuted = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
     const isNested = settingsFieldIsNested(field);
-    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled;
+    const interactionLocked = projectionFieldLocked || lookaheadRangeLocked || parentDisabled || tmdbKeyMissing;
     return (
       <div
         key={field.key}
         className={`${isNested ? "pl-8 ml-4 border-l border-[#424753]/40" : ""} ${rowMuted ? "opacity-50" : ""}`}
       >
-        <label className="block text-[16px] font-semibold text-white font-headline mb-1">{field.label}</label>
+        {field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <PosterLanguageSettingsDescription spacing="wizard" />
+        ) : null}
+        {tmdbKeyMissing && field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? (
+          <p className="ui-field-description mb-2 leading-relaxed text-yellow-300/90">
+            Needs a TMDB API key (add it under Optional APIs in Settings after setup). Without one,
+            Placeholdarr keeps using Radarr/Sonarr posters.
+          </p>
+        ) : null}
+        <label
+          className={`block text-[16px] font-semibold text-white font-headline mb-1 ${
+            field.key === "ENABLE_PREFERRED_POSTER_LANGUAGE" ? "mt-3" : ""
+          }`}
+        >
+          {field.label}
+        </label>
         {!(lookaheadRangeLocked && field.key === "EPISODES_LOOKAHEAD") &&
           (field.key === "STARTUP_SYNC_MODE" ? (
             <StartupSyncModeDescription spacing="wizard" />
@@ -9258,7 +9573,7 @@ function OnboardingWizard(props: {
               </p>
               {field.description ? <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p> : null}
             </>
-          ) : field.description ? (
+          ) : field.description && !isPosterLanguageFieldKey(field.key) ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
         {field.key === "FULL_SYNC_INTERVAL_HOURS" ? (
