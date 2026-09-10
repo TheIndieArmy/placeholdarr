@@ -5396,8 +5396,44 @@ async def integrations_test(request: Request):
         )
 
     result = test_integration_connection(service=service, url=url, token_or_key=resolved)
+    try:
+        from services.integration_status import record_arr_status, record_media_status
+
+        ok = bool(result.get("ok"))
+        message = str(result.get("message") or "")
+        if service in {"plex", "jellyfin", "emby"}:
+            record_media_status(service, ok=ok, message=message, source="test")
+        elif service in {"radarr", "sonarr"}:
+            iid = str(instance_id or "").strip().lower()
+            label = ""
+            instance_key = ""
+            if iid:
+                for item in getattr(settings, "configured_arr_instances", []) or []:
+                    if str(item.get("instance_id") or "").strip().lower() == iid:
+                        label = str(item.get("label") or "")
+                        instance_key = str(item.get("instance_key") or "")
+                        break
+            if iid:
+                record_arr_status(
+                    instance_id=iid,
+                    arr_type=service,
+                    instance_key=instance_key,
+                    label=label,
+                    ok=ok,
+                    message=message,
+                    source="test",
+                )
+    except Exception:
+        pass
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(content=result, status_code=status_code)
+
+
+@router.get("/api/integrations/status")
+async def integrations_status():
+    from services.integration_status import get_integration_status
+
+    return JSONResponse(content=get_integration_status())
 
 
 @router.get("/api/logs")

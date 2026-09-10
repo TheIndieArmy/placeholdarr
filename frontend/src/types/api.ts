@@ -594,6 +594,28 @@ export interface IntegrationTestResponse {
   message: string;
 }
 
+export interface IntegrationStatusEntry {
+  ok: boolean;
+  message: string;
+  checked_at?: string;
+  source?: string;
+  sticky_failure?: boolean;
+  service?: string;
+  instance_id?: string;
+  arr_type?: string;
+  instance_key?: string;
+  label?: string;
+}
+
+export interface IntegrationsStatusResponse {
+  checked_at: string | null;
+  media: Record<string, IntegrationStatusEntry>;
+  arr: Record<string, IntegrationStatusEntry>;
+  media_has_failure: boolean;
+  arr_has_failure: boolean;
+  settings_has_failure: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Collections (rule-based Plex collection builder)
 // ---------------------------------------------------------------------------

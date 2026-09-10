@@ -6,6 +6,7 @@ import type {
   CalendarResponse,
   DetailResponse,
   IntegrationTestResponse,
+  IntegrationsStatusResponse,
   LibraryResponse,
   LibraryVersionResponse,
   DashboardEvent,
@@ -420,4 +421,8 @@ export async function testIntegrationConnection(input: {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, message: message || "Connection test failed" };
   }
+}
+
+export async function getIntegrationsStatus(): Promise<IntegrationsStatusResponse> {
+  return fetchJson<IntegrationsStatusResponse>("/api/integrations/status");
 }

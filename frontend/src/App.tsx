@@ -16,6 +16,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } fr
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
+  getIntegrationsStatus,
   getMovieDetail,
   getSeriesDetail,
   getSettingsCurrent,
@@ -24,6 +25,7 @@ import {
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
+import type { IntegrationsStatusResponse } from "./types/api";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
@@ -354,6 +356,22 @@ const UI_SECTION_FRAME_CLASS =
  */
 const UI_INTEGRATION_CARD_SURFACE_CLASS =
   "rounded-2xl border border-[var(--brand-accent-3)] bg-[color:color-mix(in_srgb,var(--brand-surface-panel)_92%,var(--brand-accent-3)_8%)] shadow-lg shadow-black/15 backdrop-blur-md transition hover:shadow-[0_0_36px_-14px_color-mix(in_srgb,var(--brand-accent-3)_28%,transparent)]";
+
+/** Red circle with ! for sticky Media/ARR connectivity failures (nav + cards). */
+function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) {
+  const size = props.size ?? "md";
+  const dim = size === "sm" ? "h-4 w-4 text-[10px]" : "h-5 w-5 text-[11px]";
+  return (
+    <span
+      className={`inline-flex ${dim} shrink-0 items-center justify-center rounded-full bg-red-600 font-bold leading-none`}
+      style={{ color: "#ffffff" }}
+      title={props.title || "Connection problem"}
+      aria-label={props.title || "Connection problem"}
+    >
+      !
+    </span>
+  );
+}
 
 /** Wizard stacked section bodies (bottom margin between sections). */
 const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
@@ -724,11 +742,11 @@ export function App() {
   useEffect(() => {
     settingsPayloadRef.current = settingsPayload;
   }, [settingsPayload]);
-  const [activeSettingsSection, setActiveSettingsSection] = useState("Media Integrations");
   const [fieldValues, setFieldValues] = useState<FieldValueMap>({});
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
   const [settingsFeedback, setSettingsFeedback] = useState("");
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
+  const [integrationsStatus, setIntegrationsStatus] = useState<IntegrationsStatusResponse | null>(null);
   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
   const statusMessagesSaveRef = useRef<((preselectedScope?: NfoBackfillApplyScope) => Promise<void>) | null>(null);
@@ -942,9 +960,39 @@ export function App() {
   }, [settingsPayload]);
   const firstSettingsSection = settingsSectionNames[0] ?? SETTINGS_SECTION_ORDER[0];
   const firstSettingsPath = `/settings/${SETTINGS_SECTION_SLUGS[firstSettingsSection] ?? "media-integrations"}`;
+  /** Single source of truth for which Settings pane is shown (must track the URL, not a separate useState). */
+  const activeSettingsSection = useMemo(() => {
+    if (currentTab !== "settings") return firstSettingsSection;
+    const slug = location.pathname.split("/")[2] || "";
+    return resolveSettingsSectionFromSlug(slug) ?? firstSettingsSection;
+  }, [currentTab, firstSettingsSection, location.pathname]);
   const homeRedirectPath =
     setupStatus == null ? null : setupStatus.setup_complete ? HOME_PATH : "/setup";
   const showReconnectPanel = !!errorMessage && /Cannot reach the Placeholdarr API/i.test(errorMessage);
+
+  const refreshIntegrationsStatus = useCallback(async () => {
+    try {
+      const status = await getIntegrationsStatus();
+      setIntegrationsStatus(status);
+    } catch {
+      /* Keep last known status; transient API errors should not clear badges. */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!authReady || setupStatus?.setup_complete !== true) return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      void refreshIntegrationsStatus();
+    };
+    tick();
+    const id = window.setInterval(tick, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [authReady, setupStatus?.setup_complete, refreshIntegrationsStatus]);
 
   useEffect(() => {
     if (!authReady || whatsNewDismissedRef.current) return;
@@ -1374,18 +1422,13 @@ export function App() {
       navigate(firstSettingsPath, { replace: true });
       return;
     }
-    if (VIRTUAL_SETTINGS_SECTIONS.has(matched)) {
-      if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
-      return;
-    }
+    if (VIRTUAL_SETTINGS_SECTIONS.has(matched)) return;
     if (!settingsPayload) return;
     const apiSections = settingsPayload.sections ?? [];
     if (!apiSections.some((s) => s.name === matched)) {
       navigate(firstSettingsPath, { replace: true });
-      return;
     }
-    if (matched !== activeSettingsSection) setActiveSettingsSection(matched);
-  }, [activeSettingsSection, currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
+  }, [currentTab, firstSettingsPath, location.pathname, navigate, settingsPayload]);
 
   const activeShelfCache =
     libraryShelfKey === "movies" ? libraryCache.movies : libraryShelfKey === "tv" ? libraryCache.tv : undefined;
@@ -1458,16 +1501,7 @@ export function App() {
     setBaselineValues(nextValues);
 
     // Must match `settingsSectionNames`: include any virtual tabs not returned by `/api/settings/current`.
-    const apiSectionsForNav = payload.sections ?? [];
-    const sections = SETTINGS_SECTION_ORDER.filter(
-      (name) => VIRTUAL_SETTINGS_SECTIONS.has(name) || apiSectionsForNav.some((s) => s.name === name),
-    );
-    if (sections.length > 0 && !sections.includes(activeSettingsSection)) {
-      const slug = location.pathname.split("/")[2] || "";
-      const slugMatch = resolveSettingsSectionFromSlug(slug);
-      const matched = slugMatch && sections.includes(slugMatch) ? slugMatch : sections[0];
-      setActiveSettingsSection(matched);
-    }
+    // Active section follows the URL; invalid slugs are redirected by the settings-route effect.
   }
 
   const prevPreviewRouteRef = useRef<boolean | null>(null);
@@ -1851,6 +1885,8 @@ export function App() {
           brand={brand}
           themeMode={themeMode}
           authStatus={authStatus}
+          integrationsStatus={integrationsStatus}
+          onIntegrationsStatusRefresh={refreshIntegrationsStatus}
           onLogout={async () => {
             const status = await logoutAuth();
             setAuthStatus(status);
@@ -2295,12 +2331,14 @@ export function App() {
                     { icon: "calendar_month", label: "Calendar", path: "/calendar", beta: false },
                     { icon: "terminal", label: "Logs", path: "/logs", beta: false },
                     { icon: "settings", label: "Settings", path: "/settings", beta: false },
-                  ].map(({ icon, label, path, beta }) =>
-                    isActive(path) ? (
+                  ].map(({ icon, label, path, beta }) => {
+                    const settingsFail = path === "/settings" && Boolean(integrationsStatus?.settings_has_failure);
+                    return isActive(path) ? (
                       <button key={path} type="button" onClick={() => tryNavigate(path === "/settings" ? firstSettingsPath : path)} className={navActiveClass}>
                         <span className="material-symbols-outlined">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>
+                          {settingsFail ? <IntegrationFailureBadge title="Media or ARR connection problem" /> : null}
                           {beta ? (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
                               Beta
@@ -2313,6 +2351,7 @@ export function App() {
                         <span className="material-symbols-outlined transition-transform group-hover:translate-x-1">{icon}</span>
                         <span className="flex items-center gap-1.5">
                           <span>{label}</span>
+                          {settingsFail ? <IntegrationFailureBadge title="Media or ARR connection problem" /> : null}
                           {beta ? (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">
                               Beta
@@ -2320,8 +2359,8 @@ export function App() {
                           ) : null}
                         </span>
                       </button>
-                    ),
-                  )}
+                    );
+                  })}
                 </>
               );
             })()}
@@ -2330,25 +2369,38 @@ export function App() {
                 {settingsSectionNames.map((name) => {
                   const subPath = `/settings/${SETTINGS_SECTION_SLUGS[name] ?? ""}`;
                   const isSubActive = location.pathname === subPath;
+                  const sectionFail =
+                    (name === "Media Integrations" && Boolean(integrationsStatus?.media_has_failure)) ||
+                    (name === "ARR Integrations" && Boolean(integrationsStatus?.arr_has_failure));
+                  const subBase =
+                    "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ";
+                  const subActiveClass = isStudioGlass
+                    ? "bg-[#1e2430] text-slate-100"
+                    : "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]";
+                  const subInactiveClass = isStudioGlass
+                    ? "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
+                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900";
                   return (
                     <button
                       key={name}
                       type="button"
                       onClick={() => tryNavigate(subPath)}
-                      className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13px] font-headline uppercase tracking-wider transition-colors ${
-                        isStudioGlass
-                          ? isSubActive
-                            ? "bg-[#1e2430] text-slate-100"
-                            : "text-slate-400 hover:bg-[#1e2430]/50 hover:text-slate-200"
-                          : isSubActive
-                            ? "bg-[color:var(--brand-fg)] text-[color:var(--brand-accent)]"
-                            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                      }`}
+                      className={`${subBase}${isSubActive ? subActiveClass : subInactiveClass}`}
                     >
                       <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
                         {SETTINGS_SECTION_ICONS[name] || "settings"}
                       </span>
                       <span className="truncate">{name}</span>
+                      {sectionFail ? (
+                        <IntegrationFailureBadge
+                          size="sm"
+                          title={
+                            name === "Media Integrations"
+                              ? "Media connection problem"
+                              : "ARR connection problem"
+                          }
+                        />
+                      ) : null}
                     </button>
                   );
                 })}
@@ -3849,6 +3901,16 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
   );
 }
 
+function arrSecondaryPersistedWithCredentials(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
+  const instances = parseArrInstancesFromValues(values).filter((row) => row.arr_type === arrType);
+  const second = instances[1];
+  if (!second) return false;
+  return (
+    String(second.url || "").trim().length > 0 &&
+    (String(second.api_key || "").trim().length > 0 || Boolean(second.api_key_saved))
+  );
+}
+
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
 const PLAYBACK_MODE_VALUES = new Set(["match", "primary", "secondary", "both"]);
 const SHARED_PLACEHOLDER_CLEANUP_VALUES = new Set(["protect_siblings", "any_instance_has_file"]);
@@ -4036,6 +4098,8 @@ function ArrInstancesEditor(props: {
   accent: BrandAccent;
   onPrimaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
   onSecondaryTestStatusChange?: (arrType: "radarr" | "sonarr", ok: boolean) => void;
+  integrationsStatus?: IntegrationsStatusResponse | null;
+  onIntegrationsStatusRefresh?: () => Promise<void> | void;
   /** "slots" = Overseerr-style dashed placeholders + slide-over editor (onboarding). */
   layout?: "cards" | "slots";
 }) {
@@ -4100,10 +4164,24 @@ function ArrInstancesEditor(props: {
   const [slotPanelTestPassed, setSlotPanelTestPassed] = useState(false);
 
   useEffect(() => {
-    props.onValueChange("WIZARD_RADARR_SECONDARY_ENABLED", secondaryEnabled.radarr);
-    props.onValueChange("WIZARD_SONARR_SECONDARY_ENABLED", secondaryEnabled.sonarr);
-  }, [props, secondaryEnabled]);
-
+    const rad = Boolean(secondaryEnabled.radarr);
+    const son = Boolean(secondaryEnabled.sonarr);
+    if (Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED) !== rad) {
+      props.onValueChange("WIZARD_RADARR_SECONDARY_ENABLED", rad);
+    }
+    if (Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED) !== son) {
+      props.onValueChange("WIZARD_SONARR_SECONDARY_ENABLED", son);
+    }
+    // Only re-sync when the secondary toggles change (or the stored wizard flags drift).
+    // Do not depend on the whole `props` object: parent re-renders would rewrite flags every frame
+    // and can starve Settings section switches while ARR Integrations is open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onValueChange identity changes every render
+  }, [
+    secondaryEnabled.radarr,
+    secondaryEnabled.sonarr,
+    props.values.WIZARD_RADARR_SECONDARY_ENABLED,
+    props.values.WIZARD_SONARR_SECONDARY_ENABLED,
+  ]);
 
   function update(next: ArrInstanceDraft[]) {
     const radarr = next.filter((item) => item.arr_type === "radarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
@@ -4235,6 +4313,7 @@ function ArrInstancesEditor(props: {
       };
     }
     setTestState((prev) => ({ ...prev, [item.id]: result }));
+    void props.onIntegrationsStatusRefresh?.();
     if (slotIndex === 0 && primaryEnabled[arrType]) {
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: Boolean(result.ok) }));
       props.onPrimaryTestStatusChange?.(arrType, Boolean(result.ok));
@@ -4635,9 +4714,25 @@ function ArrInstancesEditor(props: {
                     ) : (
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
-                          <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
+                            {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  props.integrationsStatus.arr[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.message ||
+                                  "Connection failed. Open Configure and Test to clear."
+                                }
+                              />
+                            ) : null}
+                          </div>
                           <div className="truncate font-mono text-[13px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
-                          {testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
+                          {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
+                            <div className="mt-1 text-[14px] text-red-300">
+                              {props.integrationsStatus.arr[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.message ||
+                                "Connection failed. Open Configure and Test to clear."}
+                            </div>
+                          ) : testState[primaryItem.id] && !testState[primaryItem.id].ok ? (
                             <div className="mt-1 text-[14px] text-red-400">{testState[primaryItem.id].message}</div>
                           ) : null}
                         </div>
@@ -4720,9 +4815,25 @@ function ArrInstancesEditor(props: {
                     ) : (
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
-                          <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
+                            {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
+                              <IntegrationFailureBadge
+                                size="sm"
+                                title={
+                                  props.integrationsStatus.arr[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.message ||
+                                  "Connection failed. Open Configure and Test to clear."
+                                }
+                              />
+                            ) : null}
+                          </div>
                           <div className="truncate font-mono text-[13px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
-                          {testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
+                          {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
+                            <div className="mt-1 text-[14px] text-red-300">
+                              {props.integrationsStatus.arr[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.message ||
+                                "Connection failed. Open Configure and Test to clear."}
+                            </div>
+                          ) : testState[secondaryItem.id] && !testState[secondaryItem.id].ok ? (
                             <div className="mt-1 text-[14px] text-red-400">{testState[secondaryItem.id].message}</div>
                           ) : null}
                         </div>
@@ -5765,6 +5876,8 @@ function SettingsPanel(props: {
   brand: Brand;
   themeMode: ThemeMode;
   authStatus: AuthStatus | null;
+  integrationsStatus?: IntegrationsStatusResponse | null;
+  onIntegrationsStatusRefresh?: () => Promise<void> | void;
   onLogout: () => Promise<void>;
   onValueChange: (key: string, value: unknown) => void;
   onSave: () => Promise<void>;
@@ -5796,8 +5909,12 @@ function SettingsPanel(props: {
   const arrInstances = parseArrInstancesFromValues(props.values);
   const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
   const hasSonarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
-  const canUseRadarrSecondaryBehavior = hasRadarrSecondaryConfigured && arrSecondaryTestStatus.radarr;
-  const canUseSonarrSecondaryBehavior = hasSonarrSecondaryConfigured && arrSecondaryTestStatus.sonarr;
+  const canUseRadarrSecondaryBehavior =
+    hasRadarrSecondaryConfigured &&
+    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
+  const canUseSonarrSecondaryBehavior =
+    hasSonarrSecondaryConfigured &&
+    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
   const unlockedSettingsSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
     canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
@@ -5869,6 +5986,7 @@ function SettingsPanel(props: {
         credentialKey: target.credentialKey,
       });
       setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      void props.onIntegrationsStatusRefresh?.();
       return result;
     } catch (err) {
       const result = {
@@ -5876,6 +5994,7 @@ function SettingsPanel(props: {
         message: err instanceof Error ? err.message : String(err),
       };
       setTestResults((prev) => ({ ...prev, [field.key]: result }));
+      void props.onIntegrationsStatusRefresh?.();
       return result;
     }
   }
@@ -6206,7 +6325,18 @@ function SettingsPanel(props: {
                                   </div>
                                 )}
                               </div>
-                              <h4 className="mt-5 w-full text-center text-[20px] font-bold tracking-tight text-white font-headline">{card.title}</h4>
+                              <h4 className="mt-5 flex w-full items-center justify-center gap-2 text-center text-[20px] font-bold tracking-tight text-white font-headline">
+                                <span>{card.title}</span>
+                                {props.integrationsStatus?.media?.[card.id]?.ok === false ? (
+                                  <IntegrationFailureBadge
+                                    size="sm"
+                                    title={
+                                      props.integrationsStatus?.media?.[card.id]?.message ||
+                                      "Connection failed. Open Configure and Test to clear."
+                                    }
+                                  />
+                                ) : null}
+                              </h4>
                               {card.id === "plex" ? (
                                 <PlexLibraryTipsDisclosure
                                   className="mt-3 w-full"
@@ -6263,6 +6393,10 @@ function SettingsPanel(props: {
                                   <div className="mt-2 flex min-h-[2.5rem] flex-col justify-center text-[14px]">
                                     {!enabled ? (
                                       <p className="ui-field-description">Integration paused — Placeholdarr will not sync to {card.title} until re-enabled.</p>
+                                    ) : (props.integrationsStatus?.media?.[card.id]?.ok === false) ? (
+                                      <p className="text-red-300">
+                                        {props.integrationsStatus?.media?.[card.id]?.message || "Connection failed. Open Configure and Test to clear."}
+                                      </p>
                                     ) : urlTest && !urlTest.ok ? (
                                       <p className="text-red-400">{urlTest.message}</p>
                                     ) : !mediaDetailsComplete ? (
@@ -6352,6 +6486,8 @@ function SettingsPanel(props: {
                       values={props.values}
                       onValueChange={props.onValueChange}
                       accent={accent}
+                      integrationsStatus={props.integrationsStatus}
+                      onIntegrationsStatusRefresh={props.onIntegrationsStatusRefresh}
                       onSecondaryTestStatusChange={(arrType, ok) => {
                         setArrSecondaryTestStatus((prev) => ({ ...prev, [arrType]: ok }));
                       }}
@@ -9044,8 +9180,12 @@ function OnboardingWizard(props: {
   const hasSonarrSecondary = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
   const uiHasRadarrSecondary = hasRadarrSecondary || Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED);
   const uiHasSonarrSecondary = hasSonarrSecondary || Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED);
-  const canUseRadarrSecondaryBehavior = uiHasRadarrSecondary && arrSecondaryTestStatus.radarr;
-  const canUseSonarrSecondaryBehavior = uiHasSonarrSecondary && arrSecondaryTestStatus.sonarr;
+  const canUseRadarrSecondaryBehavior =
+    uiHasRadarrSecondary &&
+    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
+  const canUseSonarrSecondaryBehavior =
+    uiHasSonarrSecondary &&
+    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
   const allSettingsFieldsByKey = useMemo(() => {

@@ -474,4 +474,11 @@ def refresh_emby_item_metadata(item_id: str) -> bool:
             f"Emby item refresh failed for item_id={target}: {e}",
             extra={"emoji_type": "warning"},
         )
+        try:
+            from services.integration_status import is_connectivity_exception, mark_media_connectivity_failure
+
+            if is_connectivity_exception(e):
+                mark_media_connectivity_failure("emby", message=str(e) or type(e).__name__)
+        except Exception:
+            pass
     return False

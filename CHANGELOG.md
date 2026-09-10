@@ -7,6 +7,15 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+
+- **Integration connection status**: Media and ARR connectivity failures (startup, runtime, or Test) show a red circle ! on Settings / Media / ARR nav and on the failing cards until a successful Test clears them.
+
+### Fixed
+
+- **Secondary Arr settings unlock**: Shared cleanup / search / playback multi-instance controls stay available when a second Radarr or Sonarr is already saved (no re-Test required each session).
+- **ARR Integrations navigation**: Leaving ARR Integrations follows the URL immediately (section no longer stuck until refresh).
+
 ## [0.9.25] - 2026-09-09
 
 ### Summary
