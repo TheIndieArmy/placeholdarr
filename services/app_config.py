@@ -288,7 +288,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Optional APIs",
                 "label": "TMDB API Key",
                 "description": (
-                    "TMDB API key (v3 auth) for preferred poster language and Collections list sources "
+                    "TMDB API key (v3 auth) for TMDB poster language and Collections list sources "
                     "(trending, popular, upcoming, discover). Get a free key at themoviedb.org. "
                     "Optional; needed for language posters and TMDB-based collection sources."
                 ),
@@ -691,7 +691,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "ENABLE_PREFERRED_POSTER_LANGUAGE",
             {
                 "section": "Status Updates",
-                "label": "Use preferred poster language",
+                "label": "Fetch from TMDB",
                 "description": "",
                 "type": "bool",
                 "restart_required": False,
@@ -702,7 +702,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PREFER_ORIGINAL_POSTER_LANGUAGE",
             {
                 "section": "Status Updates",
-                "label": "Prefer original language poster",
+                "label": "Original language first",
                 "description": "",
                 "type": "bool",
                 "restart_required": False,
@@ -715,7 +715,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "PREFERRED_POSTER_LANGUAGE",
             {
                 "section": "Status Updates",
-                "label": "Preferred poster language",
+                "label": "Language",
                 "description": "",
                 "type": "choice",
                 "restart_required": False,
