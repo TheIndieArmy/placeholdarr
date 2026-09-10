@@ -33,6 +33,8 @@ def clear_arr_cache() -> None:
         _cache.clear()
 # Bulk *arr reads (e.g. GET /api/v3/movie) can exceed 30s on large libraries over user-share I/O.
 ARR_HTTP_TIMEOUT_SECONDS = 120
+# Full catalog pulls (startup lite / full sync bypass-cache) use the same bulk timeout.
+ARR_CATALOG_TIMEOUT_SECONDS = ARR_HTTP_TIMEOUT_SECONDS
 # Collections add: *arr often never finishes POST /movie/import (or /series/import)
 # even for ~10 titles — the add still proceeds server-side. Wait briefly for a body,
 # then poll the library until titles appear (or this deadline).
@@ -276,7 +278,12 @@ def fetch_radarr_movies(
     api_key: Optional[str] = None,
     *,
     bypass_cache: bool = False,
-) -> List[Dict]:
+) -> Optional[List[Dict]]:
+    """Return the Radarr movie catalog, or None if the request failed.
+
+    Callers that treat an empty list as "library is empty" (catalog-removed diffs)
+    must check for None and abort; do not coerce failure to [].
+    """
     url = url or _default_radarr_endpoint()[0]
     api_key = api_key or _default_radarr_endpoint()[1]
     if not url or not api_key:
@@ -289,7 +296,11 @@ def fetch_radarr_movies(
         if cached is not None:
             return cached
 
-    data = _get_json(endpoint, {'apikey': api_key}, timeout=30 if bypass_cache else ARR_HTTP_TIMEOUT_SECONDS) or []
+    data = _get_json(endpoint, {'apikey': api_key}, timeout=ARR_CATALOG_TIMEOUT_SECONDS)
+    if data is None:
+        return None
+    if not isinstance(data, list):
+        return None
     _cache_set(cache_key, data)
     return data
 
@@ -326,7 +337,12 @@ def fetch_sonarr_series(
     api_key: Optional[str] = None,
     *,
     bypass_cache: bool = False,
-) -> List[Dict]:
+) -> Optional[List[Dict]]:
+    """Return the Sonarr series catalog, or None if the request failed.
+
+    Callers that treat an empty list as "library is empty" (catalog-removed diffs)
+    must check for None and abort; do not coerce failure to [].
+    """
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
     if not url or not api_key:
@@ -342,8 +358,12 @@ def fetch_sonarr_series(
     data = _get_json(
         endpoint,
         {'apikey': api_key, 'includeSeasonImages': 'true'},
-        timeout=30 if bypass_cache else ARR_HTTP_TIMEOUT_SECONDS,
-    ) or []
+        timeout=ARR_CATALOG_TIMEOUT_SECONDS,
+    )
+    if data is None:
+        return None
+    if not isinstance(data, list):
+        return None
     _cache_set(cache_key, data)
     return data
 
@@ -1125,9 +1145,11 @@ def _emit_arr_add_progress(
 def _library_identity_map(*, url: str, api_key: str, movie: bool) -> dict[str, dict]:
     if movie:
         library = fetch_radarr_movies(url, api_key, bypass_cache=True)
+        if library is None:
+            library = []
     else:
         endpoint = _build_endpoint(url, "series")
-        library = _get_json(endpoint, {"apikey": api_key}, timeout=30) or []
+        library = _get_json(endpoint, {"apikey": api_key}, timeout=ARR_CATALOG_TIMEOUT_SECONDS) or []
     return _imported_rows_by_identity(library if isinstance(library, list) else [], movie=movie)
 
 

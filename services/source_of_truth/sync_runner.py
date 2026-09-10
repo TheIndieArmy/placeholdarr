@@ -683,6 +683,13 @@ def run_full_sync(
         for content_type, base_url, api_key, sync_is_4k, sync_instance_key in _iter_arr_endpoints(types, is_4k, instance_key=instance_key):
             if content_type == 'movie':
                 movies = fetch_radarr_movies(base_url, api_key, bypass_cache=True)
+                if movies is None:
+                    logger.warning(
+                        f"Full sync · {sync_instance_key} · movies: Radarr catalog fetch failed; "
+                        f"skipping instance (will not mark titles deleted)",
+                        extra={'emoji_type': 'warning'},
+                    )
+                    continue
                 seen_tmdbids = set()
                 for movie in movies:
                     fields = _movie_fields(movie, sync_is_4k, sync_instance_key)
@@ -712,6 +719,13 @@ def run_full_sync(
 
             if content_type == 'series':
                 series_items = fetch_sonarr_series(base_url, api_key, bypass_cache=True)
+                if series_items is None:
+                    logger.warning(
+                        f"Full sync · {sync_instance_key} · TV: Sonarr catalog fetch failed; "
+                        f"skipping instance (will not mark series deleted)",
+                        extra={'emoji_type': 'warning'},
+                    )
+                    continue
                 seen_tvdbids = set()
                 total_series = len(series_items)
                 logger.info(

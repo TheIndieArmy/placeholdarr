@@ -691,7 +691,14 @@ def _run_startup_lite_snapshot_for_instances(
                 )
 
                 if instance['arr_type'] == 'radarr':
-                    api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key'], bypass_cache=True) or []
+                    api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key'], bypass_cache=True)
+                    if api_movies is None:
+                        logger.warning(
+                            f"Startup lite · {instance_key} · movies: Radarr catalog fetch failed; "
+                            f"skipping catalog diff (will not treat titles as removed)",
+                            extra={'emoji_type': 'warning'},
+                        )
+                        continue
                     stats['snapshot_rows_seen'] += len(api_movies)
                     drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
                     removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
@@ -798,7 +805,14 @@ def _run_startup_lite_snapshot_for_instances(
                             ]
                             touched_movie_row_ids.update(row_ids)
                 else:
-                    api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True) or []
+                    api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True)
+                    if api_series is None:
+                        logger.warning(
+                            f"Startup lite · {instance_key} · TV shows: Sonarr catalog fetch failed; "
+                            f"skipping catalog diff (will not treat series as removed)",
+                            extra={'emoji_type': 'warning'},
+                        )
+                        continue
                     stats['snapshot_rows_seen'] += len(api_series)
                     drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
                     removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)

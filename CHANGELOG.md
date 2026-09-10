@@ -7,6 +7,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
+
 ## [0.9.26] - 2026-09-10
 
 ### Summary
