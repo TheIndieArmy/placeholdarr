@@ -3,7 +3,7 @@ import type { Brand, ThemeMode } from "../../brandTypes";
 import type { SeriesDetailResponse } from "../../types/api";
 import { refreshEpisodePlaceholder } from "../../api/dashboard";
 import { LibraryReconcileControl } from "../LibraryReconcileContext";
-import { DetailFactCard, DetailFactRow } from "./DetailFactCard";
+import { DetailFactCard, DetailFactRow, DetailFactTagList } from "./DetailFactCard";
 import { DetailHero } from "./DetailHero";
 import { DetailMetaStrip } from "./DetailMetaStrip";
 import { EpisodeRow } from "./EpisodeRow";
@@ -75,6 +75,7 @@ export function SeriesDetailView(props: {
               blockPlaceholder={payload.block_placeholder}
               hasPlaceholder={(payload.episode_stats?.placeholders ?? 0) > 0}
               hasFile={(payload.episode_stats?.files ?? 0) > 0 && (payload.episode_stats?.placeholders ?? 0) === 0}
+              policyTagControl={payload.policy_tag_control}
               accentHex={props.accent.hex}
               themeMode={props.themeMode}
               showInlineProgress
@@ -241,6 +242,11 @@ export function SeriesDetailView(props: {
               <DetailFactCard title="In Sonarr" themeMode={props.themeMode}>
                 <DetailFactRow label="Status" value={formatSonarrStatusLabel(payload.sonarr_status)} themeMode={props.themeMode} />
                 <DetailFactRow label="Monitored" value={formatMonitoredLabel(payload.sonarr_monitored)} themeMode={props.themeMode} />
+                <DetailFactRow
+                  label="Tags"
+                  themeMode={props.themeMode}
+                  valueNode={<DetailFactTagList tags={payload.sonarr_tags} themeMode={props.themeMode} />}
+                />
               </DetailFactCard>
               <DetailFactCard title="Airing" themeMode={props.themeMode}>
                 <DetailFactRow label="Premiere" value={payload.first_aired} themeMode={props.themeMode} />

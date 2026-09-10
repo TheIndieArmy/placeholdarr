@@ -665,6 +665,34 @@ def process_entity_reconcile_job(session, job: Job) -> dict[str, Any]:
                     arr_label=targets.arr_label,
                 )
 
+        # Tags may have changed during Arr refresh/sync; apply Never/Pinned before
+        # determination so a concurrent lite sync cannot leave policy on Auto.
+        try:
+            from services.source_of_truth.tag_placeholder_policy import apply_arr_tag_placeholder_policies
+
+            tag_movie_ids = list(targets.movie_row_ids or [])
+            tag_series_ids: list[int] = []
+            if targets.arr_kind == "sonarr":
+                if entity_type == "series":
+                    tag_series_ids = [int(entity_id)]
+                elif entity_type == "episode":
+                    ep = session.query(Episode).filter(Episode.id == int(entity_id)).first()
+                    season = session.query(Season).get(ep.season_id) if ep and ep.season_id else None
+                    if season and season.series_id is not None:
+                        tag_series_ids = [int(season.series_id)]
+            if tag_movie_ids or tag_series_ids:
+                apply_arr_tag_placeholder_policies(
+                    movie_row_ids=tag_movie_ids,
+                    series_row_ids=tag_series_ids,
+                )
+        except Exception as tag_exc:
+            _log_reconcile_warning(
+                entity_type,
+                title,
+                f"Arr tag policy apply after catalog sync failed: {tag_exc}",
+                job_id=int(job.id),
+            )
+
         _step("filesystem")
         _refresh_placeholder_presence_for_entities(
             movie_row_ids=targets.movie_row_ids,

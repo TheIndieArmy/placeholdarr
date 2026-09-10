@@ -1,7 +1,7 @@
 import type { Brand, ThemeMode } from "../../brandTypes";
 import type { MovieDetailResponse } from "../../types/api";
 import { DetailCollectionStrip } from "./DetailCollectionStrip";
-import { DetailFactCard, DetailFactRow } from "./DetailFactCard";
+import { DetailFactCard, DetailFactRow, DetailFactTagList } from "./DetailFactCard";
 import { DetailHero } from "./DetailHero";
 import { DetailMetaStrip } from "./DetailMetaStrip";
 import { MovieFileStateSection } from "./FileStateSections";
@@ -66,6 +66,7 @@ export function MovieDetailView(props: {
               blockPlaceholder={payload.block_placeholder}
               hasPlaceholder={payload.has_placeholder}
               hasFile={payload.has_file}
+              policyTagControl={payload.policy_tag_control}
               accentHex={props.accent.hex}
               themeMode={props.themeMode}
               showInlineProgress
@@ -133,6 +134,11 @@ export function MovieDetailView(props: {
                 <DetailFactRow label="Release" value={payload.radarr_release_status} themeMode={props.themeMode} />
                 <DetailFactRow label="File on disk" value={payload.has_file ? "Yes" : "No"} themeMode={props.themeMode} />
                 <DetailFactRow label="Radarr ID" value={payload.radarr_id != null ? String(payload.radarr_id) : null} themeMode={props.themeMode} />
+                <DetailFactRow
+                  label="Tags"
+                  themeMode={props.themeMode}
+                  valueNode={<DetailFactTagList tags={payload.radarr_tags} themeMode={props.themeMode} />}
+                />
               </DetailFactCard>
               <DetailFactCard title="Placeholdarr" themeMode={props.themeMode}>
                 <DetailFactRow

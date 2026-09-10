@@ -219,7 +219,13 @@ def fetch_radarr_movies(
     return data
 
 
-def fetch_radarr_movie(movie_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Dict]:
+def fetch_radarr_movie(
+    movie_id: int,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    bypass_cache: bool = False,
+) -> Optional[Dict]:
     """Fetch one Radarr movie by id."""
     url = url or _default_radarr_endpoint()[0]
     api_key = api_key or _default_radarr_endpoint()[1]
@@ -228,9 +234,10 @@ def fetch_radarr_movie(movie_id: int, url: Optional[str] = None, api_key: Option
 
     endpoint = _build_endpoint(url, f'movie/{int(movie_id)}')
     cache_key = f'radarr_movie:{endpoint}'
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     data = _get_json(endpoint, {'apikey': api_key})
     if isinstance(data, dict):
@@ -266,7 +273,13 @@ def fetch_sonarr_series(
     return data
 
 
-def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key: Optional[str] = None) -> Optional[Dict]:
+def fetch_sonarr_series_item(
+    series_id: int,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    bypass_cache: bool = False,
+) -> Optional[Dict]:
     """Fetch one Sonarr series by id."""
     url = url or _default_sonarr_endpoint()[0]
     api_key = api_key or _default_sonarr_endpoint()[1]
@@ -275,9 +288,10 @@ def fetch_sonarr_series_item(series_id: int, url: Optional[str] = None, api_key:
 
     endpoint = _build_endpoint(url, f'series/{int(series_id)}')
     cache_key = f'sonarr_series_item:season_images:{endpoint}'
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     data = _get_json(endpoint, {'apikey': api_key, 'includeSeasonImages': 'true'})
     if isinstance(data, dict):
@@ -516,13 +530,74 @@ def set_radarr_movie_monitored(
     if not url or not api_key or not movie_id:
         return False
 
-    endpoint = _build_endpoint(url, f'movie/{int(movie_id)}')
-    movie_payload = _request_json('GET', endpoint, params={'apikey': api_key})
+    endpoint = _build_endpoint(url, f"movie/{int(movie_id)}")
+    movie_payload = _request_json("GET", endpoint, params={"apikey": api_key})
     if not isinstance(movie_payload, dict):
         return False
 
-    movie_payload['monitored'] = bool(monitored)
-    updated = _request_json('PUT', endpoint, payload=movie_payload, api_key=api_key)
+    movie_payload["monitored"] = bool(monitored)
+    updated = _request_json("PUT", endpoint, payload=movie_payload, api_key=api_key)
+    return updated is not None
+
+
+def set_radarr_movie_tags(
+    movie_id: int,
+    tag_ids: list[int],
+    *,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> bool:
+    """Replace Radarr movie tags with ``tag_ids`` (full list)."""
+    url = url or _default_radarr_endpoint()[0]
+    api_key = api_key or _default_radarr_endpoint()[1]
+    if not url or not api_key or not movie_id:
+        return False
+
+    endpoint = _build_endpoint(url, f"movie/{int(movie_id)}")
+    movie_payload = _request_json("GET", endpoint, params={"apikey": api_key})
+    if not isinstance(movie_payload, dict):
+        return False
+
+    movie_payload["tags"] = [int(t) for t in (tag_ids or [])]
+    updated = _request_json("PUT", endpoint, payload=movie_payload, api_key=api_key)
+    if updated is not None:
+        with _cache_lock:
+            _cache.pop(f"radarr_movie:{endpoint}", None)
+            stale = [k for k in list(_cache.keys()) if "radarr_movies:" in str(k)]
+            for k in stale:
+                _cache.pop(k, None)
+    return updated is not None
+
+
+def set_sonarr_series_tags(
+    series_id: int,
+    tag_ids: list[int],
+    *,
+    url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> bool:
+    """Replace Sonarr series tags with ``tag_ids`` (full list)."""
+    url = url or _default_sonarr_endpoint()[0]
+    api_key = api_key or _default_sonarr_endpoint()[1]
+    if not url or not api_key or not series_id:
+        return False
+
+    endpoint = _build_endpoint(url, f"series/{int(series_id)}")
+    series_payload = _request_json(
+        "GET",
+        endpoint,
+        params={"apikey": api_key, "includeSeasonImages": "true"},
+    )
+    if not isinstance(series_payload, dict):
+        return False
+
+    series_payload["tags"] = [int(t) for t in (tag_ids or [])]
+    updated = _request_json("PUT", endpoint, payload=series_payload, api_key=api_key)
+    if updated is not None:
+        with _cache_lock:
+            stale = [k for k in list(_cache.keys()) if "sonarr_series" in str(k)]
+            for k in stale:
+                _cache.pop(k, None)
     return updated is not None
 
 

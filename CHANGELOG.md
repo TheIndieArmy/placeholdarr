@@ -7,6 +7,35 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.25] - 2026-09-09
+
+### Summary
+
+- **Arr tag policies**: Library sync Never/Pinned tag chip lists (defaults `placeholdarr-never` / `placeholdarr-pinned`) drive movie and series placeholder policy on full and lite sync; matching Arr tags always override library chips; when both match, Placeholdarr defaults to Never.
+- **Policy tag indicators**: Yellow tag glyph when Arr tags control Never/Pinned; red ! when both match; click opens a modal to clear tags in Arr.
+- **Library Arr tags**: Movie and series detail show Arr tags under In Radarr / In Sonarr.
+- **Tag policy reliability**: Lite detects tag-only catalog changes; cache bypass, drift apply, entity reconcile, task create/delete counts, and media refresh keep tags honest end to end.
+- **Placeholder activity**: Reviving a deleted placeholder logs Created with wall-clock time (not a missed or stale history row).
+
+### Added
+
+- **Arr tag policies**: Library sync Never/Pinned tag chip lists (defaults `placeholdarr-never` / `placeholdarr-pinned`) apply movie and series placeholder policy on full and lite sync; lite detects tag-only catalog changes; matching Arr tags always override library chips; when both match, Placeholdarr defaults to Never.
+- **Policy tag indicators**: Yellow tag glyph when Arr tags control Never/Pinned; red ! when Never and Pinned tags both match; click opens a modal to clear one or both tags in Arr.
+- **Library Arr tags**: Movie and series detail show Arr tags under In Radarr / In Sonarr.
+- **What's new (0.9.25)**: Startup ack notice for Arr tag Never/Pinned policies and library indicators.
+
+### Fixed
+
+- **Lite/full Arr catalog freshness**: Library sync catalog and targeted movie/series fetches bypass the short Arr HTTP cache so tag-only (and other) edits are not missed for up to two minutes.
+- **Worker startup**: Restored `set_radarr_movie_monitored` after Arr tag helpers accidentally replaced it, which stopped workers and left Auto policy reconcile jobs hanging.
+- **Tag clear follow-up**: Clearing Never/Pinned Arr tags runs determination and materialization immediately instead of only queuing a library reconcile job.
+- **Arr tag policy drift**: Lite/full sync also apply Never/Pinned when tags already match in the DB but policy does not (e.g. concurrent library reconcile synced tags without applying policy); entity reconcile applies tag policies after catalog sync.
+- **Placeholder activity on revive**: Re-creating a placeholder by reusing a deleted Placeholder row now logs Created in activity history (not only true INSERTs).
+- **Placeholder activity timestamps**: Create/delete activity always uses wall-clock action time (not stale ORM ``updated_at``), so a revive after Never is not stamped with the delete time.
+- **Placeholder activity on revive**: History inserts are queued until after flush (mapper ``session.add`` mid-flush could drop Created when reusing a deleted Placeholder row).
+- **Tag/policy media refresh**: Never/Pinned fast paths (Arr tags and library chips) schedule the same delayed Created/Deleted path refresh as scoped materialization.
+- **Lite/full task counts**: Placeholders created/removed from Arr tag policy apply are included in Tasks sync summaries (not only the later materialization pass).
+
 ## [0.9.24] - 2026-09-09
 
 ### Summary

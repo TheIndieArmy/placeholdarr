@@ -267,6 +267,15 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
 
             phases.begin("materialization", "Placeholder materialization")
             pipeline_stats["materialization"] = run_materialization_pass()
+            from services.source_of_truth.tag_placeholder_policy import (
+                merge_tag_policy_materialization_into,
+                sum_tag_policy_counts_from_arr_instance_stats,
+            )
+
+            pipeline_stats["materialization"] = merge_tag_policy_materialization_into(
+                pipeline_stats.get("materialization") if isinstance(pipeline_stats.get("materialization"), dict) else {},
+                sum_tag_policy_counts_from_arr_instance_stats(sync_stats),
+            )
             phases.end("materialization", metrics=metrics_from_pipeline(pipeline_stats).get("materialization"))
 
             phases.begin("calendar", "Calendar status")
@@ -478,6 +487,12 @@ def run_lite_sync(*, trigger: TaskTrigger = "scheduled", task_run_id: int | None
             )
         else:
             materialization_stats = {"skipped": True, "reason": "no_lite_changes_detected"}
+        from services.source_of_truth.tag_placeholder_policy import merge_tag_policy_materialization_into
+
+        materialization_stats = merge_tag_policy_materialization_into(
+            materialization_stats,
+            startup_sync_stats.get("tag_policies") if isinstance(startup_sync_stats, dict) else None,
+        )
         result["materialization"] = materialization_stats
 
         _record_progress(

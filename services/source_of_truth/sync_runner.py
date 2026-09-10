@@ -111,7 +111,7 @@ def _fill_missing_movie_art(fields: Dict, movie_entry: Dict, base_url: str, api_
     movie_id = movie_entry.get('id')
     if not movie_id:
         return fields
-    detail_entry = fetch_radarr_movie(int(movie_id), base_url, api_key)
+    detail_entry = fetch_radarr_movie(int(movie_id), base_url, api_key, bypass_cache=True)
     if not isinstance(detail_entry, dict):
         return fields
 
@@ -131,7 +131,7 @@ def _fill_missing_series_art(fields: Dict, series_entry: Dict, base_url: str, ap
     series_id = series_entry.get('id')
     if not series_id:
         return fields
-    detail_entry = fetch_sonarr_series_item(int(series_id), base_url, api_key)
+    detail_entry = fetch_sonarr_series_item(int(series_id), base_url, api_key, bypass_cache=True)
     if not isinstance(detail_entry, dict):
         return fields
 
@@ -677,10 +677,12 @@ def run_full_sync(
     }
 
     session = get_session()
+    touched_movie_row_ids: list[int] = []
+    touched_series_row_ids: list[int] = []
     try:
         for content_type, base_url, api_key, sync_is_4k, sync_instance_key in _iter_arr_endpoints(types, is_4k, instance_key=instance_key):
             if content_type == 'movie':
-                movies = fetch_radarr_movies(base_url, api_key)
+                movies = fetch_radarr_movies(base_url, api_key, bypass_cache=True)
                 seen_tmdbids = set()
                 for movie in movies:
                     fields = _movie_fields(movie, sync_is_4k, sync_instance_key)
@@ -689,7 +691,9 @@ def run_full_sync(
                         continue
                     seen_tmdbids.add(fields['tmdbid'])
                     stats['movies_seen'] += 1
-                    _, created, _ = _upsert_movie(session, fields)
+                    movie_row, created, _ = _upsert_movie(session, fields)
+                    if movie_row is not None and getattr(movie_row, "id", None) is not None:
+                        touched_movie_row_ids.append(int(movie_row.id))
                     if created:
                         stats['movies_created'] += 1
                     else:
@@ -707,7 +711,7 @@ def run_full_sync(
                 session.commit()
 
             if content_type == 'series':
-                series_items = fetch_sonarr_series(base_url, api_key)
+                series_items = fetch_sonarr_series(base_url, api_key, bypass_cache=True)
                 seen_tvdbids = set()
                 total_series = len(series_items)
                 logger.info(
@@ -739,6 +743,8 @@ def run_full_sync(
                     seen_tvdbids.add(s_fields['tvdbid'])
                     stats['series_seen'] += 1
                     series_row, created, _ = _upsert_series(session, s_fields)
+                    if series_row is not None and getattr(series_row, "id", None) is not None:
+                        touched_series_row_ids.append(int(series_row.id))
                     if created:
                         stats['series_created'] += 1
                     else:
@@ -862,6 +868,56 @@ def run_full_sync(
             },
         )
         logger.info(f"Source-of-truth fullsync complete: {stats}", extra={'emoji_type': 'success'})
+        if not dry_run and (touched_movie_row_ids or touched_series_row_ids):
+            try:
+                from services.source_of_truth.tag_placeholder_policy import (
+                    apply_arr_tag_placeholder_policies,
+                    collect_tag_policy_drift_row_ids,
+                )
+
+                drift_movies, drift_series = collect_tag_policy_drift_row_ids(
+                    instance_keys=[str(instance_key or "").strip().lower()] if instance_key else None,
+                )
+                movie_ids = sorted(set(touched_movie_row_ids) | set(drift_movies))
+                series_ids = sorted(set(touched_series_row_ids) | set(drift_series))
+                stats["tag_policy_drift_movie_ids"] = drift_movies
+                stats["tag_policy_drift_series_ids"] = drift_series
+                stats["tag_policies"] = apply_arr_tag_placeholder_policies(
+                    movie_row_ids=movie_ids,
+                    series_row_ids=series_ids,
+                )
+            except Exception as tag_exc:
+                logger.warning(
+                    f"Arr tag placeholder policies failed after fullsync: {tag_exc}",
+                    extra={"emoji_type": "warning"},
+                    exc_info=True,
+                )
+                stats["tag_policies"] = {"ok": False, "error": str(tag_exc)}
+        elif not dry_run:
+            # No touched rows, but tags may still disagree with policy (concurrent reconcile).
+            try:
+                from services.source_of_truth.tag_placeholder_policy import (
+                    apply_arr_tag_placeholder_policies,
+                    collect_tag_policy_drift_row_ids,
+                )
+
+                drift_movies, drift_series = collect_tag_policy_drift_row_ids(
+                    instance_keys=[str(instance_key or "").strip().lower()] if instance_key else None,
+                )
+                if drift_movies or drift_series:
+                    stats["tag_policy_drift_movie_ids"] = drift_movies
+                    stats["tag_policy_drift_series_ids"] = drift_series
+                    stats["tag_policies"] = apply_arr_tag_placeholder_policies(
+                        movie_row_ids=drift_movies,
+                        series_row_ids=drift_series,
+                    )
+            except Exception as tag_exc:
+                logger.warning(
+                    f"Arr tag placeholder policies failed after fullsync: {tag_exc}",
+                    extra={"emoji_type": "warning"},
+                    exc_info=True,
+                )
+                stats["tag_policies"] = {"ok": False, "error": str(tag_exc)}
         # If the user saved Status Message changes with "Next full sync", materialize them
         # now so existing placeholders pick up the new templates.
         if run_template_backfill:
@@ -917,7 +973,7 @@ def sync_radarr_movies_by_ids(
     touched_movie_row_ids: list[int] = []
     try:
         for movie_id in ids:
-            movie = fetch_radarr_movie(movie_id, base_url, api_key)
+            movie = fetch_radarr_movie(movie_id, base_url, api_key, bypass_cache=True)
             if not isinstance(movie, dict):
                 tomb_mids = [
                     int(r[0])
@@ -1236,7 +1292,7 @@ def sync_sonarr_series_by_ids(
         _ep_log_min_interval_s = 25.0
         for series_idx, series_id in enumerate(ids, start=1):
             t_series = time.monotonic()
-            series_entry = fetch_sonarr_series_item(series_id, base_url, api_key)
+            series_entry = fetch_sonarr_series_item(series_id, base_url, api_key, bypass_cache=True)
             label = _sonarr_series_display_name(series_entry if isinstance(series_entry, dict) else None, series_id)
             if not isinstance(series_entry, dict):
                 logger.info(

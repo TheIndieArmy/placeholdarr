@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import event
-from sqlalchemy.orm import object_session
+from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.attributes import get_history
 
 from core.logger import logger
@@ -26,11 +26,16 @@ _hooks_registered = False
 
 
 def _utc(dt: datetime | None) -> datetime:
-    if dt is None:
+    if dt is None or not isinstance(dt, datetime):
         return datetime.now(timezone.utc)
     if getattr(dt, "tzinfo", None) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _action_occurred_at() -> datetime:
+    """Wall-clock time for create/delete activity (never trust ORM updated_at during flush)."""
+    return datetime.now(timezone.utc)
 
 
 def _trunc(value: Any, max_len: int) -> str:
@@ -38,6 +43,21 @@ def _trunc(value: Any, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1] + "…"
+
+
+def _as_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes"}:
+        return True
+    if text in {"0", "false", "f", "no"}:
+        return False
+    return bool(value)
 
 
 def _instance_and_season_for_placeholder(session, ph: Placeholder) -> tuple[str | None, str | None, int | None]:
@@ -67,49 +87,105 @@ def _instance_and_season_for_placeholder(session, ph: Placeholder) -> tuple[str 
     return inst_key, inst_id, season_number
 
 
-def _append_history(session, row: PlaceholderActivityHistory) -> None:
-    try:
-        session.add(row)
-    except Exception as exc:
-        logger.warning("placeholder_activity_history insert skipped: %s", exc, extra={"emoji_type": "warning"})
+def _queue_history(session, values: dict[str, Any]) -> None:
+    """Queue a history insert for after_flush.
 
-
-def _on_placeholder_after_insert(_mapper, _connection, target: Placeholder) -> None:
-    session = object_session(target)
+    Mapper after_insert/after_update run mid-flush; ``session.add`` there is unsupported and
+    can silently drop Created rows on placeholder revive.
+    """
     if session is None:
         return
+    pending = session.info.setdefault("placeholder_activity_pending", [])
+    pending.append(values)
+
+
+def _drain_pending_history(session: Session, _flush_context=None) -> None:
+    pending = session.info.pop("placeholder_activity_pending", None)
+    if not pending:
+        return
+    try:
+        from sqlalchemy import insert
+
+        session.execute(insert(PlaceholderActivityHistory.__table__), pending)
+    except Exception as exc:
+        logger.warning(
+            "placeholder_activity_history insert skipped: %s",
+            exc,
+            extra={"emoji_type": "warning"},
+        )
+
+
+def _created_history_values(session, target: Placeholder, *, occurred: datetime) -> dict[str, Any]:
     extra = target.extra if isinstance(target.extra, dict) else {}
-    occurred = _utc(getattr(target, "created_at", None))
     item_type = "movie" if target.movie_id else "episode"
     create_reason = extra.get("create_reason")
     reason = _trunc(str(create_reason) if create_reason is not None else "", 4000)
     lifecycle = str(target.lifecycle_status or "").strip() or "Created"
     status_label = _trunc(lifecycle, 512)
     inst_key, inst_id, season_num = _instance_and_season_for_placeholder(session, target)
-    _append_history(
+    return {
+        "occurred_at": occurred,
+        "action": "Created",
+        "item_type": item_type,
+        "placeholder_id": target.id,
+        "movie_id": target.movie_id,
+        "episode_id": target.episode_id,
+        "series_id": target.series_id,
+        "season_id": getattr(target, "season_id", None),
+        "season_number": season_num,
+        "instance_key": inst_key,
+        "instance_id": inst_id,
+        "event_type": "placeholder_created",
+        "path": str(target.path or ""),
+        "item_title": "",
+        "series_title": None,
+        "reason": reason,
+        "status_label": status_label,
+        "source": None,
+        "event_log_id": None,
+        "extra_snapshot": extra if extra else None,
+    }
+
+
+def _deleted_history_values(session, target: Placeholder, *, occurred: datetime) -> dict[str, Any]:
+    extra = target.extra if isinstance(target.extra, dict) else {}
+    item_type = "movie" if target.movie_id else "episode"
+    del_reason = extra.get("delete_reason")
+    reason = _trunc(str(del_reason) if del_reason is not None else "", 4000)
+    lifecycle = str(target.lifecycle_status or "").strip() or "Deleted"
+    status_label = _trunc(lifecycle, 512)
+    inst_key, inst_id, season_num = _instance_and_season_for_placeholder(session, target)
+    return {
+        "occurred_at": occurred,
+        "action": "Deleted",
+        "item_type": item_type,
+        "placeholder_id": target.id,
+        "movie_id": target.movie_id,
+        "episode_id": target.episode_id,
+        "series_id": target.series_id,
+        "season_id": getattr(target, "season_id", None),
+        "season_number": season_num,
+        "instance_key": inst_key,
+        "instance_id": inst_id,
+        "event_type": "placeholder_deleted",
+        "path": str(target.path or ""),
+        "item_title": "",
+        "series_title": None,
+        "reason": reason,
+        "status_label": status_label,
+        "source": None,
+        "event_log_id": None,
+        "extra_snapshot": extra if extra else None,
+    }
+
+
+def _on_placeholder_after_insert(_mapper, _connection, target: Placeholder) -> None:
+    session = object_session(target)
+    if session is None:
+        return
+    _queue_history(
         session,
-        PlaceholderActivityHistory(
-            occurred_at=occurred,
-            action="Created",
-            item_type=item_type,
-            placeholder_id=target.id,
-            movie_id=target.movie_id,
-            episode_id=target.episode_id,
-            series_id=target.series_id,
-            season_id=getattr(target, "season_id", None),
-            season_number=season_num,
-            instance_key=inst_key,
-            instance_id=inst_id,
-            event_type="placeholder_created",
-            path=str(target.path or ""),
-            item_title="",
-            series_title=None,
-            reason=reason,
-            status_label=status_label,
-            source=None,
-            event_log_id=None,
-            extra_snapshot=extra if extra else {},
-        ),
+        _created_history_values(session, target, occurred=_utc(getattr(target, "created_at", None))),
     )
 
 
@@ -134,8 +210,8 @@ def _should_record_placeholder_deleted(ph: Placeholder) -> bool:
         return False
     hp = get_history(ph, "has_placeholder")
     if hp.has_changes():
-        prev = hp.deleted[0] if hp.deleted else None
-        curr = hp.added[0] if hp.added else ph.has_placeholder
+        prev = _as_bool(hp.deleted[0] if hp.deleted else None)
+        curr = _as_bool(hp.added[0] if hp.added else ph.has_placeholder)
         if prev is True and curr is False:
             return True
     lc = get_history(ph, "lifecycle_status")
@@ -146,44 +222,45 @@ def _should_record_placeholder_deleted(ph: Placeholder) -> bool:
     return False
 
 
+def _should_record_placeholder_created_on_update(ph: Placeholder) -> bool:
+    """True when an existing Placeholder row is revived (reuse path, not INSERT)."""
+    if not bool(getattr(ph, "has_placeholder", False)):
+        return False
+    lifecycle = str(getattr(ph, "lifecycle_status", None) or "").strip().lower()
+    if lifecycle in {"deleted", "missing", "obsolete", "replaced"}:
+        return False
+
+    hp = get_history(ph, "has_placeholder")
+    if hp.has_changes():
+        prev = _as_bool(hp.deleted[0] if hp.deleted else None)
+        curr = _as_bool(hp.added[0] if hp.added else ph.has_placeholder)
+        if prev is False and curr is True:
+            return True
+
+    lc = get_history(ph, "lifecycle_status")
+    if lc.has_changes() and lc.added:
+        new_lc = str(lc.added[0] or "").strip().lower()
+        old_lc = str(lc.deleted[0] or "").strip().lower() if lc.deleted else ""
+        if new_lc in {"active", "created"} and old_lc in {"deleted", "missing", "obsolete", "replaced"}:
+            return True
+    return False
+
+
 def _on_placeholder_after_update(_mapper, _connection, target: Placeholder) -> None:
     session = object_session(target)
     if session is None:
         return
+    if _should_record_placeholder_created_on_update(target):
+        _queue_history(
+            session,
+            _created_history_values(session, target, occurred=_action_occurred_at()),
+        )
+        return
     if not _should_record_placeholder_deleted(target):
         return
-    extra = target.extra if isinstance(target.extra, dict) else {}
-    occurred = _utc(getattr(target, "updated_at", None))
-    item_type = "movie" if target.movie_id else "episode"
-    del_reason = extra.get("delete_reason")
-    reason = _trunc(str(del_reason) if del_reason is not None else "", 4000)
-    lifecycle = str(target.lifecycle_status or "").strip() or "Deleted"
-    status_label = _trunc(lifecycle, 512)
-    inst_key, inst_id, season_num = _instance_and_season_for_placeholder(session, target)
-    _append_history(
+    _queue_history(
         session,
-        PlaceholderActivityHistory(
-            occurred_at=occurred,
-            action="Deleted",
-            item_type=item_type,
-            placeholder_id=target.id,
-            movie_id=target.movie_id,
-            episode_id=target.episode_id,
-            series_id=target.series_id,
-            season_id=getattr(target, "season_id", None),
-            season_number=season_num,
-            instance_key=inst_key,
-            instance_id=inst_id,
-            event_type="placeholder_deleted",
-            path=str(target.path or ""),
-            item_title="",
-            series_title=None,
-            reason=reason,
-            status_label=status_label,
-            source=None,
-            event_log_id=None,
-            extra_snapshot=extra if extra else {},
-        ),
+        _deleted_history_values(session, target, occurred=_action_occurred_at()),
     )
 
 
@@ -214,30 +291,30 @@ def _on_event_log_after_insert(_mapper, _connection, target: EventLog) -> None:
     status_label = _trunc(new_status, 512)
     item_type = "movie" if ph.movie_id else "episode"
     inst_key, inst_id, season_num = _instance_and_season_for_placeholder(session, ph)
-    _append_history(
+    _queue_history(
         session,
-        PlaceholderActivityHistory(
-            occurred_at=_utc(getattr(target, "created_at", None)),
-            action="Status",
-            item_type=item_type,
-            placeholder_id=ph.id,
-            movie_id=ph.movie_id,
-            episode_id=ph.episode_id,
-            series_id=ph.series_id,
-            season_id=getattr(ph, "season_id", None),
-            season_number=season_num,
-            instance_key=inst_key,
-            instance_id=inst_id,
-            event_type="placeholder_status_changed",
-            path=str(ph.path or ""),
-            item_title="",
-            series_title=None,
-            reason=reason,
-            status_label=status_label,
-            source=_trunc(src, 128) or None,
-            event_log_id=target.id,
-            extra_snapshot=payload,
-        ),
+        {
+            "occurred_at": _utc(getattr(target, "created_at", None)),
+            "action": "Status",
+            "item_type": item_type,
+            "placeholder_id": ph.id,
+            "movie_id": ph.movie_id,
+            "episode_id": ph.episode_id,
+            "series_id": ph.series_id,
+            "season_id": getattr(ph, "season_id", None),
+            "season_number": season_num,
+            "instance_key": inst_key,
+            "instance_id": inst_id,
+            "event_type": "placeholder_status_changed",
+            "path": str(ph.path or ""),
+            "item_title": "",
+            "series_title": None,
+            "reason": reason,
+            "status_label": status_label,
+            "source": _trunc(src, 128) or None,
+            "event_log_id": target.id,
+            "extra_snapshot": payload if payload else None,
+        },
     )
 
 
@@ -249,4 +326,5 @@ def register_placeholder_activity_history_hooks() -> None:
     event.listen(Placeholder, "after_insert", _on_placeholder_after_insert)
     event.listen(Placeholder, "after_update", _on_placeholder_after_update)
     event.listen(EventLog, "after_insert", _on_event_log_after_insert)
+    event.listen(Session, "after_flush", _drain_pending_history)
     logger.info("Registered placeholder_activity_history ORM hooks", extra={"emoji_type": "success"})

@@ -249,6 +249,15 @@ export interface DetailCollectionMember {
   is_current?: boolean;
 }
 
+export interface PolicyTagControl {
+  source?: "manual" | "tag" | null;
+  matching_never_tags: string[];
+  matching_pinned_tags: string[];
+  conflict: boolean;
+  controlled_by_tag: boolean;
+  desired_from_tags: "auto" | "never" | "pinned";
+}
+
 export interface MovieDetailResponse {
   ok: true;
   type: "movie";
@@ -289,6 +298,8 @@ export interface MovieDetailResponse {
   force_placeholder?: boolean;
   block_placeholder?: boolean;
   force_placeholder_despite_sibling?: boolean;
+  placeholder_policy_source?: "manual" | "tag" | null;
+  policy_tag_control?: PolicyTagControl | null;
   has_file: boolean;
   has_placeholder: boolean;
   placeholder_filepath?: string | null;
@@ -300,6 +311,8 @@ export interface MovieDetailResponse {
   radarr_quality?: string | null;
   radarr_monitored?: boolean;
   radarr_release_status?: string | null;
+  /** Resolved Radarr tag labels for this title (from payload tag ids). */
+  radarr_tags?: string[];
   theater_release_date?: string | null;
   digital_release_date?: string | null;
   physical_release_date?: string | null;
@@ -383,9 +396,13 @@ export interface SeriesDetailResponse {
   status?: string | null;
   sonarr_status?: string | null;
   sonarr_monitored?: boolean;
+  /** Resolved Sonarr series tag labels (from payload tag ids). */
+  sonarr_tags?: string[];
   placeholder_policy?: "auto" | "never" | "pinned";
   force_placeholder?: boolean;
   block_placeholder?: boolean;
+  placeholder_policy_source?: "manual" | "tag" | null;
+  policy_tag_control?: PolicyTagControl | null;
   first_aired?: string | null;
   last_aired_date?: string | null;
   episode_stats?: {
@@ -504,7 +521,7 @@ export interface SettingsField {
   section: string;
   label: string;
   description: string;
-  type: "bool" | "int" | "url" | "path" | "string" | "choice";
+  type: "bool" | "int" | "url" | "path" | "string" | "choice" | "string_list";
   required: boolean;
   secret: boolean;
   restart_required: boolean;
@@ -512,6 +529,8 @@ export interface SettingsField {
   saved_value?: unknown;
   has_saved_value?: boolean;
   options?: SettingsFieldOption[];
+  /** Default chip values for string_list settings. */
+  default?: string[];
   /** When set, the field is only interactive if the parent setting is enabled (bool). */
   depends_on?: string;
   /** When set, the field is non-interactive while the parent bool setting is enabled. */

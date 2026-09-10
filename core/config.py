@@ -196,6 +196,9 @@ class Settings(BaseSettings):
     FULL_SYNC_INTERVAL_HOURS: int = 168
     # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
     LITE_SYNC_INTERVAL_HOURS: int = 12
+    # Arr tag labels (JSON string arrays) that drive Never / Pinned placeholder policy on sync.
+    PLACEHOLDER_POLICY_NEVER_TAGS: str = '["placeholdarr-never"]'
+    PLACEHOLDER_POLICY_PINNED_TAGS: str = '["placeholdarr-pinned"]'
 
     # Collections (rule-based Plex collection builder)
     TMDB_API_KEY: Optional[str] = None

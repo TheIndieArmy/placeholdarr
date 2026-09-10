@@ -7,6 +7,7 @@ Episode = exceptions after a season stamp, unless the series gate is active.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -36,6 +37,15 @@ PolicySource = Literal["series", "season", "episode"]
 _ACTIVITY_REASON = "Placeholder policy"
 
 
+def _policy_fast_action_counts(action: Any) -> tuple[int, int]:
+    a = str(action or "").strip().lower()
+    if a in {"created_or_exists", "created", "create", "materialized"}:
+        return 1, 0
+    if a in {"deleted_or_absent", "deleted", "removed", "delete", "obsolete"}:
+        return 0, 1
+    return 0, 0
+
+
 def policy_from_entity(entity) -> PlaceholderPolicy:
     if bool(getattr(entity, "force_placeholder", False)):
         return "pinned"
@@ -49,10 +59,12 @@ def apply_placeholder_policy(
     *,
     policy: PlaceholderPolicy,
     despite_sibling: bool = False,
+    source: str | None = None,
 ) -> None:
     """Mutate entity policy flags. Caller owns session commit.
 
     despite_sibling is ignored; multi-instance behavior follows Shared Placeholder Cleanup settings.
+    source: ``manual`` (UI), ``tag`` (Arr tag policies), or None (leave source unchanged).
     """
     del despite_sibling
     pol = str(policy or "auto").strip().lower()
@@ -68,6 +80,15 @@ def apply_placeholder_policy(
         entity.force_placeholder = False
         entity.force_placeholder_despite_sibling = False
         entity.block_placeholder = False
+
+    if source is not None and hasattr(entity, "placeholder_policy_source"):
+        src = str(source or "").strip().lower()
+        if pol == "auto" and src == "tag":
+            entity.placeholder_policy_source = None
+        elif src in ("manual", "tag"):
+            entity.placeholder_policy_source = src
+        elif src == "":
+            entity.placeholder_policy_source = None
 
 
 def resolve_episode_effective_policy(
@@ -189,6 +210,43 @@ def _entity_state_snapshot(entity) -> dict[str, Any]:
     }
 
 
+def _schedule_media_refresh_for_policy_action(
+    *,
+    action: str,
+    path: str | None,
+    refresh_paths: list[str] | None = None,
+    has_movies: bool = False,
+    has_episodes: bool = False,
+) -> None:
+    """Match scoped materialization: Created path refresh on create, Deleted on remove."""
+    from services.source_of_truth.materializer import schedule_scoped_placeholder_media_refresh
+
+    action_key = str(action or "").strip().lower()
+    created_paths: list[str] = []
+    delete_paths: list[str] = []
+    if action_key in {"created_or_exists", "created", "create", "materialized"}:
+        p = str(path or "").strip()
+        if p:
+            created_paths.append(p)
+    elif action_key in {"deleted_or_absent", "deleted", "removed", "delete", "obsolete"}:
+        for item in refresh_paths or []:
+            p = str(item or "").strip()
+            if p:
+                delete_paths.append(p)
+        if not delete_paths:
+            p = str(path or "").strip()
+            if p:
+                delete_paths.append(os.path.dirname(p) or p)
+    if not created_paths and not delete_paths:
+        return
+    schedule_scoped_placeholder_media_refresh(
+        created_paths=created_paths,
+        delete_paths=delete_paths,
+        has_movies=has_movies,
+        has_episodes=has_episodes,
+    )
+
+
 def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
     """Create/remove movie placeholder from current pinned/never flags (no Arr reconcile)."""
     session = get_session()
@@ -231,10 +289,19 @@ def apply_movie_placeholder_policy_fast(movie_id: int) -> dict[str, Any]:
 
         refresh_pinned_entity_calendar_status(session, movie)
         session.commit()
+        action = str(out.get("action") or "noop")
+        _schedule_media_refresh_for_policy_action(
+            action=action,
+            path=out.get("path"),
+            refresh_paths=list(out.get("refresh_paths") or []),
+            has_movies=True,
+            has_episodes=False,
+        )
         return {
             "ok": True,
-            "action": out.get("action") or "noop",
+            "action": action,
             "path": out.get("path"),
+            "refresh_paths": list(out.get("refresh_paths") or []),
             "job_id": None,
             **_entity_state_snapshot(movie),
         }
@@ -301,10 +368,19 @@ def apply_episode_placeholder_policy_fast(episode_id: int) -> dict[str, Any]:
 
         refresh_pinned_entity_calendar_status(session, episode)
         session.commit()
+        action = str(out.get("action") or "noop")
+        _schedule_media_refresh_for_policy_action(
+            action=action,
+            path=out.get("path"),
+            refresh_paths=list(out.get("refresh_paths") or []),
+            has_movies=False,
+            has_episodes=True,
+        )
         return {
             "ok": True,
-            "action": out.get("action") or "noop",
+            "action": action,
             "path": out.get("path"),
+            "refresh_paths": list(out.get("refresh_paths") or []),
             "job_id": None,
             **_entity_state_snapshot(episode),
         }
@@ -367,10 +443,9 @@ def apply_series_gate_fast(series_id: int, *, policy: PlaceholderPolicy) -> dict
             errors.append(str(out.get("message") or f"Episode {eid} failed"))
             continue
         action = str(out.get("action") or "")
-        if action in ("created", "create", "materialized"):
-            created += 1
-        elif action in ("removed", "delete", "deleted", "obsolete"):
-            removed += 1
+        created_n, deleted_n = _policy_fast_action_counts(action)
+        created += created_n
+        removed += deleted_n
     if errors and created == 0 and removed == 0:
         return {
             "ok": False,
@@ -437,10 +512,9 @@ def apply_season_stamp_fast(season_id: int, *, policy: PlaceholderPolicy) -> dic
             errors.append(str(out.get("message") or f"Episode {eid} failed"))
             continue
         action = str(out.get("action") or "")
-        if action in ("created", "create", "materialized"):
-            created += 1
-        elif action in ("removed", "delete", "deleted", "obsolete"):
-            removed += 1
+        created_n, deleted_n = _policy_fast_action_counts(action)
+        created += created_n
+        removed += deleted_n
     if errors and created == 0 and removed == 0:
         return {
             "ok": False,

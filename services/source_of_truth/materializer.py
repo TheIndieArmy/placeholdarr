@@ -135,6 +135,58 @@ def _schedule_media_refresh(
         logger.info(log_message, extra={"emoji_type": "info"})
 
 
+def schedule_scoped_placeholder_media_refresh(
+    *,
+    created_paths: list[str] | None = None,
+    delete_paths: list[str] | None = None,
+    has_movies: bool = False,
+    has_episodes: bool = False,
+    delay_seconds: float = 20.0,
+) -> None:
+    """Schedule the same delayed Created/Deleted path refresh as scoped materialization.
+
+    Used by Never/Pinned policy fast paths (including Arr tag policies) which call
+    apply_*_materialization directly and would otherwise skip media-server refresh.
+    """
+    created = sorted({str(p).strip() for p in (created_paths or []) if str(p or "").strip()})
+    deleted = sorted({str(p).strip() for p in (delete_paths or []) if str(p or "").strip()})
+    if not created and not deleted:
+        return
+
+    def _trigger_delayed_final_refresh() -> None:
+        refresh_stats = refresh_all_path_batches_with_section_fallback(
+            [
+                (set(created), "Created"),
+                (set(deleted), "Deleted"),
+            ],
+            has_movies=bool(has_movies),
+            has_episodes=bool(has_episodes),
+            enable_section_fallback=False,
+            fallback_wait_seconds=0,
+            include_plex=True,
+        )
+        logger.info(
+            "Completed delayed final media server refresh: refreshed=%s failed=%s",
+            refresh_stats.get("refreshed", 0),
+            refresh_stats.get("failed", 0),
+            extra={"emoji_type": "success"},
+        )
+
+    _schedule_media_refresh(
+        _trigger_delayed_final_refresh,
+        delay_seconds=float(delay_seconds),
+        kind=KIND_DELAYED_FINAL,
+        payload={
+            "has_movies": bool(has_movies),
+            "has_episodes": bool(has_episodes),
+            "include_plex": True,
+            "created_paths": created,
+            "delete_paths": deleted,
+        },
+        log_message="Media server refreshes were scheduled to run asynchronously in 20 seconds.",
+    )
+
+
 REQUEST_STATUS = "REQUEST"
 REQUEST_REASON = "placeholder_request"
 
@@ -402,6 +454,7 @@ def _mark_placeholder_row_active(
     # observation round cannot affect the new pass (e.g. plex_metadata_ready_seen).
     extra = dict(getattr(row, 'extra', {}) or {})
     extra.pop('plex_metadata_ready_seen', None)
+    extra.pop('delete_reason', None)
     if activity_reason:
         extra['create_reason'] = str(activity_reason)
         extra['last_action_reason'] = str(activity_reason)

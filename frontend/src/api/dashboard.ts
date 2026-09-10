@@ -251,6 +251,28 @@ export function setSeasonPlaceholderPolicy(
   });
 }
 
+export function clearMovieArrPolicyTags(
+  movieId: number,
+  body: { remove_never?: boolean; remove_pinned?: boolean },
+): Promise<{ ok: boolean; message?: string }> {
+  return fetchJson(`/api/library/movie/${movieId}/arr-policy-tags/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function clearSeriesArrPolicyTags(
+  seriesId: number,
+  body: { remove_never?: boolean; remove_pinned?: boolean },
+): Promise<{ ok: boolean; message?: string }> {
+  return fetchJson(`/api/library/series/${seriesId}/arr-policy-tags/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function refreshEpisodePlaceholder(episodeId: number): Promise<EntityReconcileStartResponse> {
   return fetchJson<EntityReconcileStartResponse>(`/api/library/episode/${episodeId}/refresh-placeholder`, {
     method: "POST",
