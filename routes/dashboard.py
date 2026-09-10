@@ -4091,6 +4091,58 @@ def _people_display(raw: Any, *, cap: int) -> list[dict[str, Any]]:
     return people
 
 
+def _arr_tag_labels_for_payload(
+    *,
+    instance_key: str | None,
+    arr_type: str,
+    payload: Any,
+) -> list[str]:
+    """Resolve numeric Arr tag ids from payload_raw into sorted label strings."""
+    if not isinstance(payload, dict):
+        return []
+    raw_tags = payload.get("tags")
+    if not isinstance(raw_tags, list) or not raw_tags:
+        return []
+    tag_ids: list[int] = []
+    seen: set[int] = set()
+    for item in raw_tags:
+        try:
+            tag_id = int(item)
+        except Exception:
+            continue
+        if tag_id in seen:
+            continue
+        seen.add(tag_id)
+        tag_ids.append(tag_id)
+    if not tag_ids:
+        return []
+
+    key = str(instance_key or "").strip().lower()
+    label_by_id: dict[int, str] = {}
+    if key:
+        try:
+            from services.list_sources import ListSourceError, fetch_arr_tags
+
+            for row in fetch_arr_tags(key, arr_type) or []:
+                try:
+                    tid = int(row.get("id"))
+                except Exception:
+                    continue
+                label = str(row.get("label") or "").strip()
+                if label:
+                    label_by_id[tid] = label
+        except ListSourceError:
+            pass
+        except Exception:
+            pass
+
+    labels: list[str] = []
+    for tag_id in tag_ids:
+        labels.append(label_by_id.get(tag_id) or f"#{tag_id}")
+    labels.sort(key=lambda s: s.lower())
+    return labels
+
+
 def _collection_fields(collection: Any) -> tuple[str | None, int | None]:
     if not isinstance(collection, dict):
         return (None, None)
@@ -4299,6 +4351,8 @@ def _episode_display_status_map(session, episode_ids: list[int]) -> dict[int, st
 @router.get("/api/detail/movie/{movie_id}")
 async def movie_detail(movie_id: int):
     """Return full detail for a single movie."""
+    from services.source_of_truth.tag_placeholder_policy import resolve_policy_tag_control
+
     session = get_session()
     try:
         movie = session.query(Movie).filter(Movie.id == movie_id, Movie.is_deleted == False).first()
@@ -4314,6 +4368,12 @@ async def movie_detail(movie_id: int):
         instance_meta = _arr_instance_meta(movie.instance_key, getattr(movie, "instance_id", None))
         collection_title, collection_tmdb_id = _collection_fields(movie.radarr_collection)
         collection_members, collection_total = _movie_collection_members(session, movie)
+        tag_control = resolve_policy_tag_control(
+            instance_key=movie.instance_key,
+            arr_type="radarr",
+            payload=movie.radarr_payload_raw,
+            policy_source=getattr(movie, "placeholder_policy_source", None),
+        )
         return {
             "ok": True,
             "type": "movie",
@@ -4359,6 +4419,17 @@ async def movie_detail(movie_id: int):
             "force_placeholder_despite_sibling": bool(
                 getattr(movie, "force_placeholder_despite_sibling", False)
             ),
+            "placeholder_policy_source": (
+                str(getattr(movie, "placeholder_policy_source", None) or "").strip().lower() or None
+            ),
+            "policy_tag_control": {
+                "source": tag_control.get("source"),
+                "matching_never_tags": tag_control.get("matching_never_tags") or [],
+                "matching_pinned_tags": tag_control.get("matching_pinned_tags") or [],
+                "conflict": bool(tag_control.get("conflict")),
+                "controlled_by_tag": bool(tag_control.get("controlled_by_tag")),
+                "desired_from_tags": tag_control.get("desired_from_tags") or "auto",
+            },
             "has_file": bool(movie.has_file),
             "has_placeholder": bool(movie.has_placeholder),
             "placeholder_filepath": movie.placeholder_filepath,
@@ -4370,6 +4441,11 @@ async def movie_detail(movie_id: int):
             "radarr_quality": movie.radarr_quality,
             "radarr_monitored": bool(movie.radarr_monitored),
             "radarr_release_status": movie.radarr_release_status,
+            "radarr_tags": _arr_tag_labels_for_payload(
+                instance_key=movie.instance_key,
+                arr_type="radarr",
+                payload=movie.radarr_payload_raw,
+            ),
             "theater_release_date": _iso(movie.theater_release_date),
             "digital_release_date": _iso(movie.digital_release_date),
             "physical_release_date": _iso(movie.physical_release_date),
@@ -4386,6 +4462,7 @@ async def movie_detail(movie_id: int):
 async def series_detail(series_id: int):
     """Return full detail for a series, including all seasons and their episodes."""
     from services.library_future_semantics import episode_row_is_future_outside_lookahead
+    from services.source_of_truth.tag_placeholder_policy import resolve_policy_tag_control
 
     session = get_session()
     try:
@@ -4404,6 +4481,12 @@ async def series_detail(series_id: int):
 
         series_policy = policy_from_entity(series)
         series_gate = series_gate_active(series)
+        tag_control = resolve_policy_tag_control(
+            instance_key=series.instance_key,
+            arr_type="sonarr",
+            payload=series.sonarr_payload_raw,
+            policy_source=getattr(series, "placeholder_policy_source", None),
+        )
         seasons_raw = (
             session.query(Season)
             .filter(Season.series_id == series_id, Season.is_deleted == False)
@@ -4526,9 +4609,25 @@ async def series_detail(series_id: int):
             "status": series.status,
             "sonarr_status": series.sonarr_status,
             "sonarr_monitored": bool(series.sonarr_monitored),
+            "sonarr_tags": _arr_tag_labels_for_payload(
+                instance_key=series.instance_key,
+                arr_type="sonarr",
+                payload=series.sonarr_payload_raw,
+            ),
             "placeholder_policy": series_policy,
             "force_placeholder": bool(getattr(series, "force_placeholder", False)),
             "block_placeholder": bool(getattr(series, "block_placeholder", False)),
+            "placeholder_policy_source": (
+                str(getattr(series, "placeholder_policy_source", None) or "").strip().lower() or None
+            ),
+            "policy_tag_control": {
+                "source": tag_control.get("source"),
+                "matching_never_tags": tag_control.get("matching_never_tags") or [],
+                "matching_pinned_tags": tag_control.get("matching_pinned_tags") or [],
+                "conflict": bool(tag_control.get("conflict")),
+                "controlled_by_tag": bool(tag_control.get("controlled_by_tag")),
+                "desired_from_tags": tag_control.get("desired_from_tags") or "auto",
+            },
             "first_aired": _iso(series.sonarr_first_aired),
             "last_aired_date": _iso(last_aired_map.get(int(series.id))),
             "episode_stats": {
@@ -4734,7 +4833,7 @@ async def movie_placeholder_policy_set(movie_id: int, request: Request):
                 {"ok": False, "message": "Cannot set placeholder policy for a removed title."},
                 status_code=400,
             )
-        apply_placeholder_policy(movie, policy=policy)
+        apply_placeholder_policy(movie, policy=policy, source="manual")
         session.add(movie)
         session.commit()
         snapshot = _placeholder_policy_snapshot(movie)
@@ -4756,6 +4855,24 @@ async def movie_placeholder_policy_set(movie_id: int, request: Request):
             status_code=500,
         )
     return _placeholder_policy_set_response(snapshot, fast)
+
+
+@router.post("/api/library/movie/{movie_id}/arr-policy-tags/clear")
+async def movie_arr_policy_tags_clear(movie_id: int, request: Request):
+    """Remove matching Never and/or Pinned Arr tags from a movie, then re-apply policy."""
+    from services.source_of_truth.tag_placeholder_policy import clear_arr_policy_tags_for_movie
+
+    payload = await request.json()
+    remove_never = bool(payload.get("remove_never"))
+    remove_pinned = bool(payload.get("remove_pinned"))
+    out = clear_arr_policy_tags_for_movie(
+        int(movie_id),
+        remove_never=remove_never,
+        remove_pinned=remove_pinned,
+    )
+    if not out.get("ok"):
+        return JSONResponse(out, status_code=400)
+    return out
 
 
 @router.post("/api/library/episode/{episode_id}/placeholder-policy")
@@ -4839,7 +4956,7 @@ async def series_placeholder_policy_set(series_id: int, request: Request):
                 {"ok": False, "message": "Cannot set placeholder policy for a removed series."},
                 status_code=400,
             )
-        apply_placeholder_policy(series, policy=policy)
+        apply_placeholder_policy(series, policy=policy, source="manual")
         session.add(series)
         session.commit()
         snapshot = _placeholder_policy_snapshot(series)
@@ -4861,6 +4978,24 @@ async def series_placeholder_policy_set(series_id: int, request: Request):
             status_code=500,
         )
     return _placeholder_policy_set_response(snapshot, fast)
+
+
+@router.post("/api/library/series/{series_id}/arr-policy-tags/clear")
+async def series_arr_policy_tags_clear(series_id: int, request: Request):
+    """Remove matching Never and/or Pinned Arr tags from a series, then re-apply policy."""
+    from services.source_of_truth.tag_placeholder_policy import clear_arr_policy_tags_for_series
+
+    payload = await request.json()
+    remove_never = bool(payload.get("remove_never"))
+    remove_pinned = bool(payload.get("remove_pinned"))
+    out = clear_arr_policy_tags_for_series(
+        int(series_id),
+        remove_never=remove_never,
+        remove_pinned=remove_pinned,
+    )
+    if not out.get("ok"):
+        return JSONResponse(out, status_code=400)
+    return out
 
 
 @router.post("/api/library/season/{season_id}/placeholder-policy")

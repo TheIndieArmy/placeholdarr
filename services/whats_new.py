@@ -144,6 +144,24 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/library/tv",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="arr-tag-policies-0-9-25",
+        since_version="0.9.25",
+        title="Arr tags for Never and Pinned placeholders",
+        body=(
+            "You can now drive Never and Pinned from Radarr and Sonarr tags.\n\n"
+            "In Settings → Library sync, set which Arr tags mean Never and which mean Pinned "
+            "(defaults: placeholdarr-never and placeholdarr-pinned). "
+            "When a movie or series has one of those tags, Placeholdarr applies that policy on sync.\n\n"
+            "If a title has both kinds of tags, Never wins. "
+            "Arr tags always beat the Auto / Never / Pinned chip in Placeholdarr. "
+            "To use the chip again, remove the tag in Arr, or click the yellow tag (or red !) on the chip and clear it from there.\n\n"
+            "Movie and series detail also show the title's Arr tags under In Radarr / In Sonarr."
+        ),
+        cta_label="Open Library sync",
+        cta_path="/settings/library-sync",
+        requires_ack=True,
+    ),
 )
 
 

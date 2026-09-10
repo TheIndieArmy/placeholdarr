@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ThemeMode } from "../../brandTypes";
 import {
+  clearMovieArrPolicyTags,
+  clearSeriesArrPolicyTags,
   getEntityReconcileStatus,
   setEpisodePlaceholderPolicy,
   setMoviePlaceholderPolicy,
   setSeasonPlaceholderPolicy,
   setSeriesPlaceholderPolicy,
 } from "../../api/dashboard";
+import type { PolicyTagControl } from "../../types/api";
 import { PinGlyph, type PlaceholderPolicy } from "./PinGlyph";
+import { PolicyTagControlModal } from "./PolicyTagControlModal";
 import {
   nextPlaceholderPolicy,
   POLICY_LABEL,
@@ -68,6 +72,8 @@ export function PlaceholderPolicyCycle(props: {
   /** Option A: series gate greys and disables season/episode chips. */
   locked?: boolean;
   lockedReason?: string;
+  /** Arr tag policy control (movies/series only). */
+  policyTagControl?: PolicyTagControl | null;
   accentHex: string;
   themeMode: ThemeMode;
   size?: "sm" | "md";
@@ -88,6 +94,10 @@ export function PlaceholderPolicyCycle(props: {
   const progressSide = props.inlineProgressSide ?? "end";
   const hasPlaceholder = Boolean(props.hasPlaceholder);
   const hasFile = Boolean(props.hasFile);
+  const tagControl = props.policyTagControl || null;
+  const tagConflict = Boolean(tagControl?.conflict);
+  const tagControlled = Boolean(tagControl?.controlled_by_tag) && !tagConflict;
+  const tagIntercept = (tagConflict || tagControlled) && (props.mediaType === "movie" || props.mediaType === "series");
   const serverPolicy = policyFromFlags(
     props.forcePlaceholder,
     props.blockPlaceholder,
@@ -97,6 +107,9 @@ export function PlaceholderPolicyCycle(props: {
   const [displayPolicy, setDisplayPolicy] = useState<PlaceholderPolicy>(serverPolicy);
   const [phase, setPhase] = useState<PolicySyncPhase>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [tagModalOpen, setTagModalOpen] = useState(false);
+  const [tagBusy, setTagBusy] = useState(false);
+  const [tagError, setTagError] = useState<string | null>(null);
 
   /** Bumped on every click / save start so stale responses do not own the UI. */
   const generationRef = useRef(0);
@@ -252,6 +265,11 @@ export function PlaceholderPolicyCycle(props: {
 
   const cycle = () => {
     if (locked) return;
+    if (tagIntercept) {
+      setTagError(null);
+      setTagModalOpen(true);
+      return;
+    }
     // Latest click wins: invalidate in-flight UI ownership; the save layer re-asserts.
     if (phase === "creating" || phase === "removing" || phase === "working") {
       generationRef.current += 1;
@@ -266,6 +284,29 @@ export function PlaceholderPolicyCycle(props: {
       debounceRef.current = null;
       void commitPolicy(next);
     }, APPLY_DEBOUNCE_MS);
+  };
+
+  const clearArrTags = async (opts: { removeNever: boolean; removePinned: boolean }) => {
+    if (props.mediaType !== "movie" && props.mediaType !== "series") return;
+    setTagBusy(true);
+    setTagError(null);
+    try {
+      const clearFn = props.mediaType === "movie" ? clearMovieArrPolicyTags : clearSeriesArrPolicyTags;
+      const out = await clearFn(props.entityId, {
+        remove_never: opts.removeNever,
+        remove_pinned: opts.removePinned,
+      });
+      if (!out?.ok) {
+        setTagError(out?.message || "Unable to clear Arr tags");
+        return;
+      }
+      setTagModalOpen(false);
+      props.onApplied?.();
+    } catch (exc) {
+      setTagError(exc instanceof Error ? exc.message : "Unable to clear Arr tags");
+    } finally {
+      setTagBusy(false);
+    }
   };
 
   const pad = size === "sm" ? "px-2 py-0.5" : "px-2.5 py-1";
@@ -302,9 +343,15 @@ export function PlaceholderPolicyCycle(props: {
               ? "Saved"
               : null;
 
+  const tagHover = tagConflict
+    ? "Conflicting Never and Pinned Arr tags. Placeholdarr defaults to Never. Click for details."
+    : tagControlled
+      ? "Controlled by Arr tag. Click to clear."
+      : null;
+
   const title = locked
     ? props.lockedReason || "Set by series. Change the series chip to unlock."
-    : POLICY_TOOLTIP[displayPolicy];
+    : tagHover || POLICY_TOOLTIP[displayPolicy];
 
   const progressLabel = inlineLabel ? (
     <span
@@ -314,6 +361,9 @@ export function PlaceholderPolicyCycle(props: {
       {inlineLabel}
     </span>
   ) : null;
+
+  const warnYellow = isLight ? "#ca8a04" : "#facc15";
+  const warnRed = isLight ? "#b91c1c" : "#f87171";
 
   return (
     <div className="flex flex-col items-start gap-1">
@@ -347,10 +397,44 @@ export function PlaceholderPolicyCycle(props: {
             themeMode={props.themeMode}
           />
           {POLICY_LABEL[displayPolicy]}
+          {tagConflict ? (
+            <span
+              className="inline-flex items-center justify-center rounded-full text-[11px] font-black leading-none"
+              style={{ color: warnRed }}
+              aria-label="Conflicting Arr tags"
+            >
+              !
+            </span>
+          ) : tagControlled ? (
+            <span
+              className="material-symbols-outlined"
+              style={{ fontSize: size === "sm" ? 14 : 15, color: warnYellow }}
+              aria-hidden
+            >
+              sell
+            </span>
+          ) : null}
         </button>
         {progressSide === "end" ? progressLabel : null}
       </div>
       {error ? <p className="text-[11px] text-red-400 max-w-[16rem]">{error}</p> : null}
+      {tagModalOpen && tagControl ? (
+        <PolicyTagControlModal
+          mode={tagConflict ? "conflict" : "tag"}
+          control={tagControl}
+          arrLabel={props.mediaType === "series" ? "Sonarr" : "Radarr"}
+          accentHex={props.accentHex}
+          themeMode={props.themeMode}
+          busy={tagBusy}
+          error={tagError}
+          onClose={() => {
+            if (!tagBusy) setTagModalOpen(false);
+          }}
+          onClear={(opts) => {
+            void clearArrTags(opts);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

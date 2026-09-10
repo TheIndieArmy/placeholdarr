@@ -410,6 +410,33 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "PLACEHOLDER_POLICY_NEVER_TAGS",
+            {
+                "section": "Library sync",
+                "label": "Never placeholder tags",
+                "description": (
+                    "Movies/series with any of these Arr tags get Never on sync. Default: placeholdarr-never."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": ["placeholdarr-never"],
+            },
+        ),
+        (
+            "PLACEHOLDER_POLICY_PINNED_TAGS",
+            {
+                "section": "Library sync",
+                "label": "Pinned placeholder tags",
+                "description": (
+                    "Movies/series with any of these Arr tags get Pinned on sync (unless a Never tag also matches). "
+                    "Default: placeholdarr-pinned."
+                ),
+                "type": "string_list",
+                "restart_required": False,
+                "default": ["placeholdarr-pinned"],
+            },
+        ),
+        (
             "INCLUDE_SPECIALS",
             {
                 "section": "Library sync",
@@ -1080,6 +1107,77 @@ def _redact_arr_instances_json_for_payload(raw: Any) -> tuple[str, bool]:
     return (json.dumps(redacted), any_saved)
 
 
+def _coerce_string_list(raw_value: Any) -> str:
+    """Normalize a string-list setting to a canonical JSON array string for storage."""
+    if isinstance(raw_value, list):
+        items = raw_value
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            items = []
+        else:
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    items = parsed
+                else:
+                    items = [p.strip() for p in text.split(",") if p.strip()]
+            except Exception:
+                items = [p.strip() for p in text.split(",") if p.strip()]
+    elif raw_value is None:
+        items = []
+    else:
+        raise ValueError("must be a JSON array of strings")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        label = str(item or "").strip()
+        if not label:
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+    return json.dumps(out)
+
+
+def _parse_string_list_value(raw_value: Any, *, default: list[str] | None = None) -> list[str]:
+    """Decode a stored string-list setting for API/UI payloads."""
+    fallback = list(default or [])
+    if raw_value is None:
+        return fallback
+    if isinstance(raw_value, list):
+        items = raw_value
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return fallback
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                items = [p.strip() for p in text.split(",") if p.strip()]
+        except Exception:
+            items = [p.strip() for p in text.split(",") if p.strip()]
+    else:
+        return fallback
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        label = str(item or "").strip()
+        if not label:
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+    return out
+
+
 def _validate_value(key: str, raw_value: Any) -> Any:
     meta = SETTINGS_SCHEMA[key]
     value_type = meta["type"]
@@ -1102,6 +1200,8 @@ def _validate_value(key: str, raw_value: Any) -> Any:
             raise ValueError("choice field missing options")
         if value not in allowed:
             raise ValueError(f"must be one of: {', '.join(allowed)}")
+    elif value_type == "string_list":
+        value = _coerce_string_list(raw_value)
     else:
         value = str(raw_value or "").strip()
     if bool(meta.get("required", False)) and _is_blank(value):
@@ -1325,6 +1425,13 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 ev = str(effective_value or "both").strip().lower()
                 if ev == "off" or ev not in {"summary", "title", "both"}:
                     effective_value = "both"
+            if meta["type"] == "string_list":
+                default_list = meta.get("default")
+                defaults = list(default_list) if isinstance(default_list, list) else []
+                if _is_blank(effective_value) and not row:
+                    effective_value = defaults
+                else:
+                    effective_value = _parse_string_list_value(effective_value, default=defaults)
             if _is_blank(effective_value):
                 pass
             saved_value_out = None if bool(meta.get("secret", False)) else (row.value if row else None)
@@ -1332,6 +1439,8 @@ def get_settings_payload(session=None) -> dict[str, Any]:
                 sv = str(saved_value_out).strip().lower()
                 if sv == "off" or sv not in {"summary", "title", "both"}:
                     saved_value_out = "both"
+            if meta["type"] == "string_list" and saved_value_out is not None:
+                saved_value_out = _parse_string_list_value(saved_value_out, default=[])
             entry: dict[str, Any] = {
                 "key": key,
                 "section": meta["section"],
@@ -1347,6 +1456,8 @@ def get_settings_payload(session=None) -> dict[str, Any]:
             }
             if meta["type"] == "choice":
                 entry["options"] = list(meta.get("options") or [])
+            if meta["type"] == "string_list" and isinstance(meta.get("default"), list):
+                entry["default"] = list(meta["default"])
             if meta.get("depends_on"):
                 entry["depends_on"] = str(meta["depends_on"])
             if meta.get("disabled_when"):

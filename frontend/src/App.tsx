@@ -38,6 +38,7 @@ import placeholdarrLogoBlue from "./assets/Placeholdarr_blue.svg";
 import placeholdarrLogoYellow from "./assets/Placeholdarr_yellow.svg";
 import type { Brand, ThemeMode } from "./brandTypes";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { SettingsStringListChips } from "./SettingsStringListChips";
 import { TmdbAttribution } from "./TmdbAttribution";
 import { getBrandSemanticTokens, semanticTokensToCssVars, type BrandSemanticTokens } from "./brandSemanticTheme";
 import { FG_ON_ACCENT_TEXT_CLASS, accentFilledStyle } from "./brandAccentUi";
@@ -523,6 +524,9 @@ function buildPreviewDummyFieldValues(payload: SettingsPayload): FieldValueMap {
           break;
         case "choice":
           out[field.key] = field.options?.[0]?.value ?? "";
+          break;
+        case "string_list":
+          out[field.key] = Array.isArray(field.default) ? [...field.default] : [];
           break;
         default:
           out[field.key] = "";
@@ -5974,6 +5978,16 @@ function SettingsPanel(props: {
                 <ComingSoonCountdownDescription spacing="settings" />
               ) : field.key === "EPISODES_LOOKAHEAD" ? (
                 <EpisodesLookaheadDescription spacing="settings" tvPlayMode={tvPlayMode} />
+              ) : field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
+                <>
+                  <div className="mt-2 text-[12px] font-headline uppercase tracking-widest text-slate-500">Tag policies</div>
+                  <p className="ui-field-description mt-1">
+                    Match Radarr movie tags and Sonarr series tags during sync. Off-style ignore maps to Never;
+                    always-keep maps to Pinned. When both match, Placeholdarr defaults to Never. Matching Arr tags
+                    always override library chips; clear the tags in Arr (or via the chip modal) to manage policy here.
+                  </p>
+                  {field.description ? <p className="ui-field-description mt-1">{field.description}</p> : null}
+                </>
               ) : field.description && !isPlexSectionIdField(field.key) ? (
                 <p className="ui-field-description mt-1">{field.description}</p>
               ) : null)}
@@ -6011,6 +6025,13 @@ function SettingsPanel(props: {
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+        ) : field.type === "string_list" ? (
+          <SettingsStringListChips
+            value={value}
+            disabled={interactionLocked}
+            focusClass={getBrandFocusClass(props.brand, props.themeMode)}
+            onChange={(next) => handleSettingsValueChange(field.key, next)}
+          />
         ) : (
           <div className="flex gap-2">
             <input
@@ -9227,6 +9248,16 @@ function OnboardingWizard(props: {
             <ComingSoonCountdownDescription spacing="wizard" />
           ) : field.key === "EPISODES_LOOKAHEAD" ? (
             <EpisodesLookaheadDescription spacing="wizard" tvPlayMode={tvPlayMode} />
+          ) : field.key === "PLACEHOLDER_POLICY_NEVER_TAGS" ? (
+            <>
+              <div className="mb-1 text-[12px] font-headline uppercase tracking-widest text-slate-500">Tag policies</div>
+              <p className="ui-field-description mb-2 leading-relaxed">
+                Match Radarr movie tags and Sonarr series tags during sync. Off-style ignore maps to Never;
+                always-keep maps to Pinned. When both match, Placeholdarr defaults to Never. Matching Arr tags
+                always override library chips; clear the tags in Arr (or via the chip modal) to manage policy here.
+              </p>
+              {field.description ? <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p> : null}
+            </>
           ) : field.description ? (
             <p className="ui-field-description mb-2 leading-relaxed">{field.description}</p>
           ) : null)}
@@ -9261,6 +9292,13 @@ function OnboardingWizard(props: {
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+        ) : field.type === "string_list" ? (
+          <SettingsStringListChips
+            value={displayValue}
+            disabled={interactionLocked}
+            focusClass={focus}
+            onChange={(next) => handleWizardValueChange(field.key, next)}
+          />
         ) : (
           <div className="flex gap-2">
             <input
@@ -10044,6 +10082,7 @@ function deepEqualValues(a: FieldValueMap, b: FieldValueMap) {
 function normalizeComparable(value: unknown) {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return JSON.stringify(value);
   return String(value).trim();
 }
 

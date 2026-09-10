@@ -44,6 +44,23 @@ def _normalize_path(value: str | None) -> str | None:
     return os.path.normpath(text)
 
 
+def _tag_id_set(raw) -> frozenset[int]:
+    """Normalize Arr tag id lists from catalog payloads or API rows."""
+    if isinstance(raw, dict):
+        tags = raw.get("tags")
+    else:
+        tags = raw
+    out: set[int] = set()
+    if not isinstance(tags, list):
+        return frozenset()
+    for item in tags:
+        try:
+            out.add(int(item))
+        except Exception:
+            continue
+    return frozenset(out)
+
+
 def _radarr_path_drift_movie_ids(session, *, instance_key: str, api_movies: list) -> set[int]:
     """Detect Radarr items whose current API path differs from stored DB path.
 
@@ -564,7 +581,22 @@ def _refresh_placeholder_presence_for_entities(*, movie_row_ids: list[int], epis
 
 
 def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -> dict:
-    stats = {'instances': 0, 'succeeded': 0, 'failed': 0, 'movies_seen': 0, 'series_seen': 0, 'episodes_seen': 0}
+    stats = {
+        'instances': 0,
+        'succeeded': 0,
+        'failed': 0,
+        'movies_seen': 0,
+        'series_seen': 0,
+        'episodes_seen': 0,
+        'tag_policies': {
+            'created': 0,
+            'deleted': 0,
+            'files_created': 0,
+            'files_deleted': 0,
+            'errors': 0,
+            'noop': 0,
+        },
+    }
     if not instances:
         return stats
 
@@ -586,6 +618,12 @@ def _run_startup_full_for_instances(instances: list[dict], run_ids: list[str]) -
                 stats['movies_seen'] += int(run_stats.get('movies_seen', 0) or 0)
                 stats['series_seen'] += int(run_stats.get('series_seen', 0) or 0)
                 stats['episodes_seen'] += int(run_stats.get('episodes_seen', 0) or 0)
+                from services.source_of_truth.tag_placeholder_policy import merge_tag_policy_materialization_into
+
+                stats['tag_policies'] = merge_tag_policy_materialization_into(
+                    stats['tag_policies'],
+                    run_stats.get('tag_policies'),
+                )
                 row = _get_or_create_arr_state(session, instance['instance_key'], instance['arr_type'])
                 row.first_full_sync_completed_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
@@ -629,6 +667,7 @@ def _run_startup_lite_snapshot_for_instances(
         'movies_targeted': 0,
         'series_targeted': 0,
         'movie_row_ids': [],
+        'series_row_ids': [],
         'episode_row_ids': [],
         'lite_reconciliation_pre': lite_reconciliation_pre or {},
     }
@@ -637,6 +676,7 @@ def _run_startup_lite_snapshot_for_instances(
 
     session = get_session()
     touched_movie_row_ids: set[int] = set(seed_movie_row_ids or ())
+    touched_series_row_ids: set[int] = set()
     touched_episode_row_ids: set[int] = set(seed_episode_row_ids or ())
     try:
         for instance in instances:
@@ -651,7 +691,7 @@ def _run_startup_lite_snapshot_for_instances(
                 )
 
                 if instance['arr_type'] == 'radarr':
-                    api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key']) or []
+                    api_movies = fetch_radarr_movies(instance['base_url'], instance['api_key'], bypass_cache=True) or []
                     stats['snapshot_rows_seen'] += len(api_movies)
                     drift_ids = _radarr_path_drift_movie_ids(session, instance_key=instance_key, api_movies=api_movies)
                     removed_ids = _radarr_movie_ids_removed_from_catalog(session, instance_key=instance_key, api_movies=api_movies)
@@ -673,12 +713,13 @@ def _run_startup_lite_snapshot_for_instances(
                             Movie.radarr_filepath,
                             Movie.radarr_monitored,
                             Movie.is_deleted,
+                            Movie.radarr_payload_raw,
                         )
                         .filter(Movie.instance_key == instance_key, Movie.radarrid.isnot(None))
                         .all()
                     )
-                    db_by_id: dict[int, tuple[bool, str | None, str | None, bool, bool]] = {}
-                    for rid, has_file, radarrpath, radarr_filepath, monitored, is_deleted in db_rows:
+                    db_by_id: dict[int, tuple[bool, str | None, str | None, bool, bool, frozenset[int]]] = {}
+                    for rid, has_file, radarrpath, radarr_filepath, monitored, is_deleted, payload_raw in db_rows:
                         try:
                             db_by_id[int(rid)] = (
                                 bool(has_file),
@@ -686,13 +727,14 @@ def _run_startup_lite_snapshot_for_instances(
                                 _normalize_path(radarr_filepath),
                                 bool(monitored),
                                 bool(is_deleted),
+                                _tag_id_set(payload_raw),
                             )
                         except Exception:
                             continue
 
                     added_ids = set(api_by_id.keys()) - set(db_by_id.keys())
                     changed_ids: set[int] = set()
-                    for mid, (db_has_file, db_path, db_file_path, db_monitored, db_is_deleted) in db_by_id.items():
+                    for mid, (db_has_file, db_path, db_file_path, db_monitored, db_is_deleted, db_tags) in db_by_id.items():
                         item = api_by_id.get(mid)
                         if not item:
                             continue
@@ -700,12 +742,14 @@ def _run_startup_lite_snapshot_for_instances(
                         api_path = _api_movie_library_path(item)
                         api_file_path = _api_movie_file_path(item)
                         api_monitored = bool(item.get("monitored"))
+                        api_tags = _tag_id_set(item)
                         if (
                             db_has_file != api_has_file
                             or db_path != api_path
                             or db_file_path != api_file_path
                             or db_monitored != api_monitored
                             or db_is_deleted
+                            or db_tags != api_tags
                         ):
                             changed_ids.add(mid)
 
@@ -754,7 +798,7 @@ def _run_startup_lite_snapshot_for_instances(
                             ]
                             touched_movie_row_ids.update(row_ids)
                 else:
-                    api_series = fetch_sonarr_series(instance['base_url'], instance['api_key']) or []
+                    api_series = fetch_sonarr_series(instance['base_url'], instance['api_key'], bypass_cache=True) or []
                     stats['snapshot_rows_seen'] += len(api_series)
                     drift_ids = _sonarr_path_drift_series_ids(session, instance_key=instance_key, api_series=api_series)
                     removed_ids = _sonarr_series_ids_removed_from_catalog(session, instance_key=instance_key, api_series=api_series)
@@ -776,12 +820,13 @@ def _run_startup_lite_snapshot_for_instances(
                             Series.is_deleted,
                             Series.seriesfile_count,
                             Series.id,
+                            Series.sonarr_payload_raw,
                         )
                         .filter(Series.instance_key == instance_key, Series.sonarrid.isnot(None))
                         .all()
                     )
-                    db_by_id: dict[int, tuple[str | None, bool, bool, int, int]] = {}
-                    for sid, path, monitored, is_deleted, seriesfile_count, row_id in db_series_rows:
+                    db_by_id: dict[int, tuple[str | None, bool, bool, int, int, frozenset[int]]] = {}
+                    for sid, path, monitored, is_deleted, seriesfile_count, row_id, payload_raw in db_series_rows:
                         try:
                             db_by_id[int(sid)] = (
                                 _normalize_path(path),
@@ -789,6 +834,7 @@ def _run_startup_lite_snapshot_for_instances(
                                 bool(is_deleted),
                                 int(seriesfile_count or 0),
                                 int(row_id),
+                                _tag_id_set(payload_raw),
                             )
                         except Exception:
                             continue
@@ -844,7 +890,7 @@ def _run_startup_lite_snapshot_for_instances(
 
                     added_ids = set(api_by_id.keys()) - set(db_by_id.keys())
                     changed_ids: set[int] = set()
-                    for sid, (db_path, db_monitored, db_is_deleted, db_seriesfile_count, _row_id) in db_by_id.items():
+                    for sid, (db_path, db_monitored, db_is_deleted, db_seriesfile_count, _row_id, db_tags) in db_by_id.items():
                         item = api_by_id.get(sid)
                         if not item:
                             continue
@@ -852,6 +898,7 @@ def _run_startup_lite_snapshot_for_instances(
                         api_monitored = _api_series_monitored(item)
                         api_total_episodes = _api_series_total_episode_count(item)
                         api_episode_file_count = _api_series_episode_file_count(item)
+                        api_tags = _tag_id_set(item)
                         db_episode_count = int(db_episode_counts.get(sid, 0))
                         db_episode_file_count = int(db_episode_file_counts.get(sid, db_seriesfile_count))
                         if (
@@ -863,6 +910,7 @@ def _run_startup_lite_snapshot_for_instances(
                                 and db_episode_count != api_total_episodes
                             )
                             or (api_episode_file_count is not None and db_episode_file_count != api_episode_file_count)
+                            or db_tags != api_tags
                         ):
                             changed_ids.add(sid)
 
@@ -879,7 +927,7 @@ def _run_startup_lite_snapshot_for_instances(
                             changed_ids |= ep_mon_drift
 
                     if changed_ids:
-                        n_path = n_mon = n_del = n_tot = n_file = 0
+                        n_path = n_mon = n_del = n_tot = n_file = n_tags = 0
                         for sid in changed_ids:
                             item = api_by_id.get(sid)
                             if not item:
@@ -887,11 +935,12 @@ def _run_startup_lite_snapshot_for_instances(
                             db_row = db_by_id.get(sid)
                             if not db_row:
                                 continue
-                            db_path, db_monitored, db_is_deleted, db_seriesfile_count, _ = db_row
+                            db_path, db_monitored, db_is_deleted, db_seriesfile_count, _, db_tags = db_row
                             api_path = _api_series_library_path(item)
                             api_monitored = _api_series_monitored(item)
                             api_total = _api_series_total_episode_count(item)
                             api_files = _api_series_episode_file_count(item)
+                            api_tags = _tag_id_set(item)
                             db_ep = int(db_episode_counts.get(sid, 0))
                             db_files = int(db_episode_file_counts.get(sid, db_seriesfile_count))
                             hit_path = db_path != api_path
@@ -899,6 +948,7 @@ def _run_startup_lite_snapshot_for_instances(
                             hit_del = bool(db_is_deleted)
                             hit_tot = api_total is not None and db_ep != api_total
                             hit_file = api_files is not None and db_files != api_files
+                            hit_tags = db_tags != api_tags
                             if hit_path:
                                 n_path += 1
                             if hit_mon:
@@ -909,10 +959,12 @@ def _run_startup_lite_snapshot_for_instances(
                                 n_tot += 1
                             if hit_file:
                                 n_file += 1
+                            if hit_tags:
+                                n_tags += 1
                         logger.info(
                             f"Startup lite · {instance_key} · TV catalog diff · among changed={len(changed_ids)}: "
                             f"path={n_path} monitored={n_mon} series_row_deleted={n_del} "
-                            f"total_episodes_vs_DB={n_tot} episode_files_vs_DB={n_file}",
+                            f"total_episodes_vs_DB={n_tot} episode_files_vs_DB={n_file} tags={n_tags}",
                             extra={"emoji_type": "info"},
                         )
 
@@ -951,24 +1003,24 @@ def _run_startup_lite_snapshot_for_instances(
                             extra={'emoji_type': 'info'},
                         )
                         raw_ep = sync_stats.get("touched_episode_row_ids")
+                        series_row_ids = [
+                            int(r[0])
+                            for r in session.query(Series.id)
+                            .filter(Series.instance_key == instance_key, Series.sonarrid.in_(list(target_ids)))
+                            .all()
+                        ]
+                        touched_series_row_ids.update(series_row_ids)
                         if isinstance(raw_ep, list) and raw_ep:
                             touched_episode_row_ids.update(int(x) for x in raw_ep if x is not None)
-                        else:
-                            series_row_ids = [
+                        elif series_row_ids:
+                            episode_row_ids = [
                                 int(r[0])
-                                for r in session.query(Series.id)
-                                .filter(Series.instance_key == instance_key, Series.sonarrid.in_(list(target_ids)))
+                                for r in session.query(Episode.id)
+                                .join(Season, Episode.season_id == Season.id)
+                                .filter(Season.series_id.in_(series_row_ids))
                                 .all()
                             ]
-                            if series_row_ids:
-                                episode_row_ids = [
-                                    int(r[0])
-                                    for r in session.query(Episode.id)
-                                    .join(Season, Episode.season_id == Season.id)
-                                    .filter(Season.series_id.in_(series_row_ids))
-                                    .all()
-                                ]
-                                touched_episode_row_ids.update(episode_row_ids)
+                            touched_episode_row_ids.update(episode_row_ids)
 
                 row.last_history_checked_at = datetime.now(timezone.utc)
                 row.updated_at = datetime.now(timezone.utc)
@@ -983,7 +1035,46 @@ def _run_startup_lite_snapshot_for_instances(
                 )
 
         stats["movie_row_ids"] = sorted(touched_movie_row_ids)
+        stats["series_row_ids"] = sorted(touched_series_row_ids)
         stats["episode_row_ids"] = sorted(touched_episode_row_ids)
+        try:
+            from services.source_of_truth.tag_placeholder_policy import (
+                apply_arr_tag_placeholder_policies,
+                collect_tag_policy_drift_row_ids,
+            )
+
+            # Union drift so tags that landed via concurrent entity_reconcile (or other
+            # syncs) still get Never/Pinned even when lite's touched set skipped them.
+            instance_keys = [
+                str(inst.get("instance_key") or "").strip().lower()
+                for inst in instances
+                if str(inst.get("instance_key") or "").strip()
+            ]
+            drift_movies, drift_series = collect_tag_policy_drift_row_ids(
+                instance_keys=instance_keys or None,
+            )
+            movie_ids = sorted(set(stats["movie_row_ids"]) | set(drift_movies))
+            series_ids = sorted(set(stats["series_row_ids"]) | set(drift_series))
+            stats["tag_policy_drift_movie_ids"] = drift_movies
+            stats["tag_policy_drift_series_ids"] = drift_series
+            if drift_movies or drift_series:
+                logger.info(
+                    "Arr tag policy drift after lite: movies=%s series=%s",
+                    len(drift_movies),
+                    len(drift_series),
+                    extra={"emoji_type": "info"},
+                )
+            stats["tag_policies"] = apply_arr_tag_placeholder_policies(
+                movie_row_ids=movie_ids,
+                series_row_ids=series_ids,
+            )
+        except Exception as tag_exc:
+            logger.warning(
+                f"Arr tag placeholder policies failed after lite snapshot: {tag_exc}",
+                extra={"emoji_type": "warning"},
+                exc_info=True,
+            )
+            stats["tag_policies"] = {"ok": False, "error": str(tag_exc)}
         return stats
     finally:
         session.close()
@@ -1251,6 +1342,12 @@ def run_startup_source_of_truth(*, require_first_full: bool = False) -> dict:
                 )
         else:
             materialization_stats = run_materialization_pass()
+        from services.source_of_truth.tag_placeholder_policy import merge_tag_policy_materialization_into
+
+        materialization_stats = merge_tag_policy_materialization_into(
+            materialization_stats,
+            startup_sync_stats.get("tag_policies") if isinstance(startup_sync_stats, dict) else None,
+        )
         logger.info(
             f"Startup phase complete: materialization elapsed_s={time.monotonic() - phase_started:.1f}",
             extra={'emoji_type': 'info'},

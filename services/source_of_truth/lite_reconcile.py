@@ -212,7 +212,7 @@ def run_specials_backfill_if_pending(*, instances: list[dict]) -> dict:
             if instance_key:
                 sonarr_instance_keys.add(instance_key)
             try:
-                api_series = fetch_sonarr_series(inst["base_url"], inst["api_key"]) or []
+                api_series = fetch_sonarr_series(inst["base_url"], inst["api_key"], bypass_cache=True) or []
                 if not api_series:
                     continue
                 stats["series_requested"] += len(api_series)

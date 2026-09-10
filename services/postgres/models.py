@@ -94,6 +94,9 @@ class Movie(Base):
     force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)
     # User block: never create a placeholder (ignored when has_file/deleted)
     block_placeholder = Column(Boolean, nullable=False, default=False)
+    # Who last set policy flags: "manual" (UI) | "tag" (Arr tag policies) | null (legacy/unset)
+    # Matching Arr Never/Pinned tags always override manual until those tags are cleared.
+    placeholder_policy_source = Column(String(16), nullable=True)
     # Creation timestamp (DB authoritative). Set once at INSERT and do not change.
     created_at = Column(DateTime(timezone=True), server_default=text('now()'))
     # Last time this row was updated by the application/DB
@@ -578,6 +581,9 @@ class Series(Base):
     force_placeholder = Column(Boolean, nullable=False, default=False)
     force_placeholder_despite_sibling = Column(Boolean, nullable=False, default=False)
     block_placeholder = Column(Boolean, nullable=False, default=False)
+    # Who last set series gate flags: "manual" | "tag" | null
+    # Matching Arr Never/Pinned tags always override manual until those tags are cleared.
+    placeholder_policy_source = Column(String(16), nullable=True)
 
     subflows = relationship('SubFlow', back_populates='series')
     season = relationship('Season', back_populates='series')
