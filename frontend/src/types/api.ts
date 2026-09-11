@@ -306,6 +306,7 @@ export interface MovieDetailResponse {
   file_path?: string | null;
   file_size_bytes?: number | null;
   library_path?: string | null;
+  placeholder_folder?: string | null;
   radarr_id?: number | null;
   last_found_in_arr?: string | null;
   radarr_quality?: string | null;

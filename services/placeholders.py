@@ -165,14 +165,21 @@ def _apply_dir_chain_permissions(path: str) -> None:
     try:
         target_parent = os.path.abspath(os.path.dirname(path))
         roots = []
-        for r in (
-            getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
-            getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
-            getattr(settings, "TV_LIBRARY_FOLDER", None),
-            getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
-        ):
-            if r:
-                roots.append(os.path.abspath(r))
+        try:
+            from services.library_destinations import all_configured_dest_roots
+
+            for r in all_configured_dest_roots():
+                if r:
+                    roots.append(os.path.abspath(r))
+        except Exception:
+            for r in (
+                getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
+                getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
+                getattr(settings, "TV_LIBRARY_FOLDER", None),
+                getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
+            ):
+                if r:
+                    roots.append(os.path.abspath(r))
 
         for root in roots:
             try:
@@ -242,7 +249,14 @@ def movie_placeholder_path(movie: Any) -> str:
     year = getattr(movie, "year", None)
 
     movie_role = _arr_instance_role("movie", movie)
-    root = settings.MOVIE_LIBRARY_4K_FOLDER if movie_role != "primary" else settings.MOVIE_LIBRARY_FOLDER
+    from services.library_destinations import resolve_movie_dest
+
+    arr_path = getattr(movie, "radarrpath", None)
+    instance_key = str(getattr(movie, "instance_key", None) or "").strip().lower() or None
+    dest = resolve_movie_dest(instance_key=instance_key, arr_path=arr_path if isinstance(arr_path, str) else None)
+    root = dest.dest_folder or (
+        settings.MOVIE_LIBRARY_4K_FOLDER if movie_role != "primary" else settings.MOVIE_LIBRARY_FOLDER
+    )
     tmdb_or_id = getattr(movie, "tmdbid", None) or getattr(movie, "id", None)
     default_folder = os.path.join(root, f"{title} ({year}) {{tmdb-{tmdb_or_id}}}" if year else f"{title} {{tmdb-{tmdb_or_id}}}")
     folder = getattr(movie, "placeholder_folder", None) or default_folder
@@ -258,7 +272,14 @@ def episode_placeholder_path(episode: Any, season: Any, series: Any) -> str:
     year = getattr(series, "year", None)
 
     series_role = _arr_instance_role("series", series)
-    root = settings.TV_LIBRARY_4K_FOLDER if series_role != "primary" else settings.TV_LIBRARY_FOLDER
+    from services.library_destinations import resolve_series_dest
+
+    arr_path = getattr(series, "sonarrpath", None)
+    instance_key = str(getattr(series, "instance_key", None) or "").strip().lower() or None
+    dest = resolve_series_dest(instance_key=instance_key, arr_path=arr_path if isinstance(arr_path, str) else None)
+    root = dest.dest_folder or (
+        settings.TV_LIBRARY_4K_FOLDER if series_role != "primary" else settings.TV_LIBRARY_FOLDER
+    )
     tvdb_or_id = getattr(series, "tvdbid", None) or getattr(series, "id", None)
     series_folder = f"{series_title} ({year}) {{tvdb-{tvdb_or_id}}}" if year else f"{series_title} {{tvdb-{tvdb_or_id}}}"
     season_folder = f"Season {int(getattr(season, 'season_number', 0)):02d}"

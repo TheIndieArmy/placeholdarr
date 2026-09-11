@@ -462,37 +462,55 @@ def refresh_plex_section_ids(
 
 
 def _library_roots_and_section(abs_folder: str) -> tuple[list[str], int | None]:
-    movie_roots = [
-        str(r).strip()
-        for r in (
-            getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
-            getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
+    try:
+        from services.library_destinations import (
+            all_movie_dest_roots,
+            all_tv_dest_roots,
+            plex_section_for_folder,
         )
-        if r
-    ]
-    tv_roots = [
-        str(r).strip()
-        for r in (
-            getattr(settings, "TV_LIBRARY_FOLDER", None),
-            getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
-        )
-        if r
-    ]
-    movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
-    tv_section = getattr(settings, "PLEX_TV_SECTION_ID", None)
-    for root in movie_roots:
-        if _relpath_under_root(abs_folder, root) is not None:
-            try:
-                return movie_roots, int(movie_section) if movie_section is not None else None
-            except (TypeError, ValueError):
-                return movie_roots, None
-    for root in tv_roots:
-        if _relpath_under_root(abs_folder, root) is not None:
-            try:
-                return tv_roots, int(tv_section) if tv_section is not None else None
-            except (TypeError, ValueError):
-                return tv_roots, None
-    return [], None
+
+        movie_roots = [str(r).strip() for r in all_movie_dest_roots() if r]
+        tv_roots = [str(r).strip() for r in all_tv_dest_roots() if r]
+        section_id = plex_section_for_folder(abs_folder)
+        for root in movie_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                return movie_roots, section_id
+        for root in tv_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                return tv_roots, section_id
+        return [], None
+    except Exception:
+        movie_roots = [
+            str(r).strip()
+            for r in (
+                getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
+                getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None),
+            )
+            if r
+        ]
+        tv_roots = [
+            str(r).strip()
+            for r in (
+                getattr(settings, "TV_LIBRARY_FOLDER", None),
+                getattr(settings, "TV_LIBRARY_4K_FOLDER", None),
+            )
+            if r
+        ]
+        movie_section = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+        tv_section = getattr(settings, "PLEX_TV_SECTION_ID", None)
+        for root in movie_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                try:
+                    return movie_roots, int(movie_section) if movie_section is not None else None
+                except (TypeError, ValueError):
+                    return movie_roots, None
+        for root in tv_roots:
+            if _relpath_under_root(abs_folder, root) is not None:
+                try:
+                    return tv_roots, int(tv_section) if tv_section is not None else None
+                except (TypeError, ValueError):
+                    return tv_roots, None
+        return [], None
 
 
 def refresh_plex_paths(paths: set[str], *, update_type: str = "Created") -> dict[str, int]:

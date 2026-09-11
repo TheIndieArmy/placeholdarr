@@ -336,16 +336,38 @@ def _series_folder_name(title: str, year: int, tvdbid: int) -> str:
     return f"{_sanitize_name(title)} {{tvdb-{tvdbid}}}"
 
 
-def _placeholder_movie_folder(entry: Dict, *, title: str, year: int, tmdbid: int, is_4k: bool) -> str:
-    root = _movie_library_root(is_4k)
-    arr_path = entry.get('path') or entry.get('folderPath') or None
+def _placeholder_movie_folder(
+    entry: Dict,
+    *,
+    title: str,
+    year: int,
+    tmdbid: int,
+    is_4k: bool,
+    instance_key: str | None = None,
+) -> str:
+    from services.library_destinations import resolve_movie_dest
+
+    arr_path = entry.get("path") or entry.get("folderPath") or entry.get("rootFolderPath") or None
+    dest = resolve_movie_dest(instance_key=instance_key, arr_path=arr_path if isinstance(arr_path, str) else None)
+    root = dest.dest_folder or _movie_library_root(is_4k)
     folder_name = os.path.basename(arr_path) if arr_path else _movie_folder_name(title, year, tmdbid)
     return os.path.join(root, folder_name)
 
 
-def _placeholder_series_folder(entry: Dict, *, title: str, year: int, tvdbid: int, is_4k: bool) -> str:
-    root = _tv_library_root(is_4k)
-    arr_path = entry.get('path') or entry.get('folderPath') or None
+def _placeholder_series_folder(
+    entry: Dict,
+    *,
+    title: str,
+    year: int,
+    tvdbid: int,
+    is_4k: bool,
+    instance_key: str | None = None,
+) -> str:
+    from services.library_destinations import resolve_series_dest
+
+    arr_path = entry.get("path") or entry.get("folderPath") or entry.get("rootFolderPath") or None
+    dest = resolve_series_dest(instance_key=instance_key, arr_path=arr_path if isinstance(arr_path, str) else None)
+    root = dest.dest_folder or _tv_library_root(is_4k)
     folder_name = os.path.basename(arr_path) if arr_path else _series_folder_name(title, year, tvdbid)
     return os.path.join(root, folder_name)
 
@@ -357,7 +379,14 @@ def _movie_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     year = _extract_year(entry.get('year') or entry.get('inCinemas') or entry.get('physicalRelease'), 0)
     tmdbid = int(entry.get('tmdbId') or entry.get('tmdb') or 0)
     instance_id, resolved_instance_key = _resolve_instance_identity('radarr', instance_key, is_4k)
-    placeholder_folder = _placeholder_movie_folder(entry, title=title, year=year, tmdbid=tmdbid, is_4k=is_4k)
+    placeholder_folder = _placeholder_movie_folder(
+        entry,
+        title=title,
+        year=year,
+        tmdbid=tmdbid,
+        is_4k=is_4k,
+        instance_key=resolved_instance_key,
+    )
     return {
         'title': title,
         'year': year,
@@ -404,7 +433,14 @@ def _series_fields(entry: Dict, is_4k: bool, instance_key: str) -> Dict:
     year = _extract_year(entry.get('year') or entry.get('firstAired'), 0)
     tvdbid = int(entry.get('tvdbId') or entry.get('tvdbid') or 0)
     instance_id, resolved_instance_key = _resolve_instance_identity('sonarr', instance_key, is_4k)
-    placeholder_folder = _placeholder_series_folder(entry, title=title, year=year, tvdbid=tvdbid, is_4k=is_4k)
+    placeholder_folder = _placeholder_series_folder(
+        entry,
+        title=title,
+        year=year,
+        tvdbid=tvdbid,
+        is_4k=is_4k,
+        instance_key=resolved_instance_key,
+    )
     return {
         'title': title,
         'year': year,

@@ -166,7 +166,7 @@ class Settings(BaseSettings):
 
     # ARR instance configuration: fully dynamic from user-configured ARR server names in onboarding.
     ARR_INSTANCES_JSON: str = ""
-    ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "2").split('#')[0].strip())
+    ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "4").split('#')[0].strip())
     # Playback webhook source instance keys (retain defaults for backward compat)
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
     JELLYFIN_INSTANCE_KEY: str = os.getenv("JELLYFIN_INSTANCE_KEY", "jellyfin").split('#')[0].strip().lower()
@@ -226,6 +226,9 @@ class Settings(BaseSettings):
     TV_LIBRARY_FOLDER: str = ""
     MOVIE_LIBRARY_4K_FOLDER: str = ""
     TV_LIBRARY_4K_FOLDER: str = ""
+    # Optional JSON array: Arr instance + root folder → Placeholdarr dest + Plex section.
+    # Empty = all titles use LIBRARY_ROOT-derived movies/tv and primary Plex section IDs.
+    LIBRARY_DESTINATION_MAP_JSON: str = ""
 
     # Queue monitor /queue poll cadence (seconds between Radarr/Sonarr queue API polls).
     #

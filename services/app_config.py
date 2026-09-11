@@ -37,6 +37,14 @@ ART_BACKFILL_SETTING_KEYS = frozenset(
     }
 )
 
+# Settings that relocate placeholder folders on disk (destination map / library root).
+DESTINATION_REMATERIALIZE_SETTING_KEYS = frozenset(
+    {
+        "LIBRARY_ROOT",
+        "LIBRARY_DESTINATION_MAP_JSON",
+    }
+)
+
 _POSTER_LANGUAGE_OPTIONS = [
     {"value": "en", "label": "English (en)"},
     {"value": "de", "label": "German (de)"},
@@ -144,30 +152,6 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "type": "string",
                 "required": False,
                 "secret": True,
-                "restart_required": False,
-            },
-        ),
-        (
-            "PLEX_MOVIE_SECTION_ID",
-            {
-                "section": "Media Integrations",
-                "label": "Plex Movie Section ID",
-                "description": "Numeric Plex library section ID for movie refresh calls. Required when Plex is enabled.",
-                "type": "int",
-                "required": False,
-                "min": 1,
-                "restart_required": False,
-            },
-        ),
-        (
-            "PLEX_TV_SECTION_ID",
-            {
-                "section": "Media Integrations",
-                "label": "Plex TV Section ID",
-                "description": "Numeric Plex library section ID for TV refresh calls. Required when Plex is enabled.",
-                "type": "int",
-                "required": False,
-                "min": 1,
                 "restart_required": False,
             },
         ),
@@ -349,7 +333,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "ARR Instances JSON (Advanced)",
-                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 2 Radarr and 2 Sonarr instances per deployment. Changing an instance URL or API key triggers a full resync; label-only changes do not.",
+                "description": "Optional JSON array for named ARR instances. By default, Placeholdarr supports up to 4 Radarr and 4 Sonarr instances per deployment (override with ARR_MAX_INSTANCES_PER_TYPE). Changing an instance URL or API key triggers a full resync; label-only changes do not.",
                 "type": "string",
                 "required": False,
                 "restart_required": False,
@@ -361,12 +345,62 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "section": "Paths",
                 "label": "Library Root",
                 "description": (
-                    "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root. "
+                    "Base path where Placeholdarr writes placeholders by default. Placeholdarr derives `movies` and `tv` "
+                    "folders under this root for unmapped Arr roots. Set the default Plex libraries below for those "
+                    "folders. Use Library destinations to send specific Arr root folders to other paths and Plex "
+                    "libraries. "
                     "Use a path separate from Radarr/Sonarr library roots to avoid potential issues with library management."
                 ),
                 "type": "path",
                 "required": False,
                 "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_MOVIE_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Default Plex Movies library",
+                "description": (
+                    "Plex section ID for placeholders under Library Root / movies. Required when Plex is enabled; "
+                    "ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "PLEX_TV_SECTION_ID",
+            {
+                "section": "Paths",
+                "label": "Default Plex TV library",
+                "description": (
+                    "Plex section ID for placeholders under Library Root / tv. Required when Plex is enabled; "
+                    "ignored for Jellyfin/Emby (they refresh by folder path). Mapped destinations can pick a different library."
+                ),
+                "type": "int",
+                "required": False,
+                "min": 1,
+                "restart_required": False,
+            },
+        ),
+        (
+            "LIBRARY_DESTINATION_MAP_JSON",
+            {
+                "section": "Paths",
+                "label": "Library destinations",
+                "description": (
+                    "Map Arr root folders to Placeholdarr destination folders and optional Plex libraries. "
+                    "Unmapped roots keep using Library Root (movies/tv) and the default Plex libraries above. "
+                    "Jellyfin and Emby do not need library IDs; they refresh by path. "
+                    "Changing destinations rematerializes placeholders (Apply now or next full sync)."
+                ),
+                "type": "string",
+                "required": False,
+                "restart_required": False,
+                "default": "",
             },
         ),
         (
@@ -993,18 +1027,23 @@ def _arr_instance_id_has_uuid(instance_id: str) -> bool:
 
 
 def _stable_default_instance_id(arr_type: str, item: dict[str, Any]) -> str:
-    """Default webhook row id: ``radarr_primary``, ``sonarr_secondary``, etc.
+    """Default webhook row id: ``radarr_primary``, ``sonarr_secondary``, or ``{type}_{instance_key}``.
 
     One Placeholdarr deployment uses a single origin; two deployments never share a URL, so these
     predictable ids are safe for local / single-tenant installs. Existing UUID ids are preserved
-    by merge logic when already saved.
+    by merge logic when already saved. Primary/secondary keep legacy role ids for back-compat;
+    additional instances use the instance_key slug.
     """
     r = str(item.get("role") or "").strip().lower()
-    if r not in ("primary", "secondary"):
-        try:
-            r = "primary" if int(item.get("priority", 0) or 0) == 0 else "secondary"
-        except Exception:
-            r = "primary"
+    if r in ("primary", "secondary"):
+        return f"{arr_type}_{r}"
+    key = _normalize_instance_key(item.get("instance_key"))
+    if key:
+        return f"{arr_type}_{key}"
+    try:
+        r = "primary" if int(item.get("priority", 0) or 0) == 0 else "secondary"
+    except Exception:
+        r = "primary"
     return f"{arr_type}_{r}"
 
 
@@ -1646,6 +1685,36 @@ def save_settings(
             if prev_val != new_val:
                 art_backfill_keys_changed.append(key)
 
+        destination_rematerialize_keys_changed: list[str] = []
+        for key in DESTINATION_REMATERIALIZE_SETTING_KEYS:
+            if key not in validated:
+                continue
+            prev_row = _get_row(session, key)
+            prev_val = "" if not prev_row or prev_row.value is None else str(prev_row.value).strip()
+            new_val = str(validated.get(key) or "").strip()
+            if prev_val != new_val:
+                destination_rematerialize_keys_changed.append(key)
+
+        if "LIBRARY_DESTINATION_MAP_JSON" in validated:
+            raw_map = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "").strip()
+            if raw_map:
+                try:
+                    from services.library_destinations import parse_library_destination_map
+
+                    # Round-trip normalize so invalid JSON fails loudly at save.
+                    import json as _json
+
+                    payload = _json.loads(raw_map)
+                    if not isinstance(payload, list):
+                        errors["LIBRARY_DESTINATION_MAP_JSON"] = "must be a JSON array"
+                    else:
+                        validated["LIBRARY_DESTINATION_MAP_JSON"] = _json.dumps(
+                            parse_library_destination_map(raw_map),
+                            separators=(",", ":"),
+                        )
+                except Exception as exc:
+                    errors["LIBRARY_DESTINATION_MAP_JSON"] = f"invalid JSON: {exc}"
+
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
             prev_raw = str(prev_row.value if prev_row and prev_row.value is not None else "") or ""
@@ -1653,7 +1722,7 @@ def save_settings(
             validated["ARR_INSTANCES_JSON"] = merged
 
         arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
-        arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 2) or 2))
+        arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 4) or 4))
         allowed_instance_keys: dict[str, set[str]] = {"radarr": set(), "sonarr": set()}
 
         if arr_instances_json:
@@ -1905,6 +1974,30 @@ def save_settings(
                 extra={"emoji_type": "processing"},
             )
 
+        destination_rematerialize_summary: dict[str, Any] | None = None
+        if destination_rematerialize_keys_changed and apply_scope:
+            effective_dest_scope = str(apply_scope)
+            if effective_dest_scope == "future":
+                effective_dest_scope = "next_full_sync"
+            try:
+                from services.library_destination_rematerialize import enqueue_destination_rematerialize
+
+                destination_rematerialize_summary = enqueue_destination_rematerialize(
+                    source="settings_save:destination_map",
+                    apply_now=(effective_dest_scope == "now"),
+                )
+                logger.info(
+                    f"Destination rematerialize after settings save scope={effective_dest_scope} "
+                    f"keys={destination_rematerialize_keys_changed}",
+                    extra={"emoji_type": "processing"},
+                )
+            except Exception as dest_exc:
+                logger.warning(
+                    f"Destination rematerialize after settings save failed: {dest_exc}",
+                    extra={"emoji_type": "warning"},
+                )
+                destination_rematerialize_summary = {"ok": False, "error": str(dest_exc)}
+
         logger.info(
             "Settings saved"
             f" partial={partial}"
@@ -1924,6 +2017,8 @@ def save_settings(
             "nfo_backfill": backfill_summary,
             "art_backfill_keys_changed": art_backfill_keys_changed,
             "art_backfill": art_backfill_summary,
+            "destination_rematerialize_keys_changed": destination_rematerialize_keys_changed,
+            "destination_rematerialize": destination_rematerialize_summary,
         }
     except Exception as exc:
         session.rollback()

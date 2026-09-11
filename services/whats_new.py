@@ -178,6 +178,21 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/status-updates",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="library-destinations-multilibrary",
+        since_version="0.9.27-beta.1",
+        title="Multiple library destinations",
+        body=(
+            "You can map Arr root folders to different Placeholdarr destinations and Plex libraries "
+            "(Movies, Animated, Documentaries, and the same idea for TV), instead of one combined movies/tv tree.\n\n"
+            "Configure destinations under Settings → Paths. Saving offers Apply now or Next full sync so "
+            "existing placeholders move. Collection recipes still need each target Plex library selected explicitly.\n\n"
+            "You can also add more than two Radarr or Sonarr instances (default cap 4)."
+        ),
+        cta_label="Open Paths",
+        cta_path="/settings/paths",
+        requires_ack=True,
+    ),
 )
 
 

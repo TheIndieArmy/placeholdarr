@@ -213,42 +213,57 @@ def find_movie_by_id(tmdb_id, title=None, year=None):
         return None
 
     try:
-        movie_section = plex.library.sectionByID(settings.PLEX_MOVIE_SECTION_ID)
-        all_movies = _cached_section_all(movie_section, "movie")
+        from services.library_destinations import all_plex_section_ids, parse_library_destination_map
+
+        section_ids = list(all_plex_section_ids(map_rows=parse_library_destination_map()))
+        movie_default = getattr(settings, "PLEX_MOVIE_SECTION_ID", None)
+        if movie_default is not None:
+            mid = int(movie_default)
+            if mid not in section_ids:
+                section_ids.insert(0, mid)
+        if not section_ids:
+            return None
 
         target_tmdb = str(tmdb_id)
-        for movie in all_movies:
-            guid_id = _extract_guid_numeric(movie, "tmdb")
-            if guid_id and guid_id == target_tmdb:
-                return movie
-
-        for movie in all_movies:
-            path_id = _extract_path_numeric(movie, "tmdb")
-            if path_id and path_id == target_tmdb:
-                return movie
-
-        if title:
-            clean_title = _normalize_title(title)
-            if year is not None:
-                try:
-                    target_year = int(year)
-                except Exception:
-                    target_year = None
-                if target_year is not None:
-                    for movie in all_movies:
-                        if (
-                            _normalize_title(getattr(movie, "title", None)) == clean_title
-                            and int(getattr(movie, "year", 0) or 0) == target_year
-                        ):
-                            return movie
+        for section_id in section_ids:
+            try:
+                movie_section = plex.library.sectionByID(int(section_id))
+            except Exception:
+                continue
+            all_movies = _cached_section_all(movie_section, "movie")
 
             for movie in all_movies:
-                if _normalize_title(getattr(movie, "title", None)) == clean_title:
+                guid_id = _extract_guid_numeric(movie, "tmdb")
+                if guid_id and guid_id == target_tmdb:
                     return movie
-            try:
-                return movie_section.get(title)
-            except Exception:
-                return None
+
+            for movie in all_movies:
+                path_id = _extract_path_numeric(movie, "tmdb")
+                if path_id and path_id == target_tmdb:
+                    return movie
+
+            if title:
+                clean_title = _normalize_title(title)
+                if year is not None:
+                    try:
+                        target_year = int(year)
+                    except Exception:
+                        target_year = None
+                    if target_year is not None:
+                        for movie in all_movies:
+                            if (
+                                _normalize_title(getattr(movie, "title", None)) == clean_title
+                                and int(getattr(movie, "year", 0) or 0) == target_year
+                            ):
+                                return movie
+
+                for movie in all_movies:
+                    if _normalize_title(getattr(movie, "title", None)) == clean_title:
+                        return movie
+                try:
+                    return movie_section.get(title)
+                except Exception:
+                    pass
 
         return None
     except Exception as ex:

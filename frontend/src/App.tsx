@@ -25,6 +25,7 @@ import {
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
+import { DestinationMapEditor } from "./settings/DestinationMapEditor";
 import type { IntegrationsStatusResponse } from "./types/api";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
@@ -464,6 +465,8 @@ const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_NARROW = [5, 6, 9, 10] as const;
 const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE = [3, 4, 11, 12] as const;
 
 const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
+const PATH_DESTINATION_MAP_KEY = "LIBRARY_DESTINATION_MAP_JSON";
+const PATH_PLEX_DEFAULT_SECTION_KEYS = ["PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID"] as const;
 const PATH_PROFILE_KEYS = [] as const;
 const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
 
@@ -509,12 +512,22 @@ const ARR_BEHAVIOR_KEYS = new Set<string>([
 function partitionLibraryPathFields(fields: SettingsField[]) {
   const profileSet = new Set<string>(PATH_PROFILE_KEYS as unknown as string[]);
   const overrideSet = new Set<string>(PATH_PER_LIBRARY_OVERRIDE_KEYS as unknown as string[]);
+  const plexDefaultSet = new Set<string>(PATH_PLEX_DEFAULT_SECTION_KEYS as unknown as string[]);
   const byKey = new Map(fields.map((f) => [f.key, f]));
   const root = byKey.get(PATH_LIBRARY_ROOT_KEY);
+  const destinationMap = byKey.get(PATH_DESTINATION_MAP_KEY);
+  const plexDefaults = PATH_PLEX_DEFAULT_SECTION_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const profiles = PATH_PROFILE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
   const overrides = PATH_PER_LIBRARY_OVERRIDE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
-  const rest = fields.filter((f) => f.key !== PATH_LIBRARY_ROOT_KEY && !profileSet.has(f.key) && !overrideSet.has(f.key));
-  return { root, profiles, overrides, rest };
+  const rest = fields.filter(
+    (f) =>
+      f.key !== PATH_LIBRARY_ROOT_KEY &&
+      f.key !== PATH_DESTINATION_MAP_KEY &&
+      !plexDefaultSet.has(f.key) &&
+      !profileSet.has(f.key) &&
+      !overrideSet.has(f.key)
+  );
+  return { root, plexDefaults, destinationMap, profiles, overrides, rest };
 }
 
 const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
@@ -1956,13 +1969,21 @@ export function App() {
               hasUnsavedChanges && statusUpdateSettingsChanged(baselineValues, fieldValues);
             const posterLanguageChanged =
               hasUnsavedChanges && posterLanguageSettingsChanged(baselineValues, fieldValues);
+            const destinationChanged =
+              hasUnsavedChanges && destinationRematerializeSettingsChanged(baselineValues, fieldValues);
             const messagesDirty = statusMessagesMeta.dirty;
-            const needsBackfillPrompt = statusKeysChanged || messagesDirty;
+            const needsBackfillPrompt = statusKeysChanged || messagesDirty || destinationChanged;
             let applyScope: NfoBackfillApplyScope | undefined;
             try {
               if (needsBackfillPrompt) {
                 const modalCopy =
-                  posterLanguageChanged && !messagesDirty
+                  destinationChanged && !statusKeysChanged && !messagesDirty
+                    ? {
+                        title: "Apply library destinations to existing placeholders",
+                        description:
+                          "Library Root or destination map changes move placeholders on disk. Choose Apply now or wait for the next full sync.",
+                      }
+                    : posterLanguageChanged && !messagesDirty && !destinationChanged
                     ? {
                         title: "Apply poster language to existing placeholders",
                         description:
@@ -1981,6 +2002,12 @@ export function App() {
                           description:
                             "Choose when updates to placeholder status visibility, projection targets, or poster overlays should affect existing placeholders.",
                         }
+                      : destinationChanged
+                        ? {
+                            title: "Apply library destinations to existing placeholders",
+                            description:
+                              "Library Root or destination map changes move placeholders on disk. Choose Apply now or wait for the next full sync.",
+                          }
                       : {
                           title: "Apply template changes",
                           description:
@@ -1997,7 +2024,8 @@ export function App() {
 
               /* Persist field-backed settings before saving templates + enqueueing nfo_refresh jobs. */
               if (hasUnsavedChanges) {
-                const settingsBackfillScope = statusKeysChanged ? applyScope : undefined;
+                const settingsBackfillScope =
+                  statusKeysChanged || destinationChanged ? applyScope : undefined;
                 const result = await saveSettings(
                   buildPersistableSettingsValues(fieldValues, settingsPayload),
                   false,
@@ -3665,7 +3693,7 @@ type ArrInstanceDraft = {
   is_4k: boolean;
 };
 
-const ARR_INSTANCE_LIMIT_PER_TYPE = 2;
+const ARR_INSTANCE_LIMIT_PER_TYPE = 4;
 
 function normalizeInstanceKey(input: string) {
   return String(input || "")
@@ -3684,14 +3712,21 @@ function arrInstanceIdEmbedsUuid(instanceId: string): boolean {
   return hyphens >= 4;
 }
 
-function slotWebhookRoleFromRowRole(role: string): "primary" | "secondary" {
+function slotWebhookRoleFromRowRole(role: string): "primary" | "secondary" | "additional" {
   const r = String(role || "").trim().toLowerCase();
-  if (r === "secondary" || r === "additional") return "secondary";
+  if (r === "secondary") return "secondary";
+  if (r === "additional") return "additional";
   return "primary";
 }
 
-function stableArrInstanceId(arrType: "radarr" | "sonarr", slotRole: "primary" | "secondary") {
-  return `${arrType}_${slotRole}`;
+function stableArrInstanceId(
+  arrType: "radarr" | "sonarr",
+  slotRole: "primary" | "secondary" | "additional",
+  instanceKey?: string
+) {
+  if (slotRole === "primary" || slotRole === "secondary") return `${arrType}_${slotRole}`;
+  const key = normalizeInstanceKey(String(instanceKey || ""));
+  return `${arrType}_${key || "additional"}`;
 }
 
 /**
@@ -3760,10 +3795,10 @@ function deriveIs4kFromRole(role: string) {
 
 function getPlexLibraryIdPathHint(fieldKey: string): string | null {
   if (fieldKey === "PLEX_MOVIE_SECTION_ID") {
-    return "ID of the placeholder Movies library that points at your derived movies path.";
+    return "ID of the placeholder Movies library that points at your Library Root movies path (defaults for unmapped Arr roots).";
   }
   if (fieldKey === "PLEX_TV_SECTION_ID") {
-    return "ID of the placeholder TV library that points at your derived tv path.";
+    return "ID of the placeholder TV library that points at your Library Root tv path (defaults for unmapped Arr roots).";
   }
   return null;
 }
@@ -3776,7 +3811,7 @@ function getPlexLibraryTips(fieldKey: string = "setup"): string[] {
     tips.push(pathHint);
   } else {
     tips.push(
-      "Before connecting, create separate placeholder Movies and TV libraries in Plex that point at your derived movies and tv paths, then enter those library IDs in Configure.",
+      "Create separate placeholder Movies and TV libraries in Plex that point at your Library Root movies and tv paths, then set those library IDs under Paths (next to Library Root).",
     );
   }
   tips.push(
@@ -3834,7 +3869,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
             const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
             const slotRole = slotWebhookRoleFromRowRole(role);
             const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
-            const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole);
+            const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole, key);
             const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
             const instance_key_aliases = aliasRaw
               .map((a) => normalizeInstanceKey(String(a)))
@@ -3879,7 +3914,8 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
       const role = normalizeInstanceRole(row.role, rank);
       const slotRole = slotWebhookRoleFromRowRole(role);
       const instanceId =
-        String(row.instance_id || "").trim().toLowerCase() || stableArrInstanceId(row.arr_type, slotRole);
+        String(row.instance_id || "").trim().toLowerCase() ||
+        stableArrInstanceId(row.arr_type, slotRole, inferredKey);
       const aliasList = (row.instance_key_aliases || [])
         .map((a) => normalizeInstanceKey(String(a)))
         .filter((a) => a && a !== inferredKey);
@@ -4200,10 +4236,10 @@ function ArrInstancesEditor(props: {
     }),
     [primaryConnectionOk.radarr, primaryConnectionOk.sonarr, props.values],
   );
-  const [slotPanel, setSlotPanel] = useState<{ arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean } | null>(null);
+  const [slotPanel, setSlotPanel] = useState<{ arrType: "radarr" | "sonarr"; slotIndex: number; isNew?: boolean } | null>(null);
   const [disconnectDialog, setDisconnectDialog] = useState<{
     arrType: "radarr" | "sonarr";
-    slotIndex: 0 | 1;
+    slotIndex: number;
     label: string;
   } | null>(null);
   const [webhookSetupDialog, setWebhookSetupDialog] = useState<{
@@ -4260,15 +4296,25 @@ function ArrInstancesEditor(props: {
     props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(trimmed));
   }
 
-  function defaultSlot(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
-    const label = arrType === "radarr"
-      ? (slotIndex === 0 ? "Radarr Primary" : "Radarr Secondary")
-      : (slotIndex === 0 ? "Sonarr Primary" : "Sonarr Secondary");
+  function defaultSlot(arrType: "radarr" | "sonarr", slotIndex: number): ArrInstanceDraft {
+    const role: ArrInstanceDraft["role"] =
+      slotIndex === 0 ? "primary" : slotIndex === 1 ? "secondary" : "additional";
+    const label =
+      arrType === "radarr"
+        ? slotIndex === 0
+          ? "Radarr Primary"
+          : slotIndex === 1
+            ? "Radarr Secondary"
+            : `Radarr Additional ${slotIndex}`
+        : slotIndex === 0
+          ? "Sonarr Primary"
+          : slotIndex === 1
+            ? "Sonarr Secondary"
+            : `Sonarr Additional ${slotIndex}`;
     const instanceKey = inferDefaultKey(label, arrType);
-    const role = slotIndex === 0 ? "primary" : "secondary";
     return {
       id: `slot-${arrType}-${slotIndex}`,
-      instance_id: stableArrInstanceId(arrType, role),
+      instance_id: stableArrInstanceId(arrType, role, instanceKey),
       label,
       arr_type: arrType,
       instance_key: instanceKey,
@@ -4285,14 +4331,22 @@ function ArrInstancesEditor(props: {
     return instances.filter((item) => item.arr_type === arrType).slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
   }
 
-  function upsertSlot(arrType: "radarr" | "sonarr", slotIndex: 0 | 1, patch: Partial<ArrInstanceDraft>) {
+  function upsertSlot(arrType: "radarr" | "sonarr", slotIndex: number, patch: Partial<ArrInstanceDraft>) {
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     while (typeRows.length <= slotIndex) {
-      typeRows.push(defaultSlot(arrType, typeRows.length === 0 ? 0 : 1));
+      typeRows.push(defaultSlot(arrType, typeRows.length));
     }
     const target = typeRows[slotIndex] || defaultSlot(arrType, slotIndex);
     const merged = { ...target, ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, "label") || Object.prototype.hasOwnProperty.call(patch, "instance_key")) {
+      const key = normalizeInstanceKey(String(merged.instance_key || inferDefaultKey(merged.label, arrType)));
+      merged.instance_key = key;
+      if (merged.role === "additional" || slotIndex > 1) {
+        merged.role = "additional";
+        merged.instance_id = stableArrInstanceId(arrType, "additional", key);
+      }
+    }
     typeRows[slotIndex] = merged;
     if (Object.prototype.hasOwnProperty.call(patch, "url") || Object.prototype.hasOwnProperty.call(patch, "api_key")) {
       setTestState((prev) => {
@@ -4350,7 +4404,7 @@ function ArrInstancesEditor(props: {
     update([...otherRows, primary, { ...secondary }]);
   }
 
-  async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: 0 | 1) {
+  async function runTest(item: ArrInstanceDraft, arrType: "radarr" | "sonarr", slotIndex: number) {
     setTestState((prev) => ({ ...prev, [item.id]: { ok: true, message: "Testing..." } }));
     let result: { ok: boolean; message: string };
     try {
@@ -4384,11 +4438,11 @@ function ArrInstancesEditor(props: {
     sonarr: getTypeRows("sonarr"),
   };
 
-  function slotFor(arrType: "radarr" | "sonarr", slotIndex: 0 | 1): ArrInstanceDraft {
+  function slotFor(arrType: "radarr" | "sonarr", slotIndex: number): ArrInstanceDraft {
     return byType[arrType][slotIndex] || defaultSlot(arrType, slotIndex);
   }
 
-  function openSlotPanel(next: { arrType: "radarr" | "sonarr"; slotIndex: 0 | 1; isNew?: boolean }) {
+  function openSlotPanel(next: { arrType: "radarr" | "sonarr"; slotIndex: number; isNew?: boolean }) {
     setSlotPanelTestPassed(false);
     setSlotFooterTestBusy(false);
     const item = slotFor(next.arrType, next.slotIndex);
@@ -4446,8 +4500,11 @@ function ArrInstancesEditor(props: {
     const { arrType, slotIndex } = disconnectDialog;
     if (slotIndex === 0) {
       setPrimary(arrType, false);
-    } else {
+    } else if (slotIndex === 1) {
       setSecondary(arrType, false);
+    } else {
+      const typeRows = getTypeRows(arrType).filter((_, idx) => idx !== slotIndex);
+      update([...instances.filter((item) => item.arr_type !== arrType), ...typeRows]);
     }
     setSlotPanel((p) => {
       if (p?.arrType === arrType && p.slotIndex === slotIndex) {
@@ -4506,7 +4563,7 @@ function ArrInstancesEditor(props: {
   function card(
     item: ArrInstanceDraft,
     arrType: "radarr" | "sonarr",
-    slotIndex: 0 | 1,
+    slotIndex: number,
     required: boolean,
     opts?: {
       showToggle?: boolean;
@@ -4933,6 +4990,72 @@ function ArrInstancesEditor(props: {
                     )}
                   </div>
                 </div>
+                {getTypeRows(arrType).length > 2 ? (
+                  <div className="mt-4 space-y-3">
+                    <div className="text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                      Additional instances
+                    </div>
+                    {getTypeRows(arrType).slice(2).map((extraItem, offset) => {
+                      const slotIndex = offset + 2;
+                      return (
+                        <div
+                          key={extraItem.id}
+                          className="flex min-h-[96px] flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[16px] font-semibold text-white font-headline truncate">
+                              {extraItem.label}
+                            </div>
+                            <div className="truncate font-mono text-[13px] text-slate-500">
+                              {String(extraItem.url || "").trim() || "—"}
+                            </div>
+                          </div>
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openSlotPanel({ arrType, slotIndex, isNew: false })}
+                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                            >
+                              Configure
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDisconnectDialog({
+                                  arrType,
+                                  slotIndex,
+                                  label: String(extraItem.label || arrType),
+                                })
+                              }
+                              className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {secondaryEnabled[arrType] && getTypeRows(arrType).length < ARR_INSTANCE_LIMIT_PER_TYPE ? (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextIndex = getTypeRows(arrType).length;
+                        const draft = defaultSlot(arrType, nextIndex);
+                        update([...instances.filter((i) => i.arr_type !== arrType), ...getTypeRows(arrType), draft]);
+                        openSlotPanel({ arrType, slotIndex: nextIndex, isNew: true });
+                      }}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-3 text-[14px] text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: 20 }}>
+                        add
+                      </span>
+                      Add another {arrType === "radarr" ? "Radarr" : "Sonarr"} instance
+                    </button>
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -4941,7 +5064,7 @@ function ArrInstancesEditor(props: {
             const { arrType, slotIndex, isNew } = slotPanel;
             const item = slotFor(arrType, slotIndex);
             const status = testState[item.id];
-            const roleLabel = slotIndex === 0 ? "Primary" : "Secondary";
+            const roleLabel = slotIndex === 0 ? "Primary" : slotIndex === 1 ? "Secondary" : "Additional";
             const serviceLabel = arrType === "radarr" ? "Radarr" : "Sonarr";
             const slotCommitLabel = isNew ? `Add ${serviceLabel}` : `Save ${serviceLabel}`;
             const detailsComplete =
@@ -5146,7 +5269,11 @@ function LibraryPathsForm(props: {
   runTest?: (field: SettingsField) => void;
   testResults?: Record<string, { ok: boolean; message: string }>;
 }) {
-  const { root, profiles, overrides, rest } = useMemo(() => partitionLibraryPathFields(props.fields), [props.fields]);
+  const { root, plexDefaults, destinationMap, profiles, overrides, rest } = useMemo(
+    () => partitionLibraryPathFields(props.fields),
+    [props.fields],
+  );
+  const plexActive = Boolean(props.values.ENABLE_PLEX);
   const [overridesOpen, setOverridesOpen] = useState(() => {
     if (props.layout === "wizard") return false;
     return overrides.some((f) => String(props.values[f.key] ?? "").trim() !== "");
@@ -5168,15 +5295,16 @@ function LibraryPathsForm(props: {
     );
   }
 
-  function renderTextInput(field: SettingsField, opts?: { compact?: boolean; muted?: boolean }) {
-    const border = opts?.muted ? "border-[#424753]/25" : "border-[#424753]/40";
+  function renderTextInput(field: SettingsField, opts?: { compact?: boolean; muted?: boolean; disabled?: boolean }) {
+    const border = opts?.muted || opts?.disabled ? "border-[#424753]/25" : "border-[#424753]/40";
     const ph = field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`;
     return (
       <input
-        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""}`}
+        className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""} ${opts?.disabled ? "opacity-50 cursor-not-allowed text-slate-500" : ""}`}
         type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
         value={String(props.values[field.key] ?? "")}
         placeholder={ph}
+        disabled={opts?.disabled}
         onChange={(e) => props.onValueChange(field.key, e.target.value)}
       />
     );
@@ -5213,10 +5341,7 @@ function LibraryPathsForm(props: {
               {field.secret && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-400">Secret</span>}
               {field.restart_required && <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-orange-600/30 text-orange-300">Restart Required</span>}
             </div>
-            {isPlexSectionIdField(field.key) ? <PlexLibraryTipsDisclosure fieldKey={field.key} className="mt-1" /> : null}
-            {field.description && !isPlexSectionIdField(field.key) ? (
-              <p className="ui-field-description mt-1">{field.description}</p>
-            ) : null}
+            {field.description ? <p className="ui-field-description mt-1">{field.description}</p> : null}
           </div>
         </div>
         {field.type === "bool" ? (
@@ -5293,6 +5418,61 @@ function LibraryPathsForm(props: {
     </div>
   ) : null;
 
+  const plexDefaultsBlock =
+    plexDefaults.length > 0 ? (
+      <div
+        className={
+          props.layout === "wizard"
+            ? undefined
+            : `${UI_SECTION_FRAME_CLASS} px-4 py-4 ${plexActive ? "" : "opacity-60"}`
+        }
+      >
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <label className="block text-[16px] font-semibold text-white font-headline">Default Plex libraries</label>
+          {plexActive ? (
+            <span
+              className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase"
+              style={{ backgroundColor: alphaColor(props.accent.hex, 0.3), color: props.accent.text }}
+            >
+              Required for Plex
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 rounded text-[12px] font-bold font-headline uppercase bg-[#252e3a] text-slate-500">
+              Plex only
+            </span>
+          )}
+        </div>
+        <p className="ui-field-description mb-3 leading-relaxed">
+          {plexActive
+            ? "Section IDs for placeholders under Library Root. Mapped destinations can override these. Jellyfin and Emby ignore these fields and refresh by folder path."
+            : "Enable Plex under Media Integrations to edit these. Jellyfin and Emby do not use library IDs; they refresh by folder path."}
+        </p>
+        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${plexActive ? "" : "pointer-events-none"}`}>
+          {plexDefaults.map((field) => (
+            <div key={field.key}>
+              <label className="mb-1 block text-[14px] font-medium text-slate-300">{field.label}</label>
+              <PlexLibraryTipsDisclosure fieldKey={field.key} className="mb-1.5" />
+              {renderTextInput(field, { disabled: !plexActive })}
+            </div>
+          ))}
+        </div>
+      </div>
+    ) : null;
+
+  const destinationMapBlock = destinationMap ? (
+    <div className={props.layout === "settings" ? `${UI_SECTION_FRAME_CLASS} px-4 py-4` : undefined}>
+      <label className="block text-[16px] font-semibold text-white font-headline mb-1">Library destinations</label>
+      <DestinationMapEditor
+        value={String(props.values[destinationMap.key] ?? "")}
+        onChange={(json) => props.onValueChange(destinationMap.key, json)}
+        focusClass={focus}
+        layout={props.layout}
+        plexActive={plexActive}
+        libraryRoot={String(props.values.LIBRARY_ROOT ?? "")}
+      />
+    </div>
+  ) : null;
+
   const profileBlock = profiles.length ? (
     <div className={`${UI_SECTION_FRAME_CLASS} px-4 py-4`}>
       <div className="text-[12px] font-headline uppercase tracking-widest text-slate-500 mb-2">Folder Profiles</div>
@@ -5352,6 +5532,8 @@ function LibraryPathsForm(props: {
         <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
           <div className="space-y-5">
             {rootBlock}
+            {plexDefaultsBlock}
+            {destinationMapBlock}
             {profileBlock}
             {overridesBlock}
             {rest.map((field) => (
@@ -5372,12 +5554,17 @@ function LibraryPathsForm(props: {
       {root ? (
         <div className="px-6 py-5">{rootBlock}</div>
       ) : null}
+      {plexDefaults.length ? <div className="px-6 py-5">{plexDefaultsBlock}</div> : null}
+      {destinationMap ? (
+        <div className="px-6 py-5">{destinationMapBlock}</div>
+      ) : null}
       {profiles.length ? <div className="px-6 py-5">{profileBlock}</div> : null}
       {overrides.length ? <div className="px-6 py-5">{overridesBlock}</div> : null}
       {rest.map((field) => renderSettingsRestField(field))}
     </>
   );
 }
+
 
 type LookaheadIntroVariant = "settings" | "onboarding";
 
@@ -6383,7 +6570,13 @@ function SettingsPanel(props: {
               ) : null}
               {active.name === "Paths" ? (
                 <LibraryPathsForm
-                  fields={active.fields}
+                  fields={[
+                    ...active.fields,
+                    ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
+                      (field): field is SettingsField =>
+                        Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
+                    ),
+                  ]}
                   values={props.values}
                   brand={props.brand}
                   themeMode={props.themeMode}
@@ -6494,6 +6687,7 @@ function SettingsPanel(props: {
                                           <dt className="w-[4.75rem] shrink-0 font-medium text-slate-500">TV lib.</dt>
                                           <dd className="truncate font-mono text-slate-200" title={tvLib || undefined}>{tvLib || "—"}</dd>
                                         </div>
+                                        <p className="pt-1 text-[12px] text-slate-500">Default libraries are set under Paths.</p>
                                       </>
                                     ) : null}
                                   </dl>
@@ -6564,6 +6758,7 @@ function SettingsPanel(props: {
                           (field) =>
                             !SETTINGS_UI_HIDDEN_FIELD_KEYS.has(field.key) &&
                             !HIDDEN_PLAYBACK_INTERNAL_KEYS.has(field.key) &&
+                            !isPlexSectionIdField(field.key) &&
                             !ONBOARDING_MEDIA_CARDS.some((card) =>
                               [card.enabledKey, ...card.keys].includes(field.key),
                             ),
@@ -7024,6 +7219,12 @@ function statusUpdateSettingsChanged(baseline: FieldValueMap, current: FieldValu
 
 function posterLanguageSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
   return POSTER_LANGUAGE_SETTING_KEYS.some((key) => String(baseline[key] ?? "") !== String(current[key] ?? ""));
+}
+
+function destinationRematerializeSettingsChanged(baseline: FieldValueMap, current: FieldValueMap): boolean {
+  return [PATH_LIBRARY_ROOT_KEY, PATH_DESTINATION_MAP_KEY].some(
+    (key) => String(baseline[key] ?? "") !== String(current[key] ?? "")
+  );
 }
 
 const STATUS_MESSAGE_GROUP_ORDER = [
@@ -8225,7 +8426,7 @@ const ONBOARDING_MEDIA_CARDS = [
     title: "Plex",
     enabledKey: "ENABLE_PLEX",
     note: "Playback needs Tautulli or Tracearr so Placeholdarr hears when someone hits play.",
-    keys: ["PLEX_URL", "PLEX_TOKEN", "PLEX_MOVIE_SECTION_ID", "PLEX_TV_SECTION_ID", "TAUTULLI_INSTANCE_KEY"],
+    keys: ["PLEX_URL", "PLEX_TOKEN", "TAUTULLI_INSTANCE_KEY"],
     notifierKey: "PLEX_PLAYBACK_NOTIFIER",
     nativeNotifier: "tautulli" as const,
   },
@@ -9826,6 +10027,7 @@ function OnboardingWizard(props: {
                                       {tvLib || "—"}
                                     </dd>
                                   </div>
+                                  <p className="pt-1 text-[12px] text-slate-500">Default libraries are set under Paths.</p>
                                 </>
                               ) : null}
                             </dl>
@@ -10488,7 +10690,19 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   });
 
   const integrations = new Set(map.Integrations || []);
-  const mediaIntegrations = new Set([...(map["Media Integrations"] || []), ...[...integrations].filter((k) => k.startsWith("PLEX") || k.startsWith("JELLYFIN") || k.startsWith("EMBY") || k === "ENABLE_PLEX" || k === "ENABLE_JELLYFIN" || k === "ENABLE_EMBY")]);
+  const mediaIntegrations = new Set([
+    ...(map["Media Integrations"] || []),
+    ...[...integrations].filter(
+      (k) =>
+        !isPlexSectionIdField(k) &&
+        (k.startsWith("PLEX") ||
+          k.startsWith("JELLYFIN") ||
+          k.startsWith("EMBY") ||
+          k === "ENABLE_PLEX" ||
+          k === "ENABLE_JELLYFIN" ||
+          k === "ENABLE_EMBY"),
+    ),
+  ]);
   const arrIntegrations = new Set([
     ...(map["ARR Integrations"] || []),
     ...[...integrations].filter(
@@ -10508,7 +10722,14 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
   const arrBehavior = arrBehaviorFromArrIntegrations.length ? arrBehaviorFromArrIntegrations : arrBehaviorFromLookahead;
   const lookaheadNonArr = lookahead.filter((k) => !ARR_BEHAVIOR_KEYS.has(k));
 
-  if (stepKey === "paths") return [...paths];
+  if (stepKey === "paths") {
+    const pathKeys = [...paths];
+    const allKeys = new Set(sections.flatMap((section) => section.fields.map((f) => f.key)));
+    for (const key of PATH_PLEX_DEFAULT_SECTION_KEYS) {
+      if (allKeys.has(key) && !pathKeys.includes(key)) pathKeys.push(key);
+    }
+    return pathKeys;
+  }
   if (stepKey === "arr") {
     return [
       ...[...arrIntegrations].filter((k) => k.startsWith("RADARR") || k.startsWith("SONARR") || k === "ARR_INSTANCES_JSON"),
@@ -10516,7 +10737,7 @@ function fieldsForWizardStep(stepKey: (typeof WIZARD_STEPS)[number]["key"], sect
     ];
   }
   if (stepKey === "media") {
-    return [...mediaIntegrations];
+    return [...mediaIntegrations].filter((k) => !isPlexSectionIdField(k));
   }
   if (stepKey === "look_and_feel") {
     return [...LOOK_AND_FEEL_FIELD_KEYS];

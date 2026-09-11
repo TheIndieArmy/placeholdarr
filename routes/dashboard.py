@@ -4442,6 +4442,7 @@ async def movie_detail(movie_id: int):
             "file_path": movie.radarr_filepath,
             "file_size_bytes": movie.moviefile_size,
             "library_path": movie.radarrpath,
+            "placeholder_folder": movie.placeholder_folder,
             "radarr_id": movie.radarrid,
             "last_found_in_arr": _iso(movie.last_found_in_radarr),
             "radarr_quality": movie.radarr_quality,
@@ -5307,6 +5308,38 @@ async def settings_status():
 @router.get("/api/settings/current")
 async def settings_current():
     return JSONResponse(content=get_settings_payload())
+
+
+@router.get("/api/settings/arr-root-folders")
+async def settings_arr_root_folders():
+    """Live Arr root folders per configured instance (for destination map UX)."""
+    from routes.collections import _arr_instances_for_media, _fetch_instance_root_folders
+
+    out: list[dict] = []
+    for media_type, arr_type in (("movie", "radarr"), ("show", "sonarr")):
+        for item in _arr_instances_for_media(media_type):
+            folders = _fetch_instance_root_folders(item)
+            out.append(
+                {
+                    "instance_key": item.get("instance_key"),
+                    "instance_id": item.get("instance_id"),
+                    "label": item.get("label") or item.get("instance_key"),
+                    "arr_type": arr_type,
+                    "root_folders": folders,
+                }
+            )
+    return JSONResponse(content={"ok": True, "instances": out})
+
+
+@router.post("/api/settings/ensure-dest-folder")
+async def settings_ensure_dest_folder(request: Request):
+    """Create a Placeholdarr destination folder on disk (for Paths destination setup)."""
+    from services.library_destinations import ensure_single_dest_folder
+
+    payload = await request.json()
+    path = payload.get("path") if isinstance(payload, dict) else None
+    result = ensure_single_dest_folder(str(path or ""))
+    return JSONResponse(content=result)
 
 
 @router.post("/api/settings/save")

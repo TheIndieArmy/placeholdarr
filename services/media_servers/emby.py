@@ -288,15 +288,25 @@ def refresh_emby_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
 
     roots: list[str] = []
     if has_movies:
-        for key in ("MOVIE_LIBRARY_FOLDER", "MOVIE_LIBRARY_4K_FOLDER"):
-            val = getattr(settings, key, None)
-            if val:
-                roots.append(val)
+        try:
+            from services.library_destinations import all_movie_dest_roots
+
+            roots.extend(all_movie_dest_roots())
+        except Exception:
+            for key in ("MOVIE_LIBRARY_FOLDER", "MOVIE_LIBRARY_4K_FOLDER"):
+                val = getattr(settings, key, None)
+                if val:
+                    roots.append(val)
     if has_episodes:
-        for key in ("TV_LIBRARY_FOLDER", "TV_LIBRARY_4K_FOLDER"):
-            val = getattr(settings, key, None)
-            if val:
-                roots.append(val)
+        try:
+            from services.library_destinations import all_tv_dest_roots
+
+            roots.extend(all_tv_dest_roots())
+        except Exception:
+            for key in ("TV_LIBRARY_FOLDER", "TV_LIBRARY_4K_FOLDER"):
+                val = getattr(settings, key, None)
+                if val:
+                    roots.append(val)
 
     if not roots:
         return {"refreshed": 0, "failed": 0}

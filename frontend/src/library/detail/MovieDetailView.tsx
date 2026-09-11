@@ -181,6 +181,7 @@ export function MovieDetailView(props: {
               </DetailFactCard>
               <DetailFactCard title="Paths" themeMode={props.themeMode}>
                 <DetailFactRow label="Library path" value={payload.library_path} themeMode={props.themeMode} />
+                <DetailFactRow label="Placeholdarr folder" value={payload.placeholder_folder} themeMode={props.themeMode} />
                 <DetailFactRow label="File path" value={payload.file_path} themeMode={props.themeMode} />
                 <DetailFactRow label="File size" value={formatFileSize(payload.file_size_bytes)} themeMode={props.themeMode} />
               </DetailFactCard>

@@ -105,17 +105,108 @@ def _path_is_within_root(path: str | None, root: str | None) -> bool:
 
 
 def _match_tv_instance_from_path(path: str | None) -> str | None:
-    matches: list[str] = []
-    if _path_is_within_root(path, getattr(settings, 'TV_LIBRARY_FOLDER', '')):
-        matches.append('standard')
-    if _path_is_within_root(path, getattr(settings, 'TV_LIBRARY_4K_FOLDER', '')):
-        matches.append('4k')
+    """Match a played file path to standard / 4k / both using mapped TV dest roots."""
+    if not path:
+        return None
+    try:
+        from services.library_destinations import all_tv_dest_roots, parse_library_destination_map
 
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        return 'both'
-    return None
+        rows = parse_library_destination_map()
+        # Prefer matching mapped dest folders to instance roles via instance_key when possible.
+        matched_roles: list[str] = []
+        for row in rows:
+            if str(row.get("arr_type") or "").lower() != "sonarr":
+                continue
+            dest = str(row.get("dest_folder") or "")
+            if not _path_is_within_root(path, dest):
+                continue
+            key = str(row.get("instance_key") or "").strip().lower()
+            role = "standard"
+            for item in getattr(settings, "configured_arr_instances", []) or []:
+                if str(item.get("arr_type") or "").lower() != "sonarr":
+                    continue
+                if str(item.get("instance_key") or "").strip().lower() != key:
+                    continue
+                role = "4k" if bool(item.get("is_4k")) else "standard"
+                break
+            matched_roles.append(role)
+        if not matched_roles:
+            for root in all_tv_dest_roots(map_rows=[]):
+                if _path_is_within_root(path, root):
+                    matched_roles.append("standard")
+                    break
+            four_k = str(getattr(settings, "TV_LIBRARY_4K_FOLDER", "") or "")
+            if four_k and _path_is_within_root(path, four_k):
+                matched_roles.append("4k")
+        unique = list(dict.fromkeys(matched_roles))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            return "both"
+        return None
+    except Exception:
+        matches: list[str] = []
+        if _path_is_within_root(path, getattr(settings, "TV_LIBRARY_FOLDER", "")):
+            matches.append("standard")
+        if _path_is_within_root(path, getattr(settings, "TV_LIBRARY_4K_FOLDER", "")):
+            matches.append("4k")
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return "both"
+        return None
+
+
+def _match_movie_instance_from_path(path: str | None) -> str | None:
+    """Match a played movie file path to standard / 4k / both using mapped movie dest roots."""
+    if not path:
+        return None
+    try:
+        from services.library_destinations import all_movie_dest_roots, parse_library_destination_map
+
+        rows = parse_library_destination_map()
+        matched_roles: list[str] = []
+        for row in rows:
+            if str(row.get("arr_type") or "").lower() != "radarr":
+                continue
+            dest = str(row.get("dest_folder") or "")
+            if not _path_is_within_root(path, dest):
+                continue
+            key = str(row.get("instance_key") or "").strip().lower()
+            role = "standard"
+            for item in getattr(settings, "configured_arr_instances", []) or []:
+                if str(item.get("arr_type") or "").lower() != "radarr":
+                    continue
+                if str(item.get("instance_key") or "").strip().lower() != key:
+                    continue
+                role = "4k" if bool(item.get("is_4k")) else "standard"
+                break
+            matched_roles.append(role)
+        if not matched_roles:
+            for root in all_movie_dest_roots(map_rows=[]):
+                if _path_is_within_root(path, root):
+                    matched_roles.append("standard")
+                    break
+            four_k = str(getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", "") or "")
+            if four_k and _path_is_within_root(path, four_k):
+                matched_roles.append("4k")
+        unique = list(dict.fromkeys(matched_roles))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            return "both"
+        return None
+    except Exception:
+        matches: list[str] = []
+        if _path_is_within_root(path, getattr(settings, "MOVIE_LIBRARY_FOLDER", "")):
+            matches.append("standard")
+        if _path_is_within_root(path, getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", "")):
+            matches.append("4k")
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return "both"
+        return None
 
 
 def _as_int(value: Any) -> int | None:
@@ -1448,11 +1539,15 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
     playback_kind = str(context.get('playback_kind') or 'unknown')
 
     if playback_kind == 'real':
+        mode = _movie_instance_mode()
+        root_match = _match_movie_instance_from_path(context.get('file_path'))
         return {
             'ok': True,
             'event': 'playback_start',
             'media_type': 'movie',
             'skipped': 'real_movie_noop',
+            'mode': mode,
+            'root_match': root_match,
             'qualifying_instances': sorted(active_rows.keys()),
         }
 

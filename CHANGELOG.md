@@ -7,6 +7,12 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Added
+
+- **Library destination map**: Optional Arr instance + root folder → Placeholdarr dest folder + Plex section for Movies and TV; empty map keeps single `{LIBRARY_ROOT}/movies` and `tv`.
+- **Destination rematerialize**: Saving Library Root or the destination map offers Apply now or Next full sync to relocate existing placeholders.
+- **Additional Arr instances**: Default cap raised to 4 per type; webhook stable ids for additional instances use `{type}_{instance_key}`.
+
 ### Fixed
 
 - **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
