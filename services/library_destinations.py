@@ -92,6 +92,40 @@ def parse_library_destination_map(raw: str | None = None) -> list[dict[str, Any]
     return out
 
 
+def validate_library_destination_map_unique(rows: list[dict[str, Any]]) -> str | None:
+    """Return an error message when the same Arr instance+root maps to more than one dest.
+
+    Same instance with different roots across destinations is allowed. Duplicate
+    ``(instance_key, arr_root_path)`` rows are not, even when dest folders or Plex
+    section IDs differ.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        instance_key = str(row.get("instance_key") or "").strip().lower()
+        arr_root = _normalize_path(row.get("arr_root_path") or row.get("arr_root") or "").lower()
+        dest = _normalize_path(row.get("dest_folder") or row.get("dest") or "")
+        if not instance_key or not arr_root:
+            continue
+        key = (instance_key, arr_root)
+        prior_dest = seen.get(key)
+        if prior_dest is None:
+            seen[key] = dest
+            continue
+        if prior_dest == dest:
+            return (
+                f"Arr root '{row.get('arr_root_path') or arr_root}' on instance "
+                f"'{instance_key}' is listed more than once."
+            )
+        return (
+            f"Arr root '{row.get('arr_root_path') or arr_root}' on instance "
+            f"'{instance_key}' is mapped to more than one Placeholdarr folder "
+            f"('{prior_dest}' and '{dest}'). Use different roots per destination."
+        )
+    return None
+
+
 def default_movie_dest_folder() -> str:
     return str(getattr(settings, "MOVIE_LIBRARY_FOLDER", "") or "").strip()
 

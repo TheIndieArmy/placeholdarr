@@ -41,8 +41,46 @@ function newRuleId(): string {
   return `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Match ``services.library_destinations._normalize_path`` for uniqueness checks. */
+function normalizeDestPath(path: string): string {
+  let text = String(path || "")
+    .trim()
+    .replace(/\\/g, "/");
+  while (text.includes("//")) {
+    text = text.replace(/\/\//g, "/");
+  }
+  if (text.length > 1 && text.endsWith("/")) {
+    text = text.replace(/\/+$/, "");
+  }
+  return text;
+}
+
 function rootKey(instance_key: string, path: string): string {
-  return `${instance_key}::${path}`;
+  return `${String(instance_key || "")
+    .trim()
+    .toLowerCase()}::${normalizeDestPath(path).toLowerCase()}`;
+}
+
+function destinationLabel(rules: DestinationRule[], ruleId: string): string {
+  const index = rules.findIndex((r) => r.id === ruleId);
+  return index >= 0 ? `Destination ${index + 1}` : "another destination";
+}
+
+/** Other destination that already claims this instance+root (excluding ``exceptRuleId``). */
+function findRootClaimedBy(
+  rules: DestinationRule[],
+  instanceKey: string,
+  path: string,
+  exceptRuleId?: string
+): DestinationRule | null {
+  const want = rootKey(instanceKey, path);
+  for (const rule of rules) {
+    if (exceptRuleId && rule.id === exceptRuleId) continue;
+    if (rule.selected_roots.some((r) => rootKey(r.instance_key, r.path) === want)) {
+      return rule;
+    }
+  }
+  return null;
 }
 
 function parseMapJson(raw: string): DestinationMapRow[] {
@@ -303,6 +341,15 @@ export function DestinationMapEditor(props: {
     if (!draft) return;
     const rk = rootKey(instance.instance_key, path);
     const has = draft.selected_roots.some((r) => rootKey(r.instance_key, r.path) === rk);
+    if (!has) {
+      const claimed = findRootClaimedBy(rules, instance.instance_key, path, draft.id);
+      if (claimed) {
+        setSaveHint(
+          `That Arr root is already mapped on ${destinationLabel(rules, claimed.id)}. Pick a different root or edit that destination first.`
+        );
+        return;
+      }
+    }
     const selected_roots = has
       ? draft.selected_roots.filter((r) => rootKey(r.instance_key, r.path) !== rk)
       : [
@@ -379,6 +426,17 @@ export function DestinationMapEditor(props: {
     if (!ruleIsComplete(nextDraft)) {
       setSaveHint("Add a placeholder path and at least one Arr root folder before saving.");
       return;
+    }
+    for (const root of nextDraft.selected_roots) {
+      const claimed = findRootClaimedBy(rules, root.instance_key, root.path, nextDraft.id);
+      if (claimed) {
+        const inst = instances.find((i) => i.instance_key === root.instance_key);
+        const label = inst?.label || root.instance_key;
+        setSaveHint(
+          `${label} root ${normalizeDestPath(root.path) || root.path} is already on ${destinationLabel(rules, claimed.id)}. Each Arr root can only map to one Placeholdarr folder.`
+        );
+        return;
+      }
     }
     if (draftIsNew) {
       commitRules([...rules, nextDraft]);
@@ -563,6 +621,10 @@ export function DestinationMapEditor(props: {
               <p className="ui-field-description-compact">Select at least one Arr instance first.</p>
             ) : (
               <div className="space-y-4">
+                <p className="ui-field-description-compact">
+                  Each Arr root can only map to one Placeholdarr folder. The same instance can appear on multiple
+                  destinations when each uses different roots.
+                </p>
                 {selectedInstances.map((inst) => {
                   const roots = inst.root_folders || [];
                   return (
@@ -577,21 +639,37 @@ export function DestinationMapEditor(props: {
                       ) : (
                         roots.map((folder) => {
                           const checked = draft.selected_roots.some(
-                            (r) => r.instance_key === inst.instance_key && r.path === folder.path
+                            (r) =>
+                              rootKey(r.instance_key, r.path) ===
+                              rootKey(inst.instance_key, folder.path)
                           );
+                          const claimedBy = checked
+                            ? null
+                            : findRootClaimedBy(rules, inst.instance_key, folder.path, draft.id);
+                          const taken = Boolean(claimedBy);
                           return (
                             <label
                               key={folder.path}
-                              className="flex cursor-pointer items-start gap-3 rounded-lg border border-[#424753]/30 bg-[#0f1419] px-3 py-2"
+                              className={`flex items-start gap-3 rounded-lg border border-[#424753]/30 bg-[#0f1419] px-3 py-2 ${
+                                taken ? "cursor-not-allowed opacity-45" : "cursor-pointer"
+                              }`}
                             >
                               <input
                                 type="checkbox"
                                 className="mt-1"
                                 checked={checked}
+                                disabled={taken}
                                 onChange={() => toggleRoot(inst, folder.path)}
                               />
-                              <span className="min-w-0 break-all font-mono text-[13px] text-slate-200">
-                                {folder.path}
+                              <span className="min-w-0">
+                                <span className="block break-all font-mono text-[13px] text-slate-200">
+                                  {folder.path}
+                                </span>
+                                {taken && claimedBy ? (
+                                  <span className="mt-0.5 block text-[12px] text-slate-500">
+                                    Already on {destinationLabel(rules, claimedBy.id)}
+                                  </span>
+                                ) : null}
                               </span>
                             </label>
                           );

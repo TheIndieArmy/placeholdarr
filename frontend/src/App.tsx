@@ -1579,16 +1579,38 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings identity changes each render; pathname transition is the trigger.
   }, [onboardingPreviewRoute, location.pathname, location.search]);
 
-  /** Load `/api/settings/current` as soon as the Settings tab is opened — do not wait for the next 5s poll tick (avoids a blank main pane when settings were never fetched while on Activity). */
+  /** Load `/api/settings/current` when opening Settings. Re-fetch even if a payload
+   * was already cached so DB restores (e.g. Arr instances) are not stuck behind a
+   * stale empty form state from an earlier session in this tab. */
   useEffect(() => {
     if (currentTab !== "settings") return;
-    if (settingsPayload) return;
-    if (hasUnsavedChangesRef.current) return;
+    if (hasUnsavedChangesRef.current) {
+      // Heal empty Arr form state from the server without discarding other dirty fields.
+      const localArr = String(fieldValues.ARR_INSTANCES_JSON ?? "").trim();
+      if (localArr && localArr !== "[]") return;
+      void (async () => {
+        try {
+          const payload = await getSettingsCurrent();
+          const arrField = payload.sections
+            .flatMap((section) => section.fields)
+            .find((field) => field.key === "ARR_INSTANCES_JSON");
+          if (!arrField) return;
+          const serverArr = String(arrField.value ?? "").trim();
+          if (!serverArr || serverArr === "[]") return;
+          setFieldValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+          setBaselineValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+          setSettingsPayload(payload);
+        } catch {
+          /* ignore; full load path / poll can retry */
+        }
+      })();
+      return;
+    }
     void loadSettings(false).catch(() => {
       /* Errors surface via dashboard refresh / error banner; poll will retry. */
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings omitted: new function identity each render would retrigger while payload is null.
-  }, [currentTab, settingsPayload]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSettings omitted: new function identity each render would retrigger.
+  }, [currentTab]);
 
   async function handlePartialSave(result: any, partialValues: Record<string, unknown>) {
     if (onboardingPreviewRouteRef.current) return;
@@ -2058,6 +2080,14 @@ export function App() {
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
                 setOnboardingVisible(!payload.status.setup_complete);
+                // Re-apply redacted ARR JSON so per-instance api_key_saved flags match the server.
+                const arrField = payload.sections
+                  .flatMap((section) => section.fields)
+                  .find((field) => field.key === "ARR_INSTANCES_JSON");
+                if (arrField) {
+                  setFieldValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+                  setBaselineValues((prev) => ({ ...prev, ARR_INSTANCES_JSON: arrField.value }));
+                }
               } else if (messagesDirty && statusMessagesSaveRef.current) {
                 await statusMessagesSaveRef.current(applyScope);
                 setSettingsFeedback("Saved");
@@ -3869,7 +3899,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
             const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
             const slotRole = slotWebhookRoleFromRowRole(role);
             const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
-            const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole, key);
+            const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole, instanceKey);
             const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
             const instance_key_aliases = aliasRaw
               .map((a) => normalizeInstanceKey(String(a)))
@@ -3919,30 +3949,36 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
       const aliasList = (row.instance_key_aliases || [])
         .map((a) => normalizeInstanceKey(String(a)))
         .filter((a) => a && a !== inferredKey);
+      const apiKey = String(row.api_key || "").trim();
       const out: Record<string, unknown> = {
         instance_id: instanceId,
         arr_type: row.arr_type,
         instance_key: inferredKey,
         label,
         url: String(row.url || "").trim(),
-        api_key: String(row.api_key || "").trim(),
+        api_key: apiKey,
         role,
         priority: rank,
         is_4k: deriveIs4kFromRole(role),
       };
+      // Keep the client-only redaction flag in form state. Without it, remounting
+      // ArrInstancesEditor (e.g. leaving ARR Integrations and coming back) parses a
+      // blank api_key with no saved marker and forces re-entry before Test/Save.
+      // The server strips this flag on persist; merge still retains the real key.
+      if (!apiKey && row.api_key_saved) {
+        out.api_key_saved = true;
+      }
       if (aliasList.length) {
         out.instance_key_aliases = aliasList;
       }
       return out;
     })
     .filter((row) => {
-      const keyOk = Boolean(row.instance_key && row.url);
-      if (!keyOk) return false;
-      const apiKey = String(row.api_key || "").trim();
-      if (apiKey) return true;
-      // Blank key allowed when the server already has a saved key for this slot.
-      const draft = instances.find((d) => String(d.instance_id || "").toLowerCase() === String(row.instance_id || "").toLowerCase());
-      return Boolean(draft?.api_key_saved);
+      // Keep any fully addressed slot (key + URL). Blank api_key is intentional
+      // after redaction; the server merge retains the saved secret. Requiring
+      // api_key_saved here previously dropped every instance from form state and
+      // a later Settings save wrote [] into the DB.
+      return Boolean(row.instance_key && row.url);
     });
   return JSON.stringify(clean);
 }
@@ -3992,13 +4028,20 @@ function arrPrimaryPersistedWithCredentials(values: FieldValueMap, arrType: "rad
 }
 
 function arrSecondaryPersistedWithCredentials(values: FieldValueMap, arrType: "radarr" | "sonarr"): boolean {
-  const instances = parseArrInstancesFromValues(values).filter((row) => row.arr_type === arrType);
-  const second = instances[1];
-  if (!second) return false;
+  // Two or more instances with a URL count as multi-instance configured (API keys may be redacted client-side).
   return (
-    String(second.url || "").trim().length > 0 &&
-    (String(second.api_key || "").trim().length > 0 || Boolean(second.api_key_saved))
+    parseArrInstancesFromValues(values).filter(
+      (row) => row.arr_type === arrType && String(row.url || "").trim().length > 0,
+    ).length > 1
   );
+}
+
+function arrMultiInstanceBehaviorUnlocked(
+  values: FieldValueMap,
+  arrType: "radarr" | "sonarr",
+  sessionTestOk: boolean,
+): boolean {
+  return sessionTestOk || arrSecondaryPersistedWithCredentials(values, arrType);
 }
 
 const PLACEHOLDER_MODE_VALUES = new Set(["primary", "secondary", "both"]);
@@ -4225,6 +4268,7 @@ function ArrInstancesEditor(props: {
       sonarr: parsed.filter((item) => item.arr_type === "sonarr").length > 1,
     };
   });
+
   const [primaryConnectionOk, setPrimaryConnectionOk] = useState<{ radarr: boolean; sonarr: boolean }>({
     radarr: false,
     sonarr: false,
@@ -4252,6 +4296,33 @@ function ArrInstancesEditor(props: {
   const slotPanelCaptureKeyRef = useRef<string>("");
   const [slotFooterTestBusy, setSlotFooterTestBusy] = useState(false);
   const [slotPanelTestPassed, setSlotPanelTestPassed] = useState(false);
+
+  // Keep editor slots in sync with form/server JSON whenever it changes and the
+  // slide-over is closed. Stale primaryEnabled=false with empty local instances
+  // was showing "Connect" even when ARR_INSTANCES_JSON still had saved rows.
+  useEffect(() => {
+    if (slotPanel) return;
+    const parsed = parseArrInstancesFromValues(props.values);
+    const radRows = parsed.filter((item) => item.arr_type === "radarr");
+    const sonRows = parsed.filter((item) => item.arr_type === "sonarr");
+    setInstances(parsed);
+    setPrimaryEnabled({
+      radarr: radRows.length > 0,
+      sonarr: sonRows.length > 0,
+    });
+    setSecondaryEnabled({
+      radarr: radRows.length > 1,
+      sonarr: sonRows.length > 1,
+    });
+    setPrimaryCache((prev) => ({
+      radarr: radRows[0] || prev.radarr,
+      sonarr: sonRows[0] || prev.sonarr,
+    }));
+    setSecondaryCache((prev) => ({
+      radarr: radRows[1] || prev.radarr,
+      sonarr: sonRows[1] || prev.sonarr,
+    }));
+  }, [props.values.ARR_INSTANCES_JSON, slotPanel]);
 
   useEffect(() => {
     const rad = Boolean(secondaryEnabled.radarr);
@@ -6168,14 +6239,16 @@ function SettingsPanel(props: {
   }, [props.activeSection]);
 
   const arrInstances = parseArrInstancesFromValues(props.values);
-  const hasRadarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "radarr").length > 1;
-  const hasSonarrSecondaryConfigured = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
-  const canUseRadarrSecondaryBehavior =
-    hasRadarrSecondaryConfigured &&
-    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
-  const canUseSonarrSecondaryBehavior =
-    hasSonarrSecondaryConfigured &&
-    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
+  const canUseRadarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "radarr",
+    arrSecondaryTestStatus.radarr,
+  );
+  const canUseSonarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "sonarr",
+    arrSecondaryTestStatus.sonarr,
+  );
   const unlockedSettingsSearchBehavior = [
     canUseRadarrSecondaryBehavior ? String(props.values.MOVIE_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
     canUseSonarrSecondaryBehavior ? String(props.values.TV_PLACEHOLDER_SEARCH_MODE ?? "both") : null,
@@ -9539,12 +9612,16 @@ function OnboardingWizard(props: {
   const hasSonarrSecondary = arrInstances.filter((item) => item.arr_type === "sonarr").length > 1;
   const uiHasRadarrSecondary = hasRadarrSecondary || Boolean(props.values.WIZARD_RADARR_SECONDARY_ENABLED);
   const uiHasSonarrSecondary = hasSonarrSecondary || Boolean(props.values.WIZARD_SONARR_SECONDARY_ENABLED);
-  const canUseRadarrSecondaryBehavior =
-    uiHasRadarrSecondary &&
-    (arrSecondaryTestStatus.radarr || arrSecondaryPersistedWithCredentials(props.values, "radarr"));
-  const canUseSonarrSecondaryBehavior =
-    uiHasSonarrSecondary &&
-    (arrSecondaryTestStatus.sonarr || arrSecondaryPersistedWithCredentials(props.values, "sonarr"));
+  const canUseRadarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "radarr",
+    arrSecondaryTestStatus.radarr,
+  );
+  const canUseSonarrSecondaryBehavior = arrMultiInstanceBehaviorUnlocked(
+    props.values,
+    "sonarr",
+    arrSecondaryTestStatus.sonarr,
+  );
   const canUseAnySecondaryBehavior = canUseRadarrSecondaryBehavior || canUseSonarrSecondaryBehavior;
   const hasLibraryRoot = String(props.values.LIBRARY_ROOT ?? "").trim().length > 0;
   const allSettingsFieldsByKey = useMemo(() => {

@@ -1699,7 +1699,10 @@ def save_settings(
             raw_map = str(validated.get("LIBRARY_DESTINATION_MAP_JSON") or "").strip()
             if raw_map:
                 try:
-                    from services.library_destinations import parse_library_destination_map
+                    from services.library_destinations import (
+                        parse_library_destination_map,
+                        validate_library_destination_map_unique,
+                    )
 
                     # Round-trip normalize so invalid JSON fails loudly at save.
                     import json as _json
@@ -1708,18 +1711,50 @@ def save_settings(
                     if not isinstance(payload, list):
                         errors["LIBRARY_DESTINATION_MAP_JSON"] = "must be a JSON array"
                     else:
-                        validated["LIBRARY_DESTINATION_MAP_JSON"] = _json.dumps(
-                            parse_library_destination_map(raw_map),
-                            separators=(",", ":"),
-                        )
+                        normalized_rows = parse_library_destination_map(raw_map)
+                        dup_err = validate_library_destination_map_unique(normalized_rows)
+                        if dup_err:
+                            errors["LIBRARY_DESTINATION_MAP_JSON"] = dup_err
+                        else:
+                            validated["LIBRARY_DESTINATION_MAP_JSON"] = _json.dumps(
+                                normalized_rows,
+                                separators=(",", ":"),
+                            )
                 except Exception as exc:
                     errors["LIBRARY_DESTINATION_MAP_JSON"] = f"invalid JSON: {exc}"
 
         if "ARR_INSTANCES_JSON" in validated:
             prev_row = _get_row(session, "ARR_INSTANCES_JSON")
             prev_raw = str(prev_row.value if prev_row and prev_row.value is not None else "") or ""
-            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, str(validated.get("ARR_INSTANCES_JSON") or ""))
-            validated["ARR_INSTANCES_JSON"] = merged
+            incoming_raw = str(validated.get("ARR_INSTANCES_JSON") or "")
+            merged = _merge_arr_instances_for_stable_webhooks(prev_raw, incoming_raw)
+            # Soft guard: empty overwrite of a populated config is almost always a
+            # client bug (redacted keys filtered out of form state). Keep the
+            # previous value and log loudly. Intentional full clear is rare; users
+            # can still clear by disconnecting slots then saving once this path is
+            # revisited with an explicit clear flag if needed.
+            try:
+                prev_list = json.loads(prev_raw) if str(prev_raw or "").strip() else []
+            except Exception:
+                prev_list = []
+            try:
+                merged_list = json.loads(merged) if str(merged or "").strip() else []
+            except Exception:
+                merged_list = []
+            if (
+                isinstance(prev_list, list)
+                and isinstance(merged_list, list)
+                and len(prev_list) > 0
+                and len(merged_list) == 0
+            ):
+                logger.error(
+                    "Refusing accidental ARR_INSTANCES_JSON wipe (client sent empty list; "
+                    f"keeping {len(prev_list)} previous instance(s))",
+                    extra={"emoji_type": "error"},
+                )
+                validated["ARR_INSTANCES_JSON"] = prev_raw
+            else:
+                validated["ARR_INSTANCES_JSON"] = merged
 
         arr_instances_json = str(validated.get("ARR_INSTANCES_JSON", getattr(settings, "ARR_INSTANCES_JSON", "")) or "").strip()
         arr_limit = max(1, int(getattr(settings, "ARR_MAX_INSTANCES_PER_TYPE", 4) or 4))
