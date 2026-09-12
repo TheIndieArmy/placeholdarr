@@ -519,6 +519,16 @@ def _field_values_differ(current: Any, incoming: Any) -> bool:
 def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
     instance_key = str(fields.get('instance_key') or '').strip().lower()
     instance_id = str(fields.get('instance_id') or '').strip().lower()
+    legacy_keys = [instance_key]
+    if fields.get('is_4k'):
+        legacy_keys.extend(['4k', 'radarr_4k'])
+    else:
+        legacy_keys.extend(['standard', 'radarr_std'])
+    inst = settings.resolve_arr_instance('radarr', instance_key=instance_key)
+    if inst:
+        for a in inst.get('instance_key_aliases') or []:
+            if a:
+                legacy_keys.append(str(a).strip().lower())
     with session.no_autoflush:
         existing = (
             session.query(Movie)
@@ -526,7 +536,7 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
                 and_(
                     Movie.tmdbid == fields['tmdbid'],
                     or_(
-                        Movie.instance_key == instance_key,
+                        Movie.instance_key.in_(legacy_keys),
                         # Legacy fallback while older rows may still carry instance_id-only identity.
                         Movie.instance_id == instance_id,
                     ),
@@ -552,6 +562,16 @@ def _upsert_movie(session, fields: Dict) -> Tuple[Any, bool, bool]:
 def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
     instance_key = str(fields.get('instance_key') or '').strip().lower()
     instance_id = str(fields.get('instance_id') or '').strip().lower()
+    legacy_keys = [instance_key]
+    if fields.get('is_4k'):
+        legacy_keys.extend(['4k', 'sonarr_4k'])
+    else:
+        legacy_keys.extend(['standard', 'sonarr_std'])
+    inst = settings.resolve_arr_instance('sonarr', instance_key=instance_key)
+    if inst:
+        for a in inst.get('instance_key_aliases') or []:
+            if a:
+                legacy_keys.append(str(a).strip().lower())
     with session.no_autoflush:
         existing = (
             session.query(Series)
@@ -559,7 +579,7 @@ def _upsert_series(session, fields: Dict) -> Tuple[Any, bool, bool]:
                 and_(
                     Series.tvdbid == fields['tvdbid'],
                     or_(
-                        Series.instance_key == instance_key,
+                        Series.instance_key.in_(legacy_keys),
                         # Legacy fallback while older rows may still carry instance_id-only identity.
                         Series.instance_id == instance_id,
                     ),

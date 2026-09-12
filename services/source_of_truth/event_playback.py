@@ -4,7 +4,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, func, or_, text
 
 from core.config import settings
 from core.logger import logger
@@ -35,7 +35,24 @@ def _instance_label(is_4k: bool) -> str:
 
 
 def _row_instance_key(row: Any) -> str:
-    return str(getattr(row, 'instance_key', '') or '').strip().lower()
+    raw = str(getattr(row, 'instance_key', '') or '').strip().lower()
+    arr_type = 'radarr' if hasattr(row, 'tmdbid') else 'sonarr'
+    if raw:
+        inst = settings.resolve_arr_instance(arr_type, instance_key=raw)
+        if inst and inst.get('instance_key'):
+            canonical = str(inst.get('instance_key')).strip().lower()
+            if canonical:
+                return canonical
+        if raw in {'4k', 'standard', 'radarr_4k', 'radarr_std', 'sonarr_4k', 'sonarr_std'}:
+            mapped = _legacy_label_to_key(arr_type, raw.replace('radarr_', '').replace('sonarr_', ''))
+            if mapped:
+                return mapped
+    is_4k = getattr(row, 'is_4k', None)
+    if is_4k is not None:
+        inst = settings.resolve_arr_instance(arr_type, is_4k=bool(is_4k))
+        if inst and inst.get('instance_key'):
+            return str(inst.get('instance_key')).strip().lower()
+    return raw
 
 
 def _arr_type_for_media(media_type: str) -> str:
@@ -58,10 +75,28 @@ def _key_for_role(arr_type: str, role: str) -> str | None:
 def _legacy_label_to_key(arr_type: str, label: str) -> str | None:
     """Map legacy standard/4k labels to primary/secondary instance keys."""
     normalized = str(label or '').strip().lower()
+    instances = settings.arr_instances_for_type(arr_type)
+    if not instances:
+        return normalized or None
     if normalized == 'standard':
-        return _key_for_role(arr_type, 'primary')
+        key = _key_for_role(arr_type, 'primary')
+        if key:
+            return key
+        return str(instances[0].get('instance_key') or '').strip().lower() or normalized
     if normalized == '4k':
-        return _key_for_role(arr_type, 'secondary')
+        key = _key_for_role(arr_type, 'secondary')
+        if key:
+            return key
+        for item in instances:
+            if bool(item.get('is_4k', False)):
+                k = str(item.get('instance_key') or '').strip().lower()
+                if k:
+                    return k
+        if len(instances) > 1:
+            k = str(instances[1].get('instance_key') or '').strip().lower()
+            if k:
+                return k
+        return str(instances[0].get('instance_key') or '').strip().lower() or normalized
     return normalized or None
 
 
@@ -561,6 +596,57 @@ def _extract_file_path(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_plex_rating_key(payload: dict[str, Any]) -> str | None:
+    media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
+    media_ids = media.get('ids') if isinstance(media.get('ids'), dict) else {}
+    metadata = payload.get('metadata') if isinstance(payload.get('metadata'), dict) else {}
+    plex_meta = payload.get('Metadata') if isinstance(payload.get('Metadata'), dict) else {}
+    payload_ids = payload.get('ids') if isinstance(payload.get('ids'), dict) else {}
+
+    candidates = [
+        media_ids.get('plex'),
+        media_ids.get('ratingKey'),
+        media_ids.get('rating_key'),
+        payload_ids.get('plex'),
+        payload_ids.get('ratingKey'),
+        payload_ids.get('rating_key'),
+        payload.get('ratingKey'),
+        payload.get('rating_key'),
+        payload.get('plex_id'),
+        metadata.get('ratingKey'),
+        metadata.get('rating_key'),
+        plex_meta.get('ratingKey'),
+    ]
+    for val in candidates:
+        if val is not None:
+            s = str(val).strip()
+            if s and s != "0":
+                return s
+    return None
+
+
+def _extract_jellyfin_item_id(payload: dict[str, Any]) -> str | None:
+    item = payload.get('Item') if isinstance(payload.get('Item'), dict) else {}
+    media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
+    media_ids = media.get('ids') if isinstance(media.get('ids'), dict) else {}
+    payload_ids = payload.get('ids') if isinstance(payload.get('ids'), dict) else {}
+    candidates = [
+        payload.get('ItemId'),
+        payload.get('itemId'),
+        payload.get('jellyfin_id'),
+        payload_ids.get('jellyfin'),
+        media_ids.get('jellyfin'),
+        item.get('Id'),
+        item.get('id'),
+    ]
+    for val in candidates:
+        if val is not None:
+            s = str(val).strip()
+            if s:
+                return s
+    return None
+
+
 def _extract_declared_media_type(payload: dict[str, Any]) -> str | None:
     media = payload.get('media') if isinstance(payload.get('media'), dict) else {}
     item = payload.get('Item') if isinstance(payload.get('Item'), dict) else {}
@@ -861,6 +947,8 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
     imdb_id = _extract_imdb_id(payload)
     season_number, episode_number = _extract_season_episode(payload)
     file_path = _extract_file_path(payload)
+    plex_id = _extract_plex_rating_key(payload)
+    jellyfin_id = _extract_jellyfin_item_id(payload)
     # If no path found in the payload, attempt to fetch it from Jellyfin using ItemId/UserId
     if not file_path:
         try:
@@ -927,6 +1015,8 @@ def _resolve_playback_context(session, payload: dict[str, Any]) -> dict[str, Any
         'imdb_id': imdb_id,
         'season_number': season_number,
         'episode_number': episode_number,
+        'plex_id': plex_id,
+        'jellyfin_id': jellyfin_id,
         'path_info': path_info,
     }
 
@@ -1011,6 +1101,8 @@ def _active_rows_by_instance(rows: list[Any]) -> dict[str, Any]:
         key = _row_instance_key(row)
         if not key:
             continue
+        if getattr(row, 'instance_key', None) != key:
+            row.instance_key = key
         active[key] = row
     return active
 
@@ -1612,6 +1704,29 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             'target_meta': target_meta,
         }
 
+    # Seed media player IDs directly from playback payload if available
+    plex_key = _extract_plex_rating_key(payload)
+    jelly_key = _extract_jellyfin_item_id(payload)
+    if plex_key or jelly_key:
+        for t in targets:
+            match = False
+            if season_number is not None and episode_number is not None:
+                match = (t.season_number == season_number and t.episode_number == episode_number)
+            elif len(targets) == 1:
+                match = True
+            if match:
+                changed = False
+                if plex_key and (t.plex_id != plex_key or t.plex_dummy_id != plex_key):
+                    t.plex_id = plex_key
+                    t.plex_dummy_id = plex_key
+                    changed = True
+                if jelly_key and getattr(t, 'jellyfin_id', None) != jelly_key:
+                    t.jellyfin_id = jelly_key
+                    changed = True
+                if changed:
+                    t.updated_at = func.now()
+                    session.add(t)
+
     base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
     if not base_url or not api_key:
         return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': instance_key}
@@ -1755,6 +1870,23 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
         imdb_id=context.get('imdb_id'),
         file_path=context.get('file_path'),
     )
+    # Seed media player IDs directly from playback payload if available
+    plex_key = str(context.get('plex_id') or '').strip()
+    jelly_key = str(context.get('jellyfin_id') or '').strip()
+    if plex_key or jelly_key:
+        for mrow in movie_rows:
+            changed = False
+            if plex_key and (mrow.plex_id != plex_key or mrow.plex_dummy_id != plex_key):
+                mrow.plex_id = plex_key
+                mrow.plex_dummy_id = plex_key
+                changed = True
+            if jelly_key and getattr(mrow, 'jellyfin_id', None) != jelly_key:
+                mrow.jellyfin_id = jelly_key
+                changed = True
+            if changed:
+                mrow.updated_at = func.now()
+                session.add(mrow)
+
     active_rows = _active_rows_by_instance(movie_rows)
     playback_kind = str(context.get('playback_kind') or 'unknown')
 
@@ -2111,6 +2243,21 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
             file_path=context.get('file_path'),
         )
         active_rows = _active_rows_by_instance(movie_rows)
+        plex_key = str(context.get('plex_id') or '').strip()
+        jelly_key = str(context.get('jellyfin_id') or '').strip()
+        if plex_key or jelly_key:
+            for row in active_rows.values():
+                changed = False
+                if plex_key and (row.plex_id != plex_key or row.plex_dummy_id != plex_key):
+                    row.plex_id = plex_key
+                    row.plex_dummy_id = plex_key
+                    changed = True
+                if jelly_key and getattr(row, 'jellyfin_id', None) != jelly_key:
+                    row.jellyfin_id = jelly_key
+                    changed = True
+                if changed:
+                    row.updated_at = func.now()
+                    session.add(row)
         for row in active_rows.values():
             ph_rows = (
                 session.query(Placeholder)
@@ -2147,6 +2294,27 @@ def apply_search_queued_for_playback(session, payload: dict[str, Any]) -> int:
                 targets, _meta = _collect_episode_targets(session, series_row, season_number, episode_number)
             except Exception:
                 targets = []
+            plex_key = str(context.get('plex_id') or '').strip()
+            jelly_key = str(context.get('jellyfin_id') or '').strip()
+            if plex_key or jelly_key:
+                for t in targets:
+                    match = False
+                    if season_number is not None and episode_number is not None:
+                        match = (t.season_number == season_number and t.episode_number == episode_number)
+                    elif len(targets) == 1:
+                        match = True
+                    if match:
+                        changed = False
+                        if plex_key and (t.plex_id != plex_key or t.plex_dummy_id != plex_key):
+                            t.plex_id = plex_key
+                            t.plex_dummy_id = plex_key
+                            changed = True
+                        if jelly_key and getattr(t, 'jellyfin_id', None) != jelly_key:
+                            t.jellyfin_id = jelly_key
+                            changed = True
+                        if changed:
+                            t.updated_at = func.now()
+                            session.add(t)
             episode_ids = [int(ep.id) for ep in targets if getattr(ep, 'id', None)]
             if not episode_ids:
                 continue

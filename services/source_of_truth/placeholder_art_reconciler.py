@@ -340,6 +340,11 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
         except Exception as exc:
             logger.debug(f"art backfill phase stats update skipped: {exc}", extra={"emoji_type": "debug"})
 
+    try:
+        session.commit()
+    except Exception:
+        pass
+
     if refresh_paths and not bulk_completion:
         try:
             refresh_all_paths(refresh_paths, update_type="Modified", include_plex=True, include_jellyfin=True, include_emby=True)

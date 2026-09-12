@@ -35,8 +35,13 @@ def _countdown_lt_1_min_status_text() -> str:
     return render_message("import_grace.countdown_lt_1_min", {})
 
 
-def _all_countdown_status_texts() -> list[str]:
+def _all_countdown_status_texts(step_seconds: int = 60) -> list[str]:
     """Render all countdown status strings in display order."""
+    if step_seconds < 60:
+        # Under accelerated cadence (e.g. 5-10s per step), the entire countdown
+        # finishes in under a minute, so multi-minute countdown labels would be misleading.
+        lt_1_min = _countdown_lt_1_min_status_text()
+        return [lt_1_min for _ in COUNTDOWN_MINUTES_DECREASING] + [lt_1_min]
     return [_countdown_status_text(m) for m in COUNTDOWN_MINUTES_DECREASING] + [_countdown_lt_1_min_status_text()]
 
 
@@ -62,7 +67,7 @@ def build_import_grace_schedule(base_time: datetime | None = None, step_seconds:
     now = base_time or datetime.now(timezone.utc)
     step = max(1, int(step_seconds or _import_grace_step_seconds()))
 
-    countdown_texts = _all_countdown_status_texts()
+    countdown_texts = _all_countdown_status_texts(step)
     scheduled: list[dict[str, Any]] = []
     for step_index, status_text in enumerate(countdown_texts):
         scheduled.append(

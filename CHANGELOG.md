@@ -31,6 +31,13 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 - **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
 - **Arr API key retention**: Saving Arr instances keeps stored API keys when the UI omits them; an empty instance list no longer wipes a non-empty saved config.
+- **Plex cache stampede**: Concurrent section list lookups share an in-flight request per section key instead of issuing parallel full scans.
+- **Plex ratingKey cache seeding**: Playback webhooks seed Plex and Jellyfin item IDs directly into movie and episode records so player metadata updates bypass library scans.
+- **Batched placeholder job deduplication**: Coalesce duplicate `nfo_refresh` requests for the same placeholder within the debounce window.
+- **DB pool connection release**: Release database pool connections before Plex, Jellyfin, and Arr network calls during status and art refresh.
+- **Instance key self-healing**: Auto-resolve legacy `4k` and `standard` labels to canonical configured instance keys during sync and playback routing.
+- **Dynamic queue monitor instances**: Poll download queues and trigger monitored refreshes using active Arr instance keys rather than legacy hardcoded pairs.
+- **Accelerated import grace labels**: Suppress misleading multi-minute countdown strings when accelerated cadence is active.
 
 ## [0.9.26] - 2026-09-10
 
