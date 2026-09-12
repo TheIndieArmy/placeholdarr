@@ -12,10 +12,25 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Library destination map**: Optional Arr instance + root folder → Placeholdarr dest folder + Plex section for Movies and TV; empty map keeps single `{LIBRARY_ROOT}/movies` and `tv`.
 - **Destination rematerialize**: Saving Library Root or the destination map offers Apply now or Next full sync to relocate existing placeholders.
 - **Additional Arr instances**: Default cap raised to 4 per type; webhook stable ids for additional instances use `{type}_{instance_key}`.
+- **Destination uniqueness**: Each Arr instance + root folder maps to at most one Placeholdarr destination.
+- **Create dest folders**: Saving Paths can create missing Placeholdarr destination folders.
+- **Plex section defaults**: Paths can store default Plex library section IDs per destination.
+- **Match-by-path search defaults**: Placeholder and real-file search preference defaults to All instances, with an optional Prefer matched library path override.
+- **Collections dest tip**: Collections editor notes that Settings → Paths destinations each need their Plex libraries selected explicitly.
+- **Instance-key playback search**: Placeholder and TV real-file search/fallback select Arr instances by `instance_key` and walk remaining active keys in config priority order.
+- **Arr instance reorder**: Up/down controls on ARR Integrations set search and fallback priority (slot order).
+- **Named instance search options**: Placeholder and real-file search preference can target any configured Arr instance using the name you gave it.
+- **Prefer matched library path**: Toggle to override the search preference when the played path maps to exactly one library destination.
+
+### Changed
+
+- **Shared cleanup gating**: Shared cleanup options apply only when two or more instances share a Placeholdarr destination folder.
+- **ARR instance copy**: Settings and webhook helpers say up to 4 instances per type; Arr cards use Slot N with your server names; fallback copy describes remaining configured instances in priority order.
 
 ### Fixed
 
 - **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
+- **Arr API key retention**: Saving Arr instances keeps stored API keys when the UI omits them; an empty instance list no longer wipes a non-empty saved config.
 
 ## [0.9.26] - 2026-09-10
 

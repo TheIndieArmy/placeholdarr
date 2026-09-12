@@ -30,42 +30,217 @@ PLAYBACK_FALLBACK_JOB_TYPE = 'playback_fallback'
 
 
 def _instance_label(is_4k: bool) -> str:
+    """Legacy standard/4k label (telemetry and older call sites)."""
     return '4k' if bool(is_4k) else 'standard'
 
 
-def _search_preference() -> str:
-    # Legacy `PLAYBACK_SEARCH_PREFERENCE` removed. Use TV playback instance mode
-    # to determine preference when matching/missing in TV real-file routing.
-    mode = str(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    if mode == 'primary':
-        return 'standard'
-    if mode == 'secondary':
-        return '4k'
-    return 'both'
+def _row_instance_key(row: Any) -> str:
+    return str(getattr(row, 'instance_key', '') or '').strip().lower()
+
+
+def _arr_type_for_media(media_type: str) -> str:
+    return 'radarr' if media_type == 'movie' else 'sonarr'
+
+
+def _key_for_role(arr_type: str, role: str) -> str | None:
+    target = str(role or '').strip().lower()
+    if target not in {'primary', 'secondary', 'additional'}:
+        return None
+    for item in settings.arr_instances_for_type(arr_type):
+        if str(item.get('role') or '').strip().lower() != target:
+            continue
+        key = str(item.get('instance_key') or '').strip().lower()
+        if key:
+            return key
+    return None
+
+
+def _legacy_label_to_key(arr_type: str, label: str) -> str | None:
+    """Map legacy standard/4k labels to primary/secondary instance keys."""
+    normalized = str(label or '').strip().lower()
+    if normalized == 'standard':
+        return _key_for_role(arr_type, 'primary')
+    if normalized == '4k':
+        return _key_for_role(arr_type, 'secondary')
+    return normalized or None
+
+
+def _coerce_instance_key(arr_type: str, value: str | None) -> str | None:
+    """Accept an instance_key or legacy standard/4k label."""
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return None
+    if raw in {'standard', '4k'}:
+        return _legacy_label_to_key(arr_type, raw)
+    return raw
+
+
+_RESERVED_INSTANCE_SEARCH_MODES = frozenset({'match', 'primary', 'secondary', 'both'})
+
+
+def _normalize_instance_search_mode(raw: Any) -> str:
+    """Return match/both/primary/secondary or a concrete instance_key."""
+    value = str(raw or 'match').strip().lower()
+    return value or 'match'
 
 
 def _tv_instance_mode() -> str:
-    value = str(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    return value if value in {'match', 'primary', 'secondary', 'both'} else 'match'
-
+    return _normalize_instance_search_mode(getattr(settings, 'TV_PLAYBACK_INSTANCE_MODE', 'match'))
 
 
 def _movie_instance_mode() -> str:
-    value = str(getattr(settings, 'MOVIE_PLAYBACK_INSTANCE_MODE', 'match') or 'match').strip().lower()
-    return value if value in {'match', 'primary', 'secondary', 'both'} else 'match'
+    return _normalize_instance_search_mode(getattr(settings, 'MOVIE_PLAYBACK_INSTANCE_MODE', 'match'))
 
 
-def _placeholder_search_pref(media_type: str) -> str:
-    """Map MOVIE/TV_PLACEHOLDER_SEARCH_MODE (primary/secondary/both) to instance labels (standard/4k/both)."""
+def _placeholder_search_mode(media_type: str) -> str:
+    """Return MOVIE/TV_PLACEHOLDER_SEARCH_MODE (match/both/primary/secondary/instance_key)."""
     if media_type == 'movie':
-        value = str(getattr(settings, 'MOVIE_PLACEHOLDER_SEARCH_MODE', 'both') or 'both').strip().lower()
+        return _normalize_instance_search_mode(getattr(settings, 'MOVIE_PLACEHOLDER_SEARCH_MODE', 'match'))
+    return _normalize_instance_search_mode(getattr(settings, 'TV_PLACEHOLDER_SEARCH_MODE', 'match'))
+
+
+def _select_forced_instance_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    mode: str,
+    selection_reason: str,
+    root_match: str | None = None,
+) -> dict[str, Any]:
+    """Force search to primary/secondary role or a concrete instance_key."""
+    normalized = str(mode or '').strip().lower()
+    if normalized == 'primary':
+        return _select_role_only_rows(
+            rows_by_instance,
+            media_type=media_type,
+            role='primary',
+            selection_reason=f'{selection_reason}_primary',
+            root_match=root_match,
+        )
+    if normalized == 'secondary':
+        return _select_role_only_rows(
+            rows_by_instance,
+            media_type=media_type,
+            role='secondary',
+            selection_reason=f'{selection_reason}_secondary',
+            root_match=root_match,
+        )
+    return _select_preferred_key_rows(
+        rows_by_instance,
+        media_type=media_type,
+        preferred_instance=normalized,
+        selection_reason=f'{selection_reason}_instance',
+        root_match=root_match,
+    )
+
+
+def _coerce_setting_bool(raw: Any, *, default: bool = False) -> bool:
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {'1', 'true', 'yes', 'on'}:
+        return True
+    if text in {'0', 'false', 'no', 'off', ''}:
+        return False
+    return bool(default)
+
+
+def _prefer_path_match(*, media_type: str, kind: str, mode: str) -> bool:
+    """Whether a unique dest-path match should override the search preference.
+
+    Legacy mode ``match`` always prefers path matching (and treats preference as All).
+    """
+    if str(mode or '').strip().lower() == 'match':
+        return True
+    if kind == 'placeholder':
+        key = (
+            'MOVIE_PLACEHOLDER_PREFER_PATH_MATCH'
+            if media_type == 'movie'
+            else 'TV_PLACEHOLDER_PREFER_PATH_MATCH'
+        )
     else:
-        value = str(getattr(settings, 'TV_PLACEHOLDER_SEARCH_MODE', 'both') or 'both').strip().lower()
-    if value == 'primary':
-        return 'standard'
-    if value == 'secondary':
-        return '4k'
-    return 'both'
+        key = (
+            'MOVIE_PLAYBACK_PREFER_PATH_MATCH'
+            if media_type == 'movie'
+            else 'TV_PLAYBACK_PREFER_PATH_MATCH'
+        )
+    if not hasattr(settings, key):
+        return False
+    raw = getattr(settings, key)
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return False
+    return _coerce_setting_bool(raw, default=False)
+
+
+def _preference_from_mode(mode: str) -> str:
+    """Normalize stored mode into a preference (both / primary / secondary / instance_key)."""
+    normalized = str(mode or 'both').strip().lower() or 'both'
+    if normalized == 'match':
+        return 'both'
+    return normalized
+
+
+def _select_with_path_preference(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    kind: str,
+    mode: str,
+    root_match: str | None,
+    reason_prefix: str,
+) -> dict[str, Any]:
+    prefer_path = _prefer_path_match(media_type=media_type, kind=kind, mode=mode)
+    preference = _preference_from_mode(mode)
+
+    if (
+        prefer_path
+        and root_match
+        and root_match not in {'all', 'both'}
+        and rows_by_instance.get(root_match) is not None
+    ):
+        return _select_preferred_key_rows(
+            rows_by_instance,
+            media_type=media_type,
+            preferred_instance=root_match,
+            selection_reason=f'{reason_prefix}_matched_by_root',
+            root_match=root_match,
+        )
+
+    if preference == 'both':
+        return _select_all_active_rows(
+            rows_by_instance,
+            media_type=media_type,
+            selection_reason=(
+                f'{reason_prefix}_preference_both'
+                if not prefer_path
+                else (
+                    f'{reason_prefix}_match_ambiguous_used_preference'
+                    if root_match in {'all', 'both'}
+                    else f'{reason_prefix}_match_missing_used_preference'
+                )
+            ),
+            root_match=root_match,
+        )
+
+    if preference in {'primary', 'secondary'} or (
+        preference and preference not in _RESERVED_INSTANCE_SEARCH_MODES
+    ):
+        return _select_forced_instance_rows(
+            rows_by_instance,
+            media_type=media_type,
+            mode=preference,
+            selection_reason=f'{reason_prefix}_preference',
+            root_match=root_match,
+        )
+
+    return _select_all_active_rows(
+        rows_by_instance,
+        media_type=media_type,
+        selection_reason=f'{reason_prefix}_preference_both',
+        root_match=root_match,
+    )
 
 
 def _fallback_timeout_minutes() -> int:
@@ -79,9 +254,11 @@ def _fallback_enabled() -> bool:
     return bool(getattr(settings, 'ENABLE_PLAYBACK_FALLBACK_SEARCH', False)) and _fallback_timeout_minutes() > 0
 
 
-def _resolve_endpoint(content_type: str, is_4k: bool) -> tuple[str, str]:
+def _resolve_endpoint(content_type: str, *, instance_key: str | None = None, is_4k: bool | None = None) -> tuple[str, str]:
     arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
-    return settings.resolve_arr_endpoint(arr_type, is_4k=is_4k)
+    if instance_key:
+        return settings.resolve_arr_endpoint(arr_type, instance_key=instance_key)
+    return settings.resolve_arr_endpoint(arr_type, is_4k=bool(is_4k) if is_4k is not None else None)
 
 
 def _normalize_path(value: str | None) -> str | None:
@@ -104,109 +281,97 @@ def _path_is_within_root(path: str | None, root: str | None) -> bool:
         return False
 
 
-def _match_tv_instance_from_path(path: str | None) -> str | None:
-    """Match a played file path to standard / 4k / both using mapped TV dest roots."""
+def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | None:
+    """Match a played file path to an instance_key.
+
+    Returns a single key, ``all`` when ambiguous / shared, or ``None`` when unmatched.
+    Longest matching dest folder wins when multiple map rows apply.
+    Legacy default / 4K library folders map to primary / secondary keys.
+    """
     if not path:
         return None
-    try:
-        from services.library_destinations import all_tv_dest_roots, parse_library_destination_map
+    arr = str(arr_type or '').strip().lower()
+    if arr not in {'radarr', 'sonarr'}:
+        return None
 
-        rows = parse_library_destination_map()
-        # Prefer matching mapped dest folders to instance roles via instance_key when possible.
-        matched_roles: list[str] = []
-        for row in rows:
-            if str(row.get("arr_type") or "").lower() != "sonarr":
+    try:
+        from services.library_destinations import all_movie_dest_roots, all_tv_dest_roots, parse_library_destination_map
+
+        scored: list[tuple[int, str]] = []
+        for row in parse_library_destination_map():
+            if str(row.get('arr_type') or '').lower() != arr:
                 continue
-            dest = str(row.get("dest_folder") or "")
-            if not _path_is_within_root(path, dest):
+            dest = str(row.get('dest_folder') or '')
+            norm_dest = _normalize_path(dest)
+            if not norm_dest or not _path_is_within_root(path, dest):
                 continue
-            key = str(row.get("instance_key") or "").strip().lower()
-            role = "standard"
-            for item in getattr(settings, "configured_arr_instances", []) or []:
-                if str(item.get("arr_type") or "").lower() != "sonarr":
-                    continue
-                if str(item.get("instance_key") or "").strip().lower() != key:
-                    continue
-                role = "4k" if bool(item.get("is_4k")) else "standard"
+            key = str(row.get('instance_key') or '').strip().lower()
+            if not key:
+                continue
+            scored.append((len(norm_dest), key))
+
+        if scored:
+            best_len = max(length for length, _ in scored)
+            unique = list(dict.fromkeys(key for length, key in scored if length == best_len))
+            if len(unique) == 1:
+                return unique[0]
+            if len(unique) > 1:
+                return 'all'
+            return None
+
+        matched: list[str] = []
+        if arr == 'sonarr':
+            default_roots = list(all_tv_dest_roots(map_rows=[]))
+            four_k = str(getattr(settings, 'TV_LIBRARY_4K_FOLDER', '') or '')
+        else:
+            default_roots = list(all_movie_dest_roots(map_rows=[]))
+            four_k = str(getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', '') or '')
+
+        primary_key = _key_for_role(arr, 'primary')
+        secondary_key = _key_for_role(arr, 'secondary')
+        for root in default_roots:
+            if primary_key and _path_is_within_root(path, root):
+                matched.append(primary_key)
                 break
-            matched_roles.append(role)
-        if not matched_roles:
-            for root in all_tv_dest_roots(map_rows=[]):
-                if _path_is_within_root(path, root):
-                    matched_roles.append("standard")
-                    break
-            four_k = str(getattr(settings, "TV_LIBRARY_4K_FOLDER", "") or "")
-            if four_k and _path_is_within_root(path, four_k):
-                matched_roles.append("4k")
-        unique = list(dict.fromkeys(matched_roles))
+        if four_k and secondary_key and _path_is_within_root(path, four_k):
+            matched.append(secondary_key)
+
+        unique = list(dict.fromkeys(matched))
         if len(unique) == 1:
             return unique[0]
         if len(unique) > 1:
-            return "both"
+            return 'all'
         return None
     except Exception:
-        matches: list[str] = []
-        if _path_is_within_root(path, getattr(settings, "TV_LIBRARY_FOLDER", "")):
-            matches.append("standard")
-        if _path_is_within_root(path, getattr(settings, "TV_LIBRARY_4K_FOLDER", "")):
-            matches.append("4k")
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            return "both"
+        matched = []
+        primary_key = _key_for_role(arr, 'primary')
+        secondary_key = _key_for_role(arr, 'secondary')
+        if arr == 'sonarr':
+            default_folder = getattr(settings, 'TV_LIBRARY_FOLDER', '')
+            four_k = getattr(settings, 'TV_LIBRARY_4K_FOLDER', '')
+        else:
+            default_folder = getattr(settings, 'MOVIE_LIBRARY_FOLDER', '')
+            four_k = getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', '')
+        if primary_key and _path_is_within_root(path, default_folder):
+            matched.append(primary_key)
+        if secondary_key and _path_is_within_root(path, four_k):
+            matched.append(secondary_key)
+        unique = list(dict.fromkeys(matched))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            return 'all'
         return None
+
+
+def _match_tv_instance_from_path(path: str | None) -> str | None:
+    """Match a played TV path to an instance_key (or ``all`` / ``None``)."""
+    return _match_instance_key_from_path(path, arr_type='sonarr')
 
 
 def _match_movie_instance_from_path(path: str | None) -> str | None:
-    """Match a played movie file path to standard / 4k / both using mapped movie dest roots."""
-    if not path:
-        return None
-    try:
-        from services.library_destinations import all_movie_dest_roots, parse_library_destination_map
-
-        rows = parse_library_destination_map()
-        matched_roles: list[str] = []
-        for row in rows:
-            if str(row.get("arr_type") or "").lower() != "radarr":
-                continue
-            dest = str(row.get("dest_folder") or "")
-            if not _path_is_within_root(path, dest):
-                continue
-            key = str(row.get("instance_key") or "").strip().lower()
-            role = "standard"
-            for item in getattr(settings, "configured_arr_instances", []) or []:
-                if str(item.get("arr_type") or "").lower() != "radarr":
-                    continue
-                if str(item.get("instance_key") or "").strip().lower() != key:
-                    continue
-                role = "4k" if bool(item.get("is_4k")) else "standard"
-                break
-            matched_roles.append(role)
-        if not matched_roles:
-            for root in all_movie_dest_roots(map_rows=[]):
-                if _path_is_within_root(path, root):
-                    matched_roles.append("standard")
-                    break
-            four_k = str(getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", "") or "")
-            if four_k and _path_is_within_root(path, four_k):
-                matched_roles.append("4k")
-        unique = list(dict.fromkeys(matched_roles))
-        if len(unique) == 1:
-            return unique[0]
-        if len(unique) > 1:
-            return "both"
-        return None
-    except Exception:
-        matches: list[str] = []
-        if _path_is_within_root(path, getattr(settings, "MOVIE_LIBRARY_FOLDER", "")):
-            matches.append("standard")
-        if _path_is_within_root(path, getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", "")):
-            matches.append("4k")
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            return "both"
-        return None
+    """Match a played movie path to an instance_key (or ``all`` / ``None``)."""
+    return _match_instance_key_from_path(path, arr_type='radarr')
 
 
 def _as_int(value: Any) -> int | None:
@@ -843,147 +1008,192 @@ def _active_rows_by_instance(rows: list[Any]) -> dict[str, Any]:
     for row in rows:
         if bool(getattr(row, 'is_deleted', False)):
             continue
-        label = _instance_label(bool(getattr(row, 'is_4k', False)))
-        active[label] = row
+        key = _row_instance_key(row)
+        if not key:
+            continue
+        active[key] = row
     return active
 
 
-def _select_rows_by_preference(rows_by_instance: dict[str, Any], preference: str) -> dict[str, Any]:
-    qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
-    if preference == 'both':
-        return {
-            'rows': [rows_by_instance[label] for label in qualifying_instances],
-            'chosen_instances': qualifying_instances,
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': None,
-            'fallback_instance': None,
-            'selection_reason': 'preference_both',
-            'immediate_fallback': False,
-        }
+def _ranked_keys_with_rows(media_type: str, rows_by_instance: dict[str, Any]) -> list[str]:
+    from services.playback_routing import get_candidate_instances_for_movie, get_candidate_instances_for_tv
 
-    preferred_instance = '4k' if preference == '4k' else 'standard'
-    fallback_instance = 'standard' if preferred_instance == '4k' else '4k'
-    preferred_row = rows_by_instance.get(preferred_instance)
-    if preferred_row is not None:
-        return {
-            'rows': [preferred_row],
-            'chosen_instances': [preferred_instance],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance if rows_by_instance.get(fallback_instance) is not None else None,
-            'selection_reason': 'preferred_active_row',
-            'immediate_fallback': False,
-        }
+    ranking = (
+        get_candidate_instances_for_movie()
+        if media_type == 'movie'
+        else get_candidate_instances_for_tv()
+    )
+    ordered: list[str] = []
+    for key in ranking or []:
+        normalized = str(key or '').strip().lower()
+        if normalized and normalized in rows_by_instance and normalized not in ordered:
+            ordered.append(normalized)
+    for key in rows_by_instance.keys():
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
 
-    fallback_row = rows_by_instance.get(fallback_instance)
-    if fallback_row is not None:
-        return {
-            'rows': [fallback_row],
-            'chosen_instances': [fallback_instance],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance,
-            'selection_reason': 'preferred_missing_active_row',
-            'immediate_fallback': True,
-        }
 
+def _fallback_queue(preferred: str | None, media_type: str, rows_by_instance: dict[str, Any]) -> list[str]:
+    preferred_key = str(preferred or '').strip().lower() or None
+    return [key for key in _ranked_keys_with_rows(media_type, rows_by_instance) if key != preferred_key]
+
+
+def _selection_result(
+    rows_by_instance: dict[str, Any],
+    *,
+    chosen_keys: list[str],
+    preferred_instance: str | None,
+    fallback_instances: list[str],
+    selection_reason: str,
+    immediate_fallback: bool = False,
+    root_match: str | None = None,
+    qualifying_instances: list[str] | None = None,
+) -> dict[str, Any]:
+    qualifying = list(qualifying_instances) if qualifying_instances is not None else list(rows_by_instance.keys())
+    fallbacks = [str(k).strip().lower() for k in fallback_instances if str(k or '').strip()]
+    chosen = [str(k).strip().lower() for k in chosen_keys if str(k or '').strip() and k in rows_by_instance]
     return {
-        'rows': [],
-        'chosen_instances': [],
-        'qualifying_instances': qualifying_instances,
+        'rows': [rows_by_instance[key] for key in chosen],
+        'chosen_instances': chosen,
+        'qualifying_instances': qualifying,
         'preferred_instance': preferred_instance,
-        'fallback_instance': None,
-        'selection_reason': 'no_active_rows',
-        'immediate_fallback': False,
+        'fallback_instance': fallbacks[0] if fallbacks else None,
+        'fallback_instances': fallbacks,
+        'selection_reason': selection_reason,
+        'immediate_fallback': immediate_fallback,
+        'root_match': root_match,
     }
+
+
+def _select_all_active_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    selection_reason: str,
+    root_match: str | None = None,
+) -> dict[str, Any]:
+    ranked = _ranked_keys_with_rows(media_type, rows_by_instance)
+    return _selection_result(
+        rows_by_instance,
+        chosen_keys=ranked,
+        preferred_instance=None,
+        fallback_instances=[],
+        selection_reason=selection_reason,
+        root_match=root_match,
+        qualifying_instances=ranked,
+    )
+
+
+def _select_preferred_key_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    preferred_instance: str | None,
+    selection_reason: str,
+    root_match: str | None = None,
+    missing_reason: str | None = None,
+) -> dict[str, Any]:
+    ranked = _ranked_keys_with_rows(media_type, rows_by_instance)
+    preferred = str(preferred_instance or '').strip().lower() or None
+    if preferred and preferred in rows_by_instance:
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=[preferred],
+            preferred_instance=preferred,
+            fallback_instances=_fallback_queue(preferred, media_type, rows_by_instance),
+            selection_reason=selection_reason,
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
+
+    if ranked:
+        head, *tail = ranked
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=[head],
+            preferred_instance=head,
+            fallback_instances=tail,
+            selection_reason=missing_reason or 'preferred_missing_active_row',
+            immediate_fallback=True,
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
+
+    return _selection_result(
+        rows_by_instance,
+        chosen_keys=[],
+        preferred_instance=preferred,
+        fallback_instances=[],
+        selection_reason='no_active_rows',
+        root_match=root_match,
+        qualifying_instances=ranked,
+    )
+
+
+def _select_role_only_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    role: str,
+    selection_reason: str,
+    root_match: str | None = None,
+) -> dict[str, Any]:
+    """Primary/Secondary modes target that role key only (no immediate alternate)."""
+    ranked = _ranked_keys_with_rows(media_type, rows_by_instance)
+    preferred = _key_for_role(_arr_type_for_media(media_type), role)
+    if preferred and preferred in rows_by_instance:
+        return _selection_result(
+            rows_by_instance,
+            chosen_keys=[preferred],
+            preferred_instance=preferred,
+            fallback_instances=_fallback_queue(preferred, media_type, rows_by_instance),
+            selection_reason=selection_reason,
+            root_match=root_match,
+            qualifying_instances=ranked,
+        )
+    return _selection_result(
+        rows_by_instance,
+        chosen_keys=[],
+        preferred_instance=preferred,
+        fallback_instances=[],
+        selection_reason=f'{selection_reason}_no_row',
+        root_match=root_match,
+        qualifying_instances=ranked,
+    )
+
+
+def _select_placeholder_rows(
+    rows_by_instance: dict[str, Any],
+    *,
+    media_type: str,
+    file_path: str | None,
+) -> dict[str, Any]:
+    """Select which Arr instance(s) to search when a placeholder plays."""
+    mode = _placeholder_search_mode(media_type)
+    match_fn = _match_movie_instance_from_path if media_type == 'movie' else _match_tv_instance_from_path
+    root_match = match_fn(file_path)
+    return _select_with_path_preference(
+        rows_by_instance,
+        media_type=media_type,
+        kind='placeholder',
+        mode=mode,
+        root_match=root_match,
+        reason_prefix='placeholder',
+    )
 
 
 def _select_tv_real_rows(rows_by_instance: dict[str, Any], file_path: str | None) -> dict[str, Any]:
     mode = _tv_instance_mode()
-    if mode == 'both':
-        selection = _select_rows_by_preference(rows_by_instance, 'both')
-        selection['selection_reason'] = 'tv_mode_both'
-        selection['root_match'] = _match_tv_instance_from_path(file_path)
-        return selection
-
-    if mode == 'match':
-        matched_instance = _match_tv_instance_from_path(file_path)
-        if matched_instance in {'standard', '4k'} and rows_by_instance.get(matched_instance) is not None:
-            fallback_instance = '4k' if matched_instance == 'standard' else 'standard'
-            return {
-                'rows': [rows_by_instance[matched_instance]],
-                'chosen_instances': [matched_instance],
-                'qualifying_instances': [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None],
-                'preferred_instance': matched_instance,
-                'fallback_instance': fallback_instance if rows_by_instance.get(fallback_instance) is not None else None,
-                'selection_reason': 'matched_by_root',
-                'immediate_fallback': False,
-                'root_match': matched_instance,
-            }
-
-        selection = _select_rows_by_preference(rows_by_instance, _search_preference())
-        selection['selection_reason'] = 'match_ambiguous_used_preference' if matched_instance == 'both' else 'match_missing_used_preference'
-        selection['root_match'] = matched_instance
-        return selection
-
-    if mode == 'primary':
-        matched_instance = _match_tv_instance_from_path(file_path)
-        qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
-        row = rows_by_instance.get('standard')
-        fallback = rows_by_instance.get('4k')
-        if row is not None:
-            return {
-                'rows': [row],
-                'chosen_instances': ['standard'],
-                'qualifying_instances': qualifying_instances,
-                'preferred_instance': 'standard',
-                'fallback_instance': '4k' if fallback is not None else None,
-                'selection_reason': 'tv_mode_primary',
-                'immediate_fallback': False,
-                'root_match': matched_instance,
-            }
-        return {
-            'rows': [],
-            'chosen_instances': [],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': 'standard',
-            'fallback_instance': None,
-            'selection_reason': 'tv_mode_primary_no_row',
-            'immediate_fallback': False,
-            'root_match': matched_instance,
-        }
-
-    if mode == 'secondary':
-        matched_instance = _match_tv_instance_from_path(file_path)
-        qualifying_instances = [label for label in ('standard', '4k') if rows_by_instance.get(label) is not None]
-        row = rows_by_instance.get('4k')
-        fallback = rows_by_instance.get('standard')
-        if row is not None:
-            return {
-                'rows': [row],
-                'chosen_instances': ['4k'],
-                'qualifying_instances': qualifying_instances,
-                'preferred_instance': '4k',
-                'fallback_instance': 'standard' if fallback is not None else None,
-                'selection_reason': 'tv_mode_secondary',
-                'immediate_fallback': False,
-                'root_match': matched_instance,
-            }
-        return {
-            'rows': [],
-            'chosen_instances': [],
-            'qualifying_instances': qualifying_instances,
-            'preferred_instance': '4k',
-            'fallback_instance': None,
-            'selection_reason': 'tv_mode_secondary_no_row',
-            'immediate_fallback': False,
-            'root_match': matched_instance,
-        }
-
-    selection = _select_rows_by_preference(rows_by_instance, _search_preference())
-    selection['selection_reason'] = 'tv_preference_mode'
-    selection['root_match'] = _match_tv_instance_from_path(file_path)
-    return selection
+    root_match = _match_tv_instance_from_path(file_path)
+    return _select_with_path_preference(
+        rows_by_instance,
+        media_type='tv',
+        kind='playback',
+        mode=mode,
+        root_match=root_match,
+        reason_prefix='tv',
+    )
 
 
 def _play_mode() -> str:
@@ -1210,15 +1420,16 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
     # Playback may enable Radarr monitoring and trigger search. Placeholder removal for
     # monitored titles is deferred to sync/determination (SKIP_PLACEHOLDERS_WHEN_MONITORED);
     # import still removes placeholders when a real file lands.
+    instance_key = _row_instance_key(movie_row)
     if bool(getattr(movie_row, 'is_deleted', False)):
-        return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
+        return {'ok': True, 'skipped': 'deleted_in_arr', 'movie_id': int(movie_row.id), 'instance': instance_key}
 
     if bool(getattr(movie_row, 'has_file', False)):
-        return {'ok': True, 'skipped': 'has_file', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
+        return {'ok': True, 'skipped': 'has_file', 'movie_id': int(movie_row.id), 'instance': instance_key}
 
-    base_url, api_key = _resolve_endpoint('movie', bool(getattr(movie_row, 'is_4k', False)))
+    base_url, api_key = _resolve_endpoint('movie', instance_key=instance_key or None)
     if not base_url or not api_key:
-        return {'ok': False, 'reason': 'missing_movie_arr_config', 'movie_id': int(movie_row.id), 'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False)))}
+        return {'ok': False, 'reason': 'missing_movie_arr_config', 'movie_id': int(movie_row.id), 'instance': instance_key}
 
     monitored_updated = False
     if not bool(getattr(movie_row, 'radarr_monitored', False)) and getattr(movie_row, 'radarrid', None):
@@ -1242,7 +1453,7 @@ def _run_movie_search_for_row(session, movie_row: Movie) -> dict[str, Any]:
         'event': 'playback_start',
         'media_type': 'movie',
         'movie_id': int(movie_row.id),
-        'instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+        'instance': instance_key,
         'monitored_updated': monitored_updated,
         'search_triggered': bool(search_triggered),
         'status_intents_applied': len(intents),
@@ -1384,8 +1595,9 @@ def _trigger_playback_sonarr_search_for_row(
 def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, Any]) -> dict[str, Any]:
     # Same as movie playback: do not run determination/materialization here; monitored
     # cleanup is handled on the next ARR sync when SKIP_PLACEHOLDERS_WHEN_MONITORED is on.
+    instance_key = _row_instance_key(series_row)
     if bool(getattr(series_row, 'is_deleted', False)):
-        return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
+        return {'ok': True, 'skipped': 'deleted_in_arr', 'series_id': int(series_row.id), 'instance': instance_key}
 
     season_number, episode_number = _extract_season_episode(payload)
     targets, target_meta = _collect_episode_targets(session, series_row, season_number, episode_number)
@@ -1395,14 +1607,14 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
             'event': 'playback_start',
             'media_type': 'episode',
             'series_id': int(series_row.id),
-            'instance': _instance_label(bool(getattr(series_row, 'is_4k', False))),
+            'instance': instance_key,
             'skipped': 'no_targets',
             'target_meta': target_meta,
         }
 
-    base_url, api_key = _resolve_endpoint('series', bool(getattr(series_row, 'is_4k', False)))
+    base_url, api_key = _resolve_endpoint('series', instance_key=instance_key or None)
     if not base_url or not api_key:
-        return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': _instance_label(bool(getattr(series_row, 'is_4k', False)))}
+        return {'ok': False, 'reason': 'missing_series_arr_config', 'series_id': int(series_row.id), 'instance': instance_key}
 
     partition = _partition_playback_targets(session, series_row, targets)
     to_monitor: list[Episode] = partition["to_monitor"]
@@ -1459,7 +1671,7 @@ def _run_episode_search_for_row(session, series_row: Series, payload: dict[str, 
         'event': 'playback_start',
         'media_type': 'episode',
         'series_id': int(series_row.id),
-        'instance': _instance_label(bool(getattr(series_row, 'is_4k', False))),
+        'instance': instance_key,
         'mode': mode,
         'targets': len(targets),
         'target_meta': target_meta,
@@ -1482,7 +1694,10 @@ def _should_schedule_delayed_fallback(selection: dict[str, Any], chosen_instance
         return False
     if len(selection.get('chosen_instances') or []) != 1:
         return False
-    if not selection.get('fallback_instance'):
+    fallbacks = selection.get('fallback_instances') or []
+    if not fallbacks and selection.get('fallback_instance'):
+        fallbacks = [selection.get('fallback_instance')]
+    if not fallbacks:
         return False
     return chosen_instance == selection.get('preferred_instance')
 
@@ -1493,7 +1708,7 @@ def _enqueue_delayed_fallback(
     media_type: str,
     payload: dict[str, Any],
     preferred_instance: str,
-    fallback_instance: str,
+    fallback_instances: list[str],
     source_instance: str | None,
 ) -> int | None:
     if not _fallback_enabled():
@@ -1503,6 +1718,10 @@ def _enqueue_delayed_fallback(
     if timeout_minutes <= 0:
         return None
 
+    queue = [str(k).strip().lower() for k in (fallback_instances or []) if str(k or '').strip()]
+    if not queue:
+        return None
+
     from services.source_of_truth.job_priority import default_priority_for
 
     job = Job(
@@ -1510,7 +1729,8 @@ def _enqueue_delayed_fallback(
         payload={
             'media_type': media_type,
             'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance,
+            'fallback_instances': queue,
+            'fallback_instance': queue[0],
             'source_instance': source_instance,
             'payload': dict(payload),
         },
@@ -1522,7 +1742,7 @@ def _enqueue_delayed_fallback(
     session.add(job)
     session.flush()
     logger.info(
-        f"Enqueued playback fallback job job_id={job.id} media_type={media_type} preferred={preferred_instance} fallback={fallback_instance}",
+        f"Enqueued playback fallback job job_id={job.id} media_type={media_type} preferred={preferred_instance} fallback_queue={queue}",
         extra={'emoji_type': 'processing'},
     )
     return int(job.id)
@@ -1554,7 +1774,11 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
     if playback_kind != 'placeholder':
         return {'ok': False, 'reason': 'unresolved_movie_playback_kind'}
 
-    selection = _select_rows_by_preference(active_rows, _placeholder_search_pref('movie'))
+    selection = _select_placeholder_rows(
+        active_rows,
+        media_type='movie',
+        file_path=context.get('file_path'),
+    )
     selected_rows = selection.get('rows') or []
     if not selected_rows:
         return {
@@ -1577,8 +1801,8 @@ def _process_movie_playback(session, payload: dict[str, Any], context: dict[str,
                 session,
                 media_type='movie',
                 payload=payload,
-                preferred_instance=str(selection.get('preferred_instance')),
-                fallback_instance=str(selection.get('fallback_instance')),
+                preferred_instance=str(selection.get('preferred_instance') or ''),
+                fallback_instances=list(selection.get('fallback_instances') or ([selection.get('fallback_instance')] if selection.get('fallback_instance') else [])),
                 source_instance=source_instance,
             )
 
@@ -1608,7 +1832,11 @@ def _process_episode_playback(session, payload: dict[str, Any], context: dict[st
     playback_kind = str(context.get('playback_kind') or 'unknown')
 
     if playback_kind == 'placeholder':
-        selection = _select_rows_by_preference(active_rows, _placeholder_search_pref('tv'))
+        selection = _select_placeholder_rows(
+            active_rows,
+            media_type='tv',
+            file_path=context.get('file_path'),
+        )
     elif playback_kind == 'real':
         selection = _select_tv_real_rows(active_rows, context.get('file_path'))
     else:
@@ -1638,8 +1866,8 @@ def _process_episode_playback(session, payload: dict[str, Any], context: dict[st
                 session,
                 media_type='episode',
                 payload=payload,
-                preferred_instance=str(selection.get('preferred_instance')),
-                fallback_instance=str(selection.get('fallback_instance')),
+                preferred_instance=str(selection.get('preferred_instance') or ''),
+                fallback_instances=list(selection.get('fallback_instances') or ([selection.get('fallback_instance')] if selection.get('fallback_instance') else [])),
                 source_instance=source_instance,
             )
 
@@ -1675,16 +1903,30 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
 
     payload = job.payload or {}
     media_type = str(payload.get('media_type') or '').strip().lower()
-    preferred_instance = str(payload.get('preferred_instance') or '').strip().lower()
-    fallback_instance = str(payload.get('fallback_instance') or '').strip().lower()
+    preferred_raw = str(payload.get('preferred_instance') or '').strip().lower()
     event_payload = payload.get('payload') if isinstance(payload.get('payload'), dict) else {}
 
     if media_type not in {'movie', 'episode'}:
         return {'ok': False, 'reason': 'invalid_media_type'}
-    if preferred_instance not in {'standard', '4k'} or fallback_instance not in {'standard', '4k'}:
+
+    arr_type = 'radarr' if media_type == 'movie' else 'sonarr'
+    preferred_instance = _coerce_instance_key(arr_type, preferred_raw)
+
+    raw_queue = payload.get('fallback_instances')
+    if not isinstance(raw_queue, list) or not raw_queue:
+        legacy = payload.get('fallback_instance')
+        raw_queue = [legacy] if legacy else []
+    fallback_instances = [
+        key
+        for key in (_coerce_instance_key(arr_type, item) for item in raw_queue)
+        if key
+    ]
+    if not preferred_instance or not fallback_instances:
         return {'ok': False, 'reason': 'invalid_fallback_instances'}
 
     context = _resolve_playback_context(session, event_payload)
+    head, *tail = fallback_instances
+
     if media_type == 'movie':
         movie_rows = _find_movie_rows(
             session,
@@ -1697,17 +1939,50 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
         if _preferred_movie_import_succeeded(preferred_row):
             return {'ok': True, 'skipped': 'preferred_imported', 'preferred_instance': preferred_instance}
 
-        fallback_row = active_rows.get(fallback_instance)
+        fallback_row = active_rows.get(head)
         if fallback_row is None:
-            return {'ok': True, 'skipped': 'fallback_no_active_row', 'fallback_instance': fallback_instance}
+            if tail:
+                requeue_id = _enqueue_delayed_fallback(
+                    session,
+                    media_type='movie',
+                    payload=event_payload,
+                    preferred_instance=preferred_instance,
+                    fallback_instances=tail,
+                    source_instance=payload.get('source_instance'),
+                )
+                return {
+                    'ok': True,
+                    'skipped': 'fallback_no_active_row',
+                    'fallback_instance': head,
+                    'fallback_instances': fallback_instances,
+                    'requeue_job_id': requeue_id,
+                }
+            return {
+                'ok': True,
+                'skipped': 'fallback_no_active_row',
+                'fallback_instance': head,
+                'fallback_instances': fallback_instances,
+            }
 
         result = _run_movie_search_for_row(session, fallback_row)
+        requeue_id = None
+        if result.get('search_triggered') and tail and not _preferred_movie_import_succeeded(preferred_row):
+            requeue_id = _enqueue_delayed_fallback(
+                session,
+                media_type='movie',
+                payload=event_payload,
+                preferred_instance=preferred_instance,
+                fallback_instances=tail,
+                source_instance=payload.get('source_instance'),
+            )
         return {
             'ok': True,
             'event': 'playback_fallback',
             'media_type': 'movie',
             'preferred_instance': preferred_instance,
-            'fallback_instance': fallback_instance,
+            'fallback_instance': head,
+            'fallback_instances': fallback_instances,
+            'requeue_job_id': requeue_id,
             'result': result,
         }
 
@@ -1724,17 +1999,50 @@ def process_playback_fallback_job(session, job: Job) -> dict[str, Any]:
     if _preferred_episode_import_succeeded(session, preferred_row, event_payload):
         return {'ok': True, 'skipped': 'preferred_imported', 'preferred_instance': preferred_instance}
 
-    fallback_row = active_rows.get(fallback_instance)
+    fallback_row = active_rows.get(head)
     if fallback_row is None:
-        return {'ok': True, 'skipped': 'fallback_no_active_row', 'fallback_instance': fallback_instance}
+        if tail:
+            requeue_id = _enqueue_delayed_fallback(
+                session,
+                media_type='episode',
+                payload=event_payload,
+                preferred_instance=preferred_instance,
+                fallback_instances=tail,
+                source_instance=payload.get('source_instance'),
+            )
+            return {
+                'ok': True,
+                'skipped': 'fallback_no_active_row',
+                'fallback_instance': head,
+                'fallback_instances': fallback_instances,
+                'requeue_job_id': requeue_id,
+            }
+        return {
+            'ok': True,
+            'skipped': 'fallback_no_active_row',
+            'fallback_instance': head,
+            'fallback_instances': fallback_instances,
+        }
 
     result = _run_episode_search_for_row(session, fallback_row, event_payload)
+    requeue_id = None
+    if result.get('search_triggered') and tail and not _preferred_episode_import_succeeded(session, preferred_row, event_payload):
+        requeue_id = _enqueue_delayed_fallback(
+            session,
+            media_type='episode',
+            payload=event_payload,
+            preferred_instance=preferred_instance,
+            fallback_instances=tail,
+            source_instance=payload.get('source_instance'),
+        )
     return {
         'ok': True,
         'event': 'playback_fallback',
         'media_type': 'episode',
         'preferred_instance': preferred_instance,
-        'fallback_instance': fallback_instance,
+        'fallback_instance': head,
+        'fallback_instances': fallback_instances,
+        'requeue_job_id': requeue_id,
         'result': result,
     }
 

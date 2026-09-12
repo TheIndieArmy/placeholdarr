@@ -2447,8 +2447,8 @@ export function CollectionEditor(props: {
             <div className="flex flex-col gap-1.5 min-w-[16rem]">
               <span className={theme.label}>Plex libraries</span>
               <p className={`mt-1 mb-2 text-[12px] ${theme.muted}`}>
-                If you use multiple Placeholdarr destination libraries, include each Plex library that should receive
-                this collection.
+                New Placeholdarr destinations from Settings → Paths each map to their own Plex library. Select every
+                library that should get this collection; recipes do not auto-follow destination maps.
               </p>
               <p className={`text-[12px] font-normal normal-case tracking-normal ${theme.muted}`}>
                 Same collection name is created in each selected library (same type only).

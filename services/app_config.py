@@ -19,6 +19,18 @@ from services.postgres.models import AppConfig
 
 SETUP_COMPLETED_KEY = "APP_SETUP_COMPLETED_AT"
 
+# Choice fields that also accept a concrete Arr instance_key (from the instance name).
+_INSTANCE_SEARCH_MODE_KEYS = frozenset(
+    {
+        "MOVIE_PLACEHOLDER_SEARCH_MODE",
+        "TV_PLACEHOLDER_SEARCH_MODE",
+        "MOVIE_PLAYBACK_INSTANCE_MODE",
+        "TV_PLAYBACK_INSTANCE_MODE",
+    }
+)
+_INSTANCE_SEARCH_MODE_RESERVED = frozenset({"match", "both", "primary", "secondary"})
+_INSTANCE_KEY_MODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
 # Settings that rewrite existing placeholder NFO text when changed.
 NFO_BACKFILL_SETTING_KEYS = frozenset(
     {
@@ -763,62 +775,112 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             "MOVIE_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie placeholder search instance",
-                "description": "When a movie placeholder plays, which Radarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
+                "label": "Movie placeholder search preference",
+                "description": "When a movie placeholder plays, which instance(s) to search. All searches every configured Radarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "MOVIE_PLACEHOLDER_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "Movie placeholder prefer path match",
+                "description": "When enabled, a unique library destination match overrides the movie placeholder search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "TV_PLACEHOLDER_SEARCH_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV placeholder search instance",
-                "description": "When a TV placeholder plays, which Sonarr instance should be searched. Primary = first configured instance. Secondary = second configured instance. Both = search all configured instances.",
+                "label": "TV placeholder search preference",
+                "description": "When a TV placeholder plays, which instance(s) to search. All searches every configured Sonarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "TV_PLACEHOLDER_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "TV placeholder prefer path match",
+                "description": "When enabled, a unique library destination match overrides the TV placeholder search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "MOVIE_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "Movie real-file playback mode",
-                "description": "Applies when a real movie file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
+                "label": "Movie real-file search preference",
+                "description": "When a real movie file is played, which instance(s) to search. All searches every configured Radarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "match", "label": "Match by library path (recommended)"},
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "MOVIE_PLAYBACK_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "Movie real-file prefer path match",
+                "description": "When enabled, a unique library destination match overrides the movie real-file search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
             "TV_PLAYBACK_INSTANCE_MODE",
             {
                 "section": "ARR Integrations",
-                "label": "TV real-file playback mode",
-                "description": "Applies when a real TV file is played. Match routes to the instance whose library path contains the file. Primary always searches the first configured instance. Secondary always searches the second configured instance. Both searches all configured instances.",
+                "label": "TV real-file search preference",
+                "description": "When a real TV file is played, which instance(s) to search. All searches every configured Sonarr. You can also force a specific instance by its key (the name you gave it).",
                 "type": "choice",
                 "restart_required": False,
+                "default": "both",
                 "options": [
-                    {"value": "match", "label": "Match by library path (recommended)"},
-                    {"value": "primary", "label": "Primary instance only"},
-                    {"value": "secondary", "label": "Secondary instance only"},
-                    {"value": "both", "label": "Both instances"},
+                    {"value": "both", "label": "All instances"},
+                    {"value": "match", "label": "Matched by library path (legacy)"},
+                    {"value": "primary", "label": "First instance only (legacy)"},
+                    {"value": "secondary", "label": "Second instance only (legacy)"},
                 ],
+            },
+        ),
+        (
+            "TV_PLAYBACK_PREFER_PATH_MATCH",
+            {
+                "section": "ARR Integrations",
+                "label": "TV real-file prefer path match",
+                "description": "When enabled, a unique library destination match overrides the TV real-file search preference. Shared or unmatched paths still use the preference.",
+                "type": "bool",
+                "restart_required": False,
+                "default": True,
             },
         ),
         (
@@ -826,7 +888,7 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Enable playback fallback search",
-                "description": "When instance mode is set to Primary or Secondary, content that is not present in the selected ARR instance falls back immediately, including missing rows and rows marked deleted. This setting controls delayed fallback only after a search was actually attempted first but did not resolve, such as no found releases or a failed download path.",
+                "description": "When search is forced to a specific Arr instance, content that is not present there falls back immediately, including missing rows and rows marked deleted. This setting controls delayed fallback only after a search was actually attempted first but did not resolve, such as no found releases or a failed download path.",
                 "type": "bool",
                 "restart_required": False,
             },
@@ -847,22 +909,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Radarr shared placeholder cleanup",
-                "description": (
-                    "When two Radarr instances track the same movie (same TMDB id), controls shared placeholder "
-                    "behavior: keep placeholders until no instance still needs them, or stop creating/recreating "
-                    "placeholders on other instances once any instance has a real file (and remove stale on-disk files)."
-                ),
+                "description": "When two Radarr instances share the same Placeholdarr folder, choose when placeholder files are removed from disk. Not used when each instance maps to its own destination.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "protect_siblings",
                 "options": [
-                    {
-                        "value": "protect_siblings",
-                        "label": "Protect until no instance needs placeholder (recommended)",
-                    },
-                    {
-                        "value": "any_instance_has_file",
-                        "label": "Remove when any instance has a real file",
-                    },
+                    {"value": "protect_siblings", "label": "Remove when all instances have a real file"},
+                    {"value": "any_instance_has_file", "label": "Remove when any instance has a real file"},
                 ],
             },
         ),
@@ -871,22 +924,13 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             {
                 "section": "ARR Integrations",
                 "label": "Sonarr shared placeholder cleanup",
-                "description": (
-                    "When two Sonarr instances track the same episode (same TVDB id and season/episode), controls "
-                    "shared placeholder behavior: keep placeholders until no instance still needs them, or stop "
-                    "creating/recreating placeholders on other instances once any instance has a real file."
-                ),
+                "description": "When two Sonarr instances share the same Placeholdarr folder, choose when placeholder files are removed from disk. Not used when each instance maps to its own destination.",
                 "type": "choice",
                 "restart_required": False,
+                "default": "protect_siblings",
                 "options": [
-                    {
-                        "value": "protect_siblings",
-                        "label": "Protect until no instance needs placeholder (recommended)",
-                    },
-                    {
-                        "value": "any_instance_has_file",
-                        "label": "Remove when any instance has a real file",
-                    },
+                    {"value": "protect_siblings", "label": "Remove when all instances have a real file"},
+                    {"value": "any_instance_has_file", "label": "Remove when any instance has a real file"},
                 ],
             },
         ),
@@ -1298,11 +1342,22 @@ def _validate_value(key: str, raw_value: Any) -> Any:
         value = str(raw_value or "").strip()
         if key == "PLACEHOLDER_STATUS_PROJECTION_MODE" and value.lower() == "off":
             value = "both"
-        allowed = [str(o["value"]) for o in meta.get("options", [])]
-        if not allowed:
-            raise ValueError("choice field missing options")
-        if value not in allowed:
-            raise ValueError(f"must be one of: {', '.join(allowed)}")
+        if key in _INSTANCE_SEARCH_MODE_KEYS:
+            value = value.lower() or "match"
+            if value in _INSTANCE_SEARCH_MODE_RESERVED:
+                pass
+            elif _INSTANCE_KEY_MODE_RE.fullmatch(value):
+                pass
+            else:
+                raise ValueError(
+                    "must be match, both, primary, secondary, or a configured instance key"
+                )
+        else:
+            allowed = [str(o["value"]) for o in meta.get("options", [])]
+            if not allowed:
+                raise ValueError("choice field missing options")
+            if value not in allowed:
+                raise ValueError(f"must be one of: {', '.join(allowed)}")
     elif value_type == "string_list":
         value = _coerce_string_list(raw_value)
     else:
@@ -1800,8 +1855,18 @@ def save_settings(
                         reserved_tokens.add(t)
                     url = str(item.get("url") or "").strip()
                     api_key = str(item.get("api_key") or item.get("apikey") or "").strip()
-                    if not url or not api_key:
-                        raise ValueError(f"item {index + 1} requires url and api_key")
+                    label = str(item.get("label") or instance_key or f"item {index + 1}").strip()
+                    if not url:
+                        raise ValueError(f"{label}: url is required")
+                    # Blank api_key is allowed after merge when the client sent a redacted
+                    # value and no prior secret exists (URL-only shell), or while the user is
+                    # still pasting keys. Runtime configured_arr_instances skips unkeyed rows.
+                    if not api_key:
+                        logger.warning(
+                            f"ARR_INSTANCES_JSON: '{label}' has no api_key after merge; "
+                            "saving as inactive until a key is provided",
+                            extra={"emoji_type": "warning"},
+                        )
                     counts[arr_type] += 1
                     if counts[arr_type] > arr_limit:
                         raise ValueError(f"{arr_type} supports up to {arr_limit} instances per deployment")

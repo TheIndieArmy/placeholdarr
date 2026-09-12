@@ -193,6 +193,23 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/paths",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="multilibrary-match-fallback-0-9-27-beta-1",
+        since_version="0.9.27-beta.1",
+        title="Search that follows your libraries",
+        body=(
+            "Playback search now works better when you have several Radarr or Sonarr instances and separate "
+            "Placeholdarr folders for them.\n\n"
+            "Pick a default preference (All instances, or any one instance by the name you gave it), then turn on "
+            "Prefer matched library path when possible so a unique destination still wins. Shared or unmatched paths "
+            "fall back to your preference. If fallback is on, Placeholdarr can try your other instances in list order "
+            "when the first one does not deliver.\n\n"
+            "Shared placeholder cleanup only matters when more than one instance writes into the same folder."
+        ),
+        cta_label="Open ARR Integrations",
+        cta_path="/settings/arr-integrations",
+        requires_ack=True,
+    ),
 )
 
 

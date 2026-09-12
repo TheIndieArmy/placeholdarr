@@ -126,6 +126,24 @@ def validate_library_destination_map_unique(rows: list[dict[str, Any]]) -> str |
     return None
 
 
+def instances_share_dest_folder(arr_type: str, map_rows: list[dict[str, Any]] | None = None) -> bool:
+    """True when two or more distinct instances of ``arr_type`` map to the same dest folder."""
+    want = str(arr_type or "").strip().lower()
+    if want not in {"radarr", "sonarr"}:
+        return False
+    rows = map_rows if map_rows is not None else parse_library_destination_map()
+    by_dest: dict[str, set[str]] = {}
+    for row in rows:
+        if str(row.get("arr_type") or "").strip().lower() != want:
+            continue
+        dest = _normalize_path(row.get("dest_folder") or row.get("dest") or "").lower()
+        key = str(row.get("instance_key") or "").strip().lower()
+        if not dest or not key:
+            continue
+        by_dest.setdefault(dest, set()).add(key)
+    return any(len(keys) >= 2 for keys in by_dest.values())
+
+
 def default_movie_dest_folder() -> str:
     return str(getattr(settings, "MOVIE_LIBRARY_FOLDER", "") or "").strip()
 
