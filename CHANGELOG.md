@@ -9,6 +9,9 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ### Fixed
 
+- **Jellyfin 12 auth**: Send ``Authorization: MediaBrowser Token=...`` instead of legacy ``X-Emby-Token`` (connection test and all Jellyfin API calls).
+- **Integration warning !**: Client request timeouts no longer sticky the Media/ARR Settings warning; only connection errors and auth/gateway HTTP failures do.
+- **Integration warning ! (cancelled setup)**: A failed connection Test no longer sticky the Settings warning, so Cancel after a bad Test leaves no !.
 - **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
 
 ## [0.9.26] - 2026-09-10
