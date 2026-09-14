@@ -10,6 +10,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 ### Changed
 
 - **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done instead of a disabled Save.
+- **Playback setup footer**: Keep one stable primary button so Cancel does not flash accent yellow when switching sources.
 
 ### Fixed
 

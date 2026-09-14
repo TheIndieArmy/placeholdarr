@@ -8867,35 +8867,34 @@ function PlaybackWebhookSetupModal(props: {
         </div>
 
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-[#424753]/40 px-6 py-4">
-          {selectionMatchesSaved ? (
+          {!selectionMatchesSaved ? (
             <button
+              key="playback-setup-cancel"
               type="button"
-              className={`ml-auto px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
-              style={accentFilledStyle(props.accent.hex)}
+              className="text-[14px] font-headline uppercase tracking-wider text-slate-400 hover:text-slate-200"
               onClick={props.onClose}
             >
-              Done
+              Cancel
             </button>
           ) : (
-            <>
-              <button
-                type="button"
-                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
-                onClick={props.onClose}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider disabled:cursor-not-allowed disabled:opacity-60 ${FG_ON_ACCENT_TEXT_CLASS}`}
-                style={accentFilledStyle(props.accent.hex)}
-                onClick={() => void handleSave()}
-              >
-                {busy ? "Saving…" : "Save"}
-              </button>
-            </>
+            <span aria-hidden className="block w-0" />
           )}
+          <button
+            key="playback-setup-primary"
+            type="button"
+            disabled={busy && !selectionMatchesSaved}
+            className={`ml-auto px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider disabled:cursor-not-allowed disabled:opacity-60 ${FG_ON_ACCENT_TEXT_CLASS}`}
+            style={accentFilledStyle(props.accent.hex)}
+            onClick={() => {
+              if (selectionMatchesSaved) {
+                props.onClose();
+                return;
+              }
+              void handleSave();
+            }}
+          >
+            {selectionMatchesSaved ? "Done" : busy ? "Saving…" : "Save"}
+          </button>
         </div>
       </div>
     </div>
