@@ -7,6 +7,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+### Changed
+
+- **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done instead of a disabled Save.
+
 ### Fixed
 
 - **Jellyfin 12 auth**: Send ``Authorization: MediaBrowser Token=...`` instead of legacy ``X-Emby-Token`` (connection test and all Jellyfin API calls).

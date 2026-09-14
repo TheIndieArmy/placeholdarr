@@ -8721,7 +8721,9 @@ function PlaybackWebhookSetupModal(props: {
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
         <h3 className="text-[20px] font-headline font-bold text-white">Playback setup · {cardTitle}</h3>
         <p className="text-[16px] text-slate-300">
-          Choose how Placeholdarr hears when someone hits play on {cardTitle}.
+          Placeholders only become real media when Placeholdarr knows someone started playback. A playback
+          webhook tells us that moment so we can ask Radarr or Sonarr to search, based on your settings.
+          Pick how we should get that signal from {cardTitle} playbacks.
         </p>
 
         <fieldset className="space-y-2">
@@ -8857,7 +8859,7 @@ function PlaybackWebhookSetupModal(props: {
 
         {!useTracearr && selectionMatchesSaved ? (
           <p className="text-[16px] text-slate-300">
-            {nativeOptionLabel} is saved for {cardTitle} playback.
+            Using {nativeOptionLabel} for {cardTitle}. Follow the steps above, then Done.
           </p>
         ) : null}
 
@@ -8865,26 +8867,35 @@ function PlaybackWebhookSetupModal(props: {
         </div>
 
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-[#424753]/40 px-6 py-4">
-          <button
-            type="button"
-            className="text-[14px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
-            onClick={props.onClose}
-          >
-            Close
-          </button>
-          <button
-            type="button"
-            disabled={busy || selectionMatchesSaved}
-            className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider disabled:cursor-not-allowed ${
-              selectionMatchesSaved && !busy
-                ? "border border-[#424753]/50 bg-[#252e3a]/50 text-slate-500"
-                : `${FG_ON_ACCENT_TEXT_CLASS} disabled:opacity-60`
-            }`}
-            style={selectionMatchesSaved && !busy ? undefined : accentFilledStyle(props.accent.hex)}
-            onClick={() => void handleSave()}
-          >
-            {busy ? "Saving…" : "Save"}
-          </button>
+          {selectionMatchesSaved ? (
+            <button
+              type="button"
+              className={`ml-auto px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider ${FG_ON_ACCENT_TEXT_CLASS}`}
+              style={accentFilledStyle(props.accent.hex)}
+              onClick={props.onClose}
+            >
+              Done
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="text-[14px] font-headline uppercase tracking-wider text-slate-400 transition hover:text-slate-200"
+                onClick={props.onClose}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                className={`px-5 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider disabled:cursor-not-allowed disabled:opacity-60 ${FG_ON_ACCENT_TEXT_CLASS}`}
+                style={accentFilledStyle(props.accent.hex)}
+                onClick={() => void handleSave()}
+              >
+                {busy ? "Saving…" : "Save"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
