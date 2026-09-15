@@ -20,13 +20,29 @@ def _build_url(endpoint: str) -> str:
     return f"{base}/{endpoint.lstrip('/')}"
 
 
-def _session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({
-        "X-Emby-Token": getattr(settings, "JELLYFIN_TOKEN", "") or "",
+def jellyfin_auth_headers(token: str | None = None) -> dict[str, str]:
+    """Build Jellyfin request headers using the modern MediaBrowser Authorization scheme.
+
+    Jellyfin 12 disables legacy ``X-Emby-Token`` / ``api_key`` auth. Do not send those
+    alongside this header; dual tokens can 401 on newer servers. The same API key users
+    paste in Settings still works; only the wire format changes.
+    """
+    from core.version import APP_VERSION
+
+    value = str(token if token is not None else getattr(settings, "JELLYFIN_TOKEN", "") or "").strip()
+    return {
+        "Authorization": (
+            f'MediaBrowser Client="Placeholdarr", Device="Placeholdarr", '
+            f'DeviceId="placeholdarr", Version="{APP_VERSION}", Token="{value}"'
+        ),
         "Accept": "application/json",
         "Content-Type": "application/json",
-    })
+    }
+
+
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(jellyfin_auth_headers())
     return s
 
 
