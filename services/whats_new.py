@@ -182,7 +182,7 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         id="jellyfin-12-support-0-9-27",
         since_version="0.9.27",
         title="Jellyfin 12 support",
-        body="Added support for Jellyfin 12's new API authoration method. No action required.",
+        body="Added support for Jellyfin 12's new API authorization method. No action required.",
         cta_label="Open Media Integrations",
         cta_path="/settings/media-integrations",
     ),
