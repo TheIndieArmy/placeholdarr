@@ -178,6 +178,21 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         cta_path="/settings/status-updates",
         requires_ack=True,
     ),
+    WhatsNewNotice(
+        id="jellyfin-12-playback-setup-0-9-27",
+        since_version="0.9.27",
+        title="Jellyfin 12 and quieter connection warnings",
+        body=(
+            "Placeholdarr now talks to Jellyfin 12 with the modern Authorization header. "
+            "Your existing Dashboard API key still works; only how we send it changed.\n\n"
+            "The Settings connection warning (!) only sticks for real connection or auth failures. "
+            "Request timeouts and a failed Test you Cancel no longer leave the badge behind.\n\n"
+            "Playback setup on media cards also explains why a playback webhook is needed, "
+            "and uses Done when your current choice is already saved."
+        ),
+        cta_label="Open Media Integrations",
+        cta_path="/settings/media-integrations",
+    ),
 )
 
 

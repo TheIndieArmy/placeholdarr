@@ -7,6 +7,17 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 
 ## [Unreleased]
 
+## [0.9.27] - 2026-09-15
+
+### Summary
+
+- **Jellyfin 12 auth**: Modern ``Authorization: MediaBrowser Token=...`` for connection tests and all Jellyfin API calls.
+- **Integration warning !**: Client timeouts no longer sticky the Media/ARR Settings badge.
+- **Integration warning ! (cancelled setup)**: A failed Test no longer leaves the badge after Cancel.
+- **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done.
+- **Playback setup footer**: Stable primary button so Cancel does not flash accent yellow when switching sources.
+- **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout; failed fetches skip removed-from-Arr diffs.
+
 ### Changed
 
 - **Playback setup modal**: Intro explains why a playback webhook is needed; unchanged selection shows Done instead of a disabled Save.
@@ -18,6 +29,10 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Integration warning !**: Client request timeouts no longer sticky the Media/ARR Settings warning; only connection errors and auth/gateway HTTP failures do.
 - **Integration warning ! (cancelled setup)**: A failed connection Test no longer sticky the Settings warning, so Cancel after a bad Test leaves no !.
 - **Arr catalog timeout**: Full movie/series pulls use the 120s bulk timeout (not 30s); a failed catalog fetch returns None and skips removed-from-Arr diffs so startup lite cannot treat a timeout as an empty library.
+
+### Added
+
+- **What's new (0.9.27)**: Non-ack catalog notice for Jellyfin 12 auth, quieter connection warnings, and clearer playback setup.
 
 ## [0.9.26] - 2026-09-10
 
