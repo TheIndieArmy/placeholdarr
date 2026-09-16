@@ -751,8 +751,8 @@ export function DestinationMapEditor(props: {
   const body = (
     <div className="space-y-4">
       <p className="ui-field-description leading-relaxed">
-        Map Arr root folders to Placeholdarr folders (and optional Plex libraries). Anything left unmapped keeps using
-        Library Root above (<span className="font-mono text-slate-400">movies</span> /{" "}
+        Map Arr root folders to Placeholdarr folders (and optional Plex libraries). Anything left unmapped keeps the
+        default destinations from Library Root above (<span className="font-mono text-slate-400">movies</span> /{" "}
         <span className="font-mono text-slate-400">tv</span>). After Save Settings, choose Apply now or Next full sync so
         existing placeholders move.
       </p>

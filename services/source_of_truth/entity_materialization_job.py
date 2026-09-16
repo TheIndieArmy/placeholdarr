@@ -64,11 +64,26 @@ def process_entity_materialization_job(session, job: Job) -> dict[str, Any]:
     movie_ids = [int(x) for x in (payload.get("movie_ids") or []) if x is not None]
     episode_ids = [int(x) for x in (payload.get("episode_ids") or []) if x is not None]
     observation_source = str(payload.get("observation_source") or "event_materialization")
+    run_determination_first = bool(payload.get("run_determination_first"))
 
     stop_v = start_verbose_stall_heartbeat(
         f"entity_materialization job_id={job.id} obs={observation_source}",
     )
     try:
+        determination_stats: dict[str, Any] | None = None
+        if run_determination_first and (movie_ids or episode_ids):
+            from services.source_of_truth.determiner import run_determination_for_entities
+
+            determination_stats = run_determination_for_entities(
+                movie_ids=movie_ids or None,
+                episode_ids=episode_ids or None,
+            )
+            logger.info(
+                f"entity_materialization job_id={job.id} determination finished "
+                f"movies={len(movie_ids)} episodes={len(episode_ids)}",
+                extra={"emoji_type": "processing"},
+            )
+
         stats_mat = run_materialization_for_entities(
             movie_ids=movie_ids or None,
             episode_ids=episode_ids or None,

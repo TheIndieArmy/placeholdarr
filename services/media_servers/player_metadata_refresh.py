@@ -368,18 +368,12 @@ def _find_emby_episode_item_id(series: Series, season: Season, episode: Episode,
 
 
 def _projected_display_status(placeholder: Placeholder) -> str:
-    status = str(getattr(placeholder, "display_status", "") or "").strip().upper()
-    reason = str(getattr(placeholder, "display_reason", "") or "").strip()
-    if status in {"COMING_SOON", "COMING_SOON_30", "COMING_SOON_14", "COMING_SOON_7", "COMING_SOON_1", "COMING_SOON_TODAY"} and reason:
-        return reason
-    if status == "DOWNLOADING" and reason:
-        return reason
-    if status == "SEARCHING" and reason and reason.lower() == "queued":
-        return reason
-    if status == "NOT_FOUND":
-        # User-facing projection should read as outcome text, not enum token.
-        return reason or "NO QUALIFYING RELEASE FOUND"
-    return status or "REQUEST"
+    from services.status_projection import resolve_display_status
+
+    status = str(getattr(placeholder, "display_status", "") or "").strip()
+    reason = str(getattr(placeholder, "display_reason", "") or "").strip() or None
+    # Pass enum-or-reason into project_title/project_summary (same as NFO refresh).
+    return resolve_display_status(status, reason) or "REQUEST"
 
 
 def _runtime_minutes_movie(movie: Movie) -> int | None:
@@ -586,7 +580,8 @@ def _push_movie(
             if outcome == "ok":
                 logger.debug(
                     "Plex: updated movie title/summary "
-                    f"(rating_key={plex_key}, movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                    f"(rating_key={plex_key}, movie_id={int(getattr(movie, 'id', 0) or 0)}, "
+                    f"status={status!r}, title={projected_title!r})",
                     extra={"emoji_type": "debug"},
                 )
             else:
@@ -648,7 +643,8 @@ def _push_movie(
                     logger.debug(
                         "Plex: updated movie title/summary after lookup "
                         f"(rating_key={plex_movie.ratingKey}, "
-                        f"movie_id={int(getattr(movie, 'id', 0) or 0)})",
+                        f"movie_id={int(getattr(movie, 'id', 0) or 0)}, "
+                        f"status={status!r}, title={projected_title!r})",
                         extra={"emoji_type": "debug"},
                     )
                 else:

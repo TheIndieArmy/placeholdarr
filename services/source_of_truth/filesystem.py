@@ -57,8 +57,6 @@ def configured_roots() -> list[str]:
         roots = [
             getattr(settings, 'MOVIE_LIBRARY_FOLDER', None),
             getattr(settings, 'TV_LIBRARY_FOLDER', None),
-            getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', None),
-            getattr(settings, 'TV_LIBRARY_4K_FOLDER', None),
         ]
         return [root for root in dict.fromkeys(roots) if root]
 
@@ -99,7 +97,7 @@ def is_path_under_tv_library_roots(path: str | None) -> bool:
         roots = [os.path.abspath(r) for r in all_tv_dest_roots() if r]
     except Exception:
         roots = []
-        for key in ("TV_LIBRARY_FOLDER", "TV_LIBRARY_4K_FOLDER"):
+        for key in ("TV_LIBRARY_FOLDER",):
             raw = getattr(settings, key, None)
             if raw:
                 roots.append(os.path.abspath(str(raw)))
@@ -117,7 +115,7 @@ def is_path_under_movie_library_roots(path: str | None) -> bool:
         roots = [os.path.abspath(r) for r in all_movie_dest_roots() if r]
     except Exception:
         roots = []
-        for key in ("MOVIE_LIBRARY_FOLDER", "MOVIE_LIBRARY_4K_FOLDER"):
+        for key in ("MOVIE_LIBRARY_FOLDER",):
             raw = getattr(settings, key, None)
             if raw:
                 roots.append(os.path.abspath(str(raw)))

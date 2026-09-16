@@ -76,11 +76,11 @@ def _build_endpoint(base_url: str, resource: str) -> str:
 
 
 def _default_radarr_endpoint() -> tuple[str, str]:
-    return settings.resolve_arr_endpoint("radarr", role="primary")
+    return settings.resolve_arr_endpoint("radarr")
 
 
 def _default_sonarr_endpoint() -> tuple[str, str]:
-    return settings.resolve_arr_endpoint("sonarr", role="primary")
+    return settings.resolve_arr_endpoint("sonarr")
 
 
 def _mark_arr_request_connectivity_failure(
@@ -580,9 +580,16 @@ def trigger_radarr_movie_search(
     return result is not None
 
 
-def trigger_radarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
+def trigger_radarr_refresh_monitored_downloads(
+    *,
+    instance_key: str | None = None,
+) -> bool:
     """Ask Radarr to run its Refresh Monitored Downloads task (updates queue sooner than the built-in timer)."""
-    base_url, api_key = settings.resolve_arr_endpoint("radarr", is_4k=is_4k)
+    key = str(instance_key or "").strip().lower() or None
+    if key:
+        base_url, api_key = settings.resolve_arr_endpoint("radarr", instance_key=key)
+    else:
+        base_url, api_key = settings.resolve_arr_endpoint("radarr")
     if not base_url or not api_key:
         return False
     endpoint = _build_endpoint(base_url, "command")
@@ -596,9 +603,16 @@ def trigger_radarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
     return result is not None
 
 
-def trigger_sonarr_refresh_monitored_downloads(*, is_4k: bool = False) -> bool:
+def trigger_sonarr_refresh_monitored_downloads(
+    *,
+    instance_key: str | None = None,
+) -> bool:
     """Ask Sonarr to run its Refresh Monitored Downloads task."""
-    base_url, api_key = settings.resolve_arr_endpoint("sonarr", is_4k=is_4k)
+    key = str(instance_key or "").strip().lower() or None
+    if key:
+        base_url, api_key = settings.resolve_arr_endpoint("sonarr", instance_key=key)
+    else:
+        base_url, api_key = settings.resolve_arr_endpoint("sonarr")
     if not base_url or not api_key:
         return False
     endpoint = _build_endpoint(base_url, "command")

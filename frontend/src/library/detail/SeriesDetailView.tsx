@@ -59,7 +59,6 @@ export function SeriesDetailView(props: {
           certification={payload.certification}
           ratings={payload.ratings_display}
           monitored={payload.sonarr_monitored}
-          is4k={payload.is_4k}
           network={payload.network}
           networkLogoUrl={payload.network_logo_url}
           imdbid={payload.imdbid}

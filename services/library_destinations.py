@@ -168,7 +168,60 @@ def default_tv_plex_section_id() -> int | None:
         return None
 
 
-def _default_dest(*, arr_type: str, instance_key: str) -> LibraryDestination:
+def default_movie_4k_plex_section_id() -> int | None:
+    """Removed legacy setting; mapped dests carry their own Plex section IDs."""
+    return None
+
+
+def default_tv_4k_plex_section_id() -> int | None:
+    """Removed legacy setting; mapped dests carry their own Plex section IDs."""
+    return None
+
+
+def _map_default_for_instance(
+    *,
+    arr_type: str,
+    instance_key: str,
+    map_rows: list[dict[str, Any]],
+) -> LibraryDestination | None:
+    """When Arr path is missing/unmatched, use the sole (or shortest-root) map row for the key."""
+    key = str(instance_key or "").strip().lower()
+    if not key:
+        return None
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for row in map_rows:
+        if str(row.get("arr_type") or "").lower() != arr_type:
+            continue
+        if str(row.get("instance_key") or "").lower() != key:
+            continue
+        root = _normalize_path(row.get("arr_root_path"))
+        dest = _normalize_path(row.get("dest_folder"))
+        if not dest:
+            continue
+        candidates.append((len(root), row))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    best = candidates[0][1]
+    plex_id = best.get("plex_section_id")
+    if plex_id is None:
+        plex_id = (
+            default_tv_plex_section_id()
+            if arr_type == "sonarr"
+            else default_movie_plex_section_id()
+        )
+    return LibraryDestination(
+        dest_folder=str(best.get("dest_folder") or ""),
+        plex_section_id=int(plex_id) if plex_id is not None else None,
+        arr_type=arr_type,
+        instance_key=key,
+        arr_root_path=str(best.get("arr_root_path") or ""),
+        matched=True,
+    )
+
+
+def _primary_default_dest(*, arr_type: str, instance_key: str) -> LibraryDestination:
+    """Default movie/TV destinations when dest map has no row for this instance."""
     if arr_type == "sonarr":
         return LibraryDestination(
             dest_folder=default_tv_dest_folder(),
@@ -186,6 +239,17 @@ def _default_dest(*, arr_type: str, instance_key: str) -> LibraryDestination:
         arr_root_path="",
         matched=False,
     )
+
+
+def _default_dest(*, arr_type: str, instance_key: str, map_rows: list[dict[str, Any]] | None = None) -> LibraryDestination:
+    """Instance-aware default when Arr root matching fails: map row for key, else primary dest."""
+    rows = map_rows if map_rows is not None else parse_library_destination_map()
+    key = str(instance_key or "").strip().lower()
+    if key:
+        mapped = _map_default_for_instance(arr_type=arr_type, instance_key=key, map_rows=rows)
+        if mapped is not None:
+            return mapped
+    return _primary_default_dest(arr_type=arr_type, instance_key=key)
 
 
 def resolve_destination(
@@ -216,10 +280,7 @@ def resolve_destination(
             candidates.append((len(_normalize_path(root)), row))
 
     if not candidates:
-        # Also try matching when arr_path is the root itself with empty path leaf.
-        if not path:
-            return _default_dest(arr_type=normalized_type, instance_key=key)
-        return _default_dest(arr_type=normalized_type, instance_key=key)
+        return _default_dest(arr_type=normalized_type, instance_key=key, map_rows=rows)
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     best = candidates[0][1]
@@ -269,15 +330,10 @@ def resolve_series_dest(
 
 
 def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
-    """All Placeholdarr destination folders (defaults + mapped dests), deduped."""
+    """All Placeholdarr destination folders (default movie/TV + mapped dests), deduped."""
     rows = map_rows if map_rows is not None else parse_library_destination_map()
     roots: list[str] = []
-    for folder in (
-        default_movie_dest_folder(),
-        default_tv_dest_folder(),
-        str(getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", "") or "").strip(),
-        str(getattr(settings, "TV_LIBRARY_4K_FOLDER", "") or "").strip(),
-    ):
+    for folder in (default_movie_dest_folder(), default_tv_dest_folder()):
         if folder:
             roots.append(folder)
     for row in rows:
@@ -299,12 +355,9 @@ def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -
 def all_movie_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
     rows = map_rows if map_rows is not None else parse_library_destination_map()
     roots: list[str] = []
-    for folder in (
-        default_movie_dest_folder(),
-        str(getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", "") or "").strip(),
-    ):
-        if folder:
-            roots.append(folder)
+    movie = default_movie_dest_folder()
+    if movie:
+        roots.append(movie)
     for row in rows:
         if str(row.get("arr_type") or "").lower() != "radarr":
             continue
@@ -325,12 +378,9 @@ def all_movie_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> lis
 def all_tv_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
     rows = map_rows if map_rows is not None else parse_library_destination_map()
     roots: list[str] = []
-    for folder in (
-        default_tv_dest_folder(),
-        str(getattr(settings, "TV_LIBRARY_4K_FOLDER", "") or "").strip(),
-    ):
-        if folder:
-            roots.append(folder)
+    tv = default_tv_dest_folder()
+    if tv:
+        roots.append(tv)
     for row in rows:
         if str(row.get("arr_type") or "").lower() != "sonarr":
             continue
@@ -378,23 +428,23 @@ def plex_section_for_folder(
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
 
-    # Fall back to default movie/TV roots.
-    movie_roots = all_movie_dest_roots(map_rows=[])
-    tv_roots = all_tv_dest_roots(map_rows=[])
-    for root in movie_roots:
-        if _path_is_under_or_equal(folder, root):
-            return default_movie_plex_section_id()
-    for root in tv_roots:
-        if _path_is_under_or_equal(folder, root):
-            return default_tv_plex_section_id()
+    movie_primary = default_movie_dest_folder()
+    tv_primary = default_tv_dest_folder()
+    if movie_primary and _path_is_under_or_equal(folder, movie_primary):
+        return default_movie_plex_section_id()
+    if tv_primary and _path_is_under_or_equal(folder, tv_primary):
+        return default_tv_plex_section_id()
     return None
 
 
 def all_plex_section_ids(*, map_rows: list[dict[str, Any]] | None = None) -> list[int]:
-    """Unique Plex section IDs from defaults + map rows."""
+    """Unique Plex section IDs from default movie/TV libraries and map rows."""
     rows = map_rows if map_rows is not None else parse_library_destination_map()
     ids: list[int] = []
-    for sid in (default_movie_plex_section_id(), default_tv_plex_section_id()):
+    for sid in (
+        default_movie_plex_section_id(),
+        default_tv_plex_section_id(),
+    ):
         if sid is not None:
             ids.append(int(sid))
     for row in rows:
@@ -435,15 +485,21 @@ def section_ids_for_paths(
     return ids
 
 
-def dest_folder_for_instance_role_fallback(*, arr_type: str, is_4k: bool) -> str:
-    """Legacy primary/4k folder pick when no Arr path is available."""
-    if arr_type == "sonarr":
-        if is_4k and getattr(settings, "TV_LIBRARY_4K_FOLDER", None):
-            return str(settings.TV_LIBRARY_4K_FOLDER)
-        return default_tv_dest_folder()
-    if is_4k and getattr(settings, "MOVIE_LIBRARY_4K_FOLDER", None):
-        return str(settings.MOVIE_LIBRARY_4K_FOLDER)
-    return default_movie_dest_folder()
+def dest_folder_for_instance(
+    *,
+    arr_type: str,
+    instance_key: str | None,
+    arr_path: str | None = None,
+    map_rows: list[dict[str, Any]] | None = None,
+) -> str:
+    """Resolve dest folder by dest map, then default movie/TV destinations."""
+    dest = resolve_destination(
+        arr_type=arr_type,
+        instance_key=instance_key,
+        arr_path=arr_path,
+        map_rows=map_rows,
+    )
+    return str(dest.dest_folder or "").strip()
 
 
 def ensure_dest_folders_exist(dir_mode: int | None = None) -> list[str]:

@@ -50,7 +50,6 @@ export function MovieDetailView(props: {
           certification={payload.certification}
           ratings={payload.ratings_display}
           monitored={payload.radarr_monitored}
-          is4k={payload.is_4k}
           studio={payload.studio}
           trailerUrl={payload.trailer_url}
           imdbid={payload.imdbid}

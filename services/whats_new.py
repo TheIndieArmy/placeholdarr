@@ -179,32 +179,24 @@ NOTICES: tuple[WhatsNewNotice, ...] = (
         requires_ack=True,
     ),
     WhatsNewNotice(
-        id="library-destinations-multilibrary",
-        since_version="0.9.27-beta.1",
-        title="Multiple library destinations",
+        id="multilibrary-arr-setup-0-9-28-beta-1",
+        since_version="0.9.28-beta.1",
+        title="More Arrs, more libraries",
         body=(
-            "You can map Arr root folders to different Placeholdarr destinations and Plex libraries "
-            "(Movies, Animated, Documentaries, and the same idea for TV), instead of one combined movies/tv tree.\n\n"
-            "Configure destinations under Settings → Paths. Saving offers Apply now or Next full sync so "
-            "existing placeholders move. Collection recipes still need each target Plex library selected explicitly.\n\n"
-            "You can also add more than two Radarr or Sonarr instances (default cap 4)."
+            "Up to four Radarr/Sonarr instances, optional Paths destinations into separate Plex libraries, "
+            "and playback search that can follow the matched path or fall back in list order."
         ),
         cta_label="Open Paths",
         cta_path="/settings/paths",
         requires_ack=True,
     ),
     WhatsNewNotice(
-        id="multilibrary-match-fallback-0-9-27-beta-1",
-        since_version="0.9.27-beta.1",
-        title="Search that follows your libraries",
+        id="arr-names-slots-renames-0-9-28-beta-1",
+        since_version="0.9.28-beta.1",
+        title="Arr names, slots, and renames",
         body=(
-            "Playback search now works better when you have several Radarr or Sonarr instances and separate "
-            "Placeholdarr folders for them.\n\n"
-            "Pick a default preference (All instances, or any one instance by the name you gave it), then turn on "
-            "Prefer matched library path when possible so a unique destination still wins. Shared or unmatched paths "
-            "fall back to your preference. If fallback is on, Placeholdarr can try your other instances in list order "
-            "when the first one does not deliver.\n\n"
-            "Shared placeholder cleanup only matters when more than one instance writes into the same folder."
+            "Instances are identified by name and list order (not primary/4K). Renames keep a stable id and "
+            "update the catalog; four Slot seats; recopy webhooks only if something looks wrong after upgrade."
         ),
         cta_label="Open ARR Integrations",
         cta_path="/settings/arr-integrations",

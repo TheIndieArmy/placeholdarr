@@ -2823,8 +2823,16 @@ export function App() {
             onCancel={() => setLeaveConfirm(null)}
             onConfirm={() => {
               const path = leaveConfirm.path;
+              const kind = leaveConfirm.kind;
               setLeaveConfirm(null);
-              if (leaveConfirm.kind === "recipe") setCollectionsDraftDirty(false);
+              if (kind === "recipe") {
+                setCollectionsDraftDirty(false);
+              } else {
+                // Discard draft field values back to the last saved baseline so
+                // returning to Settings does not keep removals/edits that were never saved.
+                setFieldValues(baselineValues);
+                setStatusMessagesMeta({ dirty: false, hasValidationErrors: false });
+              }
               navigate(path);
             }}
           />
@@ -3745,9 +3753,7 @@ type ArrInstanceDraft = {
   url: string;
   api_key: string;
   api_key_saved?: boolean;
-  role: "primary" | "secondary" | "additional";
   priority: number;
-  is_4k: boolean;
 };
 
 const ARR_INSTANCE_LIMIT_PER_TYPE = 4;
@@ -3760,30 +3766,27 @@ function normalizeInstanceKey(input: string) {
     .replace(/^[_-]+|[_-]+$/g, "");
 }
 
-/** True when `instance_id` embeds a UUID, matching `services.app_config._arr_instance_id_has_uuid`. */
+/** True when `instance_id` is a UUID, matching backend stable-id checks. */
 function arrInstanceIdEmbedsUuid(instanceId: string): boolean {
-  let hyphens = 0;
-  for (const ch of String(instanceId || "")) {
-    if (ch === "-") hyphens += 1;
+  const text = String(instanceId || "").trim();
+  if (!text) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text);
+}
+
+function newArrInstanceId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
   }
-  return hyphens >= 4;
+  // Fallback for older browsers: RFC4122-ish random id.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const n = (Math.random() * 16) | 0;
+    const v = ch === "x" ? n : (n & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
-function slotWebhookRoleFromRowRole(role: string): "primary" | "secondary" | "additional" {
-  const r = String(role || "").trim().toLowerCase();
-  if (r === "secondary") return "secondary";
-  if (r === "additional") return "additional";
-  return "primary";
-}
-
-function stableArrInstanceId(
-  arrType: "radarr" | "sonarr",
-  slotRole: "primary" | "secondary" | "additional",
-  instanceKey?: string
-) {
-  if (slotRole === "primary" || slotRole === "secondary") return `${arrType}_${slotRole}`;
-  const key = normalizeInstanceKey(String(instanceKey || ""));
-  return `${arrType}_${key || "additional"}`;
+function defaultInstanceKeyForSlot(arrType: "radarr" | "sonarr", slotIndex: number) {
+  return `${arrType}${slotIndex + 1}`;
 }
 
 /**
@@ -3836,16 +3839,6 @@ function buildArrInstanceWebhookUrls(origin: string, instance_id: string, instan
 function inferDefaultKey(label: string, arrType: "radarr" | "sonarr") {
   const slug = normalizeInstanceKey(label);
   return slug || `${arrType}_instance`;
-}
-
-function roleFromRank(rank: number): "primary" | "secondary" | "additional" {
-  if (rank <= 0) return "primary";
-  if (rank === 1) return "secondary";
-  return "additional";
-}
-
-function deriveIs4kFromRole(role: string) {
-  return role !== "primary";
 }
 
 function getPlexLibraryIdPathHint(fieldKey: string): string | null {
@@ -3935,19 +3928,18 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
         const items = rough.map(({ obj, index, arrType, label }) => {
           const rank = rankByType[arrType];
           rankByType[arrType] = rank + 1;
-          // List order (after priority sort) is source of truth for slot roles (primary / secondary / additional).
-          const role = roleFromRank(rank);
-          const instanceKey = normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || inferDefaultKey(label, arrType)));
-          const slotRole = slotWebhookRoleFromRowRole(role);
+          const instanceKey =
+            normalizeInstanceKey(String(obj.instance_key || obj.key || obj.name || "")) ||
+            defaultInstanceKeyForSlot(arrType, rank);
           const rawInstanceId = String(obj.instance_id || obj.id || "").trim().toLowerCase();
-          const instanceId = rawInstanceId || stableArrInstanceId(arrType, slotRole, instanceKey);
+          const instanceId = rawInstanceId || newArrInstanceId();
           const aliasRaw = Array.isArray(obj.instance_key_aliases) ? obj.instance_key_aliases : [];
           const instance_key_aliases = aliasRaw
             .map((a) => normalizeInstanceKey(String(a)))
             .filter((a) => a && a !== instanceKey);
           return {
-            id: instanceId || `json-${arrType}-${index}`,
-            instance_id: instanceId || `json-${arrType}-${index}`,
+            id: instanceId,
+            instance_id: instanceId,
             label,
             arr_type: arrType,
             instance_key: instanceKey,
@@ -3955,9 +3947,7 @@ function parseArrInstancesFromValues(values: FieldValueMap): ArrInstanceDraft[] 
             url: String(obj.url || ""),
             api_key: String(obj.api_key || obj.apikey || ""),
             api_key_saved: Boolean(obj.api_key_saved) || Boolean(String(obj.api_key || obj.apikey || "").trim()),
-            role,
             priority: rank,
-            is_4k: deriveIs4kFromRole(role),
           } satisfies ArrInstanceDraft;
         });
         if (items.length) return items;
@@ -3996,16 +3986,12 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
   const clean = instances
     .map((row) => {
       const label = String(row.label || "").trim();
-      const existingKey = normalizeInstanceKey(String(row.instance_key || ""));
-      const inferredKey = existingKey || normalizeInstanceKey(inferDefaultKey(label, row.arr_type));
       const rank = rankByType[row.arr_type];
       rankByType[row.arr_type] = rank + 1;
-      // Array order per Arr type is fallback/search priority; roles follow that order.
-      const role = roleFromRank(rank);
-      const slotRole = slotWebhookRoleFromRowRole(role);
+      const existingKey = normalizeInstanceKey(String(row.instance_key || ""));
+      const inferredKey = existingKey || defaultInstanceKeyForSlot(row.arr_type, rank);
       const instanceId =
-        String(row.instance_id || "").trim().toLowerCase() ||
-        stableArrInstanceId(row.arr_type, slotRole, inferredKey);
+        String(row.instance_id || "").trim().toLowerCase() || newArrInstanceId();
       const aliasList = (row.instance_key_aliases || [])
         .map((a) => normalizeInstanceKey(String(a)))
         .filter((a) => a && a !== inferredKey);
@@ -4017,9 +4003,7 @@ function serializeArrInstances(instances: ArrInstanceDraft[]) {
         label,
         url: String(row.url || "").trim(),
         api_key: apiKey,
-        role,
         priority: rank,
-        is_4k: deriveIs4kFromRole(role),
       };
       // Keep the client-only redaction flag in form state. Without it, remounting
       // ArrInstancesEditor (e.g. leaving ARR Integrations and coming back) parses a
@@ -4072,6 +4056,58 @@ function findDuplicateArrInstanceUrl(
     const other = normalizeArrInstanceUrlForDedupe(String(row.url || ""));
     if (!other) continue;
     if (other === n) return row;
+  }
+  return null;
+}
+
+/** Same-type display name clash (case-insensitive), mirroring URL uniqueness. */
+function findDuplicateArrInstanceLabel(
+  instances: ArrInstanceDraft[],
+  selfId: string,
+  arrType: "radarr" | "sonarr",
+  candidateLabel: string,
+): ArrInstanceDraft | null {
+  const n = String(candidateLabel || "").trim().toLowerCase();
+  if (!n) return null;
+  for (const row of instances) {
+    if (row.id === selfId) continue;
+    if (row.arr_type !== arrType) continue;
+    const other = String(row.label || "").trim().toLowerCase();
+    if (!other) continue;
+    if (other === n) return row;
+  }
+  return null;
+}
+
+/** Key or alias token clash with another row of the same type. */
+function findDuplicateArrInstanceKeyToken(
+  instances: ArrInstanceDraft[],
+  selfId: string,
+  arrType: "radarr" | "sonarr",
+  candidateKey: string,
+  candidateAliases: string[] = [],
+): ArrInstanceDraft | null {
+  const tokens = new Set<string>();
+  const primary = normalizeInstanceKey(candidateKey);
+  if (primary) tokens.add(primary);
+  for (const a of candidateAliases) {
+    const ak = normalizeInstanceKey(a);
+    if (ak) tokens.add(ak);
+  }
+  if (!tokens.size) return null;
+  for (const row of instances) {
+    if (row.id === selfId) continue;
+    if (row.arr_type !== arrType) continue;
+    const otherTokens = new Set<string>();
+    const ok = normalizeInstanceKey(String(row.instance_key || inferDefaultKey(row.label, row.arr_type)));
+    if (ok) otherTokens.add(ok);
+    for (const a of row.instance_key_aliases || []) {
+      const ak = normalizeInstanceKey(String(a || ""));
+      if (ak) otherTokens.add(ak);
+    }
+    for (const t of tokens) {
+      if (otherTokens.has(t)) return row;
+    }
   }
   return null;
 }
@@ -4536,6 +4572,14 @@ function ArrInstancesEditor(props: {
     slotIndex: number;
     label: string;
   } | null>(null);
+  const [slotMotion, setSlotMotion] = useState<null | {
+    arrType: "radarr" | "sonarr";
+    phase: "exiting" | "promoting";
+    exitingSlot: number;
+    promotedId: string;
+    promotedLabel: string;
+  }>(null);
+  const slotMotionTimersRef = useRef<number[]>([]);
   const [webhookSetupDialog, setWebhookSetupDialog] = useState<{
     arrType: "radarr" | "sonarr";
     instance_key: string;
@@ -4547,11 +4591,19 @@ function ArrInstancesEditor(props: {
   const [slotFooterTestBusy, setSlotFooterTestBusy] = useState(false);
   const [slotPanelTestPassed, setSlotPanelTestPassed] = useState(false);
 
+  useEffect(() => {
+    return () => {
+      for (const id of slotMotionTimersRef.current) window.clearTimeout(id);
+      slotMotionTimersRef.current = [];
+    };
+  }, []);
+
   // Keep editor slots in sync with form/server JSON whenever it changes and the
   // slide-over is closed. Stale primaryEnabled=false with empty local instances
   // was showing "Connect" even when ARR_INSTANCES_JSON still had saved rows.
   useEffect(() => {
     if (slotPanel) return;
+    if (slotMotion) return;
     const parsed = parseArrInstancesFromValues(props.values);
     const radRows = parsed.filter((item) => item.arr_type === "radarr");
     const sonRows = parsed.filter((item) => item.arr_type === "sonarr");
@@ -4572,7 +4624,7 @@ function ArrInstancesEditor(props: {
       radarr: radRows[1] || prev.radarr,
       sonarr: sonRows[1] || prev.sonarr,
     }));
-  }, [props.values.ARR_INSTANCES_JSON, slotPanel]);
+  }, [props.values.ARR_INSTANCES_JSON, slotPanel, slotMotion]);
 
   useEffect(() => {
     const rad = Boolean(secondaryEnabled.radarr);
@@ -4599,42 +4651,60 @@ function ArrInstancesEditor(props: {
     const sonarr = next.filter((item) => item.arr_type === "sonarr").slice(0, ARR_INSTANCE_LIMIT_PER_TYPE);
     const trimmed = [...radarr, ...sonarr];
 
-    const keysOf = (rows: ArrInstanceDraft[]) =>
-      rows.map((r) => normalizeInstanceKey(String(r.instance_key || inferDefaultKey(r.label, r.arr_type))));
-    const radKeys = keysOf(radarr);
-    const sonKeys = keysOf(sonarr);
-    if (radarr.length > 1 && new Set(radKeys).size !== radKeys.length) {
-      setInstanceKeyConflict("Two Radarr rows cannot share the same instance key (derived from the name/key). Give each instance a distinct name.");
-      return;
-    }
-    if (sonarr.length > 1 && new Set(sonKeys).size !== sonKeys.length) {
-      setInstanceKeyConflict("Two Sonarr rows cannot share the same instance key (derived from the name/key). Give each instance a distinct name.");
-      return;
-    }
-    setInstanceKeyConflict(null);
+    const labelClash = (rows: ArrInstanceDraft[], typeLabel: string) => {
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const label = String(row.label || "").trim().toLowerCase();
+        if (!label) continue;
+        if (seen.has(label)) {
+          return `Two ${typeLabel} rows cannot share the same name. Give each instance a distinct name.`;
+        }
+        seen.add(label);
+      }
+      return null;
+    };
+    const tokenClash = (rows: ArrInstanceDraft[], typeLabel: string) => {
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const tokens = [
+          normalizeInstanceKey(String(row.instance_key || inferDefaultKey(row.label, row.arr_type))),
+          ...(row.instance_key_aliases || []).map((a) => normalizeInstanceKey(String(a || ""))),
+        ].filter(Boolean);
+        for (const t of tokens) {
+          if (seen.has(t)) {
+            return `Two ${typeLabel} rows cannot share the same instance key or alias (derived from the name). Give each instance a distinct name.`;
+          }
+          seen.add(t);
+        }
+      }
+      return null;
+    };
+
+    const conflict =
+      labelClash(radarr, "Radarr") ||
+      labelClash(sonarr, "Sonarr") ||
+      tokenClash(radarr, "Radarr") ||
+      tokenClash(sonarr, "Sonarr");
+    setInstanceKeyConflict(conflict);
 
     setInstances(trimmed);
     props.onValueChange("ARR_INSTANCES_JSON", serializeArrInstances(trimmed));
   }
 
   function defaultSlot(arrType: "radarr" | "sonarr", slotIndex: number): ArrInstanceDraft {
-    const role: ArrInstanceDraft["role"] =
-      slotIndex === 0 ? "primary" : slotIndex === 1 ? "secondary" : "additional";
     const serviceName = arrType === "radarr" ? "Radarr" : "Sonarr";
     const label = slotIndex === 0 ? serviceName : `${serviceName} ${slotIndex + 1}`;
-    const instanceKey = inferDefaultKey(label, arrType);
+    const instanceKey = defaultInstanceKeyForSlot(arrType, slotIndex);
     return {
       id: `slot-${arrType}-${slotIndex}`,
-      instance_id: stableArrInstanceId(arrType, role, instanceKey),
+      instance_id: newArrInstanceId(),
       label,
       arr_type: arrType,
       instance_key: instanceKey,
       url: "",
       api_key: "",
       api_key_saved: false,
-      role,
       priority: slotIndex,
-      is_4k: deriveIs4kFromRole(role),
     };
   }
 
@@ -4651,11 +4721,18 @@ function ArrInstancesEditor(props: {
     const target = typeRows[slotIndex] || defaultSlot(arrType, slotIndex);
     const merged = { ...target, ...patch };
     if (Object.prototype.hasOwnProperty.call(patch, "label") || Object.prototype.hasOwnProperty.call(patch, "instance_key")) {
-      const key = normalizeInstanceKey(String(merged.instance_key || inferDefaultKey(merged.label, arrType)));
+      // Label edits must re-slug the key (do not keep the prior key via `old || fromLabel`).
+      // Explicit instance_key edits win when both are present.
+      const keySource = Object.prototype.hasOwnProperty.call(patch, "instance_key")
+        ? String(patch.instance_key || merged.label || "")
+        : String(inferDefaultKey(merged.label, arrType) || "");
+      const key =
+        normalizeInstanceKey(keySource) ||
+        defaultInstanceKeyForSlot(arrType, slotIndex);
       merged.instance_key = key;
-      if (merged.role === "additional" || slotIndex > 1) {
-        merged.role = "additional";
-        merged.instance_id = stableArrInstanceId(arrType, "additional", key);
+      // Keep instance_id forever once assigned; rename must not mint a new identity.
+      if (!String(merged.instance_id || "").trim()) {
+        merged.instance_id = newArrInstanceId();
       }
     }
     typeRows[slotIndex] = merged;
@@ -4681,18 +4758,30 @@ function ArrInstancesEditor(props: {
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     if (!enabled) {
+      // Removing Slot 1 must not wipe Slot 2+. Promote remaining rows upward so
+      // disconnecting primary leaves the other servers intact (still unsaved until Save).
       setPrimaryCache((prev) => ({ ...prev, [arrType]: typeRows[0] || prev[arrType] }));
-      setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
-      setPrimaryEnabled((prev) => ({ ...prev, [arrType]: false }));
-      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      const remaining = typeRows.slice(1).map((row, idx) => ({
+        ...row,
+        priority: idx,
+        id: `slot-${arrType}-${idx}`,
+      }));
+      setSecondaryCache((prev) => ({ ...prev, [arrType]: remaining[1] || typeRows[1] || prev[arrType] }));
+      setPrimaryEnabled((prev) => ({ ...prev, [arrType]: remaining.length > 0 }));
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: remaining.length > 1 }));
       setPrimaryConnectionOk((prev) => ({ ...prev, [arrType]: false }));
       props.onPrimaryTestStatusChange?.(arrType, false);
-      props.onSecondaryTestStatusChange?.(arrType, false);
-      update(otherRows);
+      if (remaining.length <= 1) {
+        props.onSecondaryTestStatusChange?.(arrType, false);
+      }
+      update([...otherRows, ...remaining]);
       return;
     }
 
-    const primary = typeRows[0] ?? primaryCache[arrType] ?? defaultSlot(arrType, 0);
+    const primary = withFreshInstanceIdIfNeeded(
+      typeRows[0] ?? primaryCache[arrType] ?? defaultSlot(arrType, 0),
+      typeRows,
+    );
     setPrimaryEnabled((prev) => ({ ...prev, [arrType]: true }));
     update([...otherRows, { ...primary }]);
   }
@@ -4702,17 +4791,79 @@ function ArrInstancesEditor(props: {
     const typeRows = getTypeRows(arrType);
     const otherRows = instances.filter((item) => item.arr_type !== arrType);
     if (!enabled) {
+      // Removing Slot 2 keeps Slot 3+ and shifts them up (do not wipe overflow seats).
       setSecondaryCache((prev) => ({ ...prev, [arrType]: typeRows[1] || prev[arrType] }));
-      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: false }));
+      const kept = [typeRows[0], ...typeRows.slice(2)]
+        .filter(Boolean)
+        .map((row, idx) => ({
+          ...row!,
+          priority: idx,
+          id: `slot-${arrType}-${idx}`,
+        }));
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: kept.length > 1 }));
       props.onSecondaryTestStatusChange?.(arrType, false);
-      update([...otherRows, ...typeRows.slice(0, 1)]);
+      update([...otherRows, ...kept]);
       return;
     }
     // Ensure primary exists before adding secondary
     const primary = typeRows[0] ?? defaultSlot(arrType, 0);
-    const secondary = typeRows[1] ?? secondaryCache[arrType] ?? defaultSlot(arrType, 1);
+    // Prefer a fresh UUID when cache still holds a removed row whose instance_id
+    // was later adopted by the surviving slot (URL transplant / remove+re-add).
+    const secondary = withFreshInstanceIdIfNeeded(
+      typeRows[1] ?? secondaryCache[arrType] ?? defaultSlot(arrType, 1),
+      [primary, ...typeRows],
+    );
     setSecondaryEnabled((prev) => ({ ...prev, [arrType]: true }));
     update([...otherRows, primary, { ...secondary }]);
+  }
+
+  /** If a restored draft reuses an instance_id already on another row, mint a new UUID. */
+  function withFreshInstanceIdIfNeeded(
+    draft: ArrInstanceDraft,
+    occupied: ArrInstanceDraft[],
+  ): ArrInstanceDraft {
+    const id = String(draft.instance_id || "").trim().toLowerCase();
+    if (!id) {
+      return { ...draft, instance_id: newArrInstanceId() };
+    }
+    const clash = occupied.some(
+      (row) =>
+        row !== draft &&
+        String(row.instance_id || "").trim().toLowerCase() === id &&
+        String(row.id || "") !== String(draft.id || ""),
+    );
+    if (!clash) return draft;
+    return {
+      ...draft,
+      instance_id: newArrInstanceId(),
+      instance_key_aliases: [],
+    };
+  }
+
+  function beginAddAtSlot(arrType: "radarr" | "sonarr", slotIndex: number) {
+    if (slotMotion) return;
+    const existing = getTypeRows(arrType);
+    if (slotIndex !== existing.length || slotIndex >= ARR_INSTANCE_LIMIT_PER_TYPE) return;
+    if (slotIndex >= 1 && (!primaryEnabled[arrType] || !primaryGateOk[arrType])) return;
+    if (slotIndex === 0) {
+      setPrimary(arrType, true);
+      openSlotPanel({ arrType, slotIndex: 0, isNew: true });
+      return;
+    }
+    if (slotIndex === 1) {
+      setSecondary(arrType, true);
+      openSlotPanel({ arrType, slotIndex: 1, isNew: true });
+      return;
+    }
+    const draft = withFreshInstanceIdIfNeeded(defaultSlot(arrType, slotIndex), existing);
+    setInstances([...instances.filter((item) => item.arr_type !== arrType), ...existing, draft]);
+    openSlotPanel({ arrType, slotIndex, isNew: true });
+  }
+
+  function gridShiftClass(fromIndex: number): string {
+    // Vertical rails: every lower occupied seat steps up one row.
+    if (fromIndex >= 1) return "arr-slot-shift-up";
+    return "";
   }
 
   function moveInstanceSlot(arrType: "radarr" | "sonarr", fromIndex: number, direction: -1 | 1) {
@@ -4721,15 +4872,10 @@ function ArrInstancesEditor(props: {
     if (fromIndex < 0 || toIndex < 0 || toIndex >= typeRows.length || fromIndex >= typeRows.length) return;
     const [moved] = typeRows.splice(fromIndex, 1);
     typeRows.splice(toIndex, 0, moved);
-    const remapped = typeRows.map((row, idx) => {
-      const role = roleFromRank(idx);
-      return {
-        ...row,
-        role,
-        priority: idx,
-        is_4k: deriveIs4kFromRole(role),
-      };
-    });
+    const remapped = typeRows.map((row, idx) => ({
+      ...row,
+      priority: idx,
+    }));
     setPrimaryEnabled((prev) => ({ ...prev, [arrType]: remapped.length >= 1 }));
     setSecondaryEnabled((prev) => ({ ...prev, [arrType]: remapped.length >= 2 }));
     setSlotPanel((panel) => {
@@ -4742,9 +4888,11 @@ function ArrInstancesEditor(props: {
   }
 
   function instanceReorderControls(arrType: "radarr" | "sonarr", slotIndex: number, connectedCount: number) {
-    if (connectedCount < 2) return null;
-    const canUp = slotIndex > 0;
-    const canDown = slotIndex < connectedCount - 1;
+    // Always render the control column so filled cards keep a stable width/height
+    // whether one or many instances are connected.
+    const canReorder = connectedCount >= 2;
+    const canUp = canReorder && slotIndex > 0;
+    const canDown = canReorder && slotIndex < connectedCount - 1;
     return (
       <div className="flex shrink-0 flex-col gap-0.5" role="group" aria-label="Change search priority">
         <button
@@ -4756,7 +4904,7 @@ function ArrInstancesEditor(props: {
               ? "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
               : "cursor-not-allowed border-white/[0.06] bg-transparent text-slate-600"
           }`}
-          title="Move earlier in search/fallback order"
+          title={canReorder ? "Move earlier in search/fallback order" : "Connect another instance to reorder"}
           aria-label="Move earlier in search priority"
         >
           <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
@@ -4772,7 +4920,7 @@ function ArrInstancesEditor(props: {
               ? "border-white/15 bg-white/[0.05] text-slate-200 hover:border-white/25 hover:bg-white/[0.09]"
               : "cursor-not-allowed border-white/[0.06] bg-transparent text-slate-600"
           }`}
-          title="Move later in search/fallback order"
+          title={canReorder ? "Move later in search/fallback order" : "Connect another instance to reorder"}
           aria-label="Move later in search priority"
         >
           <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
@@ -4891,15 +5039,28 @@ function ArrInstancesEditor(props: {
     }
   }
 
-  function confirmDisconnectInstance() {
-    if (!disconnectDialog) return;
-    const { arrType, slotIndex } = disconnectDialog;
+  function clearSlotMotionTimers() {
+    for (const id of slotMotionTimersRef.current) window.clearTimeout(id);
+    slotMotionTimersRef.current = [];
+  }
+
+  function applyDisconnectInstance(arrType: "radarr" | "sonarr", slotIndex: number) {
     if (slotIndex === 0) {
       setPrimary(arrType, false);
-    } else if (slotIndex === 1) {
-      setSecondary(arrType, false);
     } else {
-      const typeRows = getTypeRows(arrType).filter((_, idx) => idx !== slotIndex);
+      const previous = getTypeRows(arrType);
+      const typeRows = previous
+        .filter((_, idx) => idx !== slotIndex)
+        .map((row, idx) => ({
+          ...row,
+          priority: idx,
+          id: `slot-${arrType}-${idx}`,
+        }));
+      if (slotIndex === 1) {
+        setSecondaryCache((prev) => ({ ...prev, [arrType]: previous[1] || prev[arrType] }));
+        props.onSecondaryTestStatusChange?.(arrType, false);
+      }
+      setSecondaryEnabled((prev) => ({ ...prev, [arrType]: typeRows.length > 1 }));
       update([...instances.filter((item) => item.arr_type !== arrType), ...typeRows]);
     }
     setSlotPanel((p) => {
@@ -4911,7 +5072,48 @@ function ArrInstancesEditor(props: {
       }
       return p;
     });
+  }
+
+  function confirmDisconnectInstance() {
+    if (!disconnectDialog || slotMotion) return;
+    const { arrType, slotIndex } = disconnectDialog;
+    const typeRows = getTypeRows(arrType);
+    const willPromote = slotIndex === 0 && typeRows.length > 1;
+    const promoted = willPromote ? typeRows[1] : null;
     setDisconnectDialog(null);
+
+    if (willPromote && promoted) {
+      const promotedId = String(promoted.instance_id || promoted.id || "");
+      const promotedLabel = String(promoted.label || "Slot 2").trim() || "Slot 2";
+      clearSlotMotionTimers();
+      setSlotMotion({
+        arrType,
+        phase: "exiting",
+        exitingSlot: 0,
+        promotedId,
+        promotedLabel,
+      });
+      const exitMs = 380;
+      const settleMs = 900;
+      const t1 = window.setTimeout(() => {
+        applyDisconnectInstance(arrType, 0);
+        setSlotMotion({
+          arrType,
+          phase: "promoting",
+          exitingSlot: 0,
+          promotedId,
+          promotedLabel,
+        });
+        const t2 = window.setTimeout(() => {
+          setSlotMotion(null);
+        }, settleMs);
+        slotMotionTimersRef.current.push(t2);
+      }, exitMs);
+      slotMotionTimersRef.current.push(t1);
+      return;
+    }
+
+    applyDisconnectInstance(arrType, slotIndex);
   }
 
   function restoreSlotPanelSnapshot() {
@@ -4983,6 +5185,20 @@ function ArrInstancesEditor(props: {
     const isEnabled = opts?.enabled ?? true;
     const isDisabled = !isEnabled;
     const dupPeer = findDuplicateArrInstanceUrl(instances, item.id, String(item.url || ""));
+    const namePeer = findDuplicateArrInstanceLabel(
+      instances,
+      item.id,
+      arrType,
+      String(item.label || ""),
+    );
+    const keyPeer = findDuplicateArrInstanceKeyToken(
+      instances,
+      item.id,
+      arrType,
+      String(item.instance_key || inferDefaultKey(item.label, arrType)),
+      item.instance_key_aliases || [],
+    );
+    const identityBlocks = Boolean(dupPeer || namePeer || keyPeer);
     return (
       <div
         key={item.id}
@@ -4990,17 +5206,22 @@ function ArrInstancesEditor(props: {
       >
         <div className="p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex-1">
-              <input
-                className="bg-transparent text-[16px] font-semibold text-white font-headline outline-none w-full"
-                value={item.label}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  upsertSlot(arrType, slotIndex, { label: value });
-                }}
-                placeholder="Instance name (e.g. Sonarr, Sonarr 4K)"
-                disabled={isDisabled}
-              />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <input
+                  className="bg-transparent text-[16px] font-semibold text-white font-headline outline-none w-full min-w-0"
+                  value={item.label}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    upsertSlot(arrType, slotIndex, { label: value });
+                  }}
+                  placeholder="Instance name (e.g. Sonarr, Sonarr 2)"
+                  disabled={isDisabled}
+                />
+                {(namePeer || keyPeer) && !isDisabled ? (
+                  <span className="shrink-0 text-[12px] font-medium text-red-400">Name already in use</span>
+                ) : null}
+              </div>
               <div className="text-[13px] text-slate-400 mt-1">
                 {item.arr_type.toUpperCase()} · Slot {slotIndex + 1}
               </div>
@@ -5022,7 +5243,12 @@ function ArrInstancesEditor(props: {
           </div>
           {opts?.toggleHint && opts.toggleDisabled ? <div className="ui-field-description-compact">{opts.toggleHint}</div> : null}
           <div>
-            <label className="block text-[13px] font-semibold text-slate-400 mb-1">URL &amp; port</label>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <label className="block text-[13px] font-semibold text-slate-400">URL &amp; port</label>
+              {dupPeer && !isDisabled ? (
+                <span className="shrink-0 text-[12px] font-medium text-red-400">URL already in use</span>
+              ) : null}
+            </div>
             <input
               className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
               value={item.url}
@@ -5030,11 +5256,6 @@ function ArrInstancesEditor(props: {
               placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
               disabled={isDisabled}
             />
-            {dupPeer && !isDisabled ? (
-              <p className="mt-1.5 text-[14px] text-red-400">
-                Same address as &quot;{dupPeer.label}&quot; ({dupPeer.arr_type}). Use a distinct URL for each instance.
-              </p>
-            ) : null}
           </div>
           <input
             className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200"
@@ -5049,7 +5270,7 @@ function ArrInstancesEditor(props: {
               type="button"
               onClick={() => void runTest(item, arrType, slotIndex)}
               className="px-3 py-1.5 rounded-md text-[14px] bg-[#252e3a] border border-[#424753]/40 text-slate-300"
-              disabled={isDisabled || Boolean(dupPeer)}
+              disabled={isDisabled || identityBlocks}
             >
               Test
             </button>
@@ -5073,6 +5294,29 @@ function ArrInstancesEditor(props: {
     if (!slotPanel) return null;
     const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
     return findDuplicateArrInstanceUrl(instances, it.id, String(it.url || ""));
+  }, [instances, slotPanel]);
+
+  const slotPanelNamePeer = useMemo(() => {
+    if (!slotPanel) return null;
+    const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    return findDuplicateArrInstanceLabel(
+      instances,
+      it.id,
+      slotPanel.arrType,
+      String(it.label || ""),
+    );
+  }, [instances, slotPanel]);
+
+  const slotPanelKeyPeer = useMemo(() => {
+    if (!slotPanel) return null;
+    const it = slotFor(slotPanel.arrType, slotPanel.slotIndex);
+    return findDuplicateArrInstanceKeyToken(
+      instances,
+      it.id,
+      slotPanel.arrType,
+      String(it.instance_key || inferDefaultKey(it.label, it.arr_type)),
+      it.instance_key_aliases || [],
+    );
   }, [instances, slotPanel]);
 
   const slotPanelItemForEffect = slotPanel ? slotFor(slotPanel.arrType, slotPanel.slotIndex) : null;
@@ -5117,6 +5361,12 @@ function ArrInstancesEditor(props: {
             <p className="text-[16px] text-slate-300 leading-relaxed">
               This removes &quot;{disconnectDialog.label}&quot; from Placeholdarr. When you save settings, movies or
               shows that were tracked only on this instance will be marked removed and their placeholders cleaned up.
+              {disconnectDialog.slotIndex === 0 && getTypeRows(disconnectDialog.arrType).length > 1 ? (
+                <>
+                  {" "}
+                  Later slots will move up to fill Slot 1 (you will see that shift after you confirm).
+                </>
+              ) : null}
               {String(
                 props.values[
                   disconnectDialog.arrType === "radarr"
@@ -5132,13 +5382,15 @@ function ArrInstancesEditor(props: {
                 type="button"
                 className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider border border-[#424753]/50 text-slate-300 hover:bg-[#252e3a]"
                 onClick={() => setDisconnectDialog(null)}
+                disabled={Boolean(slotMotion)}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80"
+                className="px-4 py-2 rounded-lg text-[14px] font-headline uppercase tracking-wider bg-red-600 text-white hover:bg-red-500 border border-red-500/80 disabled:opacity-50"
                 onClick={confirmDisconnectInstance}
+                disabled={Boolean(slotMotion)}
               >
                 Disconnect
               </button>
@@ -5195,8 +5447,6 @@ function ArrInstancesEditor(props: {
         <div className="space-y-5">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:items-stretch sm:gap-5">
           {(["radarr", "sonarr"] as const).map((arrType) => {
-            const primaryItem = slotFor(arrType, 0);
-            const secondaryItem = slotFor(arrType, 1);
             const secondaryAddLocked = !primaryEnabled[arrType] || !primaryGateOk[arrType];
             const av = ONBOARDING_ARR_VISUAL[arrType];
             const serviceName = arrType === "radarr" ? "Radarr" : "Sonarr";
@@ -5211,285 +5461,148 @@ function ArrInstancesEditor(props: {
                     <img src={av.iconSrc} alt="" decoding="async" className="h-12 w-12 object-contain" aria-hidden />
                   </div>
                   <h3 className="text-[20px] font-bold tracking-tight text-white font-headline">{serviceName}</h3>
-                  {getTypeRows(arrType).length > 1 ? (
-                    <p className="ui-field-description-compact max-w-sm text-center">
-                      Use the arrows to set instance order. That order is used for fallback when those search options below apply.
-                    </p>
+                </div>
+                <div className="mb-3 flex min-h-[1.5rem] items-center justify-center">
+                  {slotMotion?.arrType === arrType && slotMotion.phase === "promoting" ? (
+                    <span className="arr-slot-promote-chip rounded-md border border-[color:color-mix(in_srgb,var(--brand-accent-3)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--brand-accent-3)_16%,transparent)] px-2 py-0.5 text-[11px] font-semibold normal-case tracking-wide text-slate-200">
+                      {slotMotion.promotedLabel} moved into Slot 1
+                    </span>
                   ) : null}
                 </div>
-                <div className="flex min-h-0 flex-col gap-3">
-                  <div className="flex min-h-0 flex-col">
-                    <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 1</div>
-                    {!primaryEnabled[arrType] ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPrimary(arrType, true);
-                          openSlotPanel({ arrType, slotIndex: 0, isNew: true });
-                        }}
-                        className="flex min-h-[132px] flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-4 text-center text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 28 }}>add</span>
-                        <span className="text-[16px] font-headline tracking-wide">Connect {serviceName}</span>
-                      </button>
-                    ) : (
-                      <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
-                        <div className="flex items-start gap-2 min-w-0">
-                          <div className="min-w-0 flex-1">
-                            {(() => {
-                              const warn = arrSlotWarning(primaryItem);
-                              return (
-                                <>
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
-                                    {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
-                                  </div>
-                                  <div className="truncate font-mono text-[13px] text-slate-500">{String(primaryItem.url || "").trim() || "—"}</div>
-                                  {warn ? <div className="mt-1 text-[14px] text-red-300">{warn.message}</div> : null}
-                                </>
-                              );
-                            })()}
-                          </div>
-                          {instanceReorderControls(arrType, 0, getTypeRows(arrType).length)}
-                        </div>
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openSlotPanel({ arrType, slotIndex: 0, isNew: false })}
-                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
-                            >
-                              Configure
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setWebhookSetupDialog({
-                                  arrType,
-                                  instance_key: normalizeInstanceKey(String(primaryItem.instance_key || "")),
-                                  instance_id: String(primaryItem.instance_id || ""),
-                                  label: String(primaryItem.label || ""),
-                                });
-                              }}
-                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-                            >
-                              Webhook URL
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDisconnectDialog({
-                                arrType,
-                                slotIndex: 0,
-                                label: String(primaryItem.label || arrType),
-                              })
-                            }
-                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex min-h-0 flex-col">
-                    <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">Slot 2</div>
-                    {!secondaryEnabled[arrType] ? (
-                      <div
-                        className={`flex min-h-[132px] flex-1 flex-col items-center justify-center rounded-xl border border-dashed px-3 py-4 text-center transition-colors ${
-                          secondaryAddLocked
-                            ? "border-white/[0.07] bg-black/20 text-slate-600"
-                            : "border-white/15 bg-black/25 text-slate-300 hover:border-white/30 hover:bg-white/[0.04]"
-                        }`}
-                      >
-                        {secondaryAddLocked ? (
-                          <>
-                            <span className="material-symbols-outlined opacity-35" style={{ fontSize: 24 }}>
-                              lock
-                            </span>
-                            <p className="ui-field-description-compact mt-2 text-center">
-                              {!primaryEnabled[arrType]
-                                ? "Connect Slot 1 first."
-                                : "Pass a Slot 1 connection test to unlock this slot."}
-                            </p>
-                          </>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSecondary(arrType, true);
-                              openSlotPanel({ arrType, slotIndex: 1, isNew: true });
-                            }}
-                            className="flex w-full flex-col items-center justify-center gap-2 py-2"
-                          >
-                            <span className="material-symbols-outlined" style={{ fontSize: 26 }}>add</span>
-                            <span className="text-[16px] font-headline tracking-wide">Add Slot 2</span>
-                          </button>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
-                        <div className="flex items-start gap-2 min-w-0">
-                          <div className="min-w-0 flex-1">
-                            {(() => {
-                              const warn = arrSlotWarning(secondaryItem);
-                              return (
-                                <>
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
-                                    {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
-                                  </div>
-                                  <div className="truncate font-mono text-[13px] text-slate-500">{String(secondaryItem.url || "").trim() || "—"}</div>
-                                  {warn ? <div className="mt-1 text-[14px] text-red-300">{warn.message}</div> : null}
-                                </>
-                              );
-                            })()}
-                          </div>
-                          {instanceReorderControls(arrType, 1, getTypeRows(arrType).length)}
-                        </div>
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openSlotPanel({ arrType, slotIndex: 1, isNew: false })}
-                              className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
-                            >
-                              Configure
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setWebhookSetupDialog({
-                                  arrType,
-                                  instance_key: normalizeInstanceKey(String(secondaryItem.instance_key || "")),
-                                  instance_id: String(secondaryItem.instance_id || ""),
-                                  label: String(secondaryItem.label || ""),
-                                });
-                              }}
-                              className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-                            >
-                              Webhook URL
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDisconnectDialog({
-                                arrType,
-                                slotIndex: 1,
-                                label: String(secondaryItem.label || arrType),
-                              })
-                            }
-                            className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-                {getTypeRows(arrType).length > 2 ? (
-                  <div className="mt-4 space-y-3">
-                    {getTypeRows(arrType).slice(2).map((extraItem, offset) => {
-                      const slotIndex = offset + 2;
-                      const connectedCount = getTypeRows(arrType).length;
-                      const warn = arrSlotWarning(extraItem);
+                <div className="flex flex-col gap-3">
+                  {[0, 1, 2, 3].map((slotIndex) => {
+                    const typeRows = getTypeRows(arrType);
+                    const item = typeRows[slotIndex] || null;
+                    const connectedCount = typeRows.length;
+                    const busy = Boolean(slotMotion && slotMotion.arrType === arrType);
+                    const isNextEmpty = !item && slotIndex === connectedCount;
+                    const gateBlocks = slotIndex >= 1 && secondaryAddLocked;
+                    const canFill = isNextEmpty && !gateBlocks && !busy;
+                    const motionExiting =
+                      slotMotion?.arrType === arrType &&
+                      slotMotion.phase === "exiting" &&
+                      slotMotion.exitingSlot === 0;
+                    const motionClass = item
+                      ? motionExiting && slotIndex === 0
+                        ? "arr-slot-exit-fade"
+                        : motionExiting && slotIndex > 0
+                          ? gridShiftClass(slotIndex)
+                          : slotMotion?.arrType === arrType &&
+                              slotMotion.phase === "promoting" &&
+                              slotIndex === 0 &&
+                              String(item.instance_id || item.id || "") === slotMotion.promotedId
+                            ? "arr-slot-promote-settle"
+                            : ""
+                      : "";
+
+                    if (item) {
+                      const warn = arrSlotWarning(item);
                       return (
-                        <div key={extraItem.id} className="space-y-2">
-                          <div className="text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                        <div key={`${arrType}-seat-${slotIndex}`} className="flex min-h-0 flex-col">
+                          <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
                             Slot {slotIndex + 1}
                           </div>
                           <div
-                            className="flex min-h-[96px] flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3"
+                            className={`flex h-[8.25rem] flex-col justify-start gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-2.5 ${motionClass}`}
                           >
-                          <div className="flex items-start gap-2 min-w-0">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="text-[16px] font-semibold text-white font-headline truncate">
-                                  {extraItem.label}
+                            <div className="flex min-h-0 items-start gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="truncate text-[15px] font-semibold text-white font-headline">{item.label}</div>
+                                  {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
                                 </div>
-                                {warn ? <IntegrationFailureBadge size="sm" title={warn.title} /> : null}
+                                <div className="truncate font-mono text-[12px] text-slate-500">{String(item.url || "").trim() || "—"}</div>
+                                <div
+                                  className={`mt-0.5 min-h-[1rem] truncate text-[12px] ${warn ? "text-red-300" : "text-transparent"}`}
+                                  title={warn?.message || undefined}
+                                >
+                                  {warn?.message || "—"}
+                                </div>
                               </div>
-                              <div className="truncate font-mono text-[13px] text-slate-500">
-                                {String(extraItem.url || "").trim() || "—"}
-                              </div>
-                              {warn ? <div className="mt-1 text-[14px] text-red-300">{warn.message}</div> : null}
+                              {instanceReorderControls(arrType, slotIndex, connectedCount)}
                             </div>
-                            {instanceReorderControls(arrType, slotIndex, connectedCount)}
-                          </div>
-                          <div className="mt-3 flex flex-wrap items-center gap-2">
-                            <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                            <div className="mt-auto flex flex-wrap items-center gap-2">
+                              <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => openSlotPanel({ arrType, slotIndex, isNew: false })}
+                                  className="rounded-lg border border-white/15 bg-white/[0.05] px-2.5 py-1.5 text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
+                                  disabled={busy}
+                                >
+                                  Configure
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setWebhookSetupDialog({
+                                      arrType,
+                                      instance_key: normalizeInstanceKey(String(item.instance_key || "")),
+                                      instance_id: String(item.instance_id || ""),
+                                      label: String(item.label || ""),
+                                    });
+                                  }}
+                                  className="rounded-lg border border-white/10 bg-transparent px-2.5 py-1.5 text-[12px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                  disabled={busy}
+                                >
+                                  Webhook
+                                </button>
+                              </div>
                               <button
                                 type="button"
-                                onClick={() => openSlotPanel({ arrType, slotIndex, isNew: false })}
-                                className="rounded-lg border border-white/15 bg-white/[0.05] px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-200 transition hover:border-white/25 hover:bg-white/[0.09]"
-                              >
-                                Configure
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setWebhookSetupDialog({
+                                onClick={() =>
+                                  setDisconnectDialog({
                                     arrType,
-                                    instance_key: normalizeInstanceKey(String(extraItem.instance_key || "")),
-                                    instance_id: String(extraItem.instance_id || ""),
-                                    label: String(extraItem.label || ""),
-                                  });
-                                }}
-                                className="rounded-lg border border-white/10 bg-transparent px-3 py-1.5 text-[13px] font-headline font-semibold uppercase tracking-wider text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                                    slotIndex,
+                                    label: String(item.label || arrType),
+                                  })
+                                }
+                                className="ml-auto shrink-0 rounded-lg px-2 py-1.5 text-[12px] font-medium text-red-400 transition hover:text-red-300 disabled:opacity-40"
+                                disabled={busy}
                               >
-                                Webhook URL
+                                Remove
                               </button>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setDisconnectDialog({
-                                  arrType,
-                                  slotIndex,
-                                  label: String(extraItem.label || arrType),
-                                })
-                              }
-                              className="ml-auto shrink-0 rounded-lg px-3 py-1.5 text-[13px] font-medium text-red-400 transition hover:text-red-300"
-                            >
-                              Remove
-                            </button>
                           </div>
-                        </div>
                         </div>
                       );
-                    })}
-                  </div>
-                ) : null}
-                {secondaryEnabled[arrType] && getTypeRows(arrType).length < ARR_INSTANCE_LIMIT_PER_TYPE ? (
-                  <div className="mt-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const existing = getTypeRows(arrType);
-                        const nextIndex = existing.length;
-                        const draft = defaultSlot(arrType, nextIndex);
-                        // Keep the draft in local editor state only until Save. Serializing an empty URL
-                        // row is a no-op in ARR_INSTANCES_JSON, but cancel must not treat this like
-                        // "disable secondary".
-                        setInstances([
-                          ...instances.filter((i) => i.arr_type !== arrType),
-                          ...existing,
-                          draft,
-                        ]);
-                        openSlotPanel({ arrType, slotIndex: nextIndex, isNew: true });
-                      }}
-                      className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-3 text-[14px] text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
-                    >
-                      <span className="material-symbols-outlined" style={{ fontSize: 20 }}>
-                        add
-                      </span>
-                      Add another {arrType === "radarr" ? "Radarr" : "Sonarr"} instance
-                    </button>
-                  </div>
-                ) : null}
+                    }
+
+                    return (
+                      <div key={`${arrType}-seat-${slotIndex}`} className="flex min-h-0 flex-col">
+                        <div className="mb-2 text-[12px] font-headline uppercase tracking-[0.14em] text-slate-500">
+                          Slot {slotIndex + 1}
+                        </div>
+                        {canFill ? (
+                          <button
+                            type="button"
+                            onClick={() => beginAddAtSlot(arrType, slotIndex)}
+                            className="flex h-[8.25rem] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-black/25 px-3 py-3 text-center text-slate-300 transition hover:border-white/30 hover:bg-white/[0.04]"
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: 24 }}>add</span>
+                            <span className="text-[14px] font-headline tracking-wide">
+                              {slotIndex === 0 ? `Connect ${serviceName}` : `Add Slot ${slotIndex + 1}`}
+                            </span>
+                          </button>
+                        ) : (
+                          <div className="flex h-[8.25rem] flex-col items-center justify-center rounded-xl border border-dashed border-white/[0.07] bg-black/20 px-3 py-3 text-center text-slate-600">
+                            {isNextEmpty && gateBlocks ? (
+                              <>
+                                <span className="material-symbols-outlined opacity-35" style={{ fontSize: 22 }}>
+                                  lock
+                                </span>
+                                <p className="ui-field-description-compact mt-2 text-center text-slate-600">
+                                  Pass a Slot 1 connection test to unlock.
+                                </p>
+                              </>
+                            ) : (
+                              <p className="ui-field-description-compact text-center text-slate-600">Reserved</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             );
           })}
@@ -5504,7 +5617,7 @@ function ArrInstancesEditor(props: {
             const detailsComplete =
               String(item.url || "").trim().length > 0 &&
               (String(item.api_key || "").trim().length > 0 || Boolean(item.api_key_saved));
-            const dupBlocks = Boolean(slotPanelDupPeer);
+            const dupBlocks = Boolean(slotPanelDupPeer || slotPanelNamePeer || slotPanelKeyPeer);
             const testDisabled = !detailsComplete || dupBlocks || slotFooterTestBusy;
             const retainedKeyOk = Boolean(!isNew && item.api_key_saved && detailsComplete);
             const saveDisabled = (!(slotPanelTestPassed || retainedKeyOk)) || dupBlocks || slotFooterTestBusy;
@@ -5540,27 +5653,32 @@ function ArrInstancesEditor(props: {
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
                     <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">Server name</label>
+                      <div className="mb-1 flex items-baseline justify-between gap-2">
+                        <label className="block text-[14px] font-semibold text-slate-300">Server name</label>
+                        {slotPanelNamePeer || slotPanelKeyPeer ? (
+                          <span className="shrink-0 text-[12px] font-medium text-red-400">Name already in use</span>
+                        ) : null}
+                      </div>
                       <input
                         className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.label}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { label: e.target.value })}
-                        placeholder="Instance name (e.g. Radarr 4K)"
+                        placeholder="Instance name (e.g. Radarr 2)"
                       />
                     </div>
                     <div>
-                      <label className="block text-[14px] font-semibold text-slate-300 mb-1">URL &amp; port</label>
+                      <div className="mb-1 flex items-baseline justify-between gap-2">
+                        <label className="block text-[14px] font-semibold text-slate-300">URL &amp; port</label>
+                        {slotPanelDupPeer ? (
+                          <span className="shrink-0 text-[12px] font-medium text-red-400">URL already in use</span>
+                        ) : null}
+                      </div>
                       <input
                         className="w-full bg-[#0b111b] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[color:color-mix(in_srgb,var(--brand-accent-tertiary)_42%,transparent)]"
                         value={item.url}
                         onChange={(e) => upsertSlot(arrType, slotIndex, { url: e.target.value })}
                         placeholder={arrType === "sonarr" ? "https://host:8989" : "https://host:7878"}
                       />
-                      {slotPanelDupPeer ? (
-                        <p className="mt-2 text-[14px] text-red-400">
-                          Same address as &quot;{slotPanelDupPeer.label}&quot; ({slotPanelDupPeer.arr_type}). Each instance must use a distinct URL and port.
-                        </p>
-                      ) : null}
                     </div>
                     <div>
                       <label className="block text-[14px] font-semibold text-slate-300 mb-1">API key</label>
@@ -5878,7 +5996,7 @@ function LibraryPathsForm(props: {
         </div>
         <p className="ui-field-description mb-3 leading-relaxed">
           {plexActive
-            ? "Section IDs for placeholders under Library Root. Mapped destinations can override these. Jellyfin and Emby ignore these fields and refresh by folder path."
+            ? "Section IDs for the default movie and TV destinations under Library Root. Mapped destinations can override these. Jellyfin and Emby ignore these fields and refresh by folder path."
             : "Enable Plex under Media Integrations to edit these. Jellyfin and Emby do not use library IDs; they refresh by folder path."}
         </p>
         <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${plexActive ? "" : "pointer-events-none"}`}>

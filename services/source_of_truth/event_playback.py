@@ -29,9 +29,10 @@ from services.media_servers.jellyfin import get_jellyfin_file_path
 PLAYBACK_FALLBACK_JOB_TYPE = 'playback_fallback'
 
 
-def _instance_label(is_4k: bool) -> str:
-    """Legacy standard/4k label (telemetry and older call sites)."""
-    return '4k' if bool(is_4k) else 'standard'
+def _instance_label_for_row(row: Any) -> str | None:
+    """Telemetry label from the row's resolved instance_key."""
+    key = _row_instance_key(row)
+    return key or None
 
 
 def _row_instance_key(row: Any) -> str:
@@ -47,51 +48,52 @@ def _row_instance_key(row: Any) -> str:
             mapped = _legacy_label_to_key(arr_type, raw.replace('radarr_', '').replace('sonarr_', ''))
             if mapped:
                 return mapped
-    is_4k = getattr(row, 'is_4k', None)
-    if is_4k is not None:
-        inst = settings.resolve_arr_instance(arr_type, is_4k=bool(is_4k))
+        return raw
+    instance_id = str(getattr(row, 'instance_id', '') or '').strip().lower()
+    if instance_id:
+        inst = settings.resolve_arr_instance(arr_type, instance_id=instance_id)
         if inst and inst.get('instance_key'):
             return str(inst.get('instance_key')).strip().lower()
-    return raw
+    return ''
 
 
 def _arr_type_for_media(media_type: str) -> str:
     return 'radarr' if media_type == 'movie' else 'sonarr'
 
 
-def _key_for_role(arr_type: str, role: str) -> str | None:
-    target = str(role or '').strip().lower()
-    if target not in {'primary', 'secondary', 'additional'}:
+_LEGACY_ROLE_TO_RANK_INDEX = {'primary': 0, 'secondary': 1, 'additional': 2}
+
+
+def _instance_key_at_rank(arr_type: str, index: int) -> str | None:
+    item = settings.ranked_arr_instance(arr_type, index)
+    if not item:
         return None
-    for item in settings.arr_instances_for_type(arr_type):
-        if str(item.get('role') or '').strip().lower() != target:
-            continue
-        key = str(item.get('instance_key') or '').strip().lower()
-        if key:
-            return key
-    return None
+    key = str(item.get('instance_key') or '').strip().lower()
+    return key or None
+
+
+def _instance_key_for_legacy_role(arr_type: str, role: str) -> str | None:
+    idx = _LEGACY_ROLE_TO_RANK_INDEX.get(str(role or '').strip().lower())
+    if idx is None:
+        return None
+    return _instance_key_at_rank(arr_type, idx)
 
 
 def _legacy_label_to_key(arr_type: str, label: str) -> str | None:
-    """Map legacy standard/4k labels to primary/secondary instance keys."""
+    """Map legacy standard/4k labels to ranked instance keys (index 0 / 1)."""
     normalized = str(label or '').strip().lower()
     instances = settings.arr_instances_for_type(arr_type)
     if not instances:
         return normalized or None
     if normalized == 'standard':
-        key = _key_for_role(arr_type, 'primary')
+        key = _instance_key_at_rank(arr_type, 0)
         if key:
             return key
         return str(instances[0].get('instance_key') or '').strip().lower() or normalized
     if normalized == '4k':
-        key = _key_for_role(arr_type, 'secondary')
+        key = _instance_key_at_rank(arr_type, 1)
         if key:
             return key
-        for item in instances:
-            if bool(item.get('is_4k', False)):
-                k = str(item.get('instance_key') or '').strip().lower()
-                if k:
-                    return k
         if len(instances) > 1:
             k = str(instances[1].get('instance_key') or '').strip().lower()
             if k:
@@ -289,11 +291,12 @@ def _fallback_enabled() -> bool:
     return bool(getattr(settings, 'ENABLE_PLAYBACK_FALLBACK_SEARCH', False)) and _fallback_timeout_minutes() > 0
 
 
-def _resolve_endpoint(content_type: str, *, instance_key: str | None = None, is_4k: bool | None = None) -> tuple[str, str]:
+def _resolve_endpoint(content_type: str, *, instance_key: str | None = None) -> tuple[str, str]:
     arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
-    if instance_key:
-        return settings.resolve_arr_endpoint(arr_type, instance_key=instance_key)
-    return settings.resolve_arr_endpoint(arr_type, is_4k=bool(is_4k) if is_4k is not None else None)
+    key = str(instance_key or '').strip().lower()
+    if not key:
+        return '', ''
+    return settings.resolve_arr_endpoint(arr_type, instance_key=key)
 
 
 def _normalize_path(value: str | None) -> str | None:
@@ -321,7 +324,7 @@ def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | N
 
     Returns a single key, ``all`` when ambiguous / shared, or ``None`` when unmatched.
     Longest matching dest folder wins when multiple map rows apply.
-    Legacy default / 4K library folders map to primary / secondary keys.
+    Unmapped paths under the default library folder map to ranking index 0.
     """
     if not path:
         return None
@@ -330,7 +333,7 @@ def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | N
         return None
 
     try:
-        from services.library_destinations import all_movie_dest_roots, all_tv_dest_roots, parse_library_destination_map
+        from services.library_destinations import parse_library_destination_map
 
         scored: list[tuple[int, str]] = []
         for row in parse_library_destination_map():
@@ -356,20 +359,15 @@ def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | N
 
         matched: list[str] = []
         if arr == 'sonarr':
-            default_roots = list(all_tv_dest_roots(map_rows=[]))
-            four_k = str(getattr(settings, 'TV_LIBRARY_4K_FOLDER', '') or '')
+            primary_folder = str(getattr(settings, 'TV_LIBRARY_FOLDER', '') or '')
         else:
-            default_roots = list(all_movie_dest_roots(map_rows=[]))
-            four_k = str(getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', '') or '')
+            primary_folder = str(getattr(settings, 'MOVIE_LIBRARY_FOLDER', '') or '')
 
-        primary_key = _key_for_role(arr, 'primary')
-        secondary_key = _key_for_role(arr, 'secondary')
-        for root in default_roots:
-            if primary_key and _path_is_within_root(path, root):
-                matched.append(primary_key)
-                break
-        if four_k and secondary_key and _path_is_within_root(path, four_k):
-            matched.append(secondary_key)
+        default_key = _instance_key_at_rank(arr, 0)
+        # Unmapped paths under the default dest use the first ranked instance.
+        # Other instances require the dest map for path→instance matching.
+        if default_key and primary_folder and _path_is_within_root(path, primary_folder):
+            matched.append(default_key)
 
         unique = list(dict.fromkeys(matched))
         if len(unique) == 1:
@@ -379,18 +377,13 @@ def _match_instance_key_from_path(path: str | None, *, arr_type: str) -> str | N
         return None
     except Exception:
         matched = []
-        primary_key = _key_for_role(arr, 'primary')
-        secondary_key = _key_for_role(arr, 'secondary')
+        default_key = _instance_key_at_rank(arr, 0)
         if arr == 'sonarr':
             default_folder = getattr(settings, 'TV_LIBRARY_FOLDER', '')
-            four_k = getattr(settings, 'TV_LIBRARY_4K_FOLDER', '')
         else:
             default_folder = getattr(settings, 'MOVIE_LIBRARY_FOLDER', '')
-            four_k = getattr(settings, 'MOVIE_LIBRARY_4K_FOLDER', '')
-        if primary_key and _path_is_within_root(path, default_folder):
-            matched.append(primary_key)
-        if secondary_key and _path_is_within_root(path, four_k):
-            matched.append(secondary_key)
+        if default_key and default_folder and _path_is_within_root(path, default_folder):
+            matched.append(default_key)
         unique = list(dict.fromkeys(matched))
         if len(unique) == 1:
             return unique[0]
@@ -705,7 +698,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
             'playback_kind': playback_kind,
             'tmdb_id': int(movie_row.tmdbid) if getattr(movie_row, 'tmdbid', None) else None,
             'movie_id': int(movie_row.id),
-            'matched_instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+            'matched_instance': _instance_label_for_row(movie_row),
         }
 
     episode_row = (
@@ -730,7 +723,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
             'season_number': int(episode_row.season.season_number) if episode_row.season else None,
             'episode_number': int(episode_row.episode_number) if getattr(episode_row, 'episode_number', None) else None,
             'series_id': int(series_row.id) if series_row else None,
-            'matched_instance': _instance_label(bool(getattr(series_row, 'is_4k', False))) if series_row else None,
+            'matched_instance': _instance_label_for_row(series_row) if series_row else None,
         }
 
     ph_row = session.query(Placeholder).filter(Placeholder.path == file_path).first()
@@ -743,7 +736,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
                     'playback_kind': 'placeholder',
                     'tmdb_id': int(movie.tmdbid) if getattr(movie, 'tmdbid', None) else None,
                     'movie_id': int(movie.id),
-                    'matched_instance': _instance_label(bool(getattr(movie, 'is_4k', False))),
+                    'matched_instance': _instance_label_for_row(movie),
                 }
         if getattr(ph_row, 'episode_id', None):
             ep = (
@@ -762,7 +755,7 @@ def _resolve_media_from_path(session, path: str | None) -> dict[str, Any]:
                     'season_number': int(ep.season.season_number) if ep.season else None,
                     'episode_number': int(ep.episode_number) if getattr(ep, 'episode_number', None) else None,
                     'series_id': int(series.id) if series else None,
-                    'matched_instance': _instance_label(bool(getattr(series, 'is_4k', False))) if series else None,
+                    'matched_instance': _instance_label_for_row(series) if series else None,
                 }
 
     return {'media_type': 'unknown', 'playback_kind': 'unknown'}
@@ -853,7 +846,7 @@ def _try_resolve_episode_from_catalog_ids(
         'season_number': int(episode_row.season.season_number) if episode_row.season else None,
         'episode_number': int(episode_row.episode_number) if getattr(episode_row, 'episode_number', None) is not None else None,
         'series_id': int(series_row.id) if series_row else None,
-        'matched_instance': _instance_label(bool(getattr(series_row, 'is_4k', False))) if series_row else None,
+        'matched_instance': _instance_label_for_row(series_row) if series_row else None,
     }
 
 
@@ -883,7 +876,7 @@ def _try_resolve_movie_from_catalog_ids(session, *, tmdb_id: int | None, imdb_id
         'playback_kind': _playback_kind_from_movie_row(movie_row),
         'tmdb_id': int(movie_row.tmdbid) if getattr(movie_row, 'tmdbid', None) else None,
         'movie_id': int(movie_row.id),
-        'matched_instance': _instance_label(bool(getattr(movie_row, 'is_4k', False))),
+        'matched_instance': _instance_label_for_row(movie_row),
     }
 
 
@@ -1231,9 +1224,9 @@ def _select_role_only_rows(
     selection_reason: str,
     root_match: str | None = None,
 ) -> dict[str, Any]:
-    """Primary/Secondary modes target that role key only (no immediate alternate)."""
+    """Primary/Secondary modes target that ranked slot only (no immediate alternate)."""
     ranked = _ranked_keys_with_rows(media_type, rows_by_instance)
-    preferred = _key_for_role(_arr_type_for_media(media_type), role)
+    preferred = _instance_key_for_legacy_role(_arr_type_for_media(media_type), role)
     if preferred and preferred in rows_by_instance:
         return _selection_result(
             rows_by_instance,

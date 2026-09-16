@@ -293,7 +293,7 @@ def refresh_emby_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
 
             roots.extend(all_movie_dest_roots())
         except Exception:
-            for key in ("MOVIE_LIBRARY_FOLDER", "MOVIE_LIBRARY_4K_FOLDER"):
+            for key in ("MOVIE_LIBRARY_FOLDER",):
                 val = getattr(settings, key, None)
                 if val:
                     roots.append(val)
@@ -303,7 +303,7 @@ def refresh_emby_sections(has_movies: bool, has_episodes: bool) -> dict[str, int
 
             roots.extend(all_tv_dest_roots())
         except Exception:
-            for key in ("TV_LIBRARY_FOLDER", "TV_LIBRARY_4K_FOLDER"):
+            for key in ("TV_LIBRARY_FOLDER",):
                 val = getattr(settings, key, None)
                 if val:
                     roots.append(val)

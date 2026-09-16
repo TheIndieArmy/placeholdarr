@@ -22,10 +22,10 @@ class MovieRepository:
                 item = settings.resolve_arr_instance('radarr', instance_key=key) or {}
                 kwargs['instance_id'] = str(item.get('instance_id') or f"radarr:{key}").strip().lower()
             else:
-                item = settings.resolve_arr_instance('radarr', role='primary') or {}
+                item = settings.resolve_arr_instance('radarr') or {}
                 kwargs['instance_id'] = str(item.get('instance_id') or 'radarr:primary').strip().lower()
         if 'instance_key' not in kwargs:
-            item = settings.resolve_arr_instance('radarr', instance_id=kwargs.get('instance_id')) or settings.resolve_arr_instance('radarr', role='primary') or {}
+            item = settings.resolve_arr_instance('radarr', instance_id=kwargs.get('instance_id')) or settings.resolve_arr_instance('radarr') or {}
             kwargs['instance_key'] = str(item.get('instance_key') or 'radarr_std').strip().lower()
         movie = Movie(**kwargs)
         self.session.add(movie)

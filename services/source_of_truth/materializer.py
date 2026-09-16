@@ -529,6 +529,8 @@ def _mark_placeholder_rows_deleted(
         row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         row.last_observed_at = func.now()
         row.plex_placeholder_id = None
         row.jellyfin_placeholder_id = None
@@ -572,6 +574,8 @@ def _mark_placeholder_rows_deleted_for_episodes(
         row.display_status_projected = None
         row.display_reason = None
         row.display_progress = None
+        row.queue_monitor_active = False
+        row.queue_monitor_active_set_at = None
         row.last_observed_at = func.now()
         row.plex_placeholder_id = None
         row.jellyfin_placeholder_id = None

@@ -309,20 +309,8 @@ def run_scheduled_full_sync(*, trigger: TaskTrigger = "scheduled") -> dict[str, 
             update_task_run_summary(task_run_id, {"placeholder_refresh": refresh_out})
             nfo_out = refresh_out.get("nfo_backfill") if isinstance(refresh_out.get("nfo_backfill"), dict) else None
             art_out = refresh_out.get("art_backfill") if isinstance(refresh_out.get("art_backfill"), dict) else None
-            if nfo_out is None:
-                mark_follow_up_phase_skipped(
-                    task_run_id,
-                    "metadata_refresh",
-                    "Metadata refresh",
-                    reason=str(refresh_out.get("reason") or "not_requested"),
-                )
-            if art_out is None:
-                mark_follow_up_phase_skipped(
-                    task_run_id,
-                    "art_refresh",
-                    "Art refresh",
-                    reason=str(refresh_out.get("reason") or "not_requested"),
-                )
+            # Only surface follow-up phases when something was requested/enqueued.
+            # not_requested skips are omitted so Tasks does not show permanent SKIPPED cards.
             nfo_enqueued = bool(nfo_out and nfo_out.get("enqueued"))
             art_enqueued = bool(art_out and art_out.get("enqueued"))
             follow_ups_started = bool(nfo_enqueued or art_enqueued)

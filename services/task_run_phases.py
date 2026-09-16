@@ -721,6 +721,23 @@ def complete_full_sync_task_run(
         error_message=error_message,
     )
 
+    duration_s = _duration_seconds(started_at, completed_at)
+    duration_label = f"{duration_s:.1f}s" if duration_s is not None else "unknown"
+    status_label = "failed" if failed else "done"
+    if failed:
+        logger.warning(
+            f"Full sync task {status_label} · task_run_id={task_run_id} · duration={duration_label} · "
+            f"created={created_n} · removed={deleted_n}"
+            + (f" · error={error_message}" if error_message else ""),
+            extra={"emoji_type": "error"},
+        )
+    else:
+        logger.info(
+            f"Full sync task {status_label} · task_run_id={task_run_id} · duration={duration_label} · "
+            f"created={created_n} · removed={deleted_n}",
+            extra={"emoji_type": "success"},
+        )
+
     trigger = str(summary.get("trigger") or "").strip().lower()
     if not failed and trigger in ("scheduled", "manual"):
         from services.source_of_truth.scheduler import reschedule_after_full_sync_success

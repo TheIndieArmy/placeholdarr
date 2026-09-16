@@ -139,8 +139,6 @@ export function DetailMetaStrip(props: {
   certification?: string | null;
   ratings?: DetailRatingDisplay[] | null;
   monitored?: boolean | null;
-  /** @deprecated Misleading in meta — Arr instance role, not file quality. Ignored. */
-  is4k?: boolean;
   studio?: string | null;
   network?: string | null;
   networkLogoUrl?: string | null;
@@ -153,7 +151,6 @@ export function DetailMetaStrip(props: {
   /** Pin control; rendered on row 2 left. */
   policyControl?: ReactNode;
 }) {
-  void props.is4k;
   void props.monitored;
   const isLight = props.themeMode === "light";
   const runtime = formatRuntimeMinutes(props.runtime);
