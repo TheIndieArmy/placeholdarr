@@ -1,0 +1,190 @@
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 60e6c0b..4aedd32 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -466,6 +466,7 @@ const ONBOARDING_HERO_LIGHT_CENTER_SLOTS_WIDE = [3, 4, 11, 12] as const;
+ const PATH_LIBRARY_ROOT_KEY = "LIBRARY_ROOT";
+ const PATH_PROFILE_KEYS = [] as const;
+ const PATH_PER_LIBRARY_OVERRIDE_KEYS = [] as const;
++const CATEGORY_FOLDER_MAP_KEY = "CATEGORY_FOLDER_MAP_JSON";
+ 
+ const HIDDEN_PLAYBACK_INTERNAL_KEYS = new Set<string>([]);
+ 
+@@ -511,10 +512,133 @@ function partitionLibraryPathFields(fields: SettingsField[]) {
+   const overrideSet = new Set<string>(PATH_PER_LIBRARY_OVERRIDE_KEYS as unknown as string[]);
+   const byKey = new Map(fields.map((f) => [f.key, f]));
+   const root = byKey.get(PATH_LIBRARY_ROOT_KEY);
++  const categoryMap = byKey.get(CATEGORY_FOLDER_MAP_KEY);
+   const profiles = PATH_PROFILE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
+   const overrides = PATH_PER_LIBRARY_OVERRIDE_KEYS.map((k) => byKey.get(k)).filter(Boolean) as SettingsField[];
+-  const rest = fields.filter((f) => f.key !== PATH_LIBRARY_ROOT_KEY && !profileSet.has(f.key) && !overrideSet.has(f.key));
+-  return { root, profiles, overrides, rest };
++  const rest = fields.filter(
++    (f) => f.key !== PATH_LIBRARY_ROOT_KEY && f.key !== CATEGORY_FOLDER_MAP_KEY && !profileSet.has(f.key) && !overrideSet.has(f.key),
++  );
++  return { root, categoryMap, profiles, overrides, rest };
++}
++
++/** One row of the custom "Category Folder Map" editor (custom fork addition). */
++type CategoryFolderMapRow = { source_root: string; placeholder_root: string };
++
++function parseCategoryFolderMapFromValues(values: FieldValueMap): CategoryFolderMapRow[] {
++  const raw = String(values[CATEGORY_FOLDER_MAP_KEY] ?? "").trim();
++  if (!raw) return [];
++  try {
++    const parsed = JSON.parse(raw);
++    if (!Array.isArray(parsed)) return [];
++    return parsed
++      .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
++      .map((item) => ({
++        source_root: String(item.source_root ?? ""),
++        placeholder_root: String(item.placeholder_root ?? ""),
++      }));
++  } catch {
++    return [];
++  }
++}
++
++function serializeCategoryFolderMap(rows: CategoryFolderMapRow[]): string {
++  const cleaned = rows
++    .map((r) => ({ source_root: r.source_root.trim().replace(/\/+$/, ""), placeholder_root: r.placeholder_root.trim().replace(/\/+$/, "") }))
++    .filter((r) => r.source_root.length > 0 && r.placeholder_root.length > 0);
++  return cleaned.length ? JSON.stringify(cleaned) : "";
++}
++
++/**
++ * Custom fork addition: lets the user map each Radarr/Sonarr root folder ("category", e.g.
++ * /mnt/data/Media/Films_animes) to its own placeholder folder, with a "+" button per row,
++ * instead of hand-writing the CATEGORY_FOLDER_MAP_JSON value as raw JSON.
++ */
++function CategoryFolderMapEditor(props: {
++  values: FieldValueMap;
++  onValueChange: (key: string, value: unknown) => void;
++  accent: BrandAccent;
++  compact?: boolean;
++}) {
++  const rows = useMemo(() => parseCategoryFolderMapFromValues(props.values), [props.values]);
++
++  function commit(next: CategoryFolderMapRow[]) {
++    props.onValueChange(CATEGORY_FOLDER_MAP_KEY, serializeCategoryFolderMap(next));
++  }
++
++  function updateRow(index: number, patch: Partial<CategoryFolderMapRow>) {
++    const next = rows.map((r, i) => (i === index ? { ...r, ...patch } : r));
++    commit(next);
++  }
++
++  function addRow() {
++    commit([...rows, { source_root: "", placeholder_root: "" }]);
++  }
++
++  function removeRow(index: number) {
++    commit(rows.filter((_, i) => i !== index));
++  }
++
++  const inputCls =
++    "w-full bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[14px] text-slate-200 placeholder-slate-600 outline-none transition-colors focus:border-[var(--accent-border,#5b9bd5)]";
++
++  return (
++    <div className="space-y-3">
++      {rows.length === 0 ? (
++        <p className="text-[13px] text-slate-500 italic">No category folders yet — everything falls back to Library Root.</p>
++      ) : (
++        <div className="space-y-2">
++          {rows.map((row, i) => (
++            <div key={i} className="flex flex-col gap-2 rounded-lg border border-[#424753]/35 bg-[#0b111b] p-3 sm:flex-row sm:items-center">
++              <div className="flex-1">
++                <label className="block text-[11px] font-headline uppercase tracking-wider text-slate-500 mb-1">
++                  Radarr/Sonarr root folder
++                </label>
++                <input
++                  className={inputCls}
++                  type="text"
++                  value={row.source_root}
++                  placeholder="/mnt/data/Media/Films_animes"
++                  onChange={(e) => updateRow(i, { source_root: e.target.value })}
++                />
++              </div>
++              <span className="material-symbols-outlined shrink-0 self-center text-slate-500 hidden sm:block" style={{ fontSize: 20 }}>
++                arrow_forward
++              </span>
++              <div className="flex-1">
++                <label className="block text-[11px] font-headline uppercase tracking-wider text-slate-500 mb-1">
++                  Placeholder folder
++                </label>
++                <input
++                  className={inputCls}
++                  type="text"
++                  value={row.placeholder_root}
++                  placeholder="/mnt/data/Media/Films_animes"
++                  onChange={(e) => updateRow(i, { placeholder_root: e.target.value })}
++                />
++              </div>
++              <button
++                type="button"
++                onClick={() => removeRow(i)}
++                aria-label="Remove this category folder mapping"
++                className="self-end sm:self-center shrink-0 rounded-lg border border-[#424753]/40 p-2 text-slate-500 transition hover:border-red-400/50 hover:text-red-300"
++              >
++                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>delete</span>
++              </button>
++            </div>
++          ))}
++        </div>
++      )}
++      <button
++        type="button"
++        onClick={addRow}
++        className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[#424753]/50 px-3 py-2 text-[13px] font-medium text-slate-400 transition hover:border-white/30 hover:text-slate-200"
++        style={{ borderColor: alphaColor(props.accent.hex, 0.35) }}
++      >
++        <span className="material-symbols-outlined" style={{ fontSize: 18 }}>add</span>
++        Add category folder
++      </button>
++    </div>
++  );
+ }
+ 
+ const URL_TEST_TARGET: Record<string, { service: "plex" | "jellyfin" | "emby" | "radarr" | "sonarr"; credentialKey: string }> = {
+@@ -5146,7 +5270,7 @@ function LibraryPathsForm(props: {
+   runTest?: (field: SettingsField) => void;
+   testResults?: Record<string, { ok: boolean; message: string }>;
+ }) {
+-  const { root, profiles, overrides, rest } = useMemo(() => partitionLibraryPathFields(props.fields), [props.fields]);
++  const { root, categoryMap, profiles, overrides, rest } = useMemo(() => partitionLibraryPathFields(props.fields), [props.fields]);
+   const [overridesOpen, setOverridesOpen] = useState(() => {
+     if (props.layout === "wizard") return false;
+     return overrides.some((f) => String(props.values[f.key] ?? "").trim() !== "");
+@@ -5345,6 +5469,16 @@ function LibraryPathsForm(props: {
+     </div>
+   ) : null;
+ 
++  const categoryMapBlock = categoryMap ? (
++    <div className={props.layout === "settings" ? `${UI_SECTION_FRAME_CLASS} px-4 py-3` : `${UI_SECTION_FRAME_CLASS} px-3 py-3`}>
++      <div className="mb-3">
++        <div className="text-[16px] font-medium text-slate-300 font-headline">{categoryMap.label}</div>
++        {categoryMap.description ? <p className="ui-field-description mt-1">{categoryMap.description}</p> : null}
++      </div>
++      <CategoryFolderMapEditor values={props.values} onValueChange={props.onValueChange} accent={props.accent} />
++    </div>
++  ) : null;
++
+   if (props.layout === "wizard") {
+     return (
+       <div className="space-y-6">
+@@ -5352,6 +5486,7 @@ function LibraryPathsForm(props: {
+         <div className={WIZARD_ONBOARDING_SECTION_SURFACE_CLASS}>
+           <div className="space-y-5">
+             {rootBlock}
++            {categoryMapBlock}
+             {profileBlock}
+             {overridesBlock}
+             {rest.map((field) => (
+@@ -5372,6 +5507,7 @@ function LibraryPathsForm(props: {
+       {root ? (
+         <div className="px-6 py-5">{rootBlock}</div>
+       ) : null}
++      {categoryMap ? <div className="px-6 py-5">{categoryMapBlock}</div> : null}
+       {profiles.length ? <div className="px-6 py-5">{profileBlock}</div> : null}
+       {overrides.length ? <div className="px-6 py-5">{overridesBlock}</div> : null}
+       {rest.map((field) => renderSettingsRestField(field))}
