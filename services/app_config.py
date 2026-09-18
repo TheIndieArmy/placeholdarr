@@ -362,9 +362,29 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 "label": "Library Root",
                 "description": (
                     "Base path where Placeholdarr writes placeholders. Placeholdarr derives `movies` and `tv` folders under this root. "
-                    "Use a path separate from Radarr/Sonarr library roots to avoid potential issues with library management."
+                    "Use a path separate from Radarr/Sonarr library roots to avoid potential issues with library management. "
+                    "Ignored for any item matched by Category Folder Map below."
                 ),
                 "type": "path",
+                "required": False,
+                "restart_required": False,
+            },
+        ),
+        (
+            "CATEGORY_FOLDER_MAP_JSON",
+            {
+                "section": "Paths",
+                "label": "Category Folder Map (Advanced, custom fork)",
+                "description": (
+                    "Optional JSON array overriding the placeholder folder per Radarr/Sonarr root folder, so different "
+                    "categories (e.g. Films vs Films_animes, Series vs Dessin_anime) each get their own placeholder "
+                    "location instead of the single Library Root movies/tv folders. Matched by prefix against the "
+                    "real ARR item path. Example: "
+                    '[{"source_root": "/mnt/data/Media/Films", "placeholder_root": "/mnt/data/Media/Films"}, '
+                    '{"source_root": "/mnt/data/Media/Films_animes", "placeholder_root": "/mnt/data/Media/Films_animes"}]. '
+                    "Unmatched items still fall back to Library Root."
+                ),
+                "type": "string",
                 "required": False,
                 "restart_required": False,
             },

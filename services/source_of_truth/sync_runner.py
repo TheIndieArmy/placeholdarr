@@ -243,6 +243,26 @@ def _tv_library_root(is_4k: bool) -> str:
     return settings.TV_LIBRARY_4K_FOLDER if is_4k and settings.TV_LIBRARY_4K_FOLDER else settings.TV_LIBRARY_FOLDER
 
 
+def _resolve_placeholder_root(arr_path: str | None, default_root: str) -> str:
+    """Custom fork addition: pick the placeholder root for this item's *category*.
+
+    ``arr_path`` is the real folder Radarr/Sonarr reported for this item (e.g.
+    ``/mnt/data/Media/Films_animes/Some Movie (2020)``). We match its parent directory
+    against ``settings.category_folder_map`` (configured via CATEGORY_FOLDER_MAP_JSON)
+    to find a per-category placeholder folder. Falls back to ``default_root``
+    (the single Library Root movies/tv folder) when nothing matches or no map is set,
+    so existing single-folder deployments keep working unchanged.
+    """
+    if not arr_path:
+        return default_root
+    arr_dir = os.path.dirname(str(arr_path).rstrip("/"))
+    for mapping in getattr(settings, "category_folder_map", []) or []:
+        source_root = mapping.get("source_root", "")
+        if arr_dir == source_root or arr_dir.startswith(source_root + "/"):
+            return mapping.get("placeholder_root") or default_root
+    return default_root
+
+
 def _default_instance_key(content_type: str, is_4k: bool) -> str:
     """Get default/first instance key for given content type and 4k flag from configured instances."""
     arr_type = 'radarr' if content_type == 'movie' else 'sonarr'
@@ -337,15 +357,15 @@ def _series_folder_name(title: str, year: int, tvdbid: int) -> str:
 
 
 def _placeholder_movie_folder(entry: Dict, *, title: str, year: int, tmdbid: int, is_4k: bool) -> str:
-    root = _movie_library_root(is_4k)
     arr_path = entry.get('path') or entry.get('folderPath') or None
+    root = _resolve_placeholder_root(arr_path, _movie_library_root(is_4k))
     folder_name = os.path.basename(arr_path) if arr_path else _movie_folder_name(title, year, tmdbid)
     return os.path.join(root, folder_name)
 
 
 def _placeholder_series_folder(entry: Dict, *, title: str, year: int, tvdbid: int, is_4k: bool) -> str:
-    root = _tv_library_root(is_4k)
     arr_path = entry.get('path') or entry.get('folderPath') or None
+    root = _resolve_placeholder_root(arr_path, _tv_library_root(is_4k))
     folder_name = os.path.basename(arr_path) if arr_path else _series_folder_name(title, year, tvdbid)
     return os.path.join(root, folder_name)
 

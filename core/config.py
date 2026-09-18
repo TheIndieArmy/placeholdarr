@@ -18,6 +18,45 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def parse_category_folder_map_json(raw: str) -> list[dict[str, str]]:
+    """Parse ``CATEGORY_FOLDER_MAP_JSON`` into a normalized list of
+    ``{"source_root": <Radarr/Sonarr root folder path>, "placeholder_root": <matching placeholder folder>}``.
+
+    Custom fork addition: lets a single Placeholdarr deployment write placeholders into a
+    *different placeholder folder per ARR root folder/category* instead of always falling back
+    to the single MOVIE_LIBRARY_FOLDER / TV_LIBRARY_FOLDER. Entries are matched by prefix against
+    the real ARR item path (see ``_resolve_placeholder_root`` in ``services/source_of_truth/sync_runner.py``).
+
+    Example value for CATEGORY_FOLDER_MAP_JSON:
+    [
+      {"source_root": "/mnt/data/Media/Films", "placeholder_root": "/mnt/data/Media/Films"},
+      {"source_root": "/mnt/data/Media/Films_animes", "placeholder_root": "/mnt/data/Media/Films_animes"},
+      {"source_root": "/mnt/data/Media/Series", "placeholder_root": "/mnt/data/Media/Series"},
+      {"source_root": "/mnt/data/Media/Dessin_anime", "placeholder_root": "/mnt/data/Media/Dessin_anime"}
+    ]
+    """
+    parsed: list[dict[str, str]] = []
+    raw_str = str(raw or "").strip()
+    if not raw_str:
+        return parsed
+    try:
+        payload = json.loads(raw_str)
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                source_root = str(item.get("source_root") or "").strip().rstrip("/")
+                placeholder_root = str(item.get("placeholder_root") or "").strip().rstrip("/")
+                if not source_root or not placeholder_root:
+                    continue
+                parsed.append({"source_root": source_root, "placeholder_root": placeholder_root})
+    except Exception as exc:
+        logger.warning(f"Failed to parse CATEGORY_FOLDER_MAP_JSON: {exc}", extra={"emoji_type": "error"})
+    # Longest source_root first so nested roots (rare) match their most specific entry.
+    parsed.sort(key=lambda e: len(e["source_root"]), reverse=True)
+    return parsed
+
+
 def parse_configured_arr_instances_json(raw: str) -> list[dict[str, Any]]:
     """Parse ``ARR_INSTANCES_JSON`` into the same normalized list as ``Settings.configured_arr_instances``."""
     parsed_instances: list[dict[str, Any]] = []
@@ -166,6 +205,8 @@ class Settings(BaseSettings):
 
     # ARR instance configuration: fully dynamic from user-configured ARR server names in onboarding.
     ARR_INSTANCES_JSON: str = ""
+    # Custom fork addition: per-category placeholder folder mapping (see parse_category_folder_map_json).
+    CATEGORY_FOLDER_MAP_JSON: str = ""
     ARR_MAX_INSTANCES_PER_TYPE: int = int(os.getenv("ARR_MAX_INSTANCES_PER_TYPE", "2").split('#')[0].strip())
     # Playback webhook source instance keys (retain defaults for backward compat)
     TAUTULLI_INSTANCE_KEY: str = os.getenv("TAUTULLI_INSTANCE_KEY", "tautulli").split('#')[0].strip().lower()
@@ -655,6 +696,11 @@ class Settings(BaseSettings):
     @property
     def configured_arr_instances(self) -> list[dict[str, Any]]:
         return parse_configured_arr_instances_json(str(getattr(self, "ARR_INSTANCES_JSON", "") or "").strip())
+
+    @property
+    def category_folder_map(self) -> list[dict[str, str]]:
+        """Custom fork addition: parsed CATEGORY_FOLDER_MAP_JSON, longest source_root first."""
+        return parse_category_folder_map_json(str(getattr(self, "CATEGORY_FOLDER_MAP_JSON", "") or "").strip())
 
     @property
     def radarr_instance_keys(self) -> tuple[str, ...]:
