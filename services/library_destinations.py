@@ -330,7 +330,7 @@ def resolve_series_dest(
 
 
 def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -> list[str]:
-    """All Placeholdarr destination folders (default movie/TV + mapped dests), deduped."""
+    """All Placeholdarr destination folders (default movie/TV + mapped dests + Discover), deduped."""
     rows = map_rows if map_rows is not None else parse_library_destination_map()
     roots: list[str] = []
     for folder in (default_movie_dest_folder(), default_tv_dest_folder()):
@@ -340,6 +340,15 @@ def all_configured_dest_roots(*, map_rows: list[dict[str, Any]] | None = None) -
         dest = str(row.get("dest_folder") or "").strip()
         if dest:
             roots.append(dest)
+    # TMDB Discover movies live under a separate root; include it so placeholder
+    # dir-mode chmod walks apply there (media servers often run as non-root).
+    discover = str(getattr(settings, "DISCOVER_MOVIE_LIBRARY_FOLDER", "") or "").strip()
+    if not discover:
+        discover_root = str(getattr(settings, "DISCOVER_LIBRARY_ROOT", "") or "").strip()
+        if discover_root:
+            discover = os.path.join(discover_root, "movies")
+    if discover:
+        roots.append(discover)
     # Preserve order, drop empties/dupes (case-sensitive path strings as configured).
     out: list[str] = []
     seen: set[str] = set()

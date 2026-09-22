@@ -81,6 +81,7 @@ and this project follows Semantic Versioning while in pre-1.0 stabilization.
 - **Startup legacy QUEUED reset removed**: Movie/Series/Episode `QUEUED`→`PENDING` no longer runs; nothing writes that entity status anymore.
 - **Discover placeholder history titles**: Rows created from TMDB Discover materialization were tagged as episodes with empty titles; history now resolves movie names (and year) via `tmdb_movie`.
 - **Discover Library Root path**: Discover materialize writes under `DISCOVER_LIBRARY_ROOT/movies` (not Arr `LIBRARY_ROOT`); existing titles pinned to the Arr tree relocate on the next Discover materialize.
+- **Discover folder permissions**: Discover title folders use `PLACEHOLDER_DIR_MODE` (default 777) like Arr placeholders so Emby/Jellyfin (non-root) can scan into them.
 
 ## [0.9.26] - 2026-09-10
 

@@ -18,6 +18,8 @@ from services.placeholders import (
     ensure_movie_nfo,
     ensure_placeholder_file,
     sanitize_filename,
+    _apply_dir_chain_permissions,
+    _ensure_open_permissions,
 )
 from services.poster_overlay import is_discover_stub_poster, write_discover_stub_poster
 from services.postgres.db import get_session
@@ -152,7 +154,9 @@ def apply_tmdb_movie_materialization(
 
         if det == DETERMINATION_NEEDS or (det == DETERMINATION_EXISTS and not row.has_placeholder):
             os.makedirs(folder, exist_ok=True)
+            _ensure_open_permissions(folder, is_dir=True)
             ensure_placeholder_file(target)
+            _apply_dir_chain_permissions(target)
             try:
                 ensure_movie_nfo(target, _nfo_proxy(row))
             except Exception as exc:
@@ -196,7 +200,9 @@ def apply_tmdb_movie_materialization(
             needs_relocate = bool(old_folder) and os.path.normpath(old_folder) != os.path.normpath(folder)
             if needs_relocate:
                 os.makedirs(folder, exist_ok=True)
+                _ensure_open_permissions(folder, is_dir=True)
                 ensure_placeholder_file(target)
+                _apply_dir_chain_permissions(target)
                 try:
                     ensure_movie_nfo(target, _nfo_proxy(row))
                 except Exception as exc:

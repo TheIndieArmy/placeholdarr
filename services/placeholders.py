@@ -175,9 +175,13 @@ def _apply_dir_chain_permissions(path: str) -> None:
             for r in (
                 getattr(settings, "MOVIE_LIBRARY_FOLDER", None),
                 getattr(settings, "TV_LIBRARY_FOLDER", None),
+                getattr(settings, "DISCOVER_MOVIE_LIBRARY_FOLDER", None),
             ):
                 if r:
                     roots.append(os.path.abspath(r))
+            discover_root = str(getattr(settings, "DISCOVER_LIBRARY_ROOT", "") or "").strip()
+            if discover_root:
+                roots.append(os.path.abspath(os.path.join(discover_root, "movies")))
 
         for root in roots:
             try:

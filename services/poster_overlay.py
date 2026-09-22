@@ -395,6 +395,13 @@ def write_discover_stub_poster(
     Image, ImageDraw, _, _, _ = _pillow()
     folder = os.path.abspath(folder)
     os.makedirs(folder, exist_ok=True)
+    try:
+        from services.placeholders import _apply_dir_chain_permissions, _ensure_open_permissions
+
+        _ensure_open_permissions(folder, is_dir=True)
+        _apply_dir_chain_permissions(os.path.join(folder, "poster.jpg"))
+    except Exception:
+        pass
     out_path = os.path.join(folder, "poster.jpg")
     if os.path.isfile(out_path) and not is_discover_stub_poster(folder):
         # Do not clobber real (or overlay) art.
