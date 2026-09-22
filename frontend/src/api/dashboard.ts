@@ -385,6 +385,10 @@ export function getSettingsStatus(): Promise<SettingsStatus> {
   return fetchJson<SettingsStatus>("/api/settings/status");
 }
 
+export function restartApp(): Promise<{ status: string }> {
+  return postJson<{ status: string }>("/api/system/restart");
+}
+
 export type NfoBackfillApplyScope = "now" | "next_full_sync" | "future";
 
 export async function saveSettings(

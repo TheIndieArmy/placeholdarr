@@ -1,0 +1,705 @@
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 4aedd32..05e9288 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -16,11 +16,13 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } fr
+ import { copyTextToClipboard } from "./copyToClipboard";
+ import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
+ import {
++  getHealth,
+   getIntegrationsStatus,
+   getMovieDetail,
+   getSeriesDetail,
+   getSettingsCurrent,
+   getSettingsStatus,
++  restartApp,
+   saveSettings,
+   testIntegrationConnection,
+   type NfoBackfillApplyScope,
+@@ -79,6 +81,7 @@ import {
+ import { useLibraryShelves } from "./library/useLibraryShelves";
+ import { ConfirmModal } from "./ConfirmModal";
+ import { CollectionsPanel } from "./collections/CollectionsPanel";
++import DummyMediaSettings from "./DummyMediaSettings";
+ import { useActivityTasks } from "./activity/useActivityTasks";
+ import { useActivityFeed } from "./activity/useActivityFeed";
+ import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
+@@ -900,6 +903,8 @@ export function App() {
+   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
+   const [settingsFeedback, setSettingsFeedback] = useState("");
+   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
++  const [restartAvailable, setRestartAvailable] = useState(false);
++  const [restartPhase, setRestartPhase] = useState<"" | "restarting" | "reconnecting" | "failed">("");
+   const [integrationsStatus, setIntegrationsStatus] = useState<IntegrationsStatusResponse | null>(null);
+   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
+   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
+@@ -1717,6 +1722,33 @@ export function App() {
+     setSetupStatus(payload.status);
+     setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
+     setSettingsFeedbackKind("success");
++    if (result.restart_required_keys && result.restart_required_keys.length > 0) {
++      setRestartAvailable(true);
++    }
++  }
++
++  async function handleRestartNow() {
++    setRestartConfirmOpen(false);
++    setRestartPhase("restarting");
++    try {
++      await restartApp();
++    } catch {
++      // The process may terminate before the HTTP response flushes; treat that as expected.
++    }
++    setRestartPhase("reconnecting");
++
++    const deadline = Date.now() + 120_000; // give the container up to 2 minutes to come back
++    while (Date.now() < deadline) {
++      await new Promise((resolve) => setTimeout(resolve, 1500));
++      try {
++        await getHealth();
++        window.location.reload();
++        return;
++      } catch {
++        /* keep polling until the app answers again */
++      }
++    }
++    setRestartPhase("failed");
+   }
+ 
+   function tryNavigate(path: string): boolean {
+@@ -2046,6 +2078,9 @@ export function App() {
+           messagesSaveBlocked={statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors}
+           feedback={settingsFeedback}
+           feedbackKind={settingsFeedbackKind}
++          restartAvailable={restartAvailable}
++          restartPhase={restartPhase}
++          onConfirmRestart={handleRestartNow}
+           brand={brand}
+           themeMode={themeMode}
+           authStatus={authStatus}
+@@ -2139,6 +2174,9 @@ export function App() {
+                   applyScope === "now" &&
+                   Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
+                 const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
++                if (result.restart_required_keys && result.restart_required_keys.length > 0) {
++                  setRestartAvailable(true);
++                }
+                 if (messagesDirty && statusMessagesSaveRef.current) {
+                   await statusMessagesSaveRef.current(applyScope);
+                   setSettingsFeedback(saveMsg);
+@@ -2340,6 +2378,9 @@ export function App() {
+                 setBaselineValues(fieldValues);
+                 setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
+                 setSettingsFeedbackKind("success");
++                if (result.restart_required_keys && result.restart_required_keys.length > 0) {
++                  setRestartAvailable(true);
++                }
+                 const payload = await getSettingsCurrent();
+                 setSettingsPayload(payload);
+                 setSetupStatus(payload.status);
+@@ -6082,6 +6123,9 @@ function SettingsPanel(props: {
+   messagesSaveBlocked: boolean;
+   feedback: string;
+   feedbackKind: "" | "success" | "error";
++  restartAvailable: boolean;
++  restartPhase: "" | "restarting" | "reconnecting" | "failed";
++  onConfirmRestart: () => void | Promise<void>;
+   brand: Brand;
+   themeMode: ThemeMode;
+   authStatus: AuthStatus | null;
+@@ -6097,6 +6141,7 @@ function SettingsPanel(props: {
+   onOpenOptionalApis?: () => void;
+ }) {
+   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
++  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
+   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
+   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
+@@ -6482,6 +6527,26 @@ function SettingsPanel(props: {
+               {props.feedback}
+             </span>
+           )}
++          {props.restartAvailable && !isVirtualActive && !props.hasUnsavedChanges && (
++            <button
++              type="button"
++              onClick={() => setRestartConfirmOpen(true)}
++              disabled={props.restartPhase === "restarting" || props.restartPhase === "reconnecting"}
++              className="flex items-center gap-1.5 rounded-lg border border-orange-500/50 bg-orange-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-orange-300 hover:bg-orange-500/25 disabled:cursor-not-allowed disabled:opacity-70"
++              title="Some changed settings require a restart to take effect"
++            >
++              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
++                {props.restartPhase === "restarting" || props.restartPhase === "reconnecting" ? "sync" : "restart_alt"}
++              </span>
++              {props.restartPhase === "restarting"
++                ? "Restarting…"
++                : props.restartPhase === "reconnecting"
++                ? "Reconnecting…"
++                : props.restartPhase === "failed"
++                ? "Restart failed — retry"
++                : "Restart Placeholdarr"}
++            </button>
++          )}
+           {!isVirtualActive && (
+             <button
+               type="button"
+@@ -6518,17 +6583,20 @@ function SettingsPanel(props: {
+                 />
+               ) : null}
+               {active.name === "Paths" ? (
+-                <LibraryPathsForm
+-                  fields={active.fields}
+-                  values={props.values}
+-                  brand={props.brand}
+-                  themeMode={props.themeMode}
+-                  accent={accent}
+-                  layout="settings"
+-                  onValueChange={props.onValueChange}
+-                  runTest={runTest}
+-                  testResults={testResults}
+-                />
++                <>
++                  <LibraryPathsForm
++                    fields={active.fields}
++                    values={props.values}
++                    brand={props.brand}
++                    themeMode={props.themeMode}
++                    accent={accent}
++                    layout="settings"
++                    onValueChange={props.onValueChange}
++                    runTest={runTest}
++                    testResults={testResults}
++                  />
++                  <DummyMediaSettings accentHex={accent.hex} />
++                </>
+               ) : active.name === "Media Integrations" ? (
+                 (() => {
+                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
+@@ -7090,6 +7158,21 @@ function SettingsPanel(props: {
+         }}
+       />
+     ) : null}
++    {restartConfirmOpen ? (
++      <ConfirmModal
++        title="Restart Placeholdarr?"
++        message="Some settings you changed only take effect after a restart. The app will be unreachable for a few seconds while it comes back up."
++        confirmLabel="Restart now"
++        cancelLabel="Not now"
++        accentHex={accent.hex}
++        themeMode={props.themeMode}
++        onCancel={() => setRestartConfirmOpen(false)}
++        onConfirm={() => {
++          setRestartConfirmOpen(false);
++          props.onConfirmRestart();
++        }}
++      />
++    ) : null}
+     </>
+   );
+ }
+diff --git a/frontend/src/DummyMediaSettings.tsx b/frontend/src/DummyMediaSettings.tsx
+new file mode 100644
+index 0000000..af9f5e8
+--- /dev/null
++++ b/frontend/src/DummyMediaSettings.tsx
+@@ -0,0 +1,207 @@
++import { useEffect, useRef, useState } from "react";
++import { fetchJson, getCsrfToken } from "./api/client";
++
++interface DummyMediaInfo {
++  kind: "primary" | "coming_soon";
++  path: string;
++  exists: boolean;
++  size_bytes: number;
++  modified_at: number | null;
++  is_default: boolean;
++}
++
++type StatusMap = Record<"primary" | "coming_soon", DummyMediaInfo | undefined>;
++
++const KIND_LABELS: Record<"primary" | "coming_soon", { title: string; description: string }> = {
++  primary: {
++    title: "Standard placeholder video",
++    description: "Shown for titles added but not yet downloaded (dummy.mp4).",
++  },
++  coming_soon: {
++    title: "Coming Soon placeholder video",
++    description: "Shown for titles that have not aired/released yet (coming_soon_dummy.mp4). Falls back to the standard video if not set.",
++  },
++};
++
++function formatBytes(bytes: number): string {
++  if (!bytes) return "0 B";
++  const units = ["B", "KB", "MB", "GB"];
++  let value = bytes;
++  let unitIndex = 0;
++  while (value >= 1024 && unitIndex < units.length - 1) {
++    value /= 1024;
++    unitIndex += 1;
++  }
++  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
++}
++
++function formatModified(mtime: number | null): string {
++  if (!mtime) return "unknown";
++  try {
++    return new Date(mtime * 1000).toLocaleString();
++  } catch {
++    return "unknown";
++  }
++}
++
++async function uploadDummyMedia(kind: string, file: File): Promise<DummyMediaInfo> {
++  const form = new FormData();
++  form.append("file", file);
++  const csrf = getCsrfToken();
++  const response = await fetch(`/api/settings/dummy-media/upload?kind=${encodeURIComponent(kind)}`, {
++    method: "POST",
++    credentials: "same-origin",
++    headers: csrf ? { "X-CSRF-Token": csrf } : undefined,
++    body: form,
++  });
++  if (!response.ok) {
++    let message = `Upload failed: ${response.status}`;
++    try {
++      const payload = (await response.json()) as { detail?: string };
++      if (payload?.detail) message = payload.detail;
++    } catch {
++      /* ignore */
++    }
++    throw new Error(message);
++  }
++  return (await response.json()) as DummyMediaInfo;
++}
++
++function DummyMediaRow(props: {
++  kind: "primary" | "coming_soon";
++  info: DummyMediaInfo | undefined;
++  accentHex: string;
++  onChanged: (kind: "primary" | "coming_soon", info: DummyMediaInfo) => void;
++}) {
++  const { kind, info, accentHex, onChanged } = props;
++  const labels = KIND_LABELS[kind];
++  const inputRef = useRef<HTMLInputElement | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  async function handleFileChosen(file: File | undefined | null) {
++    if (!file) return;
++    setBusy(true);
++    setError(null);
++    try {
++      const updated = await uploadDummyMedia(kind, file);
++      onChanged(kind, updated);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : String(err));
++    } finally {
++      setBusy(false);
++      if (inputRef.current) inputRef.current.value = "";
++    }
++  }
++
++  async function handleReset() {
++    setBusy(true);
++    setError(null);
++    try {
++      const updated = await fetchJson<DummyMediaInfo>(`/api/settings/dummy-media/reset?kind=${encodeURIComponent(kind)}`, {
++        method: "POST",
++      });
++      onChanged(kind, updated);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : String(err));
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="flex flex-col gap-3 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
++      <div className="min-w-0">
++        <div className="text-[14px] font-semibold text-white">{labels.title}</div>
++        <div className="mt-0.5 text-[13px] text-white/60">{labels.description}</div>
++        <div className="mt-1.5 text-[12px] text-white/40">
++          {info?.exists ? (
++            <>
++              {info.is_default ? "Default video" : "Custom video"} · {formatBytes(info.size_bytes)} · updated {formatModified(info.modified_at)}
++            </>
++          ) : (
++            "No file present yet."
++          )}
++        </div>
++        {error ? <div className="mt-1.5 text-[12px] text-red-400">{error}</div> : null}
++      </div>
++      <div className="flex shrink-0 items-center gap-2">
++        <input
++          ref={inputRef}
++          type="file"
++          accept="video/mp4,video/quicktime,video/x-matroska,.mp4,.mov,.mkv,.m4v"
++          className="hidden"
++          onChange={(e) => handleFileChosen(e.target.files?.[0])}
++        />
++        <button
++          type="button"
++          disabled={busy}
++          onClick={() => inputRef.current?.click()}
++          className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-[13px] font-headline uppercase tracking-wider text-white/90 disabled:cursor-not-allowed disabled:opacity-50"
++          style={{ backgroundColor: `${accentHex}26`, border: `1px solid ${accentHex}66` }}
++        >
++          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
++            upload
++          </span>
++          {busy ? "Uploading…" : "Upload video"}
++        </button>
++        {info?.exists && !info.is_default ? (
++          <button
++            type="button"
++            disabled={busy}
++            onClick={handleReset}
++            className="flex items-center gap-1.5 rounded-lg border border-[#424753]/60 px-3 py-2 text-[13px] font-headline uppercase tracking-wider text-white/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
++            title="Restore the bundled default video"
++          >
++            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
++              restart_alt
++            </span>
++            Reset
++          </button>
++        ) : null}
++      </div>
++    </div>
++  );
++}
++
++export default function DummyMediaSettings(props: { accentHex: string }) {
++  const [status, setStatus] = useState<StatusMap>({ primary: undefined, coming_soon: undefined });
++  const [loadError, setLoadError] = useState<string | null>(null);
++
++  useEffect(() => {
++    let cancelled = false;
++    fetchJson<StatusMap>("/api/settings/dummy-media/status")
++      .then((data) => {
++        if (!cancelled) setStatus(data);
++      })
++      .catch((err) => {
++        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  function handleChanged(kind: "primary" | "coming_soon", info: DummyMediaInfo) {
++    setStatus((prev) => ({ ...prev, [kind]: info }));
++  }
++
++  return (
++    <div className="mt-6 bg-[#171c22] rounded-xl border border-[#424753]/40 overflow-hidden">
++      <div className="px-6 py-4 border-b border-[#424753]/30">
++        <h2 className="text-[18px] font-bold text-white font-headline">Placeholder Videos</h2>
++        <p className="mt-1 text-[13px] text-white/50">
++          Replace the video files placeholders link to when a title is browsed/scrubbed before it is downloaded.
++        </p>
++      </div>
++      {loadError ? (
++        <div className="px-6 py-4 text-[13px] text-red-400">{loadError}</div>
++      ) : (
++        <div className="divide-y divide-[#424753]/20">
++          <DummyMediaRow kind="primary" info={status.primary} accentHex={props.accentHex} onChanged={handleChanged} />
++          <DummyMediaRow kind="coming_soon" info={status.coming_soon} accentHex={props.accentHex} onChanged={handleChanged} />
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/api/dashboard.ts b/frontend/src/api/dashboard.ts
+index 7d3f017..7144d37 100644
+--- a/frontend/src/api/dashboard.ts
++++ b/frontend/src/api/dashboard.ts
+@@ -385,6 +385,10 @@ export function getSettingsStatus(): Promise<SettingsStatus> {
+   return fetchJson<SettingsStatus>("/api/settings/status");
+ }
+ 
++export function restartApp(): Promise<{ status: string }> {
++  return postJson<{ status: string }>("/api/system/restart");
++}
++
+ export type NfoBackfillApplyScope = "now" | "next_full_sync" | "future";
+ 
+ export async function saveSettings(
+diff --git a/main.py b/main.py
+index e2d3337..33d1a92 100644
+--- a/main.py
++++ b/main.py
+@@ -598,6 +598,14 @@ app.include_router(messages_router)
+ from routes.whats_new import router as whats_new_router
+ app.include_router(whats_new_router)
+ 
++# Placeholder ("dummy") video upload/reset from the Settings UI
++from routes.dummy_media import router as dummy_media_router
++app.include_router(dummy_media_router)
++
++# System actions (restart) from the Settings UI
++from routes.system import router as system_router
++app.include_router(system_router)
++
+ app.add_middleware(AuthGateMiddleware)
+ _session_https_only = bool(getattr(settings, "AUTH_COOKIE_SECURE", False))
+ app.add_middleware(
+diff --git a/routes/dummy_media.py b/routes/dummy_media.py
+new file mode 100644
+index 0000000..62d709a
+--- /dev/null
++++ b/routes/dummy_media.py
+@@ -0,0 +1,76 @@
++"""HTTP routes for uploading/resetting the placeholder ("dummy") video files
++shown in Plex/Jellyfin/Emby for missing and coming-soon titles.
++"""
++
++from __future__ import annotations
++
++import os
++import tempfile
++
++from fastapi import APIRouter, File, HTTPException, UploadFile
++from fastapi.responses import JSONResponse
++
++from core.logger import logger
++from services.dummy_media import (
++    DummyMediaError,
++    get_dummy_media_status,
++    reset_dummy_media_to_default,
++    save_uploaded_dummy_media,
++)
++
++router = APIRouter(prefix="/api/settings/dummy-media", tags=["dummy-media"])
++
++_VALID_KINDS = {"primary", "coming_soon"}
++_CHUNK_SIZE = 1024 * 1024  # 1MB
++
++
++@router.get("/status")
++async def dummy_media_status():
++    return JSONResponse(content=get_dummy_media_status())
++
++
++@router.post("/upload")
++async def dummy_media_upload(kind: str, file: UploadFile = File(...)):
++    if kind not in _VALID_KINDS:
++        raise HTTPException(status_code=400, detail=f"Invalid kind '{kind}'. Expected one of {sorted(_VALID_KINDS)}.")
++
++    suffix = os.path.splitext(file.filename or "")[1].lower() or ".mp4"
++    tmp_fd, tmp_path = tempfile.mkstemp(prefix="placeholdarr_dummy_upload_", suffix=suffix)
++    size = 0
++    try:
++        with os.fdopen(tmp_fd, "wb") as tmp:
++            while True:
++                chunk = await file.read(_CHUNK_SIZE)
++                if not chunk:
++                    break
++                size += len(chunk)
++                tmp.write(chunk)
++    finally:
++        await file.close()
++
++    try:
++        info = save_uploaded_dummy_media(kind, tmp_path, size)
++    except DummyMediaError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    except Exception as exc:
++        logger.error(f"Failed to save uploaded dummy media ({kind}): {exc}", extra={"emoji_type": "error"})
++        raise HTTPException(status_code=500, detail="Failed to save uploaded file.") from exc
++
++    logger.info(f"Custom dummy media uploaded for kind={kind} ({size} bytes)", extra={"emoji_type": "dummy"})
++    return JSONResponse(content=info)
++
++
++@router.post("/reset")
++async def dummy_media_reset(kind: str):
++    if kind not in _VALID_KINDS:
++        raise HTTPException(status_code=400, detail=f"Invalid kind '{kind}'. Expected one of {sorted(_VALID_KINDS)}.")
++    try:
++        info = reset_dummy_media_to_default(kind)
++    except DummyMediaError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    except Exception as exc:
++        logger.error(f"Failed to reset dummy media ({kind}): {exc}", extra={"emoji_type": "error"})
++        raise HTTPException(status_code=500, detail="Failed to reset to default.") from exc
++
++    logger.info(f"Dummy media reset to default for kind={kind}", extra={"emoji_type": "dummy"})
++    return JSONResponse(content=info)
+diff --git a/routes/system.py b/routes/system.py
+new file mode 100644
+index 0000000..01bdc7c
+--- /dev/null
++++ b/routes/system.py
+@@ -0,0 +1,41 @@
++"""System-level routes: restarting the running process from the Settings UI.
++
++Placeholdarr runs as a single long-lived process inside its container. There is
++no in-process "reload config" for restart-required settings (env-derived at
++import time), so the practical way to apply them is to exit the process and
++let Docker's restart policy (`restart: unless-stopped` in docker-compose.yml)
++bring it back up with the new configuration.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import os
++import signal
++
++from fastapi import APIRouter
++from fastapi.responses import JSONResponse
++
++from core.logger import logger
++
++router = APIRouter(prefix="/api/system", tags=["system"])
++
++_RESTART_DELAY_SECONDS = 0.75
++
++
++async def _delayed_self_terminate() -> None:
++    await asyncio.sleep(_RESTART_DELAY_SECONDS)
++    logger.warning("Restart requested from Settings UI; terminating process now.", extra={"emoji_type": "restart"})
++    os.kill(os.getpid(), signal.SIGTERM)
++
++
++@router.post("/restart")
++async def system_restart():
++    """Schedule a graceful self-restart shortly after responding.
++
++    Requires the container to run under a restart policy that brings it back
++    up after a clean exit (already the case in the bundled docker-compose.yml).
++    Without such a policy, this stops the app instead of restarting it.
++    """
++    asyncio.create_task(_delayed_self_terminate())
++    return JSONResponse(content={"status": "restarting", "delay_seconds": _RESTART_DELAY_SECONDS})
+diff --git a/services/dummy_media.py b/services/dummy_media.py
+new file mode 100644
+index 0000000..ba10cba
+--- /dev/null
++++ b/services/dummy_media.py
+@@ -0,0 +1,125 @@
++from __future__ import annotations
++
++import os
++import shutil
++import tempfile
++from typing import Any
++
++from services.placeholders import _ensure_open_permissions  # reuse existing perms helper
++
++# Destinations mirror services.placeholders._resolve_dummy_path()'s highest-priority
++# runtime fallback, so an uploaded file is picked up automatically without needing
++# to touch DUMMY_FILE_PATH / COMING_SOON_DUMMY_FILE_PATH settings.
++_DEST = {
++    "primary": "/config/dummy.mp4",
++    "coming_soon": "/config/coming_soon_dummy.mp4",
++}
++
++_MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500MB safety cap
++_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v"}
++
++
++class DummyMediaError(Exception):
++    """Raised for invalid uploads / unknown kinds."""
++
++
++def _repo_default_source(kind: str) -> str:
++    service_dir = os.path.dirname(os.path.abspath(__file__))
++    repo_root = os.path.abspath(os.path.join(service_dir, ".."))
++    filename = "coming_soon_dummy.mp4" if kind == "coming_soon" else "dummy.mp4"
++    for candidate in (
++        os.path.join("/app", filename),
++        os.path.join(repo_root, filename),
++    ):
++        if os.path.isfile(candidate):
++            return candidate
++    return ""
++
++
++def _dest_for(kind: str) -> str:
++    if kind not in _DEST:
++        raise DummyMediaError(f"Unknown dummy media kind: {kind!r}")
++    return _DEST[kind]
++
++
++def get_dummy_media_status() -> dict[str, Any]:
++    """Report current state (custom vs default, size, mtime) for both dummy kinds."""
++    result: dict[str, Any] = {}
++    for kind, dest in _DEST.items():
++        default_source = _repo_default_source(kind)
++        info: dict[str, Any] = {
++            "kind": kind,
++            "path": dest,
++            "exists": False,
++            "size_bytes": 0,
++            "modified_at": None,
++            "is_default": True,
++        }
++        try:
++            if os.path.isfile(dest):
++                stat = os.stat(dest)
++                info["exists"] = True
++                info["size_bytes"] = stat.st_size
++                info["modified_at"] = stat.st_mtime
++                if default_source and os.path.isfile(default_source):
++                    import filecmp
++
++                    info["is_default"] = filecmp.cmp(dest, default_source, shallow=False)
++                else:
++                    info["is_default"] = False
++        except Exception:
++            pass
++        result[kind] = info
++    return result
++
++
++def save_uploaded_dummy_media(kind: str, tmp_path: str, size_bytes: int) -> dict[str, Any]:
++    """Atomically replace the dummy media file for `kind` with the uploaded file at tmp_path."""
++    dest = _dest_for(kind)
++
++    if size_bytes <= 0:
++        raise DummyMediaError("Uploaded file is empty.")
++    if size_bytes > _MAX_UPLOAD_BYTES:
++        raise DummyMediaError(f"Uploaded file exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit.")
++
++    config_dir = os.path.dirname(dest)
++    os.makedirs(config_dir, exist_ok=True)
++    _ensure_open_permissions(config_dir, is_dir=True)
++
++    # Write into the destination directory first, then atomic rename, so a failed/partial
++    # upload never clobbers a working dummy file mid-write.
++    fd, staged_path = tempfile.mkstemp(prefix=".dummy_upload_", dir=config_dir)
++    os.close(fd)
++    try:
++        shutil.copyfile(tmp_path, staged_path)
++        os.replace(staged_path, dest)
++    except Exception:
++        try:
++            os.unlink(staged_path)
++        except OSError:
++            pass
++        raise
++    finally:
++        try:
++            os.unlink(tmp_path)
++        except OSError:
++            pass
++
++    _ensure_open_permissions(dest)
++    return get_dummy_media_status()[kind]
++
++
++def reset_dummy_media_to_default(kind: str) -> dict[str, Any]:
++    """Restore the bundled default video for `kind`, discarding any custom upload."""
++    dest = _dest_for(kind)
++    source = _repo_default_source(kind)
++    if not source:
++        raise DummyMediaError(f"No bundled default video available for {kind!r}.")
++
++    config_dir = os.path.dirname(dest)
++    os.makedirs(config_dir, exist_ok=True)
++    _ensure_open_permissions(config_dir, is_dir=True)
++
++    shutil.copy2(source, dest)
++    _ensure_open_permissions(dest)
++    return get_dummy_media_status()[kind]
