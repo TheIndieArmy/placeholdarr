@@ -16,11 +16,13 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } fr
 import { copyTextToClipboard } from "./copyToClipboard";
 import { ARR_WEBHOOK_SERVICES, PLAYBACK_WEBHOOK_SERVICES } from "./webhookConfig";
 import {
+  getHealth,
   getIntegrationsStatus,
   getMovieDetail,
   getSeriesDetail,
   getSettingsCurrent,
   getSettingsStatus,
+  restartApp,
   saveSettings,
   testIntegrationConnection,
   type NfoBackfillApplyScope,
@@ -80,6 +82,7 @@ import {
 import { useLibraryShelves } from "./library/useLibraryShelves";
 import { ConfirmModal } from "./ConfirmModal";
 import { CollectionsPanel } from "./collections/CollectionsPanel";
+import DummyMediaSettings from "./DummyMediaSettings";
 import { useActivityTasks } from "./activity/useActivityTasks";
 import { useActivityFeed } from "./activity/useActivityFeed";
 import { PlaceholdersPanel } from "./activity/PlaceholdersPanel";
@@ -793,6 +796,8 @@ export function App() {
   const [baselineValues, setBaselineValues] = useState<FieldValueMap>({});
   const [settingsFeedback, setSettingsFeedback] = useState("");
   const [settingsFeedbackKind, setSettingsFeedbackKind] = useState<"" | "success" | "error">("");
+  const [restartAvailable, setRestartAvailable] = useState(false);
+  const [restartPhase, setRestartPhase] = useState<"" | "restarting" | "reconnecting" | "failed">("");
   const [integrationsStatus, setIntegrationsStatus] = useState<IntegrationsStatusResponse | null>(null);
   /** Status message templates (Settings → Status Updates) — separate API from fieldValues. */
   const [statusMessagesMeta, setStatusMessagesMeta] = useState({ dirty: false, hasValidationErrors: false });
@@ -1632,6 +1637,32 @@ export function App() {
     setSetupStatus(payload.status);
     setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
     setSettingsFeedbackKind("success");
+    if (result.restart_required_keys && result.restart_required_keys.length > 0) {
+      setRestartAvailable(true);
+    }
+  }
+
+  async function handleRestartNow() {
+    setRestartPhase("restarting");
+    try {
+      await restartApp();
+    } catch {
+      // The process may terminate before the HTTP response flushes; treat that as expected.
+    }
+    setRestartPhase("reconnecting");
+
+    const deadline = Date.now() + 120_000; // give the container up to 2 minutes to come back
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        await getHealth();
+        window.location.reload();
+        return;
+      } catch {
+        /* keep polling until the app answers again */
+      }
+    }
+    setRestartPhase("failed");
   }
 
   function tryNavigate(path: string): boolean {
@@ -1961,6 +1992,9 @@ export function App() {
           messagesSaveBlocked={statusMessagesMeta.dirty && statusMessagesMeta.hasValidationErrors}
           feedback={settingsFeedback}
           feedbackKind={settingsFeedbackKind}
+          restartAvailable={restartAvailable}
+          restartPhase={restartPhase}
+          onConfirmRestart={handleRestartNow}
           brand={brand}
           themeMode={themeMode}
           authStatus={authStatus}
@@ -2069,6 +2103,9 @@ export function App() {
                   applyScope === "now" &&
                   Boolean(result.nfo_backfill?.enqueued || result.art_backfill?.enqueued);
                 const saveMsg = formatSettingsSaveSuccessMessage(result.restart_required_keys);
+                if (result.restart_required_keys && result.restart_required_keys.length > 0) {
+                  setRestartAvailable(true);
+                }
                 if (messagesDirty && statusMessagesSaveRef.current) {
                   await statusMessagesSaveRef.current(applyScope);
                   setSettingsFeedback(saveMsg);
@@ -2278,6 +2315,9 @@ export function App() {
                 setBaselineValues(fieldValues);
                 setSettingsFeedback(formatSettingsSaveSuccessMessage(result.restart_required_keys));
                 setSettingsFeedbackKind("success");
+                if (result.restart_required_keys && result.restart_required_keys.length > 0) {
+                  setRestartAvailable(true);
+                }
                 const payload = await getSettingsCurrent();
                 setSettingsPayload(payload);
                 setSetupStatus(payload.status);
@@ -6685,6 +6725,9 @@ function SettingsPanel(props: {
   messagesSaveBlocked: boolean;
   feedback: string;
   feedbackKind: "" | "success" | "error";
+  restartAvailable: boolean;
+  restartPhase: "" | "restarting" | "reconnecting" | "failed";
+  onConfirmRestart: () => void | Promise<void>;
   brand: Brand;
   themeMode: ThemeMode;
   authStatus: AuthStatus | null;
@@ -6700,6 +6743,7 @@ function SettingsPanel(props: {
   onOpenOptionalApis?: () => void;
 }) {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [arrSecondaryTestStatus, setArrSecondaryTestStatus] = useState<{ radarr: boolean; sonarr: boolean }>({ radarr: false, sonarr: false });
   const [mediaPanel, setMediaPanel] = useState<null | (typeof ONBOARDING_MEDIA_CARDS)[number]["id"]>(null);
   const [mediaPanelTestPassed, setMediaPanelTestPassed] = useState(false);
@@ -7135,6 +7179,26 @@ function SettingsPanel(props: {
               {props.feedback}
             </span>
           )}
+          {props.restartAvailable && !isVirtualActive && !props.hasUnsavedChanges && (
+            <button
+              type="button"
+              onClick={() => setRestartConfirmOpen(true)}
+              disabled={props.restartPhase === "restarting" || props.restartPhase === "reconnecting"}
+              className="flex items-center gap-1.5 rounded-lg border border-orange-500/50 bg-orange-500/15 px-3 py-1.5 text-[13px] font-headline uppercase tracking-wider text-orange-300 hover:bg-orange-500/25 disabled:cursor-not-allowed disabled:opacity-70"
+              title="Some changed settings require a restart to take effect"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                {props.restartPhase === "restarting" || props.restartPhase === "reconnecting" ? "sync" : "restart_alt"}
+              </span>
+              {props.restartPhase === "restarting"
+                ? "Restarting…"
+                : props.restartPhase === "reconnecting"
+                ? "Reconnecting…"
+                : props.restartPhase === "failed"
+                ? "Restart failed; retry"
+                : "Restart Placeholdarr"}
+            </button>
+          )}
           {!isVirtualActive && (
             <button
               type="button"
@@ -7171,23 +7235,26 @@ function SettingsPanel(props: {
                 />
               ) : null}
               {active.name === "Paths" ? (
-                <LibraryPathsForm
-                  fields={[
-                    ...active.fields,
-                    ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
-                      (field): field is SettingsField =>
-                        Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
-                    ),
-                  ]}
-                  values={props.values}
-                  brand={props.brand}
-                  themeMode={props.themeMode}
-                  accent={accent}
-                  layout="settings"
-                  onValueChange={props.onValueChange}
-                  runTest={runTest}
-                  testResults={testResults}
-                />
+                <>
+                  <LibraryPathsForm
+                    fields={[
+                      ...active.fields,
+                      ...PATH_PLEX_DEFAULT_SECTION_KEYS.map((key) => allSettingsFieldsByKey.get(key)).filter(
+                        (field): field is SettingsField =>
+                          Boolean(field) && !active.fields.some((existing) => existing.key === field!.key),
+                      ),
+                    ]}
+                    values={props.values}
+                    brand={props.brand}
+                    themeMode={props.themeMode}
+                    accent={accent}
+                    layout="settings"
+                    onValueChange={props.onValueChange}
+                    runTest={runTest}
+                    testResults={testResults}
+                  />
+                  <DummyMediaSettings accentHex={accent.hex} />
+                </>
               ) : active.name === "Media Integrations" ? (
                 (() => {
                   const fieldByKey = new Map(active.fields.map((f) => [f.key, f]));
@@ -7886,6 +7953,21 @@ function SettingsPanel(props: {
           clearMediaCardConnection(card, props.onValueChange);
           setMediaPanel((p) => (p === card.id ? null : p));
           setMediaRemoveConfirmId(null);
+        }}
+      />
+    ) : null}
+    {restartConfirmOpen ? (
+      <ConfirmModal
+        title="Restart Placeholdarr?"
+        message="Some settings you changed only take effect after a restart. The app will be unreachable for a few seconds while it comes back up."
+        confirmLabel="Restart now"
+        cancelLabel="Not now"
+        accentHex={accent.hex}
+        themeMode={props.themeMode}
+        onCancel={() => setRestartConfirmOpen(false)}
+        onConfirm={() => {
+          setRestartConfirmOpen(false);
+          props.onConfirmRestart();
         }}
       />
     ) : null}
